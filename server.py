@@ -153,15 +153,14 @@ async def search_endpoint(keyword: str):
 async def get_all_memory_endpoint():
     """返回记忆管理弹窗使用的消息集合。"""
     service = require_service()
-    return {"messages": service.get_all_memory()}
+    return service.get_all_memory()
 
 
 @app.delete("/api/memory")
 async def delete_memory_endpoint(request: DeleteMemoryRequest):
     """删除指定消息或清空全部记忆。"""
     service = require_service()
-    service.delete_memory(message_ids=request.message_ids, delete_all=request.delete_all)
-    return {"status": "success"}
+    return service.delete_memory(message_ids=request.message_ids, delete_all=request.delete_all)
 
 
 if __name__ == "__main__":

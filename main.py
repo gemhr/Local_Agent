@@ -64,7 +64,8 @@ class ApiWorker(QThread):
         self.agent_id = ""
         self.query = ""
         self.file_path = ""
-        self.http = requests.Session()
+        self._session: requests.Session | None = None
+        self._response: requests.Response | None = None
         self.protocol_buffer = ""
 
     def set_task(self, agent_id: str, query: str, file_path: str = "") -> None:
@@ -83,35 +84,52 @@ class ApiWorker(QThread):
         """向后端发送流式请求并分批发射文本片段。"""
         try:
             self.protocol_buffer = ""
-            response = self.http.post(
-                self.api_url,
-                json={
-                    "agent_id": self.agent_id,
-                    "query": self.query,
-                    "file_path": self.file_path,
-                },
-                stream=True,
-                timeout=300,
-            )
-            response.raise_for_status()
+            with requests.Session() as session:
+                self._session = session
+                self._response = session.post(
+                    self.api_url,
+                    json={
+                        "agent_id": self.agent_id,
+                        "query": self.query,
+                        "file_path": self.file_path,
+                    },
+                    stream=True,
+                    timeout=300,
+                )
+                self._response.raise_for_status()
 
-            buffer = ""
-            for chunk in response.iter_content(chunk_size=128, decode_unicode=True):
-                if not chunk:
-                    continue
-                buffer += chunk
-                if len(buffer) >= 64 or "\n" in buffer:
-                    self._emit_stream_payload(buffer)
-                    buffer = ""
+                buffer = ""
+                for chunk in self._response.iter_content(chunk_size=128, decode_unicode=True):
+                    if self.isInterruptionRequested():
+                        break
+                    if not chunk:
+                        continue
+                    buffer += chunk
+                    if len(buffer) >= 64 or "\n" in buffer:
+                        self._emit_stream_payload(buffer)
+                        buffer = ""
 
-            if buffer:
-                self._emit_stream_payload(buffer)
-            if self.protocol_buffer:
-                self.chunk_signal.emit(self.protocol_buffer)
-                self.protocol_buffer = ""
-            self.finished_signal.emit()
+                if not self.isInterruptionRequested():
+                    if buffer:
+                        self._emit_stream_payload(buffer)
+                    if self.protocol_buffer:
+                        self.chunk_signal.emit(self.protocol_buffer)
+                        self.protocol_buffer = ""
+                self.finished_signal.emit()
         except Exception as exc:
-            self.error_signal.emit(f"API request failed: {exc}")
+            if not self.isInterruptionRequested():
+                self.error_signal.emit(f"API request failed: {exc}")
+        finally:
+            self._response = None
+            self._session = None
+
+    def cancel(self) -> None:
+        """请求中断当前流式调用。"""
+        self.requestInterruption()
+        if self._response is not None:
+            self._response.close()
+        if self._session is not None:
+            self._session.close()
 
     def _emit_stream_payload(self, payload: str) -> None:
         """解析流中的编排事件，并转发普通文本片段。"""
@@ -207,6 +225,7 @@ class MainController(QObject):
         self.pet.file_dropped.connect(self._handle_pet_file_drop)
         self.pet.quit_requested.connect(self._quit_application)
         self.chat_panel.message_sent.connect(self._handle_user_message)
+        self.chat_panel.memory_changed_signal.connect(self._handle_memory_changed)
         self.chat_panel.request_more_history_signal.connect(self._fetch_older_history)
         self.chat_panel.agent_switched_signal.connect(self._load_agent_history_if_needed)
         self.history_ready_signal.connect(self.chat_panel.load_history_messages)
@@ -399,10 +418,29 @@ class MainController(QObject):
         """将请求错误显示在聊天面板中。"""
         self.chat_panel.append_system_msg(error_msg, target_agent_id=self.worker.agent_id)
 
+    def _handle_memory_changed(self, agent_ids: list, delete_all: bool) -> None:
+        """在记忆发生删除后同步刷新主界面历史状态。"""
+        if delete_all:
+            self.chat_panel.reset_all_messages()
+            self.agent_history_offsets.clear()
+            self.loaded_history_agents.clear()
+            self.fetching_history_agents.clear()
+            self._fetch_and_load_history(self.chat_panel.current_agent_id)
+            return
+
+        for agent_id in agent_ids:
+            self.chat_panel.reset_agent_messages(agent_id)
+            self.agent_history_offsets[agent_id] = 0
+            self.loaded_history_agents.discard(agent_id)
+            self.fetching_history_agents.discard(agent_id)
+
+        if self.chat_panel.current_agent_id in agent_ids:
+            self._fetch_and_load_history(self.chat_panel.current_agent_id)
+
     def _quit_application(self) -> None:
         """安全关闭后台任务并退出应用。"""
         if self.worker.isRunning():
-            self.worker.requestInterruption()
+            self.worker.cancel()
             self.worker.wait(2000)
         if hasattr(self, "scheduler"):
             self.scheduler.shutdown(wait=False)

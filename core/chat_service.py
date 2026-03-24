@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """聊天应用服务层。"""
 
-from typing import Generator, Optional
+from typing import Any, Generator, Optional
 
 from core.agent_router import AgentRouter
 
@@ -46,15 +46,33 @@ class ChatService:
 
     def search_memory(self, keyword: str) -> list[dict]:
         """搜索持久化消息。"""
-        return self.router.memory_manager.search_messages(keyword)
+        return self.router.memory_manager.search_messages(
+            keyword,
+            memory_scope=self.router.DIRECT_MEMORY_SCOPE,
+        )
 
-    def get_all_memory(self) -> list[dict]:
-        """返回记忆管理界面使用的消息集合。"""
-        return self.router.memory_manager.get_all_messages()
+    def get_all_memory(self) -> dict[str, list[dict[str, Any]]]:
+        """返回记忆管理界面使用的完整记忆快照。"""
+        return {
+            "messages": self.router.memory_manager.get_all_messages(),
+            "summaries": self.router.memory_manager.get_all_summaries(),
+        }
 
-    def delete_memory(self, message_ids: Optional[list[int]] = None, delete_all: bool = False) -> None:
+    def delete_memory(
+        self,
+        message_ids: Optional[list[int]] = None,
+        delete_all: bool = False,
+    ) -> dict[str, Any]:
         """删除指定消息或清空全部记忆。"""
         if delete_all:
             self.router.memory_manager.clear_all_memory()
-            return
-        self.router.memory_manager.delete_messages(message_ids or [])
+            return {
+                "status": "success",
+                "affected_agent_ids": list(self.router.agents_config.keys()),
+                "refresh_agent_ids": list(self.router.agents_config.keys()),
+                "delete_all": True,
+            }
+        result = self.router.memory_manager.delete_messages(message_ids or [])
+        result["status"] = "success"
+        result["delete_all"] = False
+        return result

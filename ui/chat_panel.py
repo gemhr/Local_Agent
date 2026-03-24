@@ -36,6 +36,7 @@ class ChatPanel(QWidget):
     message_sent = pyqtSignal(str, str, str)
     request_more_history_signal = pyqtSignal(str)
     agent_switched_signal = pyqtSignal(str)
+    memory_changed_signal = pyqtSignal(list, bool)
 
     def __init__(self, api_base_url: str) -> None:
         """初始化聊天主面板。
@@ -231,6 +232,31 @@ class ChatPanel(QWidget):
 
         QTimer.singleShot(30, adjust)
 
+    def reset_agent_messages(self, agent_id: str) -> None:
+        """清空指定智能体当前画布中的消息气泡与流式状态。"""
+        layout = self.chat_layouts.get(agent_id)
+        if layout is None:
+            return
+
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self.active_ai_labels.pop(agent_id, None)
+        self.active_ai_texts.pop(agent_id, None)
+        self.active_status_widgets.pop(agent_id, None)
+        timer = self._render_timers.get(agent_id)
+        if timer is not None:
+            timer.stop()
+        self.update_agent_sidebar_preview(agent_id, "", "")
+
+    def reset_all_messages(self) -> None:
+        """清空所有智能体当前画布中的消息气泡。"""
+        for agent_id in list(self.chat_layouts.keys()):
+            self.reset_agent_messages(agent_id)
+
     def _init_ui(self) -> None:
         """构建主面板的全部 UI 结构。"""
         self.setWindowTitle("Local Agent")
@@ -405,6 +431,7 @@ class ChatPanel(QWidget):
         if event is not None and event.button() != Qt.MouseButton.LeftButton:
             return
         dialog = MemoryManagerDialog(f"{self.api_base_url}/api/memory", parent=self)
+        dialog.memory_changed.connect(self.memory_changed_signal.emit)
         dialog.exec()
         if event is not None:
             event.accept()

@@ -58,6 +58,18 @@ class VectorDBManager:
         """
         return self.vector_store.similarity_search(query, k=top_k)
 
+    def similarity_search_with_scores(
+        self,
+        query: str,
+        top_k: int = 4,
+    ) -> List[tuple[Document, float]]:
+        """执行带相关度分数的相似度检索。"""
+        return self.vector_store.similarity_search_with_relevance_scores(query, k=top_k)
+
     def search(self, query: str, k: int = 4) -> List[Document]:
         """提供与业务层一致的统一检索入口。"""
         return self.similarity_search(query=query, top_k=k)
+
+    def search_with_scores(self, query: str, k: int = 4) -> List[tuple[Document, float]]:
+        """提供带分数的统一检索入口。"""
+        return self.similarity_search_with_scores(query=query, top_k=k)

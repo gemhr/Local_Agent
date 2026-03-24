@@ -3,6 +3,7 @@
 """本地大语言模型推理封装。"""
 
 import os
+import threading
 from typing import Dict, Generator, List
 
 from llama_cpp import Llama
@@ -37,6 +38,9 @@ class LocalLLMEngine:
             n_gpu_layers=n_gpu_layers,
             verbose=False,
         )
+        # llama.cpp 的 Python 封装不适合被多个请求并发复用，
+        # 这里串行化生成流程，避免同一实例被同时推进。
+        self._generate_lock = threading.Lock()
         print("[LLM] Model loaded.")
 
     def generate(
@@ -55,17 +59,18 @@ class LocalLLMEngine:
         Yields:
             str: 增量文本片段。
         """
-        response_stream = self.llm.create_chat_completion(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stream=True,
-        )
+        with self._generate_lock:
+            response_stream = self.llm.create_chat_completion(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
 
-        for chunk in response_stream:
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                yield delta["content"]
+            for chunk in response_stream:
+                delta = chunk["choices"][0]["delta"]
+                if "content" in delta:
+                    yield delta["content"]
 
     def get_token_count(self, text: str) -> int:
         """统计一段文本的 token 数量。
