@@ -1,0 +1,22 @@
+[project]
+name = "local-agent"
+version = "0.1.0"
+description = "Local desktop AI agent"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "apscheduler>=3.11.0",
+    "black>=26.3.1",
+    "fastapi>=0.116.0",
+    "langchain-chroma>=0.2.0",
+    "langchain-core>=0.3.0",
+    "langchain-huggingface>=0.3.0",
+    "llama-cpp-python @ file:///D:/PythonProject/Local_Agent/llama_cpp_python-0.2.90-cp312-cp312-win_amd64.whl",
+    "markdown>=3.8",
+    "openpyxl>=3.1.0",
+    "pandas>=2.3.0",
+    "psutil>=7.0.0",
+    "pydantic>=2.11.0",
+    "PyQt6>=6.9.0",
+    "requests>=2.32.0",
+    "uvicorn>=0.35.0",
+]
