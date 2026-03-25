@@ -134,6 +134,6 @@ class Settings:
             wiki_cookie=os.getenv("LOCAL_AGENT_WIKI_COOKIE", ""),
             local_knowledge_base_dir=os.getenv(
                 "LOCAL_AGENT_LOCAL_KB_DIR",
-                os.path.join(project_root, "local_knowledge_base"),
+                os.path.join(project_root, "data", "knowledge_base"),
             ),
         )
