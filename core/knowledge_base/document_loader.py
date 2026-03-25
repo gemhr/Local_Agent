@@ -6,6 +6,8 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -161,6 +163,9 @@ def split_documents(
         parser_name = "pypdf" if source_type in {"pdf", "pdf_md"} else "native"
         doc_chunk_index = 0
 
+
+    for document in documents:
+        content = document.content
         for start in range(0, len(content), step):
             snippet = content[start : start + chunk_size].strip()
             if not snippet:
@@ -174,6 +179,7 @@ def split_documents(
             chunk_id = hashlib.sha1(stable_chunk_key.encode("utf-8")).hexdigest()
             chunk_index = doc_chunk_index
             doc_chunk_index += 1
+            chunk_index = len(chunks)
             chunks.append(
                 {
                     "page_content": snippet,
@@ -200,6 +206,10 @@ def split_documents(
                         "parser_name": parser_name,
                         "parser_version": "v1",
                         "ingest_batch_id": batch_id,
+                        "source": document.source,
+                        "file_type": document.file_type,
+                        "chunk_id": f"{document.source}:{chunk_index}:{uuid.uuid4().hex[:8]}",
+                        "offset": start,
                     },
                 }
             )
