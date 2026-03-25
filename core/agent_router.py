@@ -94,6 +94,15 @@ class AgentRouter:
             f"Your role: {config['role']}",
             "Reply clearly and concisely in Chinese unless the user asks otherwise.",
         ]
+        if agent_id == "knowledge_expert":
+            lines.extend(
+                [
+                    "你必须优先依据本地知识库信源回答。",
+                    "如果用户消息包含【系统提供的参考资料】，请优先使用资料内容并在答案末尾增加“参考来源：”列表。",
+                    "参考来源格式固定为“[序号] 文件路径或来源名”。",
+                    "如果没有可用本地信源，先明确写“未找到对应信源”，再给出通用回答。",
+                ]
+            )
         if allow_delegation and agent_id == "core_router":
             lines.extend(
                 [
@@ -334,7 +343,7 @@ class AgentRouter:
                     break
                 snippet = snippet[:remaining]
 
-            source = doc.metadata.get("source", "未知来源")
+            source = self._format_source_label(doc.metadata)
             segments.append(f"[来源: {source}]\n{snippet}")
             total_chars += len(snippet)
             if len(segments) >= self.rag_top_k or total_chars >= self.rag_context_max_chars:
@@ -343,6 +352,27 @@ class AgentRouter:
         if not segments:
             return ""
         return "\n\n".join(segments)
+
+    @staticmethod
+    def _format_source_label(metadata: dict) -> str:
+        """格式化来源标签，优先补充页码与章节信息。"""
+        source = str(metadata.get("source", "未知来源"))
+        page_start = metadata.get("page_start")
+        page_end = metadata.get("page_end")
+        section_parts = [metadata.get("section_h1"), metadata.get("section_h2"), metadata.get("section_h3")]
+        section = "/".join(str(part) for part in section_parts if part)
+
+        suffix_parts = []
+        if page_start is not None:
+            if page_end is not None and page_end != page_start:
+                suffix_parts.append(f"p.{page_start}-{page_end}")
+            else:
+                suffix_parts.append(f"p.{page_start}")
+        if section:
+            suffix_parts.append(f"section: {section}")
+        if not suffix_parts:
+            return source
+        return f"{source} ({', '.join(suffix_parts)})"
 
     def _dedupe_current_user_message(
         self,
@@ -393,6 +423,12 @@ class AgentRouter:
             if context:
                 user_query = (
                     f"【系统提供的参考资料】\n{context}\n\n"
+                    f"【用户实际提问】\n{user_query}"
+                )
+            else:
+                user_query = (
+                    "【系统提示】未检索到本地知识库信源。请先说明“未找到对应信源”，"
+                    "再基于通用知识回答。\n\n"
                     f"【用户实际提问】\n{user_query}"
                 )
 
