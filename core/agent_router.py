@@ -94,6 +94,15 @@ class AgentRouter:
             f"Your role: {config['role']}",
             "Reply clearly and concisely in Chinese unless the user asks otherwise.",
         ]
+        if agent_id == "knowledge_expert":
+            lines.extend(
+                [
+                    "你必须优先依据本地知识库信源回答。",
+                    "如果用户消息包含【系统提供的参考资料】，请优先使用资料内容并在答案末尾增加“参考来源：”列表。",
+                    "参考来源格式固定为“[序号] 文件路径或来源名”。",
+                    "如果没有可用本地信源，先明确写“未找到对应信源”，再给出通用回答。",
+                ]
+            )
         if allow_delegation and agent_id == "core_router":
             lines.extend(
                 [
@@ -393,6 +402,12 @@ class AgentRouter:
             if context:
                 user_query = (
                     f"【系统提供的参考资料】\n{context}\n\n"
+                    f"【用户实际提问】\n{user_query}"
+                )
+            else:
+                user_query = (
+                    "【系统提示】未检索到本地知识库信源。请先说明“未找到对应信源”，"
+                    "再基于通用知识回答。\n\n"
                     f"【用户实际提问】\n{user_query}"
                 )
 
