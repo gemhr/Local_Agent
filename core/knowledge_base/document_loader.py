@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +21,7 @@ class LoadedDocument:
 
 
 SUPPORTED_EXTENSIONS = {".md", ".txt", ".pdf", ".docx", ".xlsx", ".xls", ".csv"}
+SCHEMA_VERSION = "kb_chunk_schema_v1"
 
 
 def _read_text_file(path: Path) -> str:
@@ -100,15 +105,64 @@ def load_documents(base_dir: str) -> list[LoadedDocument]:
     return documents
 
 
+def _build_markdown_heading_index(content: str) -> list[tuple[int, int, str]]:
+    """构建 Markdown 标题位置索引。"""
+    headings: list[tuple[int, int, str]] = []
+    for match in re.finditer(r"(?m)^(#{1,3})\s+(.+?)\s*$", content):
+        level = len(match.group(1))
+        title = match.group(2).strip()
+        headings.append((match.start(), level, title))
+    return headings
+
+
+def _resolve_sections(
+    headings: list[tuple[int, int, str]],
+    start_offset: int,
+) -> tuple[str | None, str | None, str | None]:
+    """根据切片起始位置解析当前标题层级。"""
+    section_h1: str | None = None
+    section_h2: str | None = None
+    section_h3: str | None = None
+    for pos, level, title in headings:
+        if pos > start_offset:
+            break
+        if level == 1:
+            section_h1 = title
+            section_h2 = None
+            section_h3 = None
+        elif level == 2:
+            section_h2 = title
+            section_h3 = None
+        elif level == 3:
+            section_h3 = title
+    return section_h1, section_h2, section_h3
+
+
+def _resolve_source_type(document: LoadedDocument) -> str:
+    if document.file_type == "md" and document.source.endswith(".pdf.md"):
+        return "pdf_md"
+    return document.file_type
+
+
 def split_documents(
     documents: Iterable[LoadedDocument],
     *,
     chunk_size: int = 600,
     chunk_overlap: int = 100,
+    ingest_batch_id: str | None = None,
 ) -> list[dict]:
     """将文档切分为可向量化 chunk。"""
     chunks: list[dict] = []
     step = max(1, chunk_size - chunk_overlap)
+    batch_id = ingest_batch_id or datetime.now(timezone.utc).isoformat()
+
+    for document in documents:
+        content = document.content
+        headings = _build_markdown_heading_index(content) if document.file_type == "md" else []
+        source_type = _resolve_source_type(document)
+        parser_name = "pypdf" if source_type in {"pdf", "pdf_md"} else "native"
+        doc_chunk_index = 0
+
 
     for document in documents:
         content = document.content
@@ -116,11 +170,42 @@ def split_documents(
             snippet = content[start : start + chunk_size].strip()
             if not snippet:
                 continue
+            section_h1, section_h2, section_h3 = _resolve_sections(headings, start)
+            content_hash = hashlib.sha1(snippet.encode("utf-8")).hexdigest()
+            stable_chunk_key = (
+                f"{document.source}|{start}|{start + len(snippet)}|"
+                f"{section_h1 or ''}|{section_h2 or ''}|{section_h3 or ''}|{content_hash}"
+            )
+            chunk_id = hashlib.sha1(stable_chunk_key.encode("utf-8")).hexdigest()
+            chunk_index = doc_chunk_index
+            doc_chunk_index += 1
             chunk_index = len(chunks)
             chunks.append(
                 {
                     "page_content": snippet,
                     "metadata": {
+                        "schema_version": SCHEMA_VERSION,
+                        "source": document.source,
+                        "source_type": source_type,
+                        "file_type": document.file_type,
+                        "chunk_id": chunk_id,
+                        "chunk_index": chunk_index,
+                        "content_hash": content_hash,
+                        "char_start": start,
+                        "char_end": start + len(snippet),
+                        "offset": start,
+                        "page_start": None,
+                        "page_end": None,
+                        "section_h1": section_h1,
+                        "section_h2": section_h2,
+                        "section_h3": section_h3,
+                        "block_type": "paragraph",
+                        "lang": "zh",
+                        "chunker_name": "character_window_splitter",
+                        "chunker_version": "v1",
+                        "parser_name": parser_name,
+                        "parser_version": "v1",
+                        "ingest_batch_id": batch_id,
                         "source": document.source,
                         "file_type": document.file_type,
                         "chunk_id": f"{document.source}:{chunk_index}:{uuid.uuid4().hex[:8]}",

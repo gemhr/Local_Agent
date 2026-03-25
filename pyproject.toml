@@ -10,7 +10,7 @@ dependencies = [
     "langchain-chroma>=0.2.0",
     "langchain-core>=0.3.0",
     "langchain-huggingface>=0.3.0",
-    "llama-cpp-python @ file:///D:/PythonProject/Local_Agent/llama_cpp_python-0.2.90-cp312-cp312-win_amd64.whl",
+    "llama-cpp-python @ file:///D:/PyPrj/Local_Agent-main/data/llama_cpp_python-0.2.90-cp312-cp312-win_amd64.whl",
     "markdown>=3.8",
     "openpyxl>=3.1.0",
     "pandas>=2.3.0",

@@ -343,7 +343,7 @@ class AgentRouter:
                     break
                 snippet = snippet[:remaining]
 
-            source = doc.metadata.get("source", "未知来源")
+            source = self._format_source_label(doc.metadata)
             segments.append(f"[来源: {source}]\n{snippet}")
             total_chars += len(snippet)
             if len(segments) >= self.rag_top_k or total_chars >= self.rag_context_max_chars:
@@ -352,6 +352,27 @@ class AgentRouter:
         if not segments:
             return ""
         return "\n\n".join(segments)
+
+    @staticmethod
+    def _format_source_label(metadata: dict) -> str:
+        """格式化来源标签，优先补充页码与章节信息。"""
+        source = str(metadata.get("source", "未知来源"))
+        page_start = metadata.get("page_start")
+        page_end = metadata.get("page_end")
+        section_parts = [metadata.get("section_h1"), metadata.get("section_h2"), metadata.get("section_h3")]
+        section = "/".join(str(part) for part in section_parts if part)
+
+        suffix_parts = []
+        if page_start is not None:
+            if page_end is not None and page_end != page_start:
+                suffix_parts.append(f"p.{page_start}-{page_end}")
+            else:
+                suffix_parts.append(f"p.{page_start}")
+        if section:
+            suffix_parts.append(f"section: {section}")
+        if not suffix_parts:
+            return source
+        return f"{source} ({', '.join(suffix_parts)})"
 
     def _dedupe_current_user_message(
         self,
