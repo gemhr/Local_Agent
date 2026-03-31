@@ -228,11 +228,18 @@ class AgentRouter:
         recent_messages = self.memory_manager.get_chat_history(
             agent_id=agent_id,
             limit=self.summary_keep_recent,
-            ascending=True,
+            ascending=False,
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
         if not recent_messages:
             return self.memory_manager.get_summary_record(agent_id)["summary"]
+        recent_messages = list(reversed(recent_messages))
+
+        print(
+            "[Summary] trigger detected: "
+            f"agent={agent_id}, total_messages={total_messages}, "
+            f"threshold={self.summary_trigger_messages}, keep_recent={self.summary_keep_recent}"
+        )
 
         cutoff_id = recent_messages[0]["id"] - 1
         summary_record = self.memory_manager.get_summary_record(agent_id)
@@ -243,6 +250,11 @@ class AgentRouter:
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
         if not new_messages:
+            print(
+                "[Summary] skipped: "
+                f"agent={agent_id}, reason=no_new_messages, "
+                f"last_message_id={summary_record['last_message_id']}, cutoff_id={cutoff_id}"
+            )
             return str(summary_record["summary"])
 
         try:
@@ -251,6 +263,11 @@ class AgentRouter:
             merged_summary = self._fallback_summary(str(summary_record["summary"]), new_messages)
 
         self.memory_manager.save_summary(agent_id, merged_summary, cutoff_id)
+        print(
+            "[Summary] updated: "
+            f"agent={agent_id}, summarized_messages={len(new_messages)}, "
+            f"new_last_message_id={cutoff_id}"
+        )
         return merged_summary
 
     def _extract_query_terms(self, rewritten_query: str, user_query: str) -> list[str]:

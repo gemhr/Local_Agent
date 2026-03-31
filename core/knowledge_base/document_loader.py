@@ -65,6 +65,10 @@ def _read_excel_file(path: Path) -> str:
     outputs: list[str] = []
     for sheet_name, frame in sheets.items():
         sample = frame.fillna("").astype(str).head(100)
+        column_names = [str(column) for column in sample.columns]
+        lines = [f"[{sheet_name}] 列: {', '.join(column_names)}"]
+        for _, row in sample.iterrows():
+            lines.append(" | ".join(f"{column_name}={row[original_column]}" for column_name, original_column in zip(column_names, sample.columns)))
         lines = [f"[{sheet_name}] 列: {', '.join(sample.columns)}"]
         for _, row in sample.iterrows():
             lines.append(" | ".join(f"{col}={row[col]}" for col in sample.columns))

@@ -1,0 +1,15 @@
+id,label,lane,x,y,w,h,color
+N1,Desktop UI,Interaction,80,80,180,56,#2b6ef2
+N2,FastAPI /api/chat,Interaction,320,80,180,56,#2b6ef2
+N3,ChatService,Interaction,560,80,180,56,#2b6ef2
+N4,AgentRouter,Orchestration,80,220,220,64,#10b8a3
+N5,Core Router Agent,Orchestration,340,220,220,64,#10b8a3
+N6,Specialist Agents,Orchestration,600,220,260,64,#10b8a3
+N7,Local LLM Engine,Capability,80,380,220,64,#f59e0b
+N8,Tool Registry,Capability,340,380,220,64,#f59e0b
+N9,MemoryManager SQLite,Capability,600,380,260,64,#f59e0b
+N10,Document Loader,Knowledge,80,560,220,64,#8b5cf6
+N11,VectorDBManager,Knowledge,340,560,220,64,#8b5cf6
+N12,ChromaDB + BGE,Knowledge,600,560,260,64,#8b5cf6
+N13,Local KB Files,Knowledge,900,560,220,64,#8b5cf6
+N14,Final Answer,Interaction,860,80,200,56,#0f172a
