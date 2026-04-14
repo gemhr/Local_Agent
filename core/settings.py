@@ -57,44 +57,48 @@ class Settings:
         api_port = _env_int("LOCAL_AGENT_API_PORT", 8000)
         api_base_url = os.getenv("LOCAL_AGENT_API_BASE_URL", f"http://{api_host}:{api_port}")
 
-        # 本机预设专门针对“无独显、7B、本地 CPU 推理”场景。
+        # 预设参数已从 7B 本地 CPU 推理调优为更适配 27B 远端模型：
+        # - 允许更长回复（model_max_tokens）
+        # - 保留更长会话记忆窗口（history_window_size）
+        # - 放宽摘要与 RAG 上下文容量，减少信息截断
+        # - 提高远端等待时间，适配 27B 在复杂问题下更长的推理时延
         profile_name = os.getenv("LOCAL_AGENT_MODEL_PROFILE", "balanced").lower()
         presets = {
             "fast": {
                 "model_threads": 8,
-                "model_context": 2048,
-                "model_max_tokens": 384,
-                "history_window_size": 6,
-                "summary_trigger_messages": 12,
-                "summary_keep_recent": 6,
-                "summary_max_chars": 700,
-                "rag_top_k": 2,
-                "rag_doc_max_chars": 500,
-                "rag_context_max_chars": 900,
-            },
-            "balanced": {
-                "model_threads": 10,
                 "model_context": 3072,
                 "model_max_tokens": 640,
                 "history_window_size": 8,
-                "summary_trigger_messages": 16,
+                "summary_trigger_messages": 14,
                 "summary_keep_recent": 8,
                 "summary_max_chars": 1000,
                 "rag_top_k": 3,
                 "rag_doc_max_chars": 700,
-                "rag_context_max_chars": 1500,
+                "rag_context_max_chars": 1400,
+            },
+            "balanced": {
+                "model_threads": 10,
+                "model_context": 4096,
+                "model_max_tokens": 1024,
+                "history_window_size": 12,
+                "summary_trigger_messages": 20,
+                "summary_keep_recent": 12,
+                "summary_max_chars": 1600,
+                "rag_top_k": 3,
+                "rag_doc_max_chars": 1000,
+                "rag_context_max_chars": 2400,
             },
             "deep": {
                 "model_threads": 12,
-                "model_context": 4096,
-                "model_max_tokens": 896,
-                "history_window_size": 10,
-                "summary_trigger_messages": 20,
-                "summary_keep_recent": 10,
-                "summary_max_chars": 1400,
-                "rag_top_k": 3,
-                "rag_doc_max_chars": 900,
-                "rag_context_max_chars": 2200,
+                "model_context": 6144,
+                "model_max_tokens": 1536,
+                "history_window_size": 16,
+                "summary_trigger_messages": 24,
+                "summary_keep_recent": 14,
+                "summary_max_chars": 2200,
+                "rag_top_k": 4,
+                "rag_doc_max_chars": 1200,
+                "rag_context_max_chars": 3200,
             },
         }
         preset = presets.get(profile_name, presets["balanced"])
@@ -113,7 +117,7 @@ class Settings:
             remote_model_name=os.getenv("LOCAL_AGENT_REMOTE_MODEL_NAME", "Qwen3.5-27B"),
             remote_api_base_url=os.getenv("LOCAL_AGENT_REMOTE_API_BASE_URL", ""),
             remote_api_key=os.getenv("LOCAL_AGENT_REMOTE_API_KEY", ""),
-            remote_timeout_seconds=_env_int("LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS", 60),
+            remote_timeout_seconds=_env_int("LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS", 120),
             remote_verify_tls=os.getenv("LOCAL_AGENT_REMOTE_VERIFY_TLS", "0") == "1",
             remote_enable_thinking=os.getenv("LOCAL_AGENT_REMOTE_ENABLE_THINKING", "0") == "1",
             model_threads=_env_int("LOCAL_AGENT_MODEL_THREADS", preset["model_threads"]),
