@@ -44,7 +44,38 @@ class VectorDBManager:
         if not chunks:
             return
         docs = [Document(page_content=chunk["page_content"], metadata=chunk["metadata"]) for chunk in chunks]
-        self.vector_store.add_documents(docs)
+        ids = [str(chunk.get("metadata", {}).get("chunk_id", f"chunk-{index}")) for index, chunk in enumerate(chunks)]
+        batch_size = self._resolve_batch_size()
+
+        for start in range(0, len(docs), batch_size):
+            end = start + batch_size
+            batch_docs = docs[start:end]
+            batch_ids = ids[start:end]
+            try:
+                self.vector_store.delete(ids=batch_ids)
+            except Exception:
+                pass
+            self.vector_store.add_documents(batch_docs, ids=batch_ids)
+
+    def _resolve_batch_size(self) -> int:
+        """解析当前 Chroma 允许的最大批次大小。"""
+        default_batch_size = 5000
+        collection = getattr(self.vector_store, "_collection", None)
+        client = getattr(collection, "_client", None)
+        if client is None:
+            return default_batch_size
+
+        for attr_name in ("max_batch_size", "get_max_batch_size"):
+            attr = getattr(client, attr_name, None)
+            if attr is None:
+                continue
+            try:
+                value = attr() if callable(attr) else attr
+            except Exception:
+                continue
+            if isinstance(value, int) and value > 0:
+                return value
+        return default_batch_size
 
     def similarity_search(self, query: str, top_k: int = 4) -> List[Document]:
         """执行相似度检索。

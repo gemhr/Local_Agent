@@ -94,6 +94,15 @@ class AgentRouter:
             f"Your role: {config['role']}",
             "Reply clearly and concisely in Chinese unless the user asks otherwise.",
         ]
+        if agent_id == "knowledge_expert":
+            lines.extend(
+                [
+                    "你必须优先依据本地知识库信源回答。",
+                    "如果用户消息包含【系统提供的参考资料】，请优先使用资料内容并在答案末尾增加“参考来源：”列表。",
+                    "参考来源格式固定为“[序号] 文件路径或来源名”。",
+                    "如果没有可用本地信源，先明确写“未找到对应信源”，再给出通用回答。",
+                ]
+            )
         if allow_delegation and agent_id == "core_router":
             lines.extend(
                 [
@@ -219,11 +228,18 @@ class AgentRouter:
         recent_messages = self.memory_manager.get_chat_history(
             agent_id=agent_id,
             limit=self.summary_keep_recent,
-            ascending=True,
+            ascending=False,
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
         if not recent_messages:
             return self.memory_manager.get_summary_record(agent_id)["summary"]
+        recent_messages = list(reversed(recent_messages))
+
+        print(
+            "[Summary] trigger detected: "
+            f"agent={agent_id}, total_messages={total_messages}, "
+            f"threshold={self.summary_trigger_messages}, keep_recent={self.summary_keep_recent}"
+        )
 
         cutoff_id = recent_messages[0]["id"] - 1
         summary_record = self.memory_manager.get_summary_record(agent_id)
@@ -234,6 +250,11 @@ class AgentRouter:
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
         if not new_messages:
+            print(
+                "[Summary] skipped: "
+                f"agent={agent_id}, reason=no_new_messages, "
+                f"last_message_id={summary_record['last_message_id']}, cutoff_id={cutoff_id}"
+            )
             return str(summary_record["summary"])
 
         try:
@@ -242,6 +263,11 @@ class AgentRouter:
             merged_summary = self._fallback_summary(str(summary_record["summary"]), new_messages)
 
         self.memory_manager.save_summary(agent_id, merged_summary, cutoff_id)
+        print(
+            "[Summary] updated: "
+            f"agent={agent_id}, summarized_messages={len(new_messages)}, "
+            f"new_last_message_id={cutoff_id}"
+        )
         return merged_summary
 
     def _extract_query_terms(self, rewritten_query: str, user_query: str) -> list[str]:
@@ -334,7 +360,7 @@ class AgentRouter:
                     break
                 snippet = snippet[:remaining]
 
-            source = doc.metadata.get("source", "未知来源")
+            source = self._format_source_label(doc.metadata)
             segments.append(f"[来源: {source}]\n{snippet}")
             total_chars += len(snippet)
             if len(segments) >= self.rag_top_k or total_chars >= self.rag_context_max_chars:
@@ -343,6 +369,27 @@ class AgentRouter:
         if not segments:
             return ""
         return "\n\n".join(segments)
+
+    @staticmethod
+    def _format_source_label(metadata: dict) -> str:
+        """格式化来源标签，优先补充页码与章节信息。"""
+        source = str(metadata.get("source", "未知来源"))
+        page_start = metadata.get("page_start")
+        page_end = metadata.get("page_end")
+        section_parts = [metadata.get("section_h1"), metadata.get("section_h2"), metadata.get("section_h3")]
+        section = "/".join(str(part) for part in section_parts if part)
+
+        suffix_parts = []
+        if page_start is not None:
+            if page_end is not None and page_end != page_start:
+                suffix_parts.append(f"p.{page_start}-{page_end}")
+            else:
+                suffix_parts.append(f"p.{page_start}")
+        if section:
+            suffix_parts.append(f"section: {section}")
+        if not suffix_parts:
+            return source
+        return f"{source} ({', '.join(suffix_parts)})"
 
     def _dedupe_current_user_message(
         self,
@@ -378,14 +425,16 @@ class AgentRouter:
         )
         history = self._dedupe_current_user_message(history, user_query)
 
+        system_prompt = self._build_system_prompt(agent_id, allow_delegation=allow_delegation)
+        if summary_text:
+            system_prompt = f"{system_prompt}\n\nConversation summary:\n{summary_text}"
+
         messages = [
             {
                 "role": "system",
-                "content": self._build_system_prompt(agent_id, allow_delegation=allow_delegation),
+                "content": system_prompt,
             }
         ]
-        if summary_text:
-            messages.append({"role": "system", "content": f"Conversation summary:\n{summary_text}"})
         messages.extend({"role": row["role"], "content": row["content"]} for row in history)
 
         if agent_id == "knowledge_expert" and self.db_manager:
@@ -393,6 +442,12 @@ class AgentRouter:
             if context:
                 user_query = (
                     f"【系统提供的参考资料】\n{context}\n\n"
+                    f"【用户实际提问】\n{user_query}"
+                )
+            else:
+                user_query = (
+                    "【系统提示】未检索到本地知识库信源。请先说明“未找到对应信源”，"
+                    "再基于通用知识回答。\n\n"
                     f"【用户实际提问】\n{user_query}"
                 )
 
@@ -488,16 +543,12 @@ class AgentRouter:
         tool_name, tool_args = tool_call
         observation = str(self.tools[tool_name]["func"](tool_args))
         observation = self._truncate_text(observation, 1600)
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    f"Tool used: {tool_name}\n"
-                    f"Tool observation:\n{observation}\n\n"
-                    "Use the observation to answer the user directly. "
-                    "Do not expose tool protocol."
-                ),
-            }
+        messages[0]["content"] += (
+            "\n\n"
+            f"Tool used: {tool_name}\n"
+            f"Tool observation:\n{observation}\n\n"
+            "Use the observation to answer the user directly. "
+            "Do not expose tool protocol."
         )
         return messages
 
@@ -564,14 +615,15 @@ class AgentRouter:
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
         history = self._dedupe_current_user_message(history, user_query)
+        system_prompt = self._build_system_prompt("core_router", allow_delegation=True)
+        if summary_text:
+            system_prompt = f"{system_prompt}\n\nConversation summary:\n{summary_text}"
         messages = [
             {
                 "role": "system",
-                "content": self._build_system_prompt("core_router", allow_delegation=True),
+                "content": system_prompt,
             }
         ]
-        if summary_text:
-            messages.append({"role": "system", "content": f"Conversation summary:\n{summary_text}"})
         messages.extend({"role": row["role"], "content": row["content"]} for row in history)
         messages.append({"role": "user", "content": user_query})
         return messages

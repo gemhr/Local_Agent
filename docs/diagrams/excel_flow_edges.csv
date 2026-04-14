@@ -1,0 +1,16 @@
+from_id,to_id,label
+N1,N2,HTTP request
+N2,N3,Service bridge
+N3,N4,chat_stream
+N4,N5,route plan
+N5,N6,delegate
+N4,N7,LLM generate
+N4,N8,tool call
+N4,N9,history+summary
+N4,N12,RAG search
+N10,N11,chunk ingest
+N11,N12,upsert batches
+N13,N10,load documents
+N12,N4,top-k docs
+N6,N14,synthesis output
+N7,N14,final tokens
