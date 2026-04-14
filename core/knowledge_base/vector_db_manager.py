@@ -76,11 +76,6 @@ class VectorDBManager:
             if isinstance(value, int) and value > 0:
                 return value
         return default_batch_size
-        try:
-            self.vector_store.delete(ids=ids)
-        except Exception:
-            pass
-        self.vector_store.add_documents(docs, ids=ids)
 
     def similarity_search(self, query: str, top_k: int = 4) -> List[Document]:
         """执行相似度检索。

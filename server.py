@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from core.agent_router import AgentRouter
 from core.chat_service import ChatService
-from core.llm_engine import LocalLLMEngine
+from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
 from core.settings import Settings
 from tools.registry import register_all_tools
@@ -50,12 +50,26 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             print(f"[Server] Vector DB disabled: {exc}")
 
-    engine = LocalLLMEngine(
-        model_path=settings.model_path,
-        n_ctx=settings.model_context,
-        n_threads=settings.model_threads,
-        n_gpu_layers=settings.model_gpu_layers,
-    )
+    if settings.llm_backend == "local":
+        engine = LocalLLMEngine(
+            model_path=settings.model_path,
+            n_ctx=settings.model_context,
+            n_threads=settings.model_threads,
+            n_gpu_layers=settings.model_gpu_layers,
+        )
+    else:
+        if not settings.remote_api_base_url:
+            raise RuntimeError(
+                "LOCAL_AGENT_REMOTE_API_BASE_URL is required when LOCAL_AGENT_LLM_BACKEND != local"
+            )
+        engine = RemoteLLMEngine(
+            api_base_url=settings.remote_api_base_url,
+            model_name=settings.remote_model_name,
+            api_key=settings.remote_api_key,
+            timeout_seconds=settings.remote_timeout_seconds,
+            verify_tls=settings.remote_verify_tls,
+            enable_thinking=settings.remote_enable_thinking,
+        )
     router = AgentRouter(
         llm_engine=engine,
         memory_manager=memory_manager,

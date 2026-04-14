@@ -425,14 +425,16 @@ class AgentRouter:
         )
         history = self._dedupe_current_user_message(history, user_query)
 
+        system_prompt = self._build_system_prompt(agent_id, allow_delegation=allow_delegation)
+        if summary_text:
+            system_prompt = f"{system_prompt}\n\nConversation summary:\n{summary_text}"
+
         messages = [
             {
                 "role": "system",
-                "content": self._build_system_prompt(agent_id, allow_delegation=allow_delegation),
+                "content": system_prompt,
             }
         ]
-        if summary_text:
-            messages.append({"role": "system", "content": f"Conversation summary:\n{summary_text}"})
         messages.extend({"role": row["role"], "content": row["content"]} for row in history)
 
         if agent_id == "knowledge_expert" and self.db_manager:
@@ -541,16 +543,12 @@ class AgentRouter:
         tool_name, tool_args = tool_call
         observation = str(self.tools[tool_name]["func"](tool_args))
         observation = self._truncate_text(observation, 1600)
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    f"Tool used: {tool_name}\n"
-                    f"Tool observation:\n{observation}\n\n"
-                    "Use the observation to answer the user directly. "
-                    "Do not expose tool protocol."
-                ),
-            }
+        messages[0]["content"] += (
+            "\n\n"
+            f"Tool used: {tool_name}\n"
+            f"Tool observation:\n{observation}\n\n"
+            "Use the observation to answer the user directly. "
+            "Do not expose tool protocol."
         )
         return messages
 
@@ -617,14 +615,15 @@ class AgentRouter:
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
         history = self._dedupe_current_user_message(history, user_query)
+        system_prompt = self._build_system_prompt("core_router", allow_delegation=True)
+        if summary_text:
+            system_prompt = f"{system_prompt}\n\nConversation summary:\n{summary_text}"
         messages = [
             {
                 "role": "system",
-                "content": self._build_system_prompt("core_router", allow_delegation=True),
+                "content": system_prompt,
             }
         ]
-        if summary_text:
-            messages.append({"role": "system", "content": f"Conversation summary:\n{summary_text}"})
         messages.extend({"role": row["role"], "content": row["content"]} for row in history)
         messages.append({"role": "user", "content": user_query})
         return messages

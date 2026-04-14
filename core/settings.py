@@ -21,7 +21,14 @@ class Settings:
     api_port: int
     api_base_url: str
     model_profile: str
+    llm_backend: str
     model_path: str
+    remote_model_name: str
+    remote_api_base_url: str
+    remote_api_key: str
+    remote_timeout_seconds: int
+    remote_verify_tls: bool
+    remote_enable_thinking: bool
     model_threads: int
     model_context: int
     model_gpu_layers: int
@@ -98,10 +105,17 @@ class Settings:
             api_port=api_port,
             api_base_url=api_base_url,
             model_profile=profile_name if profile_name in presets else "balanced",
+            llm_backend=os.getenv("LOCAL_AGENT_LLM_BACKEND", "remote").lower(),
             model_path=os.getenv(
                 "LOCAL_AGENT_MODEL_PATH",
                 os.path.join(project_root, "data", "models", "qwen2.5-7b-instruct-q4_k_m.gguf"),
             ),
+            remote_model_name=os.getenv("LOCAL_AGENT_REMOTE_MODEL_NAME", "Qwen3.5-27B"),
+            remote_api_base_url=os.getenv("LOCAL_AGENT_REMOTE_API_BASE_URL", ""),
+            remote_api_key=os.getenv("LOCAL_AGENT_REMOTE_API_KEY", ""),
+            remote_timeout_seconds=_env_int("LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS", 60),
+            remote_verify_tls=os.getenv("LOCAL_AGENT_REMOTE_VERIFY_TLS", "0") == "1",
+            remote_enable_thinking=os.getenv("LOCAL_AGENT_REMOTE_ENABLE_THINKING", "0") == "1",
             model_threads=_env_int("LOCAL_AGENT_MODEL_THREADS", preset["model_threads"]),
             model_context=_env_int("LOCAL_AGENT_MODEL_CONTEXT", preset["model_context"]),
             model_gpu_layers=_env_int("LOCAL_AGENT_MODEL_GPU_LAYERS", 0),
