@@ -1,0 +1,8 @@
+{"sample_id":"rag_001","variant":"baseline","latency_ms":850.2,"answer":"根据制度，年假最小申请单位为一天。","predicted_agent":"knowledge_expert","used_tools":[],"retrieved_docs":["hr_policy.md"],"citation_hits":["hr_policy.md"],"metadata":{}}
+{"sample_id":"rag_002","variant":"baseline","latency_ms":910.1,"answer":"审批由财务先审再给主管。","predicted_agent":"knowledge_expert","used_tools":[],"retrieved_docs":["finance_reimbursement.pdf"],"citation_hits":["finance_reimbursement.pdf"],"metadata":{}}
+{"sample_id":"tool_001","variant":"baseline","latency_ms":500.0,"answer":"/tmp 中包含 a.txt 与 b.csv","predicted_agent":"core_router","used_tools":[],"retrieved_docs":[],"citation_hits":[],"metadata":{}}
+{"sample_id":"tool_002","variant":"baseline","latency_ms":620.0,"answer":"当前系统状态正常。","predicted_agent":"core_router","used_tools":["get_system_status"],"retrieved_docs":[],"citation_hits":[],"metadata":{}}
+{"sample_id":"router_001","variant":"baseline","latency_ms":420.0,"answer":"向量数据库偏语义，倒排索引偏关键词。","predicted_agent":"core_router","used_tools":[],"retrieved_docs":[],"citation_hits":[],"metadata":{}}
+{"sample_id":"router_002","variant":"baseline","latency_ms":780.0,"answer":"试用期一般 6 个月。","predicted_agent":"core_router","used_tools":[],"retrieved_docs":["employee_handbook.docx"],"citation_hits":["employee_handbook.docx"],"metadata":{}}
+{"sample_id":"general_001","variant":"baseline","latency_ms":360.0,"answer":"这是周报。","predicted_agent":"core_router","used_tools":[],"retrieved_docs":[],"citation_hits":[],"metadata":{}}
+{"sample_id":"general_002","variant":"baseline","latency_ms":350.0,"answer":"Recall@K 是在前 K 条中的命中情况。","predicted_agent":"core_router","used_tools":[],"retrieved_docs":[],"citation_hits":[],"metadata":{}}
