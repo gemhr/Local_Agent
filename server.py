@@ -46,6 +46,9 @@ async def lifespan(app: FastAPI):
             db_manager = VectorDBManager(
                 db_persist_dir=settings.chroma_dir,
                 local_model_path=settings.embedding_model_path,
+                collection_name=(settings.knowledge_collection_name),
+                embedding_batch_size=(settings.embedding_batch_size),
+                query_prompt_name=(settings.embedding_query_prompt_name),
             )
         except Exception as exc:
             print(f"[Server] Vector DB disabled: {exc}")
@@ -61,6 +64,10 @@ async def lifespan(app: FastAPI):
         if not settings.remote_api_base_url:
             raise RuntimeError(
                 "LOCAL_AGENT_REMOTE_API_BASE_URL is required when LOCAL_AGENT_LLM_BACKEND != local"
+            )
+        if "deepseek.com" in settings.remote_api_base_url and not settings.remote_api_key:
+            raise RuntimeError(
+                "DEEPSEEK_API_KEY or LOCAL_AGENT_REMOTE_API_KEY is required for DeepSeek remote mode"
             )
         engine = RemoteLLMEngine(
             api_base_url=settings.remote_api_base_url,
