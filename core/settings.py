@@ -39,7 +39,10 @@ class Settings:
     summary_max_chars: int
     chroma_dir: str
     embedding_model_path: str
+    embedding_query_prompt_name: str
+    embedding_batch_size: int
     memory_db_path: str
+    knowledge_collection_name: str
     rag_top_k: int
     rag_doc_max_chars: int
     rag_context_max_chars: int
@@ -112,46 +115,96 @@ class Settings:
             llm_backend=os.getenv("LOCAL_AGENT_LLM_BACKEND", "remote").lower(),
             model_path=os.getenv(
                 "LOCAL_AGENT_MODEL_PATH",
-                os.path.join(project_root, "data", "models", "qwen2.5-7b-instruct-q4_k_m.gguf"),
+                os.path.join(
+                    project_root, "data", "models", "qwen2.5-7b-instruct-q4_k_m.gguf"
+                ),
             ),
-            remote_model_name=os.getenv("LOCAL_AGENT_REMOTE_MODEL_NAME", "Qwen3.5-27B"),
-            remote_api_base_url=os.getenv("LOCAL_AGENT_REMOTE_API_BASE_URL", ""),
-            remote_api_key=os.getenv("LOCAL_AGENT_REMOTE_API_KEY", ""),
+            remote_model_name=os.getenv(
+                "LOCAL_AGENT_REMOTE_MODEL_NAME", "deepseek-v4-flash"
+            ),
+            remote_api_base_url=os.getenv(
+                "LOCAL_AGENT_REMOTE_API_BASE_URL", "https://api.deepseek.com"
+            ),
+            remote_api_key=os.getenv(
+                "LOCAL_AGENT_REMOTE_API_KEY", os.getenv("DEEPSEEK_API_KEY", "")
+            ),
             remote_timeout_seconds=_env_int("LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS", 120),
             remote_verify_tls=os.getenv("LOCAL_AGENT_REMOTE_VERIFY_TLS", "0") == "1",
-            remote_enable_thinking=os.getenv("LOCAL_AGENT_REMOTE_ENABLE_THINKING", "0") == "1",
-            model_threads=_env_int("LOCAL_AGENT_MODEL_THREADS", preset["model_threads"]),
-            model_context=_env_int("LOCAL_AGENT_MODEL_CONTEXT", preset["model_context"]),
+            remote_enable_thinking=os.getenv("LOCAL_AGENT_REMOTE_ENABLE_THINKING", "0")
+            == "1",
+            model_threads=_env_int(
+                "LOCAL_AGENT_MODEL_THREADS", preset["model_threads"]
+            ),
+            model_context=_env_int(
+                "LOCAL_AGENT_MODEL_CONTEXT", preset["model_context"]
+            ),
             model_gpu_layers=_env_int("LOCAL_AGENT_MODEL_GPU_LAYERS", 0),
-            model_max_tokens=_env_int("LOCAL_AGENT_MODEL_MAX_TOKENS", preset["model_max_tokens"]),
-            history_window_size=_env_int("LOCAL_AGENT_HISTORY_WINDOW_SIZE", preset["history_window_size"]),
+            model_max_tokens=_env_int(
+                "LOCAL_AGENT_MODEL_MAX_TOKENS", preset["model_max_tokens"]
+            ),
+            history_window_size=_env_int(
+                "LOCAL_AGENT_HISTORY_WINDOW_SIZE", preset["history_window_size"]
+            ),
             summary_trigger_messages=_env_int(
                 "LOCAL_AGENT_SUMMARY_TRIGGER_MESSAGES",
                 preset["summary_trigger_messages"],
             ),
-            summary_keep_recent=_env_int("LOCAL_AGENT_SUMMARY_KEEP_RECENT", preset["summary_keep_recent"]),
-            summary_max_chars=_env_int("LOCAL_AGENT_SUMMARY_MAX_CHARS", preset["summary_max_chars"]),
-            chroma_dir=os.getenv("LOCAL_AGENT_CHROMA_DIR", os.path.join(project_root, "chroma_db")),
+            summary_keep_recent=_env_int(
+                "LOCAL_AGENT_SUMMARY_KEEP_RECENT", preset["summary_keep_recent"]
+            ),
+            summary_max_chars=_env_int(
+                "LOCAL_AGENT_SUMMARY_MAX_CHARS", preset["summary_max_chars"]
+            ),
+            chroma_dir=os.getenv(
+                "LOCAL_AGENT_CHROMA_DIR", os.path.join(project_root, "chroma_db")
+            ),
             embedding_model_path=os.getenv(
                 "LOCAL_AGENT_EMBEDDING_MODEL_PATH",
-                os.path.join(project_root, "data", "models", "bge-large-zh-v1.5"),
+                os.path.join(
+                    project_root,
+                    "data",
+                    "models",
+                    "Qwen3-Embedding-0.6B",
+                ),
+            ),
+            embedding_query_prompt_name=os.getenv(
+                "LOCAL_AGENT_EMBEDDING_QUERY_PROMPT_NAME",
+                "query",
+            ),
+            embedding_batch_size=max(
+                1,
+                int(
+                    os.getenv(
+                        "LOCAL_AGENT_EMBEDDING_BATCH_SIZE",
+                        "8",
+                    )
+                ),
             ),
             memory_db_path=os.getenv(
                 "LOCAL_AGENT_MEMORY_DB_PATH",
                 os.path.join(project_root, "data", "database", "agent_memory.db"),
             ),
             rag_top_k=_env_int("LOCAL_AGENT_RAG_TOP_K", preset["rag_top_k"]),
-            rag_doc_max_chars=_env_int("LOCAL_AGENT_RAG_DOC_MAX_CHARS", preset["rag_doc_max_chars"]),
+            rag_doc_max_chars=_env_int(
+                "LOCAL_AGENT_RAG_DOC_MAX_CHARS", preset["rag_doc_max_chars"]
+            ),
             rag_context_max_chars=_env_int(
                 "LOCAL_AGENT_RAG_CONTEXT_MAX_CHARS",
                 preset["rag_context_max_chars"],
             ),
-            orchestration_enabled=os.getenv("LOCAL_AGENT_ORCHESTRATION_ENABLED", "1") == "1",
-            orchestration_max_agents=_env_int("LOCAL_AGENT_ORCHESTRATION_MAX_AGENTS", 3),
+            orchestration_enabled=os.getenv("LOCAL_AGENT_ORCHESTRATION_ENABLED", "1")
+            == "1",
+            orchestration_max_agents=_env_int(
+                "LOCAL_AGENT_ORCHESTRATION_MAX_AGENTS", 3
+            ),
             sync_enabled=os.getenv("LOCAL_AGENT_SYNC_ENABLED", "0") == "1",
             wiki_cookie=os.getenv("LOCAL_AGENT_WIKI_COOKIE", ""),
             local_knowledge_base_dir=os.getenv(
                 "LOCAL_AGENT_LOCAL_KB_DIR",
                 os.path.join(project_root, "data", "knowledge_base"),
+            ),
+            knowledge_collection_name=os.getenv(
+                "LOCAL_AGENT_KB_COLLECTION",
+                "huawei_wiki_collection",
             ),
         )
