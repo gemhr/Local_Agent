@@ -4,11 +4,14 @@
 
 import json
 import re
-from typing import Callable, Dict, Generator, Optional
+from typing import TYPE_CHECKING, Callable, Dict, Generator, Optional
 
-from core.knowledge_base.vector_db_manager import VectorDBManager
-from core.llm_engine import LocalLLMEngine
 from core.memory_manager import MemoryManager
+from core.runtime import RunContext
+
+if TYPE_CHECKING:
+    from core.knowledge_base.vector_db_manager import VectorDBManager
+    from core.llm_engine import LocalLLMEngine
 
 
 class AgentRouter:
@@ -20,9 +23,9 @@ class AgentRouter:
 
     def __init__(
         self,
-        llm_engine: LocalLLMEngine,
+        llm_engine: "LocalLLMEngine",
         memory_manager: MemoryManager,
-        db_manager: Optional[VectorDBManager] = None,
+        db_manager: Optional["VectorDBManager"] = None,
         *,
         history_window_size: int = 8,
         summary_trigger_messages: int = 16,
@@ -528,8 +531,11 @@ class AgentRouter:
         user_query: str,
         *,
         history_scope: str = DIRECT_MEMORY_SCOPE,
+        run_context: RunContext | None = None,
     ) -> list[dict[str, str]]:
         """构建回答消息，并在需要时注入工具观察结果。"""
+        if run_context is not None:
+            run_context.raise_if_inactive()
         messages = self._build_messages(
             user_query=user_query,
             agent_id=agent_id,
@@ -541,7 +547,11 @@ class AgentRouter:
             return messages
 
         tool_name, tool_args = tool_call
+        if run_context is not None:
+            run_context.raise_if_inactive()
         observation = str(self.tools[tool_name]["func"](tool_args))
+        if run_context is not None:
+            run_context.raise_if_inactive()
         observation = self._truncate_text(observation, 1600)
         messages[0]["content"] += (
             "\n\n"
@@ -558,15 +568,21 @@ class AgentRouter:
         user_query: str,
         *,
         history_scope: str = DIRECT_MEMORY_SCOPE,
+        run_context: RunContext | None = None,
     ) -> Generator[str, None, str]:
         """流式生成最终可见回答。"""
         messages = self._prepare_answer_messages(
             agent_id=agent_id,
             user_query=user_query,
             history_scope=history_scope,
+            run_context=run_context,
         )
+        if run_context is not None:
+            run_context.raise_if_inactive()
         final_response = ""
         for chunk in self.llm.generate(messages, max_tokens=self.max_tokens):
+            if run_context is not None:
+                run_context.raise_if_inactive()
             final_response += chunk
             yield chunk
         return final_response
@@ -577,13 +593,17 @@ class AgentRouter:
         user_query: str,
         *,
         history_scope: str = DIRECT_MEMORY_SCOPE,
+        run_context: RunContext | None = None,
     ) -> str:
         """同步生成最终回答文本。"""
         messages = self._prepare_answer_messages(
             agent_id=agent_id,
             user_query=user_query,
             history_scope=history_scope,
+            run_context=run_context,
         )
+        if run_context is not None:
+            run_context.raise_if_inactive()
         return self._collect_model_response(messages)
 
     def _parse_delegate_plan(self, response_text: str) -> list[dict[str, str]]:
@@ -640,8 +660,11 @@ class AgentRouter:
         persist: bool = True,
         persist_scope: str = DIRECT_MEMORY_SCOPE,
         history_scope: str = DIRECT_MEMORY_SCOPE,
+        run_context: RunContext | None = None,
     ) -> str:
         """执行一次非流式智能体调用。"""
+        if run_context is not None:
+            run_context.raise_if_inactive()
         if persist:
             self.memory_manager.add_message(
                 agent_id,
@@ -653,7 +676,10 @@ class AgentRouter:
             agent_id=agent_id,
             user_query=user_query,
             history_scope=history_scope,
+            run_context=run_context,
         )
+        if run_context is not None:
+            run_context.raise_if_inactive()
         if persist:
             self.memory_manager.add_message(
                 agent_id,
@@ -668,9 +694,17 @@ class AgentRouter:
         event = {"type": event_type, **payload}
         return f"{self.ORCHESTRATION_EVENT_PREFIX}{json.dumps(event, ensure_ascii=False)}\n"
 
-    def _plan_orchestration(self, user_query: str) -> dict[str, object]:
+    def _plan_orchestration(
+        self,
+        user_query: str,
+        run_context: RunContext | None = None,
+    ) -> dict[str, object]:
         """执行核心 Agent 的委派规划阶段。"""
+        if run_context is not None:
+            run_context.raise_if_inactive()
         planning_messages = self._build_orchestration_messages(user_query)
+        if run_context is not None:
+            run_context.raise_if_inactive()
         planning_response = self._collect_model_response(planning_messages)
         delegates = self._parse_delegate_plan(planning_response)
         return {
@@ -711,13 +745,17 @@ class AgentRouter:
         self,
         user_query: str,
         agent_id: str,
+        run_context: RunContext | None = None,
     ) -> Generator[str, None, None]:
         """执行单智能体流式回复并持久化结果。"""
         final_response = yield from self._stream_final_response(
             agent_id=agent_id,
             user_query=user_query,
             history_scope=self.DIRECT_MEMORY_SCOPE,
+            run_context=run_context,
         )
+        if run_context is not None:
+            run_context.raise_if_inactive()
         self.memory_manager.add_message(
             agent_id,
             "assistant",
@@ -728,10 +766,13 @@ class AgentRouter:
     def _stream_core_with_orchestration(
         self,
         user_query: str,
+        run_context: RunContext | None = None,
     ) -> Generator[str, None, None]:
         """先执行编排，再流式输出核心 Agent 的最终汇总结论。"""
+        if run_context is not None:
+            run_context.raise_if_inactive()
         yield self._build_orchestration_event("planning_started")
-        orchestration_result = self._plan_orchestration(user_query)
+        orchestration_result = self._plan_orchestration(user_query, run_context=run_context)
         delegates = orchestration_result["delegates"]
 
         if not delegates:
@@ -740,7 +781,10 @@ class AgentRouter:
                 agent_id="core_router",
                 user_query=user_query,
                 history_scope=self.DIRECT_MEMORY_SCOPE,
+                run_context=run_context,
             )
+            if run_context is not None:
+                run_context.raise_if_inactive()
             self.memory_manager.add_message(
                 "core_router",
                 "assistant",
@@ -777,6 +821,7 @@ class AgentRouter:
                 persist=True,
                 persist_scope=self.ORCHESTRATION_MEMORY_SCOPE,
                 history_scope=self.DIRECT_MEMORY_SCOPE,
+                run_context=run_context,
             )
             specialist_outputs.append(
                 {
@@ -786,6 +831,8 @@ class AgentRouter:
                     "result": result,
                 }
             )
+            if run_context is not None:
+                run_context.raise_if_inactive()
             yield self._build_orchestration_event(
                 "delegate_finished",
                 agent_id=agent_id,
@@ -802,7 +849,10 @@ class AgentRouter:
             agent_id="core_router",
             user_query=synthesis_query,
             history_scope=self.DIRECT_MEMORY_SCOPE,
+            run_context=run_context,
         )
+        if run_context is not None:
+            run_context.raise_if_inactive()
         self.memory_manager.add_message(
             "core_router",
             "assistant",
@@ -820,18 +870,27 @@ class AgentRouter:
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
 
-    def chat_stream(self, user_query: str, agent_id: str = "core_router") -> Generator[str, None, None]:
+    def chat_stream(
+        self,
+        user_query: str,
+        agent_id: str = "core_router",
+        run_context: RunContext | None = None,
+    ) -> Generator[str, None, None]:
         """执行一次对话，并持久化用户与助手消息。"""
+        if run_context is not None:
+            run_context.raise_if_inactive()
         self.memory_manager.add_message(
             agent_id,
             "user",
             user_query,
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
+        if run_context is not None:
+            run_context.raise_if_inactive()
         if self._should_orchestrate(agent_id):
-            yield from self._stream_core_with_orchestration(user_query=user_query)
+            yield from self._stream_core_with_orchestration(user_query=user_query, run_context=run_context)
             return
-        yield from self._stream_single_agent(user_query=user_query, agent_id=agent_id)
+        yield from self._stream_single_agent(user_query=user_query, agent_id=agent_id, run_context=run_context)
 
     def get_agent_meta(self, agent_id: str) -> tuple[str, str]:
         """返回智能体的显示名称与头像文件名。"""
