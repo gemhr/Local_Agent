@@ -2,22 +2,42 @@
 # -*- coding: utf-8 -*-
 """聊天应用服务层。"""
 
+import logging
+from collections.abc import Callable
 from typing import Any, Generator, Optional
 
 from core.agent_router import AgentRouter
-from core.runtime import LEGACY_DEFAULT_SESSION_ID, create_run_context
+from core.runtime import (
+    AgentState,
+    LEGACY_DEFAULT_SESSION_ID,
+    RunCancelledError,
+    RunDeadlineExceededError,
+    StopReason,
+    create_run_context,
+)
+
+LEGACY_AGENT_ROUTER_STEP_ID = "legacy-agent-router"
+LEGACY_AGENT_ROUTER_STEP_NAME = "Legacy AgentRouter execution"
+
+logger = logging.getLogger(__name__)
 
 
 class ChatService:
     """对外暴露聊天、历史和记忆管理操作。"""
 
-    def __init__(self, router: AgentRouter) -> None:
+    def __init__(
+        self,
+        router: AgentRouter,
+        state_observer: Callable[[AgentState], None] | None = None,
+    ) -> None:
         """初始化应用服务。
 
         Args:
             router: 负责路由、工具和记忆协调的核心对象。
+            state_observer: Optional test/diagnostic callback for ephemeral AgentState snapshots.
         """
         self.router = router
+        self._state_observer = state_observer
 
     def stream_chat(self, agent_id: str, query: str, file_path: str = "") -> Generator[str, None, None]:
         """流式执行一次对话。
@@ -39,12 +59,76 @@ class ChatService:
         )
         # Keep the source in this generator frame so cancellation authority is not lost.
         _cancellation_source = cancellation_source
-        yield from self.router.chat_stream(
-            user_query=final_query,
-            agent_id=agent_id,
-            run_context=run_context,
-        )
-        _ = _cancellation_source
+        agent_state = AgentState.for_run_context(run_context.run_id)
+        agent_state.assert_matches_run_context(run_context.run_id)
+        agent_state.add_step(LEGACY_AGENT_ROUTER_STEP_ID, LEGACY_AGENT_ROUTER_STEP_NAME)
+        agent_state.mark_running()
+        agent_state.start_step(LEGACY_AGENT_ROUTER_STEP_ID)
+        self._observe_state(agent_state)
+        output_chunks: list[str] = []
+        try:
+            for chunk in self.router.chat_stream(
+                user_query=final_query,
+                agent_id=agent_id,
+                run_context=run_context,
+            ):
+                output_chunks.append(chunk)
+                yield chunk
+            final_output = "".join(output_chunks) if output_chunks else None
+            agent_state.succeed_step(LEGACY_AGENT_ROUTER_STEP_ID)
+            agent_state.mark_succeeded(final_output=final_output)
+            self._observe_state(agent_state)
+            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
+        except RunDeadlineExceededError:
+            agent_state.fail_step(
+                LEGACY_AGENT_ROUTER_STEP_ID,
+                error_code="DEADLINE_EXCEEDED",
+                error_message="Run deadline exceeded",
+            )
+            agent_state.mark_failed(
+                stop_reason=StopReason.DEADLINE_EXCEEDED,
+                error_code="DEADLINE_EXCEEDED",
+                error_message="Run deadline exceeded",
+            )
+            self._observe_state(agent_state)
+            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
+            raise
+        except RunCancelledError:
+            agent_state.cancel_step(
+                LEGACY_AGENT_ROUTER_STEP_ID,
+                error_code="USER_CANCELLED",
+                error_message="Run cancelled",
+            )
+            agent_state.mark_cancelled(
+                stop_reason=StopReason.USER_CANCELLED,
+                error_code="USER_CANCELLED",
+                error_message="Run cancelled",
+            )
+            self._observe_state(agent_state)
+            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
+            raise
+        except Exception:
+            agent_state.fail_step(
+                LEGACY_AGENT_ROUTER_STEP_ID,
+                error_code="UNHANDLED_ERROR",
+                error_message="Agent execution failed",
+            )
+            agent_state.mark_failed(
+                stop_reason=StopReason.UNHANDLED_ERROR,
+                error_code="UNHANDLED_ERROR",
+                error_message="Agent execution failed",
+            )
+            self._observe_state(agent_state)
+            logger.exception("AgentRouter execution failed")
+            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
+            raise
+        finally:
+            _ = _cancellation_source
+
+    def _observe_state(self, agent_state: AgentState) -> None:
+        """Notify an optional observer without storing AgentState on the service."""
+        if self._state_observer is not None:
+            self._state_observer(agent_state)
 
     def get_history(self, agent_id: str, limit: int, offset: int) -> list[dict]:
         """返回按显示顺序排列的一页历史消息。"""
@@ -88,3 +172,4 @@ class ChatService:
         result["status"] = "success"
         result["delete_all"] = False
         return result
+
