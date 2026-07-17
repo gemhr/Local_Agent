@@ -5,6 +5,7 @@
 from typing import Any, Generator, Optional
 
 from core.agent_router import AgentRouter
+from core.runtime import LEGACY_DEFAULT_SESSION_ID, create_run_context
 
 
 class ChatService:
@@ -32,7 +33,18 @@ class ChatService:
         final_query = query
         if file_path:
             final_query += f"\n\nPlease analyze this file path: '{file_path}'"
-        yield from self.router.chat_stream(user_query=final_query, agent_id=agent_id)
+        run_context, cancellation_source = create_run_context(
+            entry_agent_id=agent_id,
+            session_id=LEGACY_DEFAULT_SESSION_ID,
+        )
+        # Keep the source in this generator frame so cancellation authority is not lost.
+        _cancellation_source = cancellation_source
+        yield from self.router.chat_stream(
+            user_query=final_query,
+            agent_id=agent_id,
+            run_context=run_context,
+        )
+        _ = _cancellation_source
 
     def get_history(self, agent_id: str, limit: int, offset: int) -> list[dict]:
         """返回按显示顺序排列的一页历史消息。"""
