@@ -17,6 +17,12 @@ def _env_int_at_least(name: str, default: int, minimum: int) -> int:
     return max(minimum, _env_int(name, default))
 
 
+def _env_float_in_range(name: str, default: float, minimum: float, maximum: float) -> float:
+    """读取限定范围内的浮点环境变量。"""
+    value = float(os.getenv(name, str(default)))
+    return min(maximum, max(minimum, value))
+
+
 @dataclass(frozen=True)
 class Settings:
     """不可变运行时配置对象。"""
@@ -49,6 +55,7 @@ class Settings:
     memory_db_path: str
     knowledge_collection_name: str
     rag_top_k: int
+    rag_min_score: float
     rag_doc_max_chars: int
     rag_context_max_chars: int
     orchestration_enabled: bool
@@ -158,6 +165,7 @@ class Settings:
                 os.path.join(project_root, "data", "database", "agent_memory.db"),
             ),
             rag_top_k=_env_int("LOCAL_AGENT_RAG_TOP_K", preset["rag_top_k"]),
+            rag_min_score=_env_float_in_range("LOCAL_AGENT_RAG_MIN_SCORE", 0.55, 0.0, 1.0),
             rag_doc_max_chars=_env_int("LOCAL_AGENT_RAG_DOC_MAX_CHARS", preset["rag_doc_max_chars"]),
             rag_context_max_chars=_env_int(
                 "LOCAL_AGENT_RAG_CONTEXT_MAX_CHARS",
