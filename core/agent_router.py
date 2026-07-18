@@ -54,7 +54,7 @@ class AgentRouter:
         self.orchestration_max_agents = orchestration_max_agents
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256
-        self.knowledge_rewrite_max_tokens = 24
+        self.knowledge_rewrite_max_tokens = 128
         self.tools: Dict[str, Dict[str, object]] = {}
         self.agents_config = {
             "core_router": {
@@ -154,6 +154,7 @@ class AgentRouter:
         *,
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
+        enable_thinking: bool | None = None,
     ) -> str:
         """收集一次完整的模型输出。"""
         response_text = ""
@@ -161,6 +162,7 @@ class AgentRouter:
             messages,
             max_tokens=max_tokens or self.max_tokens,
             temperature=temperature,
+            enable_thinking=enable_thinking,
         ):
             response_text += chunk
         return response_text
@@ -212,6 +214,7 @@ class AgentRouter:
             summary_messages,
             max_tokens=self.summary_plan_max_tokens,
             temperature=0.1,
+            enable_thinking=False,
         ).strip()
         if not summary:
             return self._fallback_summary(existing_summary, new_messages)
@@ -299,6 +302,7 @@ class AgentRouter:
             rewrite_messages,
             max_tokens=self.knowledge_rewrite_max_tokens,
             temperature=0.1,
+            enable_thinking=False,
         )
         cleaned = rewritten.strip().strip("\"'")
         return cleaned or user_query
@@ -522,6 +526,7 @@ class AgentRouter:
             planner_messages,
             max_tokens=self.tool_plan_max_tokens,
             temperature=0.1,
+            enable_thinking=False,
         )
         return self._parse_tool_call(planner_response)
 
@@ -705,7 +710,10 @@ class AgentRouter:
         planning_messages = self._build_orchestration_messages(user_query)
         if run_context is not None:
             run_context.raise_if_inactive()
-        planning_response = self._collect_model_response(planning_messages)
+        planning_response = self._collect_model_response(
+            planning_messages,
+            enable_thinking=False,
+        )
         delegates = self._parse_delegate_plan(planning_response)
         return {
             "planning_messages": planning_messages,

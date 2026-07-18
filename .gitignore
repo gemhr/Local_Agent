@@ -1,0 +1,18 @@
+# Local secrets and IDE state
+.env
+.env.*
+!.env.example
+.idea/
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local models, vector stores, ingestion logs, and generated databases
+chroma_db/
+data/models/
+data/ingestion_logs/
+data/database/
