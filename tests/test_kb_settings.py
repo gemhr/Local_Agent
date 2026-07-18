@@ -27,3 +27,15 @@ def test_default_collection_is_valid(monkeypatch) -> None:
     monkeypatch.delenv("LOCAL_AGENT_KB_COLLECTION", raising=False)
 
     assert Settings.load().knowledge_collection_name
+
+
+def test_rag_min_score_environment_override(monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_AGENT_RAG_MIN_SCORE", "0.72")
+
+    assert Settings.load().rag_min_score == 0.72
+
+
+def test_rag_min_score_is_clamped(monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_AGENT_RAG_MIN_SCORE", "1.5")
+
+    assert Settings.load().rag_min_score == 1.0

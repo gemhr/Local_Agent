@@ -20,8 +20,10 @@ from tools.registry import register_all_tools
 
 try:
     from core.knowledge_base.vector_db_manager import VectorDBManager
-except Exception:  # pragma: no cover
+    vector_db_import_error: Exception | None = None
+except Exception as exc:  # pragma: no cover
     VectorDBManager = None
+    vector_db_import_error = exc
 
 
 settings = Settings.load()
@@ -43,6 +45,7 @@ async def lifespan(app: FastAPI):
 
     memory_manager = MemoryManager(db_path=settings.memory_db_path)
     db_manager = None
+    knowledge_base_error = None
     if VectorDBManager is not None:
         try:
             db_manager = VectorDBManager(
@@ -60,6 +63,7 @@ async def lifespan(app: FastAPI):
                 db_manager.count(),
             )
         except Exception as exc:
+            knowledge_base_error = f"{type(exc).__name__}: {exc}"
             logger.warning(
                 "[KB Runtime] initialization failed: collection=%s, "
                 "chroma_dir=%s, model=%s, error=%s",
@@ -68,6 +72,13 @@ async def lifespan(app: FastAPI):
                 settings.embedding_model_path,
                 exc,
             )
+    else:
+        knowledge_base_error = (
+            f"{type(vector_db_import_error).__name__}: {vector_db_import_error}"
+            if vector_db_import_error is not None
+            else "VectorDBManager is unavailable"
+        )
+        logger.warning("[KB Runtime] import failed: %s", knowledge_base_error)
 
     if settings.llm_backend == "local":
         engine = LocalLLMEngine(
@@ -98,11 +109,13 @@ async def lifespan(app: FastAPI):
         summary_keep_recent=settings.summary_keep_recent,
         summary_max_chars=settings.summary_max_chars,
         rag_top_k=settings.rag_top_k,
+        rag_min_score=settings.rag_min_score,
         rag_doc_max_chars=settings.rag_doc_max_chars,
         rag_context_max_chars=settings.rag_context_max_chars,
         max_tokens=settings.model_max_tokens,
         orchestration_enabled=settings.orchestration_enabled,
         orchestration_max_agents=settings.orchestration_max_agents,
+        knowledge_base_error=knowledge_base_error,
     )
     register_all_tools(router)
     chat_service = ChatService(router)

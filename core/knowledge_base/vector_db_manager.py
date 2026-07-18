@@ -213,11 +213,55 @@ class VectorDBManager:
         top_k: int = 4,
         metadata_filter: Dict[str, Any] | None = None,
     ) -> List[tuple[Document, float]]:
-        """执行带相关度分数的相似度检索。"""
+        """执行带归一化分数的相似度检索，分数越高越相关。"""
         kwargs: Dict[str, Any] = {"query": query, "k": top_k}
         if metadata_filter:
             kwargs["filter"] = metadata_filter
-        return self.vector_store.similarity_search_with_relevance_scores(**kwargs)
+        results = self.vector_store.similarity_search_with_score(**kwargs)
+        normalized_results = []
+        for document, distance in results:
+            safe_distance = max(0.0, float(distance))
+            normalized_results.append((document, 1.0 / (1.0 + safe_distance)))
+        return normalized_results
+
+    def keyword_search(self, terms: List[str], k: int = 8) -> List[Document]:
+        """使用 Chroma 文本索引补充精确术语召回。"""
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None or k < 1:
+            return []
+
+        documents: List[Document] = []
+        seen_ids: set[str] = set()
+        for term in terms:
+            normalized_term = str(term).strip()
+            if not normalized_term:
+                continue
+            variants = [normalized_term]
+            if normalized_term.isascii() and normalized_term.isalnum():
+                variants.extend([normalized_term.lower(), normalized_term.upper()])
+            for variant in dict.fromkeys(variants):
+                try:
+                    result = collection.get(
+                        where_document={"$contains": variant},
+                        include=["documents", "metadatas"],
+                        limit=k,
+                    )
+                except Exception:
+                    continue
+                ids = result.get("ids", []) if result else []
+                texts = result.get("documents", []) if result else []
+                metadatas = result.get("metadatas", []) if result else []
+                for index, text in enumerate(texts):
+                    document_id = str(ids[index]) if index < len(ids) else ""
+                    metadata = metadatas[index] if index < len(metadatas) else {}
+                    dedup_key = document_id or str(metadata.get("chunk_id", "")) or str(text)
+                    if not text or dedup_key in seen_ids:
+                        continue
+                    seen_ids.add(dedup_key)
+                    documents.append(Document(page_content=str(text), metadata=metadata or {}))
+                    if len(documents) >= k:
+                        return documents
+        return documents
 
     def search(
         self,
