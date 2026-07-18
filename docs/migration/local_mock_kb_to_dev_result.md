@@ -172,15 +172,15 @@ python server.py
 
 ## 15. Commit Hash
 
-待发布；Draft PR 创建后回填实现 Commit。
+实现提交：`3efa709c9d9154ac4c80aef66822f7a4a19f8566`。
 
 ## 16. 推送分支
 
-`feat/local-mock-kb-on-dev`（待推送）
+`origin/feat/local-mock-kb-on-dev`
 
 ## 17. Draft PR 链接
 
-待创建。
+<https://github.com/gemhr/Local_Agent/pull/10>
 
 ## 18. 剩余风险和后续建议
 
