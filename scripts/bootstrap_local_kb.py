@@ -79,9 +79,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--ingest-batch-size",
         type=int,
         default=32,
-        help="单次向量化和写入的 Chunk 数量。",
+        help="VectorDBManager 单次向量化并写入的 Chunk 数量。",
     )
 
+    parser.add_argument(
+        "--flush-chunks",
+        type=int,
+        default=128,
+        help=("累计多少个 Chunk 后统一写入向量库。" "该参数用于跨文件合并向量化任务。"),
+    )
     return parser
 
 
@@ -189,8 +195,51 @@ def main() -> None:
 
     failures: list[tuple[str, str]] = []
 
+    pending_chunks: list[dict] = []
+    pending_sources: list[str] = []
+    pending_file_count = 0
+
+    def flush_pending_chunks() -> int:
+        """删除待更新源文件的旧 Chunk，并批量写入新 Chunk。"""
+        nonlocal pending_chunks
+        nonlocal pending_sources
+        nonlocal pending_file_count
+
+        if manager is None or not pending_chunks:
+            return 0
+
+        unique_sources = list(dict.fromkeys(pending_sources))
+
+        print(
+            f"[KB] 开始批量写入："
+            f"文件={pending_file_count}，"
+            f"chunks={len(pending_chunks)}",
+            flush=True,
+        )
+
+        for pending_source in unique_sources:
+            manager.delete_source(pending_source)
+
+        written = manager.ingest_chunks(pending_chunks)
+
+        print(
+            f"[KB] 批量写入完成：" f"文件={pending_file_count}，" f"chunks={written}",
+            flush=True,
+        )
+
+        pending_chunks = []
+        pending_sources = []
+        pending_file_count = 0
+
+        return written
+
     for index, path in enumerate(files, start=1):
         source = path.relative_to(source_dir).as_posix()
+
+        print(
+            f"[KB] [{index}/{len(files)}] 开始: {source}",
+            flush=True,
+        )
 
         try:
             documents = load_document_file(
@@ -225,19 +274,24 @@ def main() -> None:
                 continue
 
             if manager is not None:
-                written = manager.replace_source_chunks(
-                    source,
-                    chunks,
-                )
-                written_chunks += written
+                pending_sources.append(source)
+                pending_chunks.extend(chunks)
+                pending_file_count += 1
+
+                if len(pending_chunks) >= args.flush_chunks:
+                    written_chunks += flush_pending_chunks()
 
             success_files += 1
 
+            status = "已解析待写入" if manager is not None else "成功"
+
             print(
                 f"[KB] [{index}/{len(files)}] "
-                f"成功: {source} | "
+                f"{status}: {source} | "
                 f"解析单元={len(documents)} | "
-                f"chunks={len(chunks)}"
+                f"chunks={len(chunks)} | "
+                f"待写入chunks={len(pending_chunks)}",
+                flush=True,
             )
 
         except Exception as exc:
@@ -248,6 +302,16 @@ def main() -> None:
                 f"[KB] [{index}/{len(files)}] "
                 f"失败: {source} | {exc}"
             )
+
+    if manager is not None and pending_chunks:
+        try:
+            written_chunks += flush_pending_chunks()
+        except Exception as exc:
+            print(
+                f"[KB] 最后一批写入失败: {exc}",
+                flush=True,
+            )
+            raise
 
     print()
     print("=" * 80)

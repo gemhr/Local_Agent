@@ -50,6 +50,13 @@ async def lifespan(app: FastAPI):
                 embedding_batch_size=(settings.embedding_batch_size),
                 query_prompt_name=(settings.embedding_query_prompt_name),
             )
+            print(
+                "[KB Runtime] "
+                f"collection={settings.knowledge_collection_name}, "
+                f"chroma_dir={settings.chroma_dir}, "
+                f"model={settings.embedding_model_path}, "
+                f"count={db_manager.count()}"
+            )
         except Exception as exc:
             print(f"[Server] Vector DB disabled: {exc}")
 
