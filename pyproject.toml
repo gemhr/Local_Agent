@@ -21,4 +21,14 @@ dependencies = [
     "python-docx>=1.1.2",
     "requests>=2.32.0",
     "uvicorn>=0.35.0",
+    "xlrd>=2.0.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

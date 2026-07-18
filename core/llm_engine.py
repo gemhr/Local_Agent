@@ -8,7 +8,6 @@ from typing import Any
 from typing import Dict, Generator, List
 
 import requests
-from llama_cpp import Llama
 
 
 class LocalLLMEngine:
@@ -32,6 +31,8 @@ class LocalLLMEngine:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"Model file not found: {model_path}")
 
+        from llama_cpp import Llama
+
         print(f"[LLM] Loading model: {os.path.basename(model_path)} ...")
         self.llm = Llama(
             model_path=model_path,
@@ -50,6 +51,7 @@ class LocalLLMEngine:
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        enable_thinking: bool | None = None,
     ) -> Generator[str, None, None]:
         """执行流式文本生成。
 
@@ -112,6 +114,19 @@ class RemoteLLMEngine:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def _chat_completions_url(self) -> str:
+        """兼容传入 API 根地址、v1 地址或完整 Chat Completions 地址。"""
+        if self.api_base_url.endswith("/chat/completions"):
+            return self.api_base_url
+        if self.api_base_url.endswith("/v1"):
+            return f"{self.api_base_url}/chat/completions"
+        return f"{self.api_base_url}/v1/chat/completions"
+
+    def _supports_deepseek_thinking(self) -> bool:
+        """只为声明为 DeepSeek 兼容的 Provider 发送专属参数。"""
+        provider_identity = f"{self.api_base_url} {self.model_name}".lower()
+        return "deepseek" in provider_identity
+
     @staticmethod
     def _extract_content(payload: dict[str, Any]) -> str:
         choices = payload.get("choices")
@@ -134,8 +149,12 @@ class RemoteLLMEngine:
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: int = 1024,
+        enable_thinking: bool | None = None,
     ) -> Generator[str, None, None]:
-        url = f"{self.api_base_url}/v1/chat/completions"
+        url = self._chat_completions_url()
+        effective_thinking = (
+            self.enable_thinking if enable_thinking is None else enable_thinking
+        )
         body = {
             "model": self.model_name,
             "messages": messages,
@@ -143,7 +162,14 @@ class RemoteLLMEngine:
             "max_tokens": max_tokens,
             "stream": False,
         }
-        body["chat_template_kwargs"] = {"enable_thinking": self.enable_thinking}
+        if self._supports_deepseek_thinking():
+            body["thinking"] = {
+                "type": "enabled" if effective_thinking else "disabled",
+            }
+            if effective_thinking:
+                body["reasoning_effort"] = "high"
+        else:
+            body["chat_template_kwargs"] = {"enable_thinking": effective_thinking}
         response = requests.post(
             url,
             headers=self._build_headers(),
@@ -162,6 +188,17 @@ class RemoteLLMEngine:
         except Exception as exc:
             raise RuntimeError(f"Remote API returned non-JSON payload: {response.text[:1200]}") from exc
         content = self._extract_content(payload)
-        if not content:
+        if not content.strip():
+            choices = payload.get("choices") or []
+            first_choice = choices[0] if choices else {}
+            message = first_choice.get("message") or {}
+            finish_reason = first_choice.get("finish_reason")
+            reasoning_content = message.get("reasoning_content") or ""
+            if finish_reason == "length":
+                raise RuntimeError(
+                    "Remote model output was truncated before producing final content: "
+                    f"model={self.model_name}, max_tokens={max_tokens}, "
+                    f"reasoning_chars={len(reasoning_content)}"
+                )
             raise RuntimeError(f"Remote model returned empty content: payload={payload}")
         yield content

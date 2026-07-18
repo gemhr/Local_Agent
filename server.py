@@ -3,6 +3,7 @@
 """FastAPI 后端入口。"""
 
 from contextlib import asynccontextmanager
+import logging
 from typing import Optional
 
 import uvicorn
@@ -25,6 +26,7 @@ except Exception:  # pragma: no cover
 
 settings = Settings.load()
 chat_service: Optional[ChatService] = None
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -46,9 +48,26 @@ async def lifespan(app: FastAPI):
             db_manager = VectorDBManager(
                 db_persist_dir=settings.chroma_dir,
                 local_model_path=settings.embedding_model_path,
+                collection_name=settings.knowledge_collection_name,
+                embedding_batch_size=settings.embedding_batch_size,
+                query_prompt_name=settings.embedding_query_prompt_name or None,
+            )
+            logger.info(
+                "[KB Runtime] collection=%s, chroma_dir=%s, model=%s, count=%s",
+                settings.knowledge_collection_name,
+                settings.chroma_dir,
+                settings.embedding_model_path,
+                db_manager.count(),
             )
         except Exception as exc:
-            print(f"[Server] Vector DB disabled: {exc}")
+            logger.warning(
+                "[KB Runtime] initialization failed: collection=%s, "
+                "chroma_dir=%s, model=%s, error=%s",
+                settings.knowledge_collection_name,
+                settings.chroma_dir,
+                settings.embedding_model_path,
+                exc,
+            )
 
     if settings.llm_backend == "local":
         engine = LocalLLMEngine(
