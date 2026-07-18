@@ -112,6 +112,11 @@ class RemoteLLMEngine:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def _chat_completions_url(self) -> str:
+        if self.api_base_url.endswith("/chat/completions"):
+            return self.api_base_url
+        return f"{self.api_base_url}/chat/completions"
+
     @staticmethod
     def _extract_content(payload: dict[str, Any]) -> str:
         choices = payload.get("choices")
@@ -135,15 +140,21 @@ class RemoteLLMEngine:
         temperature: float = 0.7,
         max_tokens: int = 1024,
     ) -> Generator[str, None, None]:
-        url = f"{self.api_base_url}/v1/chat/completions"
+        url = self._chat_completions_url()
+
         body = {
             "model": self.model_name,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": False,
+            # False 时也必须显式下发，不能直接省略。
+            "thinking": {"type": ("enabled" if self.enable_thinking else "disabled")},
         }
-        body["chat_template_kwargs"] = {"enable_thinking": self.enable_thinking}
+
+        if self.enable_thinking:
+            body["reasoning_effort"] = "high"
+
         response = requests.post(
             url,
             headers=self._build_headers(),
@@ -151,17 +162,42 @@ class RemoteLLMEngine:
             timeout=self.timeout_seconds,
             verify=self.verify_tls,
         )
+
         if response.status_code >= 400:
             raise RuntimeError(
                 "Remote API request failed: "
                 f"status={response.status_code}, "
                 f"response={response.text[:1200]}"
             )
+
         try:
             payload = response.json()
         except Exception as exc:
-            raise RuntimeError(f"Remote API returned non-JSON payload: {response.text[:1200]}") from exc
+            raise RuntimeError(
+                "Remote API returned non-JSON payload: " f"{response.text[:1200]}"
+            ) from exc
+
         content = self._extract_content(payload)
-        if not content:
-            raise RuntimeError(f"Remote model returned empty content: payload={payload}")
+
+        if not content.strip():
+            choices = payload.get("choices") or []
+            first_choice = choices[0] if choices else {}
+            message = first_choice.get("message") or {}
+
+            finish_reason = first_choice.get("finish_reason")
+            reasoning_content = message.get("reasoning_content") or ""
+
+            if finish_reason == "length":
+                raise RuntimeError(
+                    "Remote model output was truncated before "
+                    "producing final content: "
+                    f"model={self.model_name}, "
+                    f"max_tokens={max_tokens}, "
+                    f"reasoning_chars={len(reasoning_content)}"
+                )
+
+            raise RuntimeError(
+                "Remote model returned empty content: " f"payload={payload}"
+            )
+
         yield content

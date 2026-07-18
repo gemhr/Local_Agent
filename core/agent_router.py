@@ -51,7 +51,7 @@ class AgentRouter:
         self.orchestration_max_agents = orchestration_max_agents
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256
-        self.knowledge_rewrite_max_tokens = 24
+        self.knowledge_rewrite_max_tokens = 128
         self.tools: Dict[str, Dict[str, object]] = {}
         self.agents_config = {
             "core_router": {
