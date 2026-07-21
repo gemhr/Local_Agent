@@ -294,7 +294,7 @@ class ChatServiceAgentStateTests(unittest.TestCase):
 
         states: list[AgentState] = []
         service = ChatService(FakeRouter(), state_observer=states.append)  # type: ignore[arg-type]
-        with self.assertLogs("core.chat_service", level="ERROR"):
+        with self.assertLogs("core.runtime.agent_loop", level="ERROR"):
             with self.assertRaises(RuntimeError):
                 list(service.stream_chat(agent_id="code_expert", query="hi"))
         self.assertEqual(states[-1].status, RunStatus.FAILED)
