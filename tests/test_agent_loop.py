@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+import inspect
 import unittest
 
 from core.runtime import (
@@ -14,15 +15,41 @@ from core.runtime import (
     AgentLoopPolicy,
     AgentObservation,
     AgentState,
+    AgentStateMachine,
     CancellationSource,
     LegacyAgentRouterDriver,
     RunCancelledError,
     RunDeadlineExceededError,
+    RunEventType,
+    RunStateEvent,
     RunStatus,
     StepStatus,
+    StepEventType,
+    StepStateEvent,
     StopReason,
     create_run_context,
 )
+
+
+class RecordingStateMachine(AgentStateMachine):
+    """记录 Loop 发送的事件，同时执行真实状态转移。"""
+
+    def __init__(self) -> None:
+        self.run_events: list[RunEventType] = []
+        self.step_events: list[StepEventType] = []
+        self.added_steps: list[str] = []
+
+    def add_step(self, state: AgentState, *, step_id: str, name: str) -> None:
+        self.added_steps.append(step_id)
+        super().add_step(state, step_id=step_id, name=name)
+
+    def apply_run_event(self, state: AgentState, event: RunStateEvent) -> None:
+        self.run_events.append(event.event_type)
+        super().apply_run_event(state, event)
+
+    def apply_step_event(self, state: AgentState, event: StepStateEvent) -> None:
+        self.step_events.append(event.event_type)
+        super().apply_step_event(state, event)
 
 
 class ScriptedDriver:
@@ -206,6 +233,130 @@ class AgentLoopTests(unittest.TestCase):
                 next(stream)
         self.assertEqual(state.status, RunStatus.FAILED)
         self.assertNotEqual(state.status, RunStatus.SUCCEEDED)
+
+    def test_normal_event_sequence(self) -> None:
+        driver = ScriptedDriver(
+            [action("one")],
+            [AgentObservation(ActionOutcome.COMPLETED, final_output="完成")],
+        )
+        context, _ = create_run_context(entry_agent_id="test")
+        state = AgentState.for_run_context(context.run_id)
+        machine = RecordingStateMachine()
+        list(
+            AgentLoop(state_machine=machine).run_stream(
+                run_context=context,
+                agent_state=state,
+                driver=driver,
+            )
+        )
+        self.assertEqual(machine.added_steps, ["one"])
+        self.assertEqual(machine.run_events, [RunEventType.STARTED, RunEventType.COMPLETED])
+        self.assertEqual(machine.step_events, [StepEventType.STARTED, StepEventType.SUCCEEDED])
+
+    def test_deadline_and_cancellation_event_sequences(self) -> None:
+        class DeadlineDriver(ScriptedDriver):
+            def execute(self, selected, context):
+                raise RunDeadlineExceededError("deadline")
+                yield "unreachable"
+
+        context, _ = create_run_context(entry_agent_id="test")
+        state = AgentState.for_run_context(context.run_id)
+        machine = RecordingStateMachine()
+        with self.assertRaises(RunDeadlineExceededError):
+            list(
+                AgentLoop(state_machine=machine).run_stream(
+                    run_context=context,
+                    agent_state=state,
+                    driver=DeadlineDriver([action("one")], []),
+                )
+            )
+        self.assertEqual(machine.run_events, [RunEventType.STARTED, RunEventType.DEADLINE_EXCEEDED])
+        self.assertEqual(machine.step_events, [StepEventType.STARTED, StepEventType.FAILED])
+
+        class CancelledDriver(ScriptedDriver):
+            def execute(self, selected, context):
+                raise RunCancelledError("cancelled")
+                yield "unreachable"
+
+        context, _ = create_run_context(entry_agent_id="test")
+        state = AgentState.for_run_context(context.run_id)
+        machine = RecordingStateMachine()
+        with self.assertRaises(RunCancelledError):
+            list(
+                AgentLoop(state_machine=machine).run_stream(
+                    run_context=context,
+                    agent_state=state,
+                    driver=CancelledDriver([action("one")], []),
+                )
+            )
+        self.assertEqual(machine.run_events, [RunEventType.STARTED, RunEventType.CANCELLED])
+        self.assertEqual(machine.step_events, [StepEventType.STARTED, StepEventType.CANCELLED])
+
+    def test_policy_stop_events_and_unknown_exception_sequence(self) -> None:
+        cases = (
+            (
+                ScriptedDriver([action("one"), action("two")], [AgentObservation(ActionOutcome.CONTINUE)]),
+                AgentLoopPolicy(max_steps=1),
+                RunEventType.MAX_STEPS_REACHED,
+            ),
+            (ScriptedDriver([None], []), None, RunEventType.NO_ACTION),
+            (
+                ScriptedDriver(
+                    [action("one", "same"), action("two", "same")],
+                    [AgentObservation(ActionOutcome.CONTINUE)],
+                ),
+                AgentLoopPolicy(max_consecutive_same_action=1),
+                RunEventType.REPEATED_ACTION,
+            ),
+        )
+        for driver, policy, expected_event in cases:
+            with self.subTest(expected_event=expected_event):
+                context, _ = create_run_context(entry_agent_id="test")
+                state = AgentState.for_run_context(context.run_id)
+                machine = RecordingStateMachine()
+                list(
+                    AgentLoop(policy, machine).run_stream(
+                        run_context=context,
+                        agent_state=state,
+                        driver=driver,
+                    )
+                )
+                self.assertEqual(machine.run_events[-1], expected_event)
+
+        class BrokenDriver(ScriptedDriver):
+            def execute(self, selected, context):
+                raise RuntimeError("secret")
+                yield "unreachable"
+
+        context, _ = create_run_context(entry_agent_id="test")
+        state = AgentState.for_run_context(context.run_id)
+        machine = RecordingStateMachine()
+        with self.assertLogs("core.runtime.agent_loop", level="ERROR"):
+            with self.assertRaises(RuntimeError):
+                list(
+                    AgentLoop(state_machine=machine).run_stream(
+                        run_context=context,
+                        agent_state=state,
+                        driver=BrokenDriver([action("one")], []),
+                    )
+                )
+        self.assertEqual(machine.run_events, [RunEventType.STARTED, RunEventType.FAILED])
+        self.assertEqual(machine.step_events, [StepEventType.STARTED, StepEventType.FAILED])
+
+    def test_agent_loop_does_not_call_agent_state_lifecycle_mutations_directly(self) -> None:
+        source = inspect.getsource(AgentLoop.run_stream)
+        for method_name in (
+            "mark_running",
+            "start_step",
+            "succeed_step",
+            "fail_step",
+            "cancel_step",
+            "mark_succeeded",
+            "mark_failed",
+            "mark_cancelled",
+        ):
+            self.assertNotIn(f"agent_state.{method_name}(", source)
+        self.assertNotIn("agent_state.add_step(", source)
 
 
 if __name__ == "__main__":
