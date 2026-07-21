@@ -15,11 +15,11 @@ if TYPE_CHECKING:
 
 
 class KnowledgeBaseUnavailableError(RuntimeError):
-    """Raised when a knowledge-grounded request has no retrieval backend."""
+    """知识库问答请求没有可用检索后端时引发。"""
 
 
 class KnowledgeSourceNotFoundError(LookupError):
-    """Raised when retrieval cannot find a sufficiently relevant local source."""
+    """检索未找到足够相关的本地信源时引发。"""
 
 
 class AgentRouter:
@@ -71,22 +71,22 @@ class AgentRouter:
         self.agents_config = {
             "core_router": {
                 "name": "Core Router",
-                "role": "Route generic questions and coordinate helper agents.",
+                "role": "处理通用问题，并协调辅助智能体。",
                 "avatar": "avatar_router.png",
             },
             "data_analyst": {
                 "name": "Data Analyst",
-                "role": "Analyze CSV and Excel files and summarize insights.",
+                "role": "分析 CSV 和 Excel 文件，并总结洞见。",
                 "avatar": "avatar_excel.png",
             },
             "code_expert": {
                 "name": "Code Expert",
-                "role": "Review code, debug issues, and improve architecture.",
+                "role": "审查代码、排查问题并改进架构。",
                 "avatar": "avatar_code.png",
             },
             "knowledge_expert": {
                 "name": "Knowledge Expert",
-                "role": "Answer questions using the local knowledge base when available.",
+                "role": "在可用时依据本地知识库回答问题。",
                 "avatar": "avatar_knowledge.png",
             },
         }
@@ -105,9 +105,9 @@ class AgentRouter:
         """为指定智能体构造回答提示词。"""
         config = self.agents_config.get(agent_id, self.agents_config["core_router"])
         lines = [
-            f"You are {config['name']}.",
-            f"Your role: {config['role']}",
-            "Reply clearly and concisely in Chinese unless the user asks otherwise.",
+            f"你是 {config['name']}。",
+            f"你的职责：{config['role']}",
+            "除非用户另有要求，否则请用中文清晰、简洁地回答。",
         ]
         if agent_id == "knowledge_expert":
             lines.extend(
@@ -121,18 +121,19 @@ class AgentRouter:
         if allow_delegation and agent_id == "core_router":
             lines.extend(
                 [
-                    "You are allowed to orchestrate specialist agents when needed.",
-                    "Available specialist agents:",
-                    "- data_analyst: Analyze CSV, Excel, tabular data, metrics, and trends.",
-                    "- code_expert: Review code, debug issues, explain implementation, and improve architecture.",
-                    "- knowledge_expert: Answer questions grounded in the local knowledge base.",
+                    "你可以在需要时编排专业智能体。",
+                    "可用的专业智能体：",
+                    "- data_analyst：分析 CSV、Excel、表格数据、指标和趋势。",
+                    "- code_expert：审查代码、排查问题、解释实现并改进架构。",
+                    "- knowledge_expert：依据本地知识库回答问题。",
                     (
-                        "If specialists are needed, output ONLY one or more lines in this exact format: "
+                        "如需专业智能体，只能输出一行或多行，且每行必须严格使用以下格式："
                         "Delegate: agent_id | task"
                     ),
-                    "Do not delegate to core_router.",
-                    "Do not include any extra commentary when emitting Delegate lines.",
-                    "If specialists are not needed, answer the user directly.",
+                    "其中 `Delegate:`、agent_id、竖线和 task 的格式必须保持不变。",
+                    "不得委派给 core_router。",
+                    "输出 Delegate: 行时不得附加任何说明文字。",
+                    "如不需要专业智能体，请直接回答用户。",
                 ]
             )
         return "\n".join(lines)
@@ -141,14 +142,15 @@ class AgentRouter:
         """构造工具规划提示词。"""
         config = self.agents_config.get(agent_id, self.agents_config["core_router"])
         lines = [
-            f"You are deciding whether {config['name']} needs a local tool before answering.",
-            "Return exactly one line.",
-            "If no tool is needed, return: NO_TOOL",
-            "If one tool is needed, return: CALL: tool_name(argument_text)",
-            "Do not answer the user directly.",
+            f"你正在判断 {config['name']} 在回答前是否需要使用本地工具。",
+            "只能输出一行。",
+            "无需工具时仅输出 `NO_TOOL`。",
+            "需要一个工具时，仅输出 `CALL: tool_name(argument_text)`。",
+            "其中 `CALL:`、工具名称和括号格式必须保持不变。",
+            "不要直接回答用户。",
         ]
         if self.tools:
-            lines.append("Available tools:")
+            lines.append("可用工具：")
             for tool_name, tool_info in self.tools.items():
                 lines.append(f"- {tool_name}: {tool_info['description']}")
         return "\n".join(lines)
@@ -533,7 +535,7 @@ class AgentRouter:
 
         system_prompt = self._build_system_prompt(agent_id, allow_delegation=allow_delegation)
         if summary_text:
-            system_prompt = f"{system_prompt}\n\nConversation summary:\n{summary_text}"
+            system_prompt = f"{system_prompt}\n\n对话摘要：\n{summary_text}"
 
         messages = [
             {
@@ -661,10 +663,10 @@ class AgentRouter:
         observation = self._truncate_text(observation, 1600)
         messages[0]["content"] += (
             "\n\n"
-            f"Tool used: {tool_name}\n"
-            f"Tool observation:\n{observation}\n\n"
-            "Use the observation to answer the user directly. "
-            "Do not expose tool protocol."
+            f"已使用工具：{tool_name}\n"
+            f"工具观察结果：\n{observation}\n\n"
+            "请依据观察结果直接回答用户。"
+            "不要向用户暴露工具调用协议。"
         )
         return messages
 
@@ -733,7 +735,7 @@ class AgentRouter:
 
     @staticmethod
     def _resolve_explicit_knowledge_delegate(user_query: str) -> list[dict[str, str]]:
-        """Resolve explicit knowledge requests without relying on planner formatting."""
+        """无需依赖规划器输出格式，直接解析显式知识库请求。"""
         patterns = (
             r"(?:(?:请\s*)?(?:让|调用|使用|交给|委派)|请)(?:一下|下)?\s*(?:本地)?\s*(?:知识专家|knowledge[_ ]expert)",
             r"(?:根据|查询|检索|查找|搜索)(?:一下|下)?(?:本地)?知识库",
@@ -759,7 +761,7 @@ class AgentRouter:
         history = self._dedupe_current_user_message(history, user_query)
         system_prompt = self._build_system_prompt("core_router", allow_delegation=True)
         if summary_text:
-            system_prompt = f"{system_prompt}\n\nConversation summary:\n{summary_text}"
+            system_prompt = f"{system_prompt}\n\n对话摘要：\n{summary_text}"
         messages = [
             {
                 "role": "system",
@@ -852,29 +854,27 @@ class AgentRouter:
     ) -> str:
         """将专属 Agent 结果整理为核心 Agent 的最终汇总输入。"""
         sections = [
-            "User question:",
+            "用户问题：",
             user_query,
             "",
-            "Specialist outputs:",
+            "专业智能体输出：",
         ]
         for item in specialist_outputs:
             sections.extend(
                 [
                     f"[{item['agent_name']}]",
-                    f"Task: {item['task']}",
+                    f"任务：{item['task']}",
                     item["result"],
                     "",
                 ]
             )
         sections.append(
-            "Please synthesize the specialist outputs into one final answer for the user. "
-            "Do not emit Delegate lines. Do not ask the specialists again. "
-            "Keep the answer coherent and directly useful. "
-            "Any factual claim about local knowledge must be supported by the Knowledge "
-            "Expert output above. Preserve its source references and uncertainty exactly; "
-            "do not invent, expand, or replace missing local facts with general knowledge. "
-            "If the Knowledge Expert reports that the knowledge base is unavailable or no "
-            "relevant source was found, state that limitation plainly."
+            "请将专业智能体输出整合为面向用户的一份最终回答。"
+            "不要输出 Delegate: 行，也不要再次询问专业智能体。"
+            "回答应连贯且直接有用。"
+            "所有关于本地知识的事实性陈述都必须由上方知识专家的输出支持。"
+            "必须原样保留其中的来源引用和不确定性；不得编造、扩展，或用通用知识替代缺失的本地事实。"
+            "如果知识专家报告知识库不可用或未找到相关来源，请明确说明这一限制。"
         )
         return "\n".join(sections)
 

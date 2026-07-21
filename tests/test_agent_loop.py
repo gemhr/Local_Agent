@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Unit tests for the minimal bounded AgentLoop."""
+"""最小有界 AgentLoop 的单元测试。"""
 
 from __future__ import annotations
 

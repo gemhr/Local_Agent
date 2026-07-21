@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Minimal synchronous agent loop and legacy AgentRouter compatibility driver."""
+"""最小同步智能体循环与旧版 AgentRouter 兼容驱动器。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _SAFE_DEDUP_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
 class ActionOutcome(str, Enum):
-    """The safe terminal result reported by one accepted action."""
+    """单个已接受动作报告的安全终态结果。"""
 
     CONTINUE = "CONTINUE"
     COMPLETED = "COMPLETED"
@@ -34,7 +34,7 @@ class ActionOutcome(str, Enum):
 
 @dataclass(frozen=True)
 class AgentAction:
-    """A non-sensitive action selected by an AgentLoopDriver."""
+    """由 AgentLoopDriver 选择的非敏感动作。"""
 
     step_id: str
     name: str
@@ -42,7 +42,7 @@ class AgentAction:
     dedup_key: str
 
     def __post_init__(self) -> None:
-        """Reject empty fields and require an opaque, non-path deduplication key."""
+        """拒绝空字段，并要求使用不含路径的不可读去重键。"""
         for field_name, value in (
             ("step_id", self.step_id),
             ("name", self.name),
@@ -57,7 +57,7 @@ class AgentAction:
 
 @dataclass(frozen=True)
 class AgentObservation:
-    """Safe result of an action, without exception objects or traceback text."""
+    """动作的安全结果，不包含异常对象或回溯文本。"""
 
     outcome: ActionOutcome
     final_output: str | None = None
@@ -65,7 +65,7 @@ class AgentObservation:
     error_message: str | None = None
 
     def __post_init__(self) -> None:
-        """Validate observation fields without accepting untyped or empty error metadata."""
+        """校验观察结果字段，不接受无类型或为空的错误元数据。"""
         if not isinstance(self.outcome, ActionOutcome):
             raise ValueError("outcome must be an ActionOutcome")
         for field_name, value in (
@@ -80,20 +80,20 @@ class AgentObservation:
 
     @property
     def should_continue(self) -> bool:
-        """Return whether the loop should request a further decision."""
+        """返回循环是否应请求下一次决策。"""
         return self.outcome == ActionOutcome.CONTINUE
 
 
 @dataclass(frozen=True)
 class AgentLoopPolicy:
-    """Bounded loop limits owned explicitly by an AgentLoop instance."""
+    """由 AgentLoop 实例显式持有的有界循环限制。"""
 
     max_steps: int = 8
     max_consecutive_no_action: int = 1
     max_consecutive_same_action: int = 2
 
     def __post_init__(self) -> None:
-        """Require positive integers while rejecting bool, which is an int subclass."""
+        """要求正整数，并拒绝作为 int 子类的 bool。"""
         for field_name, value in (
             ("max_steps", self.max_steps),
             ("max_consecutive_no_action", self.max_consecutive_no_action),
@@ -104,26 +104,26 @@ class AgentLoopPolicy:
 
 
 class AgentLoopDriver(Protocol):
-    """Minimal decision and execution boundary for the synchronous loop."""
+    """同步循环的最小决策与执行边界。"""
 
     def decide(self, previous_observation: AgentObservation | None) -> AgentAction | None:
-        """Select the next action without performing it."""
+        """选择下一个动作，但不执行它。"""
 
     def execute(self, action: AgentAction, run_context: RunContext) -> Generator[str, None, AgentObservation]:
-        """Execute an accepted action and return its safe observation."""
+        """执行已接受动作并返回其安全观察结果。"""
 
 
 class LegacyAgentRouter(Protocol):
-    """Structural legacy Router dependency needed by the compatibility driver."""
+    """兼容驱动器所需的旧版 Router 结构化依赖。"""
 
     def chat_stream(
         self, user_query: str, agent_id: str = "core_router", run_context: RunContext | None = None
     ) -> Generator[str, None, None]:
-        """Yield existing text and orchestration chunks."""
+        """产出现有文本和编排数据块。"""
 
 
 class LegacyAgentRouterDriver:
-    """Present the unchanged AgentRouter stream as one completed loop action."""
+    """将未改变的 AgentRouter 流呈现为一次已完成的循环动作。"""
 
     def __init__(self, router: LegacyAgentRouter, *, user_query: str, agent_id: str) -> None:
         self._router = router
@@ -132,7 +132,7 @@ class LegacyAgentRouterDriver:
         self._decided = False
 
     def decide(self, previous_observation: AgentObservation | None) -> AgentAction | None:
-        """Return exactly one legacy action; its completed observation ends the run."""
+        """恰好返回一个旧版动作；其完成观察结果将结束本次运行。"""
         if self._decided:
             return None
         self._decided = True
@@ -144,7 +144,7 @@ class LegacyAgentRouterDriver:
         )
 
     def execute(self, action: AgentAction, run_context: RunContext) -> Generator[str, None, AgentObservation]:
-        """Forward chunks unchanged and aggregate the final text output once."""
+        """原样转发数据块，并一次性汇总最终文本输出。"""
         final_output_chunks: list[str] = []
         for chunk in self._router.chat_stream(
             user_query=self._user_query, agent_id=self._agent_id, run_context=run_context
@@ -159,7 +159,7 @@ class LegacyAgentRouterDriver:
 
 
 class AgentLoop:
-    """Own one RunContext/AgentState execution lifecycle using a bounded driver loop."""
+    """通过有界驱动循环管理一次 RunContext/AgentState 执行生命周期。"""
 
     def __init__(self, policy: AgentLoopPolicy | None = None) -> None:
         self._policy = policy or AgentLoopPolicy()
@@ -172,7 +172,7 @@ class AgentLoop:
         driver: AgentLoopDriver,
         state_observer: Callable[[AgentState], None] | None = None,
     ) -> Generator[str, None, None]:
-        """Run a driver while applying state updates and bounded termination policies."""
+        """运行驱动器，同时应用状态更新和有界终止策略。"""
         agent_state.assert_matches_run_context(run_context.run_id)
         if agent_state.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED}:
             raise AgentStateValidationError("cannot run an already terminated AgentState")
