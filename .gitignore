@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# IDE
+.idea/
+
+# Runtime data
+chroma_db/
+data/database/
+data/ingestion_logs/
+data/logs/
+
+# Local models and packages
+data/models/
+*.whl
+
+# Local environment
+.env
+.env.*
+!.env.example
