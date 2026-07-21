@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Unit tests for AgentState and ChatService state integration."""
+"""AgentState 与 ChatService 状态集成的单元测试。"""
 
 from __future__ import annotations
 

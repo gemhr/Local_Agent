@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Minimal runtime context primitives for LocalAgent."""
+"""LocalAgent 的最小运行时上下文基础组件。"""
 
 from core.runtime.cancellation import CancellationSource, CancellationToken, RunCancelledError
 
