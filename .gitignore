@@ -19,3 +19,6 @@ data/database/
 
 # Runtime logs
 data/logs/*.log
+
+# Local Python wheel packages
+*.whl
