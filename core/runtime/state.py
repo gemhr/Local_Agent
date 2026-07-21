@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Serializable per-run AgentState primitives for LocalAgent."""
+"""LocalAgent 每次运行所用的可序列化 AgentState 基础组件。"""
 
 from __future__ import annotations
 
@@ -14,15 +14,15 @@ AGENT_STATE_SCHEMA_VERSION = 1
 
 
 class AgentStateValidationError(ValueError):
-    """Raised when an AgentState or StepState invariant is violated."""
+    """违反 AgentState 或 StepState 不变量时引发。"""
 
 
 class UnsupportedStateVersionError(ValueError):
-    """Raised when serialized state uses an unsupported schema version."""
+    """序列化状态使用不支持的模式版本时引发。"""
 
 
 class RunStatus(str, Enum):
-    """Coarse lifecycle status for one chat run."""
+    """单次聊天运行的粗粒度生命周期状态。"""
 
     CREATED = "CREATED"
     RUNNING = "RUNNING"
@@ -32,11 +32,10 @@ class RunStatus(str, Enum):
 
 
 class StepStatus(str, Enum):
-    """Coarse lifecycle status for one run step.
+    """单个运行步骤的粗粒度生命周期状态。
 
-    BLOCKED means a step will not execute in the current run because a
-    prerequisite failed, was cancelled, or cannot be satisfied. A step that is
-    merely waiting on prerequisites that may still complete should stay PENDING.
+    BLOCKED 表示前置条件失败、被取消或无法满足，因而该步骤不会在当前运行中执行。
+    仅等待仍可能完成的前置条件的步骤应保持 PENDING。
     """
 
     PENDING = "PENDING"
@@ -49,7 +48,7 @@ class StepStatus(str, Enum):
 
 
 class StopReason(str, Enum):
-    """Final reason explaining why a run stopped."""
+    """说明运行停止原因的最终状态。"""
 
     COMPLETED = "COMPLETED"
     UNHANDLED_ERROR = "UNHANDLED_ERROR"
@@ -79,7 +78,7 @@ _CANCELLATION_REASONS = {
 
 
 def utc_now() -> datetime:
-    """Return a timezone-aware UTC timestamp for state mutation methods."""
+    """返回供状态变更方法使用的带时区 UTC 时间戳。"""
     return datetime.now(UTC)
 
 
@@ -109,7 +108,7 @@ def _safe_error_message(message: str | None) -> str | None:
 
 @dataclass
 class StepState:
-    """Serializable state for one execution step within an AgentState."""
+    """AgentState 内单个执行步骤的可序列化状态。"""
 
     step_id: str
     name: str
@@ -121,7 +120,7 @@ class StepState:
     error_message: str | None = None
 
     def validate(self) -> None:
-        """Validate step-level invariants."""
+        """校验步骤级不变量。"""
         if not self.step_id:
             raise AgentStateValidationError("step_id must not be empty")
         if not self.name:
@@ -153,7 +152,7 @@ class StepState:
             raise AgentStateValidationError("failed step must include a safe error summary")
 
     def to_dict(self) -> dict[str, str | None]:
-        """Serialize this step into JSON-friendly primitives."""
+        """将此步骤序列化为适用于 JSON 的基础类型。"""
         self.validate()
         return {
             "step_id": self.step_id,
@@ -168,7 +167,7 @@ class StepState:
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> "StepState":
-        """Deserialize and validate one StepState from JSON-friendly primitives."""
+        """从适用于 JSON 的基础类型反序列化并校验一个 StepState。"""
         try:
             status = StepStatus(str(payload["status"]))
         except KeyError as exc:
@@ -189,7 +188,7 @@ class StepState:
 
 @dataclass
 class AgentState:
-    """Mutable but constrained, serializable state for one LocalAgent run."""
+    """单次 LocalAgent 运行的可变但受约束的可序列化状态。"""
 
     run_id: str
     schema_version: int = AGENT_STATE_SCHEMA_VERSION
@@ -210,29 +209,29 @@ class AgentState:
 
     @classmethod
     def for_run_context(cls, run_id: str) -> "AgentState":
-        """Create initial state for a RunContext run_id."""
+        """为 RunContext 的 run_id 创建初始状态。"""
         return cls(run_id=run_id)
 
     def assert_matches_run_context(self, run_id: str) -> None:
-        """Ensure state and RunContext identifiers match before integration."""
+        """集成前确保状态与 RunContext 标识符匹配。"""
         if self.run_id != run_id:
             raise AgentStateValidationError("agent_state.run_id must match run_context.run_id")
 
     def mark_running(self) -> None:
-        """Mark the run as running."""
+        """将运行标记为运行中。"""
         self.status = RunStatus.RUNNING
         self.stop_reason = None
         self._touch_and_validate()
 
     def add_step(self, step_id: str, name: str) -> None:
-        """Add a new pending step with a unique identifier."""
+        """添加具有唯一标识符的新待处理步骤。"""
         if step_id in self.steps:
             raise AgentStateValidationError("step_id must be unique")
         self.steps[step_id] = StepState(step_id=step_id, name=name)
         self._touch_and_validate()
 
     def start_step(self, step_id: str) -> None:
-        """Mark an existing step as running and active."""
+        """将现有步骤标记为运行中且活跃。"""
         step = self._get_step(step_id)
         now = utc_now()
         step.status = StepStatus.RUNNING
@@ -244,7 +243,7 @@ class AgentState:
         self._touch_and_validate()
 
     def succeed_step(self, step_id: str) -> None:
-        """Mark a running step as succeeded and no longer active."""
+        """将运行中的步骤标记为成功且不再活跃。"""
         step = self._get_step(step_id)
         step.status = StepStatus.SUCCEEDED
         step.ended_at = utc_now()
@@ -254,7 +253,7 @@ class AgentState:
         self._touch_and_validate()
 
     def fail_step(self, step_id: str, *, error_code: str, error_message: str | None = None) -> None:
-        """Mark a step as failed with a safe error code and brief summary."""
+        """使用安全错误码和简短摘要将步骤标记为失败。"""
         step = self._get_step(step_id)
         step.status = StepStatus.FAILED
         step.ended_at = utc_now()
@@ -264,7 +263,7 @@ class AgentState:
         self._touch_and_validate()
 
     def cancel_step(self, step_id: str, *, error_code: str = "RUN_CANCELLED", error_message: str | None = None) -> None:
-        """Mark a step as cancelled and no longer active."""
+        """将步骤标记为已取消且不再活跃。"""
         step = self._get_step(step_id)
         step.status = StepStatus.CANCELLED
         step.ended_at = utc_now()
@@ -274,7 +273,7 @@ class AgentState:
         self._touch_and_validate()
 
     def block_step(self, step_id: str, *, error_code: str | None = None, error_message: str | None = None) -> None:
-        """Mark a never-started step as blocked for this run without activating it."""
+        """将从未启动的步骤标记为在本次运行中受阻，但不激活该步骤。"""
         step = self._get_step(step_id)
         step.status = StepStatus.BLOCKED
         step.started_at = None
@@ -285,7 +284,7 @@ class AgentState:
         self._touch_and_validate()
 
     def mark_succeeded(self, *, final_output: str | None = None) -> None:
-        """Mark the run as successfully completed."""
+        """将运行标记为成功完成。"""
         self.status = RunStatus.SUCCEEDED
         self.stop_reason = StopReason.COMPLETED
         self.final_output = final_output
@@ -295,7 +294,7 @@ class AgentState:
         self._touch_and_validate()
 
     def mark_failed(self, *, stop_reason: StopReason, error_code: str, error_message: str | None = None) -> None:
-        """Mark the run as failed with a safe error summary."""
+        """使用安全错误摘要将运行标记为失败。"""
         self.status = RunStatus.FAILED
         self.stop_reason = stop_reason
         self.error_code = error_code
@@ -304,7 +303,7 @@ class AgentState:
         self._touch_and_validate()
 
     def mark_cancelled(self, *, stop_reason: StopReason, error_code: str = "RUN_CANCELLED", error_message: str | None = None) -> None:
-        """Mark the run as cancelled with a compatible cancellation reason."""
+        """使用兼容的取消原因将运行标记为已取消。"""
         self.status = RunStatus.CANCELLED
         self.stop_reason = stop_reason
         self.error_code = error_code
@@ -313,7 +312,7 @@ class AgentState:
         self._touch_and_validate()
 
     def validate(self) -> None:
-        """Validate run-level and cross-step invariants."""
+        """校验运行级和跨步骤不变量。"""
         if isinstance(self.schema_version, bool) or not isinstance(self.schema_version, int):
             raise UnsupportedStateVersionError(f"unsupported AgentState schema_version: {self.schema_version}")
         if self.schema_version != AGENT_STATE_SCHEMA_VERSION:
@@ -353,7 +352,7 @@ class AgentState:
             raise AgentStateValidationError("all RUNNING steps must be present in active_step_ids")
 
     def to_dict(self) -> dict[str, object]:
-        """Serialize state into deterministic JSON-friendly primitives."""
+        """将状态序列化为确定性的适用于 JSON 的基础类型。"""
         self.validate()
         return {
             "schema_version": self.schema_version,
@@ -371,7 +370,7 @@ class AgentState:
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> "AgentState":
-        """Deserialize, version-check, and validate an AgentState payload."""
+        """反序列化、检查版本并校验 AgentState 载荷。"""
         if "schema_version" not in payload:
             raise UnsupportedStateVersionError("AgentState schema_version is required")
         version = payload["schema_version"]

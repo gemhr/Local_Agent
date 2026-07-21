@@ -10,7 +10,7 @@ dependencies = [
     "langchain-chroma>=0.2.0",
     "langchain-core>=0.3.0",
     "langchain-huggingface>=0.3.0",
-    "llama-cpp-python @ file:///D:/PyPrj/Local_Agent-main/data/llama_cpp_python-0.2.90-cp312-cp312-win_amd64.whl",
+    "llama-cpp-python @ file:///D:/PythonProject/Local_Agent/llama_cpp_python-0.2.90-cp312-cp312-win_amd64.whl",
     "markdown>=3.8",
     "openpyxl>=3.1.0",
     "pandas>=2.3.0",
@@ -20,5 +20,17 @@ dependencies = [
     "PyQt6>=6.9.0",
     "python-docx>=1.1.2",
     "requests>=2.32.0",
+    "sentence-transformers>=5.0,<6",
+    "transformers>=4.51,<5",
     "uvicorn>=0.35.0",
+    "xlrd>=2.0.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

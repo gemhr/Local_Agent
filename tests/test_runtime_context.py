@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Unit tests for minimal RunContext primitives."""
+"""最小 RunContext 基础组件的单元测试。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from core.runtime import (
 
 
 class FakeClock:
-    """Controllable clock for deterministic deadline tests."""
+    """用于确定性截止时间测试的可控时钟。"""
 
     def __init__(self) -> None:
         self.now = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
