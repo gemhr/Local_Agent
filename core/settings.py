@@ -12,6 +12,17 @@ def _env_int(name: str, default: int) -> int:
     return int(value) if value is not None else default
 
 
+def _env_int_at_least(name: str, default: int, minimum: int) -> int:
+    """读取有下限约束的整数环境变量。"""
+    return max(minimum, _env_int(name, default))
+
+
+def _env_float_in_range(name: str, default: float, minimum: float, maximum: float) -> float:
+    """读取限定范围内的浮点环境变量。"""
+    value = float(os.getenv(name, str(default)))
+    return min(maximum, max(minimum, value))
+
+
 @dataclass(frozen=True)
 class Settings:
     """不可变运行时配置对象。"""
@@ -39,8 +50,12 @@ class Settings:
     summary_max_chars: int
     chroma_dir: str
     embedding_model_path: str
+    embedding_query_prompt_name: str
+    embedding_batch_size: int
     memory_db_path: str
+    knowledge_collection_name: str
     rag_top_k: int
+    rag_min_score: float
     rag_doc_max_chars: int
     rag_context_max_chars: int
     orchestration_enabled: bool
@@ -136,11 +151,21 @@ class Settings:
                 "LOCAL_AGENT_EMBEDDING_MODEL_PATH",
                 os.path.join(project_root, "data", "models", "bge-large-zh-v1.5"),
             ),
+            embedding_query_prompt_name=os.getenv(
+                "LOCAL_AGENT_EMBEDDING_QUERY_PROMPT_NAME",
+                "",
+            ),
+            embedding_batch_size=_env_int_at_least(
+                "LOCAL_AGENT_EMBEDDING_BATCH_SIZE",
+                8,
+                1,
+            ),
             memory_db_path=os.getenv(
                 "LOCAL_AGENT_MEMORY_DB_PATH",
                 os.path.join(project_root, "data", "database", "agent_memory.db"),
             ),
             rag_top_k=_env_int("LOCAL_AGENT_RAG_TOP_K", preset["rag_top_k"]),
+            rag_min_score=_env_float_in_range("LOCAL_AGENT_RAG_MIN_SCORE", 0.55, 0.0, 1.0),
             rag_doc_max_chars=_env_int("LOCAL_AGENT_RAG_DOC_MAX_CHARS", preset["rag_doc_max_chars"]),
             rag_context_max_chars=_env_int(
                 "LOCAL_AGENT_RAG_CONTEXT_MAX_CHARS",
@@ -153,5 +178,9 @@ class Settings:
             local_knowledge_base_dir=os.getenv(
                 "LOCAL_AGENT_LOCAL_KB_DIR",
                 os.path.join(project_root, "data", "knowledge_base"),
+            ),
+            knowledge_collection_name=os.getenv(
+                "LOCAL_AGENT_KB_COLLECTION",
+                "huawei_wiki_collection",
             ),
         )

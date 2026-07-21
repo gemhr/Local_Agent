@@ -14,6 +14,14 @@ if TYPE_CHECKING:
     from core.llm_engine import LocalLLMEngine
 
 
+class KnowledgeBaseUnavailableError(RuntimeError):
+    """知识库问答请求没有可用检索后端时引发。"""
+
+
+class KnowledgeSourceNotFoundError(LookupError):
+    """检索未找到足够相关的本地信源时引发。"""
+
+
 class AgentRouter:
     """协调提示词、工具调用、记忆、知识检索与多智能体协作。"""
 
@@ -32,11 +40,13 @@ class AgentRouter:
         summary_keep_recent: int = 8,
         summary_max_chars: int = 1000,
         rag_top_k: int = 3,
+        rag_min_score: float = 0.55,
         rag_doc_max_chars: int = 700,
         rag_context_max_chars: int = 1500,
         max_tokens: int = 640,
         orchestration_enabled: bool = True,
         orchestration_max_agents: int = 3,
+        knowledge_base_error: str | None = None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -47,34 +57,36 @@ class AgentRouter:
         self.summary_keep_recent = summary_keep_recent
         self.summary_max_chars = summary_max_chars
         self.rag_top_k = rag_top_k
+        self.rag_min_score = min(1.0, max(0.0, float(rag_min_score)))
         self.rag_doc_max_chars = rag_doc_max_chars
         self.rag_context_max_chars = rag_context_max_chars
         self.max_tokens = max_tokens
         self.orchestration_enabled = orchestration_enabled
         self.orchestration_max_agents = orchestration_max_agents
+        self.knowledge_base_error = knowledge_base_error
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256
-        self.knowledge_rewrite_max_tokens = 24
+        self.knowledge_rewrite_max_tokens = 128
         self.tools: Dict[str, Dict[str, object]] = {}
         self.agents_config = {
             "core_router": {
                 "name": "Core Router",
-                "role": "Route generic questions and coordinate helper agents.",
+                "role": "处理通用问题，并协调辅助智能体。",
                 "avatar": "avatar_router.png",
             },
             "data_analyst": {
                 "name": "Data Analyst",
-                "role": "Analyze CSV and Excel files and summarize insights.",
+                "role": "分析 CSV 和 Excel 文件，并总结洞见。",
                 "avatar": "avatar_excel.png",
             },
             "code_expert": {
                 "name": "Code Expert",
-                "role": "Review code, debug issues, and improve architecture.",
+                "role": "审查代码、排查问题并改进架构。",
                 "avatar": "avatar_code.png",
             },
             "knowledge_expert": {
                 "name": "Knowledge Expert",
-                "role": "Answer questions using the local knowledge base when available.",
+                "role": "在可用时依据本地知识库回答问题。",
                 "avatar": "avatar_knowledge.png",
             },
         }
@@ -93,9 +105,9 @@ class AgentRouter:
         """为指定智能体构造回答提示词。"""
         config = self.agents_config.get(agent_id, self.agents_config["core_router"])
         lines = [
-            f"You are {config['name']}.",
-            f"Your role: {config['role']}",
-            "Reply clearly and concisely in Chinese unless the user asks otherwise.",
+            f"你是 {config['name']}。",
+            f"你的职责：{config['role']}",
+            "除非用户另有要求，否则请用中文清晰、简洁地回答。",
         ]
         if agent_id == "knowledge_expert":
             lines.extend(
@@ -103,24 +115,25 @@ class AgentRouter:
                     "你必须优先依据本地知识库信源回答。",
                     "如果用户消息包含【系统提供的参考资料】，请优先使用资料内容并在答案末尾增加“参考来源：”列表。",
                     "参考来源格式固定为“[序号] 文件路径或来源名”。",
-                    "如果没有可用本地信源，先明确写“未找到对应信源”，再给出通用回答。",
+                    "如果没有可用本地信源，只能明确说明“未找到对应信源”，不得使用通用知识补写事实。",
                 ]
             )
         if allow_delegation and agent_id == "core_router":
             lines.extend(
                 [
-                    "You are allowed to orchestrate specialist agents when needed.",
-                    "Available specialist agents:",
-                    "- data_analyst: Analyze CSV, Excel, tabular data, metrics, and trends.",
-                    "- code_expert: Review code, debug issues, explain implementation, and improve architecture.",
-                    "- knowledge_expert: Answer questions grounded in the local knowledge base.",
+                    "你可以在需要时编排专业智能体。",
+                    "可用的专业智能体：",
+                    "- data_analyst：分析 CSV、Excel、表格数据、指标和趋势。",
+                    "- code_expert：审查代码、排查问题、解释实现并改进架构。",
+                    "- knowledge_expert：依据本地知识库回答问题。",
                     (
-                        "If specialists are needed, output ONLY one or more lines in this exact format: "
+                        "如需专业智能体，只能输出一行或多行，且每行必须严格使用以下格式："
                         "Delegate: agent_id | task"
                     ),
-                    "Do not delegate to core_router.",
-                    "Do not include any extra commentary when emitting Delegate lines.",
-                    "If specialists are not needed, answer the user directly.",
+                    "其中 `Delegate:`、agent_id、竖线和 task 的格式必须保持不变。",
+                    "不得委派给 core_router。",
+                    "输出 Delegate: 行时不得附加任何说明文字。",
+                    "如不需要专业智能体，请直接回答用户。",
                 ]
             )
         return "\n".join(lines)
@@ -129,14 +142,15 @@ class AgentRouter:
         """构造工具规划提示词。"""
         config = self.agents_config.get(agent_id, self.agents_config["core_router"])
         lines = [
-            f"You are deciding whether {config['name']} needs a local tool before answering.",
-            "Return exactly one line.",
-            "If no tool is needed, return: NO_TOOL",
-            "If one tool is needed, return: CALL: tool_name(argument_text)",
-            "Do not answer the user directly.",
+            f"你正在判断 {config['name']} 在回答前是否需要使用本地工具。",
+            "只能输出一行。",
+            "无需工具时仅输出 `NO_TOOL`。",
+            "需要一个工具时，仅输出 `CALL: tool_name(argument_text)`。",
+            "其中 `CALL:`、工具名称和括号格式必须保持不变。",
+            "不要直接回答用户。",
         ]
         if self.tools:
-            lines.append("Available tools:")
+            lines.append("可用工具：")
             for tool_name, tool_info in self.tools.items():
                 lines.append(f"- {tool_name}: {tool_info['description']}")
         return "\n".join(lines)
@@ -154,6 +168,7 @@ class AgentRouter:
         *,
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
+        enable_thinking: bool | None = None,
     ) -> str:
         """收集一次完整的模型输出。"""
         response_text = ""
@@ -161,6 +176,7 @@ class AgentRouter:
             messages,
             max_tokens=max_tokens or self.max_tokens,
             temperature=temperature,
+            enable_thinking=enable_thinking,
         ):
             response_text += chunk
         return response_text
@@ -212,6 +228,7 @@ class AgentRouter:
             summary_messages,
             max_tokens=self.summary_plan_max_tokens,
             temperature=0.1,
+            enable_thinking=False,
         ).strip()
         if not summary:
             return self._fallback_summary(existing_summary, new_messages)
@@ -299,6 +316,7 @@ class AgentRouter:
             rewrite_messages,
             max_tokens=self.knowledge_rewrite_max_tokens,
             temperature=0.1,
+            enable_thinking=False,
         )
         cleaned = rewritten.strip().strip("\"'")
         return cleaned or user_query
@@ -308,48 +326,135 @@ class AgentRouter:
         content: str,
         relevance_score: float,
         query_terms: list[str],
+        metadata: dict | None = None,
     ) -> float:
-        """结合向量分数、关键词覆盖与正文密度做二次排序。"""
+        """结合向量分数、正文命中和来源元数据做二次排序。"""
         normalized = content.lower()
+        metadata = metadata or {}
+        metadata_text = " ".join(
+            str(metadata.get(key, ""))
+            for key in (
+                "source",
+                "file_name",
+                "document_title",
+                "section_path",
+                "section_h1",
+                "section_h2",
+                "section_h3",
+            )
+        ).lower()
         lexical_hits = sum(1 for term in query_terms if term in normalized)
+        metadata_hits = sum(1 for term in query_terms if term in metadata_text)
+        term_frequency = sum(min(normalized.count(term), 3) for term in query_terms)
         length_bonus = min(len(content), 600) / 600 * 0.08
         coverage_bonus = min(lexical_hits, 4) * 0.06
+        frequency_bonus = min(term_frequency, 5) * 0.015
+        metadata_bonus = min(metadata_hits, 3) * 0.18
         title_like = (
             len(content) < 90
             or (content.lstrip().startswith("#") and len(content) < 160)
             or (content.count("\n") <= 1 and len(content.split()) <= 12)
         )
-        title_penalty = 0.18 if title_like else 0.0
-        return relevance_score + coverage_bonus + length_bonus - title_penalty
+        title_penalty = 0.12 if title_like and not metadata_hits else 0.0
+        return min(
+            1.0,
+            relevance_score
+            + coverage_bonus
+            + frequency_bonus
+            + metadata_bonus
+            + length_bonus
+            - title_penalty,
+        )
+
+    @staticmethod
+    def _rag_candidate_key(doc: object, normalized_content: str) -> str:
+        """优先使用稳定元数据标识对多路召回结果去重。"""
+        metadata = getattr(doc, "metadata", {}) or {}
+        for key in ("chunk_id", "id", "document_id"):
+            value = metadata.get(key)
+            if value:
+                return f"{key}:{value}"
+        source = metadata.get("source") or metadata.get("file_name") or ""
+        return f"content:{source}:{normalized_content[:300]}"
 
     def _build_rag_context(self, user_query: str) -> str:
         """构建重写、扩召回与重排后的知识库上下文。"""
         if not self.db_manager:
             return ""
 
-        rewritten_query = self._rewrite_knowledge_query(user_query)
+        try:
+            rewritten_query = self._rewrite_knowledge_query(user_query)
+        except Exception:
+            rewritten_query = user_query
         query_terms = self._extract_query_terms(rewritten_query, user_query)
         candidate_k = max(self.rag_top_k * 2, 8)
+        candidates: dict[str, tuple[object, float]] = {}
 
-        try:
-            docs_with_scores = self.db_manager.search_with_scores(rewritten_query, k=candidate_k)
-        except Exception:
-            docs_with_scores = [(doc, 0.0) for doc in self.db_manager.search(rewritten_query, k=candidate_k)]
+        for query in dict.fromkeys((rewritten_query, user_query)):
+            try:
+                docs_with_scores = self.db_manager.search_with_scores(
+                    query,
+                    k=candidate_k,
+                )
+            except Exception:
+                try:
+                    docs_with_scores = [
+                        (doc, 0.0)
+                        for doc in self.db_manager.search(query, k=candidate_k)
+                    ]
+                except Exception:
+                    docs_with_scores = []
+            for doc, score in docs_with_scores:
+                normalized = " ".join(doc.page_content.split())
+                if not normalized:
+                    continue
+                candidate_key = self._rag_candidate_key(doc, normalized)
+                previous = candidates.get(candidate_key)
+                normalized_score = min(1.0, max(0.0, float(score)))
+                if previous is None or normalized_score > previous[1]:
+                    candidates[candidate_key] = (doc, normalized_score)
+
+        keyword_search = getattr(self.db_manager, "keyword_search", None)
+        if callable(keyword_search) and query_terms:
+            try:
+                keyword_docs = keyword_search(query_terms, k=candidate_k)
+            except Exception:
+                keyword_docs = []
+            for doc in keyword_docs:
+                normalized = " ".join(doc.page_content.split())
+                if not normalized:
+                    continue
+                candidate_key = self._rag_candidate_key(doc, normalized)
+                previous = candidates.get(candidate_key)
+                keyword_score = 0.55
+                if previous is None or keyword_score > previous[1]:
+                    candidates[candidate_key] = (doc, keyword_score)
 
         ranked_candidates = []
-        for doc, score in docs_with_scores:
+        for doc, score in candidates.values():
             normalized = " ".join(doc.page_content.split())
-            if not normalized:
-                continue
-            rerank_score = self._score_rag_candidate(normalized, float(score), query_terms)
+            rerank_score = self._score_rag_candidate(
+                normalized,
+                score,
+                query_terms,
+                doc.metadata,
+            )
             ranked_candidates.append((rerank_score, doc))
 
         ranked_candidates.sort(key=lambda item: item[0], reverse=True)
+        if not ranked_candidates:
+            return ""
+        relevance_floor = max(
+            self.rag_min_score,
+            ranked_candidates[0][0] - 0.20,
+        )
 
         seen = set()
         segments = []
         total_chars = 0
-        for _, doc in ranked_candidates:
+        for score, doc in ranked_candidates:
+            if score < relevance_floor:
+                continue
             normalized = " ".join(doc.page_content.split())
             dedup_key = normalized[:200]
             if dedup_key in seen:
@@ -430,7 +535,7 @@ class AgentRouter:
 
         system_prompt = self._build_system_prompt(agent_id, allow_delegation=allow_delegation)
         if summary_text:
-            system_prompt = f"{system_prompt}\n\nConversation summary:\n{summary_text}"
+            system_prompt = f"{system_prompt}\n\n对话摘要：\n{summary_text}"
 
         messages = [
             {
@@ -440,7 +545,11 @@ class AgentRouter:
         ]
         messages.extend({"role": row["role"], "content": row["content"]} for row in history)
 
-        if agent_id == "knowledge_expert" and self.db_manager:
+        if agent_id == "knowledge_expert":
+            if self.db_manager is None:
+                raise KnowledgeBaseUnavailableError(
+                    "本地知识库当前不可用，请检查服务启动日志中的 [KB Runtime] 初始化错误。"
+                )
             context = self._build_rag_context(user_query)
             if context:
                 user_query = (
@@ -448,10 +557,8 @@ class AgentRouter:
                     f"【用户实际提问】\n{user_query}"
                 )
             else:
-                user_query = (
-                    "【系统提示】未检索到本地知识库信源。请先说明“未找到对应信源”，"
-                    "再基于通用知识回答。\n\n"
-                    f"【用户实际提问】\n{user_query}"
+                raise KnowledgeSourceNotFoundError(
+                    "未找到足够相关的本地知识库信源，知识专家已停止回答。"
                 )
 
         messages.append({"role": "user", "content": user_query})
@@ -522,6 +629,7 @@ class AgentRouter:
             planner_messages,
             max_tokens=self.tool_plan_max_tokens,
             temperature=0.1,
+            enable_thinking=False,
         )
         return self._parse_tool_call(planner_response)
 
@@ -555,10 +663,10 @@ class AgentRouter:
         observation = self._truncate_text(observation, 1600)
         messages[0]["content"] += (
             "\n\n"
-            f"Tool used: {tool_name}\n"
-            f"Tool observation:\n{observation}\n\n"
-            "Use the observation to answer the user directly. "
-            "Do not expose tool protocol."
+            f"已使用工具：{tool_name}\n"
+            f"工具观察结果：\n{observation}\n\n"
+            "请依据观察结果直接回答用户。"
+            "不要向用户暴露工具调用协议。"
         )
         return messages
 
@@ -625,6 +733,22 @@ class AgentRouter:
                 break
         return delegates
 
+    @staticmethod
+    def _resolve_explicit_knowledge_delegate(user_query: str) -> list[dict[str, str]]:
+        """无需依赖规划器输出格式，直接解析显式知识库请求。"""
+        patterns = (
+            r"(?:(?:请\s*)?(?:让|调用|使用|交给|委派)|请)(?:一下|下)?\s*(?:本地)?\s*(?:知识专家|knowledge[_ ]expert)",
+            r"(?:根据|查询|检索|查找|搜索)(?:一下|下)?(?:本地)?知识库",
+            r"^(?:知识专家|knowledge[_ ]expert)\s*[,，:：]",
+        )
+        for pattern in patterns:
+            if not re.search(pattern, user_query, flags=re.IGNORECASE):
+                continue
+            task = re.sub(pattern, "", user_query, count=1, flags=re.IGNORECASE)
+            task = task.lstrip(" ，,。.:：;；") or user_query
+            return [{"agent_id": "knowledge_expert", "task": task}]
+        return []
+
     def _build_orchestration_messages(self, user_query: str) -> list[dict[str, str]]:
         """构建核心 Agent 的委派规划消息。"""
         summary_text = self._update_summary_if_needed("core_router")
@@ -637,7 +761,7 @@ class AgentRouter:
         history = self._dedupe_current_user_message(history, user_query)
         system_prompt = self._build_system_prompt("core_router", allow_delegation=True)
         if summary_text:
-            system_prompt = f"{system_prompt}\n\nConversation summary:\n{summary_text}"
+            system_prompt = f"{system_prompt}\n\n对话摘要：\n{summary_text}"
         messages = [
             {
                 "role": "system",
@@ -702,10 +826,20 @@ class AgentRouter:
         """执行核心 Agent 的委派规划阶段。"""
         if run_context is not None:
             run_context.raise_if_inactive()
+        explicit_delegates = self._resolve_explicit_knowledge_delegate(user_query)
+        if explicit_delegates:
+            return {
+                "planning_messages": [],
+                "planning_response": "deterministic knowledge routing",
+                "delegates": explicit_delegates,
+            }
         planning_messages = self._build_orchestration_messages(user_query)
         if run_context is not None:
             run_context.raise_if_inactive()
-        planning_response = self._collect_model_response(planning_messages)
+        planning_response = self._collect_model_response(
+            planning_messages,
+            enable_thinking=False,
+        )
         delegates = self._parse_delegate_plan(planning_response)
         return {
             "planning_messages": planning_messages,
@@ -720,24 +854,27 @@ class AgentRouter:
     ) -> str:
         """将专属 Agent 结果整理为核心 Agent 的最终汇总输入。"""
         sections = [
-            "User question:",
+            "用户问题：",
             user_query,
             "",
-            "Specialist outputs:",
+            "专业智能体输出：",
         ]
         for item in specialist_outputs:
             sections.extend(
                 [
                     f"[{item['agent_name']}]",
-                    f"Task: {item['task']}",
+                    f"任务：{item['task']}",
                     item["result"],
                     "",
                 ]
             )
         sections.append(
-            "Please synthesize the specialist outputs into one final answer for the user. "
-            "Do not emit Delegate lines. Do not ask the specialists again. "
-            "Keep the answer coherent and directly useful."
+            "请将专业智能体输出整合为面向用户的一份最终回答。"
+            "不要输出 Delegate: 行，也不要再次询问专业智能体。"
+            "回答应连贯且直接有用。"
+            "所有关于本地知识的事实性陈述都必须由上方知识专家的输出支持。"
+            "必须原样保留其中的来源引用和不确定性；不得编造、扩展，或用通用知识替代缺失的本地事实。"
+            "如果知识专家报告知识库不可用或未找到相关来源，请明确说明这一限制。"
         )
         return "\n".join(sections)
 
@@ -839,6 +976,32 @@ class AgentRouter:
                 agent_name=self.agents_config[agent_id]["name"],
                 summary=self._truncate_text(result, 120),
             )
+
+        if (
+            len(specialist_outputs) == 1
+            and specialist_outputs[0]["agent_id"] == "knowledge_expert"
+        ):
+            final_response = specialist_outputs[0]["result"]
+            if final_response:
+                yield final_response
+            if run_context is not None:
+                run_context.raise_if_inactive()
+            self.memory_manager.add_message(
+                "core_router",
+                "assistant",
+                final_response,
+                metadata={
+                    "orchestration": [
+                        {
+                            "agent_id": "knowledge_expert",
+                            "task": specialist_outputs[0]["task"],
+                            "result_preview": self._truncate_text(final_response, 180),
+                        }
+                    ]
+                },
+                memory_scope=self.DIRECT_MEMORY_SCOPE,
+            )
+            return
 
         yield self._build_orchestration_event("synthesis_started")
         synthesis_query = self._build_synthesis_query(
