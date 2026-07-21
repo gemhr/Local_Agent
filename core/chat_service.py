@@ -28,7 +28,7 @@ class ChatService:
 
         Args:
             router: 负责路由、工具和记忆协调的核心对象。
-            state_observer: Optional test/diagnostic callback for ephemeral AgentState snapshots.
+            state_observer: 用于临时 AgentState 快照的可选测试或诊断回调。
         """
         self.router = router
         self._state_observer = state_observer
@@ -51,7 +51,7 @@ class ChatService:
             entry_agent_id=agent_id,
             session_id=LEGACY_DEFAULT_SESSION_ID,
         )
-        # Keep the source in this generator frame so cancellation authority is not lost.
+        # 在此生成器栈帧中保留取消源，避免丢失取消控制权。
         _cancellation_source = cancellation_source
         agent_state = AgentState.for_run_context(run_context.run_id)
         driver = LegacyAgentRouterDriver(self.router, user_query=final_query, agent_id=agent_id)
@@ -67,7 +67,7 @@ class ChatService:
             _ = _cancellation_source
 
     def _observe_state(self, agent_state: AgentState) -> None:
-        """Notify an optional observer without storing AgentState on the service."""
+        """通知可选观察者，但不在服务对象上存储 AgentState。"""
         if self._state_observer is not None:
             self._state_observer(agent_state)
 

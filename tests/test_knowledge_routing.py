@@ -192,5 +192,8 @@ def test_multi_agent_synthesis_prompt_forbids_ungrounded_expansion() -> None:
         ],
     )
 
-    assert "do not invent, expand" in prompt
-    assert "no relevant source was found" in prompt
+    assert "不要输出 Delegate: 行" in prompt
+    assert "所有关于本地知识的事实性陈述都必须由上方知识专家的输出支持" in prompt
+    assert "原样保留其中的来源引用和不确定性" in prompt
+    assert "不得编造、扩展，或用通用知识替代缺失的本地事实" in prompt
+    assert "知识库不可用或未找到相关来源" in prompt
