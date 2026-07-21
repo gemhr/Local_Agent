@@ -16,3 +16,6 @@ chroma_db/
 data/models/
 data/ingestion_logs/
 data/database/
+
+# Runtime logs
+data/logs/*.log
