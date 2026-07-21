@@ -25,9 +25,26 @@ from core.runtime.context import (
     SystemClock,
     create_run_context,
 )
+from core.runtime.agent_loop import (
+    ActionOutcome,
+    AgentAction,
+    AgentLoop,
+    AgentLoopDriver,
+    AgentLoopPolicy,
+    AgentObservation,
+    LEGACY_AGENT_ROUTER_STEP_ID,
+    LEGACY_AGENT_ROUTER_STEP_NAME,
+    LegacyAgentRouterDriver,
+)
 
 __all__ = [
     "AGENT_STATE_SCHEMA_VERSION",
+    "ActionOutcome",
+    "AgentAction",
+    "AgentLoop",
+    "AgentLoopDriver",
+    "AgentLoopPolicy",
+    "AgentObservation",
     "AgentState",
     "AgentStateValidationError",
     "CancellationSource",
@@ -35,6 +52,9 @@ __all__ = [
     "Clock",
     "Deadline",
     "LEGACY_DEFAULT_SESSION_ID",
+    "LEGACY_AGENT_ROUTER_STEP_ID",
+    "LEGACY_AGENT_ROUTER_STEP_NAME",
+    "LegacyAgentRouterDriver",
     "RunCancelledError",
     "RunContext",
     "RunContextData",
