@@ -2,24 +2,18 @@
 # -*- coding: utf-8 -*-
 """聊天应用服务层。"""
 
-import logging
 from collections.abc import Callable
 from typing import Any, Generator, Optional
 
 from core.agent_router import AgentRouter
 from core.runtime import (
+    AgentLoop,
     AgentState,
     LEGACY_DEFAULT_SESSION_ID,
-    RunCancelledError,
-    RunDeadlineExceededError,
-    StopReason,
+    LEGACY_AGENT_ROUTER_STEP_ID,
+    LegacyAgentRouterDriver,
     create_run_context,
 )
-
-LEGACY_AGENT_ROUTER_STEP_ID = "legacy-agent-router"
-LEGACY_AGENT_ROUTER_STEP_NAME = "Legacy AgentRouter execution"
-
-logger = logging.getLogger(__name__)
 
 
 class ChatService:
@@ -60,68 +54,15 @@ class ChatService:
         # Keep the source in this generator frame so cancellation authority is not lost.
         _cancellation_source = cancellation_source
         agent_state = AgentState.for_run_context(run_context.run_id)
-        agent_state.assert_matches_run_context(run_context.run_id)
-        agent_state.add_step(LEGACY_AGENT_ROUTER_STEP_ID, LEGACY_AGENT_ROUTER_STEP_NAME)
-        agent_state.mark_running()
-        agent_state.start_step(LEGACY_AGENT_ROUTER_STEP_ID)
-        self._observe_state(agent_state)
-        output_chunks: list[str] = []
+        driver = LegacyAgentRouterDriver(self.router, user_query=final_query, agent_id=agent_id)
+        loop = AgentLoop()
         try:
-            for chunk in self.router.chat_stream(
-                user_query=final_query,
-                agent_id=agent_id,
+            yield from loop.run_stream(
                 run_context=run_context,
-            ):
-                output_chunks.append(chunk)
-                yield chunk
-            final_output = "".join(output_chunks) if output_chunks else None
-            agent_state.succeed_step(LEGACY_AGENT_ROUTER_STEP_ID)
-            agent_state.mark_succeeded(final_output=final_output)
-            self._observe_state(agent_state)
-            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
-        except RunDeadlineExceededError:
-            agent_state.fail_step(
-                LEGACY_AGENT_ROUTER_STEP_ID,
-                error_code="DEADLINE_EXCEEDED",
-                error_message="Run deadline exceeded",
+                agent_state=agent_state,
+                driver=driver,
+                state_observer=self._observe_state,
             )
-            agent_state.mark_failed(
-                stop_reason=StopReason.DEADLINE_EXCEEDED,
-                error_code="DEADLINE_EXCEEDED",
-                error_message="Run deadline exceeded",
-            )
-            self._observe_state(agent_state)
-            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
-            raise
-        except RunCancelledError:
-            agent_state.cancel_step(
-                LEGACY_AGENT_ROUTER_STEP_ID,
-                error_code="USER_CANCELLED",
-                error_message="Run cancelled",
-            )
-            agent_state.mark_cancelled(
-                stop_reason=StopReason.USER_CANCELLED,
-                error_code="USER_CANCELLED",
-                error_message="Run cancelled",
-            )
-            self._observe_state(agent_state)
-            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
-            raise
-        except Exception:
-            agent_state.fail_step(
-                LEGACY_AGENT_ROUTER_STEP_ID,
-                error_code="UNHANDLED_ERROR",
-                error_message="Agent execution failed",
-            )
-            agent_state.mark_failed(
-                stop_reason=StopReason.UNHANDLED_ERROR,
-                error_code="UNHANDLED_ERROR",
-                error_message="Agent execution failed",
-            )
-            self._observe_state(agent_state)
-            logger.exception("AgentRouter execution failed")
-            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
-            raise
         finally:
             _ = _cancellation_source
 
@@ -172,4 +113,3 @@ class ChatService:
         result["status"] = "success"
         result["delete_all"] = False
         return result
-
