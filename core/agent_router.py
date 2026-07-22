@@ -4,10 +4,14 @@
 
 import json
 import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Dict, Generator, Optional
 
 from core.memory_manager import MemoryManager
-from core.runtime import RunContext
+from core.runtime import (
+    ContextBuildRequest, ContextBuilder, ContextItem, ContextSourceType, ContextTrustLevel,
+    DeterministicTokenEstimator, RunContext,
+)
 
 if TYPE_CHECKING:
     from core.knowledge_base.vector_db_manager import VectorDBManager
@@ -44,6 +48,7 @@ class AgentRouter:
         rag_doc_max_chars: int = 700,
         rag_context_max_chars: int = 1500,
         max_tokens: int = 640,
+        model_context_window: int = 4096,
         orchestration_enabled: bool = True,
         orchestration_max_agents: int = 3,
         knowledge_base_error: str | None = None,
@@ -61,6 +66,8 @@ class AgentRouter:
         self.rag_doc_max_chars = rag_doc_max_chars
         self.rag_context_max_chars = rag_context_max_chars
         self.max_tokens = max_tokens
+        self.model_context_window = model_context_window
+        self.context_builder = ContextBuilder(DeterministicTokenEstimator())
         self.orchestration_enabled = orchestration_enabled
         self.orchestration_max_agents = orchestration_max_agents
         self.knowledge_base_error = knowledge_base_error
@@ -499,6 +506,13 @@ class AgentRouter:
             return source
         return f"{source} ({', '.join(suffix_parts)})"
 
+    def _estimate_messages_tokens(self, messages: list[dict[str, str]]) -> int:
+        """估算 Builder 之外既有消息正文的近似 Token 数。"""
+        return sum(
+            self.context_builder.estimator.estimate(message["content"])
+            for message in messages
+        )
+
     def _dedupe_current_user_message(
         self,
         history: list[dict[str, str]],
@@ -534,7 +548,7 @@ class AgentRouter:
         history = self._dedupe_current_user_message(history, user_query)
 
         system_prompt = self._build_system_prompt(agent_id, allow_delegation=allow_delegation)
-        if summary_text:
+        if summary_text and agent_id != "knowledge_expert":
             system_prompt = f"{system_prompt}\n\n对话摘要：\n{summary_text}"
 
         messages = [
@@ -552,10 +566,32 @@ class AgentRouter:
                 )
             context = self._build_rag_context(user_query)
             if context:
-                user_query = (
-                    f"【系统提供的参考资料】\n{context}\n\n"
-                    f"【用户实际提问】\n{user_query}"
+                preexisting_messages_tokens = self._estimate_messages_tokens(messages)
+                preexisting_mandatory_tokens = self.context_builder.estimator.estimate(system_prompt)
+                context_items = [
+                    ContextItem("knowledge-user-request", ContextSourceType.CURRENT_USER_REQUEST,
+                        ContextTrustLevel.USER_CONTENT, user_query, 1000, datetime.now(timezone.utc)),
+                    ContextItem("knowledge-rag-documents", ContextSourceType.RAG_DOCUMENT,
+                        ContextTrustLevel.UNTRUSTED_EXTERNAL, context, 500, datetime.now(timezone.utc),
+                        source_ref="knowledge_base", citation_id="local-kb"),
+                ]
+                if summary_text:
+                    context_items.append(
+                        ContextItem("knowledge-memory-summary", ContextSourceType.MEMORY_SUMMARY,
+                            ContextTrustLevel.USER_CONTENT, summary_text, 700, datetime.now(timezone.utc),
+                            source_ref="memory_summary")
+                    )
+                context_result = self.context_builder.build(
+                    ContextBuildRequest(
+                        run_id="legacy-router", agent_id=agent_id,
+                        items=context_items,
+                        max_input_tokens=self.model_context_window,
+                        reserved_output_tokens=self.max_tokens,
+                        preexisting_messages_tokens=preexisting_messages_tokens,
+                        preexisting_mandatory_tokens=preexisting_mandatory_tokens,
+                    )
                 )
+                user_query = context_result.rendered_text
             else:
                 raise KnowledgeSourceNotFoundError(
                     "未找到足够相关的本地知识库信源，知识专家已停止回答。"
