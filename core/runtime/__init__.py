@@ -36,6 +36,14 @@ from core.runtime.agent_loop import (
     LEGACY_AGENT_ROUTER_STEP_NAME,
     LegacyAgentRouterDriver,
 )
+from core.runtime.state_machine import (
+    AgentStateMachine,
+    InvalidStateTransitionError,
+    RunEventType,
+    RunStateEvent,
+    StepEventType,
+    StepStateEvent,
+)
 
 __all__ = [
     "AGENT_STATE_SCHEMA_VERSION",
@@ -46,6 +54,7 @@ __all__ = [
     "AgentLoopPolicy",
     "AgentObservation",
     "AgentState",
+    "AgentStateMachine",
     "AgentStateValidationError",
     "CancellationSource",
     "CancellationToken",
@@ -55,13 +64,18 @@ __all__ = [
     "LEGACY_AGENT_ROUTER_STEP_ID",
     "LEGACY_AGENT_ROUTER_STEP_NAME",
     "LegacyAgentRouterDriver",
+    "InvalidStateTransitionError",
     "RunCancelledError",
     "RunContext",
     "RunContextData",
     "RunDeadlineExceededError",
     "RunIdentifiers",
     "RunStatus",
+    "RunEventType",
+    "RunStateEvent",
+    "StepEventType",
     "StepState",
+    "StepStateEvent",
     "StepStatus",
     "StopReason",
     "UnsupportedStateVersionError",

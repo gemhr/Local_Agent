@@ -13,7 +13,14 @@ from typing import Protocol
 
 from core.runtime.cancellation import RunCancelledError
 from core.runtime.context import RunContext, RunDeadlineExceededError
-from core.runtime.state import AgentState, AgentStateValidationError, RunStatus, StopReason
+from core.runtime.state import AgentState, StopReason
+from core.runtime.state_machine import (
+    AgentStateMachine,
+    RunEventType,
+    RunStateEvent,
+    StepEventType,
+    StepStateEvent,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -161,8 +168,13 @@ class LegacyAgentRouterDriver:
 class AgentLoop:
     """通过有界驱动循环管理一次 RunContext/AgentState 执行生命周期。"""
 
-    def __init__(self, policy: AgentLoopPolicy | None = None) -> None:
+    def __init__(
+        self,
+        policy: AgentLoopPolicy | None = None,
+        state_machine: AgentStateMachine | None = None,
+    ) -> None:
         self._policy = policy or AgentLoopPolicy()
+        self._state_machine = state_machine or AgentStateMachine()
 
     def run_stream(
         self,
@@ -174,9 +186,10 @@ class AgentLoop:
     ) -> Generator[str, None, None]:
         """运行驱动器，同时应用状态更新和有界终止策略。"""
         agent_state.assert_matches_run_context(run_context.run_id)
-        if agent_state.status in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED}:
-            raise AgentStateValidationError("cannot run an already terminated AgentState")
-        agent_state.mark_running()
+        self._state_machine.apply_run_event(
+            agent_state,
+            RunStateEvent(RunEventType.STARTED),
+        )
         self._observe(agent_state, state_observer)
         steps_taken = 0
         consecutive_no_action = 0
@@ -188,7 +201,13 @@ class AgentLoop:
             while True:
                 run_context.raise_if_inactive()
                 if steps_taken >= self._policy.max_steps:
-                    self._mark_failed(agent_state, StopReason.MAX_STEPS_REACHED, "MAX_STEPS_REACHED", "Maximum steps reached")
+                    self._apply_failed_run_event(
+                        agent_state,
+                        RunEventType.MAX_STEPS_REACHED,
+                        StopReason.MAX_STEPS_REACHED,
+                        "MAX_STEPS_REACHED",
+                        "Maximum steps reached",
+                    )
                     self._observe(agent_state, state_observer)
                     return
                 action = driver.decide(previous_observation)
@@ -196,7 +215,13 @@ class AgentLoop:
                 if action is None:
                     consecutive_no_action += 1
                     if consecutive_no_action >= self._policy.max_consecutive_no_action:
-                        self._mark_failed(agent_state, StopReason.NO_ACTION, "NO_ACTION", "No action available")
+                        self._apply_failed_run_event(
+                            agent_state,
+                            RunEventType.NO_ACTION,
+                            StopReason.NO_ACTION,
+                            "NO_ACTION",
+                            "No action available",
+                        )
                         self._observe(agent_state, state_observer)
                         return
                     continue
@@ -206,12 +231,25 @@ class AgentLoop:
                 )
                 previous_dedup_key = action.dedup_key
                 if consecutive_same_action > self._policy.max_consecutive_same_action:
-                    self._mark_failed(agent_state, StopReason.REPEATED_ACTION, "REPEATED_ACTION", "Repeated action limit reached")
+                    self._apply_failed_run_event(
+                        agent_state,
+                        RunEventType.REPEATED_ACTION,
+                        StopReason.REPEATED_ACTION,
+                        "REPEATED_ACTION",
+                        "Repeated action limit reached",
+                    )
                     self._observe(agent_state, state_observer)
                     return
                 steps_taken += 1
-                agent_state.add_step(action.step_id, action.name)
-                agent_state.start_step(action.step_id)
+                self._state_machine.add_step(
+                    agent_state,
+                    step_id=action.step_id,
+                    name=action.name,
+                )
+                self._state_machine.apply_step_event(
+                    agent_state,
+                    StepStateEvent(StepEventType.STARTED, action.step_id),
+                )
                 active_step_id = action.step_id
                 execution = driver.execute(action, run_context)
                 while True:
@@ -225,14 +263,39 @@ class AgentLoop:
                 if not isinstance(observation, AgentObservation):
                     raise TypeError("driver.execute must return an AgentObservation")
                 if observation.outcome == ActionOutcome.FAILED:
-                    agent_state.fail_step(active_step_id, error_code=observation.error_code or "UNHANDLED_ERROR", error_message=observation.error_message or "Agent execution failed")
-                    self._mark_failed(agent_state, StopReason.UNHANDLED_ERROR, observation.error_code or "UNHANDLED_ERROR", observation.error_message or "Agent execution failed")
+                    self._state_machine.apply_step_event(
+                        agent_state,
+                        StepStateEvent(
+                            StepEventType.FAILED,
+                            active_step_id,
+                            error_code=observation.error_code or "UNHANDLED_ERROR",
+                            error_message=observation.error_message or "Agent execution failed",
+                        ),
+                    )
+                    active_step_id = None
+                    self._apply_failed_run_event(
+                        agent_state,
+                        RunEventType.FAILED,
+                        StopReason.UNHANDLED_ERROR,
+                        observation.error_code or "UNHANDLED_ERROR",
+                        observation.error_message or "Agent execution failed",
+                    )
                     self._observe(agent_state, state_observer)
                     return
-                agent_state.succeed_step(active_step_id)
+                self._state_machine.apply_step_event(
+                    agent_state,
+                    StepStateEvent(StepEventType.SUCCEEDED, active_step_id),
+                )
                 active_step_id = None
                 if observation.outcome == ActionOutcome.COMPLETED:
-                    agent_state.mark_succeeded(final_output=observation.final_output)
+                    self._state_machine.apply_run_event(
+                        agent_state,
+                        RunStateEvent(
+                            RunEventType.COMPLETED,
+                            stop_reason=StopReason.COMPLETED,
+                            final_output=observation.final_output,
+                        ),
+                    )
                     self._observe(agent_state, state_observer)
                     logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
                     return
@@ -241,30 +304,91 @@ class AgentLoop:
             raise
         except RunDeadlineExceededError:
             if active_step_id is not None:
-                agent_state.fail_step(active_step_id, error_code="DEADLINE_EXCEEDED", error_message="Run deadline exceeded")
-            self._mark_failed(agent_state, StopReason.DEADLINE_EXCEEDED, "DEADLINE_EXCEEDED", "Run deadline exceeded")
+                self._state_machine.apply_step_event(
+                    agent_state,
+                    StepStateEvent(
+                        StepEventType.FAILED,
+                        active_step_id,
+                        error_code="DEADLINE_EXCEEDED",
+                        error_message="Run deadline exceeded",
+                    ),
+                )
+                active_step_id = None
+            self._apply_failed_run_event(
+                agent_state,
+                RunEventType.DEADLINE_EXCEEDED,
+                StopReason.DEADLINE_EXCEEDED,
+                "DEADLINE_EXCEEDED",
+                "Run deadline exceeded",
+            )
             self._observe(agent_state, state_observer)
             logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
             raise
         except RunCancelledError:
             if active_step_id is not None:
-                agent_state.cancel_step(active_step_id, error_code="USER_CANCELLED", error_message="Run cancelled")
-            agent_state.mark_cancelled(stop_reason=StopReason.USER_CANCELLED, error_code="USER_CANCELLED", error_message="Run cancelled")
+                self._state_machine.apply_step_event(
+                    agent_state,
+                    StepStateEvent(
+                        StepEventType.CANCELLED,
+                        active_step_id,
+                        error_code="USER_CANCELLED",
+                        error_message="Run cancelled",
+                    ),
+                )
+                active_step_id = None
+            self._state_machine.apply_run_event(
+                agent_state,
+                RunStateEvent(
+                    RunEventType.CANCELLED,
+                    stop_reason=StopReason.USER_CANCELLED,
+                    error_code="USER_CANCELLED",
+                    error_message="Run cancelled",
+                ),
+            )
             self._observe(agent_state, state_observer)
             logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
             raise
         except Exception:
             if active_step_id is not None:
-                agent_state.fail_step(active_step_id, error_code="UNHANDLED_ERROR", error_message="Agent execution failed")
-            self._mark_failed(agent_state, StopReason.UNHANDLED_ERROR, "UNHANDLED_ERROR", "Agent execution failed")
+                self._state_machine.apply_step_event(
+                    agent_state,
+                    StepStateEvent(
+                        StepEventType.FAILED,
+                        active_step_id,
+                        error_code="UNHANDLED_ERROR",
+                        error_message="Agent execution failed",
+                    ),
+                )
+                active_step_id = None
+            self._apply_failed_run_event(
+                agent_state,
+                RunEventType.FAILED,
+                StopReason.UNHANDLED_ERROR,
+                "UNHANDLED_ERROR",
+                "Agent execution failed",
+            )
             self._observe(agent_state, state_observer)
             logger.exception("Agent loop execution failed")
             logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
             raise
 
-    @staticmethod
-    def _mark_failed(agent_state: AgentState, reason: StopReason, code: str, message: str) -> None:
-        agent_state.mark_failed(stop_reason=reason, error_code=code, error_message=message)
+    def _apply_failed_run_event(
+        self,
+        agent_state: AgentState,
+        event_type: RunEventType,
+        reason: StopReason,
+        code: str,
+        message: str,
+    ) -> None:
+        self._state_machine.apply_run_event(
+            agent_state,
+            RunStateEvent(
+                event_type,
+                stop_reason=reason,
+                error_code=code,
+                error_message=message,
+            ),
+        )
 
     @staticmethod
     def _observe(agent_state: AgentState, observer: Callable[[AgentState], None] | None) -> None:
