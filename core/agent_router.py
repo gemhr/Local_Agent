@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Callable, Dict, Generator, Optional
 from core.memory_manager import MemoryManager
 from core.runtime import (
     ContextBuildRequest, ContextBuilder, ContextItem, ContextSourceType, ContextTrustLevel,
-    DeterministicTokenEstimator, RunContext,
+    DeterministicTokenEstimator, ModelContextRequirements, ModelPreference, ModelProfile,
+    ModelProfileId, ModelResolver, ModelSelectionPolicy, ModelSelectionRequest,
+    RiskLevel, RunContext, TaskCapabilityRequirements, create_single_step_plan,
 )
 
 if TYPE_CHECKING:
@@ -52,6 +54,8 @@ class AgentRouter:
         orchestration_enabled: bool = True,
         orchestration_max_agents: int = 3,
         knowledge_base_error: str | None = None,
+        model_profiles: tuple[ModelProfile, ...] | None = None,
+        model_resolver: ModelResolver | None = None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -71,6 +75,12 @@ class AgentRouter:
         self.orchestration_enabled = orchestration_enabled
         self.orchestration_max_agents = orchestration_max_agents
         self.knowledge_base_error = knowledge_base_error
+        default_profile = ModelProfile(ModelProfileId.LOCAL_FAST, model_context_window, max_tokens, False, False, False, False, 1, 1)
+        self.model_profiles = model_profiles or (default_profile,)
+        self.model_selection_policy = ModelSelectionPolicy()
+        # hybrid 使用可用 Profile 的最大安全窗口构建一次上下文，避免先按本地窗口裁剪。
+        self.model_context_window = max(self.model_selection_policy.maximum_safe_context_window(profile.context_window) for profile in self.model_profiles)
+        self.model_resolver = model_resolver or ModelResolver({self.model_profiles[0].profile_id: llm_engine})
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256
         self.knowledge_rewrite_max_tokens = 128
@@ -533,6 +543,7 @@ class AgentRouter:
         *,
         allow_delegation: bool = False,
         history_scope: str = DIRECT_MEMORY_SCOPE,
+        context_requirements_out: list[ModelContextRequirements] | None = None,
     ) -> list[dict[str, str]]:
         """构建一次推理所需的完整消息序列。"""
         summary_text = ""
@@ -592,6 +603,8 @@ class AgentRouter:
                     )
                 )
                 user_query = context_result.rendered_text
+                if context_requirements_out is not None:
+                    context_requirements_out.append(context_result.model_requirements)
             else:
                 raise KnowledgeSourceNotFoundError(
                     "未找到足够相关的本地知识库信源，知识专家已停止回答。"
@@ -599,6 +612,30 @@ class AgentRouter:
 
         messages.append({"role": "user", "content": user_query})
         return messages
+
+    def _capability_requirements(self, agent_id: str, user_query: str) -> TaskCapabilityRequirements:
+        """从既有确定性路由信息生成最小能力需求，不保存用户正文。"""
+        return TaskCapabilityRequirements(
+            requires_rag=agent_id == "knowledge_expert",
+            requires_tools=self._tool_intent_likely(user_query),
+            requires_multi_agent=False,
+            requires_code_reasoning=agent_id == "code_expert",
+            risk_level=RiskLevel.LOW,
+            estimated_steps=1,
+        )
+
+    def _select_model(self, agent_id: str, user_query: str, messages: list[dict[str, str]], context_requirements: ModelContextRequirements | None = None) -> object:
+        """使用完整消息的近似上下文特征选择并解析一次首选模型。"""
+        estimated = self._estimate_messages_tokens(messages)
+        requirements = context_requirements or ModelContextRequirements(estimated, estimated + self.max_tokens, estimated >= 2048, False, False, len(messages), 0, 0, False, False)
+        capabilities = self._capability_requirements(agent_id, user_query)
+        create_single_step_plan(agent_id, capabilities)
+        decision = self.model_selection_policy.select(ModelSelectionRequest(agent_id, capabilities, requirements, ModelPreference.AUTO, self.model_profiles))
+        profile = next(profile for profile in self.model_profiles if profile.profile_id == decision.selected_profile)
+        final_required = self.model_selection_policy.required_context_window(requirements.minimum_context_window)
+        if profile.context_window < final_required:
+            raise ValueError("所选模型无法满足最终消息的安全上下文窗口")
+        return self.model_resolver.resolve(decision.selected_profile)
 
     def _parse_tool_call(self, response_text: str) -> Optional[tuple[str, str]]:
         """解析工具规划结果。"""
@@ -676,6 +713,7 @@ class AgentRouter:
         *,
         history_scope: str = DIRECT_MEMORY_SCOPE,
         run_context: RunContext | None = None,
+        context_requirements_out: list[ModelContextRequirements] | None = None,
     ) -> list[dict[str, str]]:
         """构建回答消息，并在需要时注入工具观察结果。"""
         if run_context is not None:
@@ -685,6 +723,7 @@ class AgentRouter:
             agent_id=agent_id,
             allow_delegation=False,
             history_scope=history_scope,
+            context_requirements_out=context_requirements_out,
         )
         tool_call = self._plan_tool_call(messages, agent_id)
         if not tool_call:
@@ -715,16 +754,19 @@ class AgentRouter:
         run_context: RunContext | None = None,
     ) -> Generator[str, None, str]:
         """流式生成最终可见回答。"""
+        context_requirements_out: list[ModelContextRequirements] = []
         messages = self._prepare_answer_messages(
             agent_id=agent_id,
             user_query=user_query,
             history_scope=history_scope,
             run_context=run_context,
+            context_requirements_out=context_requirements_out,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
         final_response = ""
-        for chunk in self.llm.generate(messages, max_tokens=self.max_tokens):
+        selected_model = self._select_model(agent_id, user_query, messages, context_requirements_out[0] if context_requirements_out else None)
+        for chunk in selected_model.generate(messages, max_tokens=self.max_tokens):
             if run_context is not None:
                 run_context.raise_if_inactive()
             final_response += chunk
@@ -740,15 +782,21 @@ class AgentRouter:
         run_context: RunContext | None = None,
     ) -> str:
         """同步生成最终回答文本。"""
+        context_requirements_out: list[ModelContextRequirements] = []
         messages = self._prepare_answer_messages(
             agent_id=agent_id,
             user_query=user_query,
             history_scope=history_scope,
             run_context=run_context,
+            context_requirements_out=context_requirements_out,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
-        return self._collect_model_response(messages)
+        selected_model = self._select_model(agent_id, user_query, messages, context_requirements_out[0] if context_requirements_out else None)
+        response = ""
+        for chunk in selected_model.generate(messages, max_tokens=self.max_tokens):
+            response += chunk
+        return response
 
     def _parse_delegate_plan(self, response_text: str) -> list[dict[str, str]]:
         """解析核心 Agent 输出的委派计划。"""
