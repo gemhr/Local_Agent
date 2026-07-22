@@ -48,7 +48,7 @@ uv sync
 | 使用位置 | 实际模型与访问方式 | 推荐 backend | 关键参数原则 |
 | --- | --- | --- | --- |
 | 本地 | Qwen 7B GGUF，经 `llama-cpp-python` 加载 | `local` | 保持较小窗口和输出，适合简单、短上下文请求。 |
-| 公司网络 | 公司内部 IP 部署的 Qwen 27B，OpenAI-compatible，无 API Key | `remote` | 使用实际 IP/端口和服务端注册的模型名；API Key 留空；窗口值必须与公司部署值一致。 |
+| 公司网络 | 公司内部 IP 部署的 Qwen3.5-27B，OpenAI-compatible，无 API Key | `remote` | 使用实际 IP/端口和服务端注册的模型名；API Key 留空；窗口值必须与公司部署值一致。 |
 | 家中网络 | DeepSeek 官方 `v4-flash`，OpenAI-compatible，需要 API Key | `remote` | 使用 HTTPS、API Key 和官方控制台确认的模型 ID；可采用更大的 context、输出和 timeout，但不得超过 Provider 实际限制。 |
 
 > `LOCAL_AGENT_REMOTE_CONTEXT_WINDOW` 是模型选择的能力声明，不是请求参数；虚报过大会让策略选择无法实际执行的远程模型。应以公司部署配置或 DeepSeek 官方控制台的实际窗口为准。
@@ -71,16 +71,16 @@ uv run python main.py
 
 `LOCAL_AGENT_MODEL_GPU_LAYERS=0` 表示 CPU 推理；如本机已正确配置 llama.cpp GPU wheel，可按显存容量提高该值。Qwen 7B 的实际 GGUF 文件名和盘符可不同，但 `LOCAL_AGENT_MODEL_PATH` 必须指向存在的 `.gguf` 文件。
 
-### 4.3 公司：内部 IP 的 Qwen 27B（无 API Key）
+### 4.3 公司：内部 IP 的 Qwen3.5-27B（无 API Key）
 
-以下示例假定公司服务使用 HTTP、地址为 `http://10.0.0.20:8000`，且注册模型名为 `qwen-27b`；请替换成公司实际地址、端口和模型 ID。为空的 API Key 会使客户端**不发送** `Authorization` 请求头。
+公司提供的接口是完整的 OpenAI-compatible Chat Completions 地址：`http://xxx.xx.xx.xxx:8001/v1/chat/completions`。请只将 `xxx.xx.xx.xxx` 替换为公司实际 IP；不要填写 API Key。为空的 API Key 会使客户端**不发送** `Authorization` 请求头，客户端会自动发送 `Content-Type: application/json`，并构造 `messages`、`model` 与 `chat_template_kwargs.enable_thinking=false` 请求体。
 
 ```powershell
 $env:LOCAL_AGENT_LLM_BACKEND="remote"
 $env:LOCAL_AGENT_MODEL_PROFILE="balanced"
-$env:LOCAL_AGENT_REMOTE_API_BASE_URL="http://10.0.0.20:8000/v1"
+$env:LOCAL_AGENT_REMOTE_API_BASE_URL="http://xxx.xx.xx.xxx:8001/v1/chat/completions"
 $env:LOCAL_AGENT_REMOTE_API_KEY=""
-$env:LOCAL_AGENT_REMOTE_MODEL_NAME="qwen-27b"
+$env:LOCAL_AGENT_REMOTE_MODEL_NAME="Qwen3.5-27B"
 $env:LOCAL_AGENT_REMOTE_CONTEXT_WINDOW="32768"
 $env:LOCAL_AGENT_MODEL_MAX_TOKENS="2048"
 $env:LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS="180"
@@ -92,7 +92,7 @@ uv run python server.py
 uv run python main.py
 ```
 
-远程地址可配置为 API 根地址、以 `/v1` 结尾的地址，或完整 `/chat/completions` 地址；客户端会规范化为 Chat Completions 请求地址。内部服务若实际使用 HTTPS 且证书可信，应将 `LOCAL_AGENT_REMOTE_VERIFY_TLS` 设为 `1`。
+远程地址可配置为 API 根地址、以 `/v1` 结尾的地址，或完整 `/chat/completions` 地址；本示例按公司提供的**完整地址**填写，客户端不会重复追加路径。内部服务若实际使用 HTTPS 且证书可信，应将 `LOCAL_AGENT_REMOTE_VERIFY_TLS` 设为 `1`。
 
 ### 4.4 家中：DeepSeek 官方 `v4-flash`（需要 API Key）
 
@@ -117,16 +117,36 @@ uv run python main.py
 
 绝不能把真实 Key 写入 README、`.env` 以外的提交文件、终端截图或日志。官方 HTTPS 端点应保持 `LOCAL_AGENT_REMOTE_VERIFY_TLS="1"`。当前远程引擎仅在地址或模型名包含 `deepseek` 时发送 DeepSeek thinking 兼容字段；Flash 场景默认关闭 thinking，确认 Provider 支持后才设为 `1`。
 
-### 4.5 hybrid：本地 Qwen 7B + 当前网络的远程模型
+### 4.5 hybrid：本地 Qwen 7B + 公司 Qwen3.5-27B
 
-hybrid 同时需要第 4.2 节的**全部本地变量**，以及第 4.3 节或第 4.4 节中**一组远程变量**；唯一差异是把 backend 改为：
+以下是公司网络下可直接使用的完整 hybrid 后端启动模板。将 IP 与本地 GGUF 文件路径替换为真实值后，在**同一个 PowerShell 窗口**执行；不需要自行编写 `headers` 或 HTTP 请求代码。
 
 ```powershell
 $env:LOCAL_AGENT_LLM_BACKEND="hybrid"
+$env:LOCAL_AGENT_MODEL_PROFILE="balanced"
+
+# LOCAL_FAST：本地 Qwen 7B GGUF
+$env:LOCAL_AGENT_MODEL_PATH="D:\PythonProject\Local_Agent\data\models\qwen2.5-7b-instruct-q4_k_m.gguf"
+$env:LOCAL_AGENT_MODEL_CONTEXT="4096"
+$env:LOCAL_AGENT_MODEL_MAX_TOKENS="2048"
+$env:LOCAL_AGENT_MODEL_THREADS="10"
+$env:LOCAL_AGENT_MODEL_GPU_LAYERS="0"
+
+# REMOTE_ADVANCED：公司 OpenAI-compatible Qwen3.5-27B
+$env:LOCAL_AGENT_REMOTE_API_BASE_URL="http://xxx.xx.xx.xxx:8001/v1/chat/completions"
+$env:LOCAL_AGENT_REMOTE_API_KEY=""
+$env:LOCAL_AGENT_REMOTE_MODEL_NAME="Qwen3.5-27B"
+$env:LOCAL_AGENT_REMOTE_CONTEXT_WINDOW="32768"
+$env:LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS="180"
+$env:LOCAL_AGENT_REMOTE_VERIFY_TLS="0"
+$env:LOCAL_AGENT_REMOTE_ENABLE_THINKING="0"
+
 uv run python server.py
 ```
 
-hybrid 目前是 **eager loading**：启动时同时加载本地 Qwen 7B GGUF 并创建远程客户端。本地模型文件不存在或加载失败会阻止后端启动，不会自动退化为 remote-only。知识专家最终回答会按上下文与能力选择一次本地或远程调用，不做失败 fallback。
+`LOCAL_AGENT_MODEL_MAX_TOKENS` 当前同时作为两个 Profile 的最大输出预留，因此 hybrid 示例统一设为 `2048`；如本地 Qwen 7B 输出较慢，可降为 `1024`，但远程模型输出上限也会随之降低。hybrid 目前是 **eager loading**：启动时同时加载本地 Qwen 7B GGUF 并创建远程客户端。本地模型文件不存在或加载失败会阻止后端启动，不会自动退化为 remote-only。知识专家最终回答会按上下文与能力选择一次本地或远程调用，不做失败 fallback。
+
+若在家中使用 hybrid，请保留本地变量，将上例中 `REMOTE_ADVANCED` 的七项远程变量替换为第 4.4 节的 DeepSeek 参数，并把 `LOCAL_AGENT_MODEL_MAX_TOKENS` 调整为适合本机 Qwen 7B 的值；该值会同时限制远程输出。
 
 ### 4.6 仅运行后端
 
