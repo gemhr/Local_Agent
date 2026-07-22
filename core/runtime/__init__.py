@@ -36,6 +36,11 @@ from core.runtime.agent_loop import (
     LEGACY_AGENT_ROUTER_STEP_NAME,
     LegacyAgentRouterDriver,
 )
+from core.runtime.model_context import (
+    ContextBuilder, ContextBuildRequest, ContextBuildResult, ContextBudgetExceededError, ContextDropRecord,
+    ContextItem, ContextSourceType, ContextStats, ContextTrustLevel, DeterministicTokenEstimator,
+    ModelContextRequirements, TokenEstimator,
+)
 from core.runtime.state_machine import (
     AgentStateMachine,
     InvalidStateTransitionError,
@@ -57,6 +62,9 @@ __all__ = [
     "AgentStateMachine",
     "AgentStateValidationError",
     "CancellationSource",
+    "ContextBuilder", "ContextBuildRequest", "ContextBuildResult", "ContextBudgetExceededError",
+    "ContextDropRecord", "ContextItem", "ContextSourceType", "ContextStats", "ContextTrustLevel",
+    "DeterministicTokenEstimator", "ModelContextRequirements", "TokenEstimator",
     "CancellationToken",
     "Clock",
     "Deadline",
