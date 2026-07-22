@@ -40,6 +40,7 @@ class Settings:
     remote_timeout_seconds: int
     remote_verify_tls: bool
     remote_enable_thinking: bool
+    remote_context_window: int
     model_threads: int
     model_context: int
     model_gpu_layers: int
@@ -135,6 +136,7 @@ class Settings:
             remote_timeout_seconds=_env_int("LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS", 120),
             remote_verify_tls=os.getenv("LOCAL_AGENT_REMOTE_VERIFY_TLS", "0") == "1",
             remote_enable_thinking=os.getenv("LOCAL_AGENT_REMOTE_ENABLE_THINKING", "0") == "1",
+            remote_context_window=_env_int("LOCAL_AGENT_REMOTE_CONTEXT_WINDOW", 32768),
             model_threads=_env_int("LOCAL_AGENT_MODEL_THREADS", preset["model_threads"]),
             model_context=_env_int("LOCAL_AGENT_MODEL_CONTEXT", preset["model_context"]),
             model_gpu_layers=_env_int("LOCAL_AGENT_MODEL_GPU_LAYERS", 0),
