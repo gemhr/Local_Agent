@@ -41,6 +41,8 @@ from core.runtime.model_context import (
     ContextItem, ContextSourceType, ContextStats, ContextTrustLevel, DeterministicTokenEstimator,
     ModelContextRequirements, TokenEstimator,
 )
+from core.runtime.planning import Plan, PlanSource, PlanStep, PlanValidator, RiskLevel, TaskCapabilityRequirements, create_single_step_plan
+from core.runtime.model_selection import (ModelPreference, ModelProfile, ModelProfileId, ModelResolver, ModelSelectionDecision, ModelSelectionError, ModelSelectionPolicy, ModelSelectionReason, ModelSelectionRequest)
 from core.runtime.state_machine import (
     AgentStateMachine,
     InvalidStateTransitionError,
@@ -65,6 +67,8 @@ __all__ = [
     "ContextBuilder", "ContextBuildRequest", "ContextBuildResult", "ContextBudgetExceededError",
     "ContextDropRecord", "ContextItem", "ContextSourceType", "ContextStats", "ContextTrustLevel",
     "DeterministicTokenEstimator", "ModelContextRequirements", "TokenEstimator",
+    "Plan", "PlanSource", "PlanStep", "PlanValidator", "RiskLevel", "TaskCapabilityRequirements", "create_single_step_plan",
+    "ModelPreference", "ModelProfile", "ModelProfileId", "ModelResolver", "ModelSelectionDecision", "ModelSelectionError", "ModelSelectionPolicy", "ModelSelectionReason", "ModelSelectionRequest",
     "CancellationToken",
     "Clock",
     "Deadline",
