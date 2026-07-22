@@ -6,6 +6,7 @@ from core.agent_router import (
     KnowledgeBaseUnavailableError,
     KnowledgeSourceNotFoundError,
 )
+from core.runtime import ModelProfile, ModelProfileId, ModelResolver
 
 
 class FakeMemory:
@@ -247,3 +248,29 @@ def test_knowledge_summary_is_untrusted_relevant_memory_not_system_message() -> 
     assert combined.count("UNIQUE_USER_REQUEST_12345") == 1
     assert combined.count("源字段和目标字段") == 1
     assert [message["role"] for message in messages] == ["system", "assistant", "user"]
+
+
+class RecordingModel(RewriteLLM):
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.calls = []
+
+    def generate(self, messages, **kwargs):
+        self.calls.append((messages, kwargs))
+        yield self.response
+
+
+def test_knowledge_final_call_uses_selected_profile_once_and_preserves_messages() -> None:
+    local, remote = RecordingModel("local"), RecordingModel("remote")
+    profiles = (
+        ModelProfile(ModelProfileId.LOCAL_FAST, 128, 64, False, False, False, False, 1, 1),
+        ModelProfile(ModelProfileId.REMOTE_ADVANCED, 8192, 512, True, True, True, True, 2, 2),
+    )
+    router = AgentRouter(
+        llm_engine=local, memory_manager=FakeMemory(), db_manager=HybridDB(), max_tokens=64,
+        model_profiles=profiles, model_resolver=ModelResolver({ModelProfileId.LOCAL_FAST: local, ModelProfileId.REMOTE_ADVANCED: remote}),
+    )
+    assert "remote" in list(router._stream_final_response("knowledge_expert", "讲讲 CDT"))
+    assert len(local.calls) == 1  # 查询改写使用既有默认模型入口。
+    assert len(remote.calls) == 1
+    assert [message["role"] for message in remote.calls[0][0]] == ["system", "user"]
