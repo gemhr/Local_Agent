@@ -105,17 +105,8 @@ Plan 尚未驱动 Scheduler；未实现 DAG 环检测、Budget、Deadline 选择
 - 面试表达：同一 Plan 可映射到不同部署。
 - 当前状态：已覆盖。
 
-## 20. 需要带回 ChatGPT 审查的信息
-Planner 入口为 `create_single_step_plan`，选择入口为 `ModelSelectionPolicy.select`，Resolver 为 `ModelResolver.resolve`。上述章节已列出最终字段、规则、1.10 余量、强制偏好、真实接入/未接入路径、无 fallback、未改 API/AgentState/Memory/Stream、测试与 Bad Case。需人工确认生产环境同时提供 LOCAL_FAST 与 REMOTE_ADVANCED 对象的启动装配；后续建议只在第 8 天实现 Scheduler 输入消费，不在本次实施。
-
-## 21. 第 7 天补充审查：上下文与选择顺序
-知识专家真实顺序为：先查询一次 RAG/Memory 并由 `ContextBuilder.build()` 生成候选上下文统计，再将 Builder 的**未裁剪** `raw_minimum_context_window` 交给 Policy，最后按已选 Profile 调用模型。当前采用方案 B：Router 的 Builder 窗口为所有可用 Profile `context_window / 1.10` 的最大整数值；local-only 来自 LOCAL_FAST，remote-only 来自 REMOTE_ADVANCED，hybrid 取两者最大值。因此不再固定绑定 `Settings.model_context`，不会先按本地窗口裁剪后再选择。
-
-`raw_estimated_input_tokens/raw_minimum_context_window` 是 Builder 规范化、去重后但 item 裁剪前的需求；`estimated_input_tokens/minimum_context_window` 是最终实际 messages 需求，`was_truncated` 明确标记裁剪。Policy 选择 raw 字段；调用前以最终字段再次验证。安全公式严格为 `ceil(minimum_context_window × 1.10)`，其中 minimum 已包含 reserved output，绝不重复加输出预算，也不放大 Profile 窗口。
-
-LOCAL_FAST 当前保守声明不支持 Tool、structured output、code reasoning、long reasoning；REMOTE_ADVANCED 声明支持这些能力。声明来自 `server.py` 的 Profile 装配，不依赖模型名称，Policy 不检查 DeepSeek/Qwen 字符串；测试使用显式 Fake Profile。hybrid 为 eager loading：启动立即构造远程客户端并加载本地 GGUF；本地加载失败会阻止启动，即使远程配置可用。其代价是更长启动时间和本地内存/显存占用，当前未改为 lazy loading。
-
 ### Bad Case 5：上下文先按本地窗口裁剪，导致远程模型永远不会被选择
+
 - 类型：真实发现
 - 触发条件：hybrid 使用原 `Settings.model_context` 作为 Builder `max_input_tokens`，而本地窗口小于远程窗口。
 - 故障表现：RAG 或 Memory 先被裁剪，裁剪后需求可能满足本地窗口并错误选择 LOCAL_FAST。
@@ -126,12 +117,8 @@ LOCAL_FAST 当前保守声明不支持 Tool、structured output、code reasoning
 - 面试表达：不能让裁剪结果伪装成原始任务只需要小窗口；至少保留 raw 与 final 两套统计。
 - 当前状态：已修复，后续可演进为两阶段正式 Build。
 
-## 22. 第 7 天最终语义检查
-`raw_minimum_context_window` 不是所有 Profile 的绝对可执行硬约束：执行可行性只由 final `minimum_context_window` 经同一安全函数计算。raw 用于 AUTO 下判断本地是否会造成额外信息损失、优先选择可保留更多内容的远程 Profile、生成 `CONTEXT_WINDOW_REQUIRED`，并在 `matched_rules` 记录 `context_truncated`。即使 raw 超过全部 Profile，只要 final 由非 mandatory 内容裁剪得到且远程 final 校验通过，AUTO 选择远程；不会选择无法承载 raw 的本地。FORCE_LOCAL 在 mandatory 完整、final 满足本地安全窗口且只裁剪可选内容时允许本地，Decision 也带 `context_truncated`，且无 fallback。
-
-安全余量唯一来源是 `ModelSelectionPolicy.context_window_safety_ratio` 及其 `required_context_window()` / `maximum_safe_context_window()`：Builder 安全窗口、Policy final 可行性和最终调用前校验均复用这些方法。
-
 ### Bad Case 6：Windows 本地 Wheel 导致 Linux 测试环境无法恢复依赖
+
 - 类型：真实发现
 - 触发条件：Linux 环境使用 `uv run` 解析项目中指向 Windows 本地路径的 llama_cpp_python wheel。
 - 故障表现：uv 在依赖解析阶段失败，测试未开始。
@@ -141,3 +128,19 @@ LOCAL_FAST 当前保守声明不支持 Tool、structured output、code reasoning
 - 对应知识点：跨平台依赖可恢复性。
 - 面试表达：先区分依赖解析故障和业务回归，再以平台标记隔离可选 native 依赖。
 - 当前状态：已记录，待后续依赖治理处理。
+
+## 20. 需要带回 ChatGPT 审查的信息
+Planner 入口为 `create_single_step_plan`，选择入口为 `ModelSelectionPolicy.select`，Resolver 为 `ModelResolver.resolve`。上述章节已列出最终字段、规则、1.10 余量、强制偏好、真实接入/未接入路径、无 fallback、未改 API/AgentState/Memory/Stream、测试与 Bad Case。需人工确认生产环境同时提供 LOCAL_FAST 与 REMOTE_ADVANCED 对象的启动装配；后续建议只在第 8 天实现 Scheduler 输入消费，不在本次实施。
+
+## 21. 第 7 天补充审查：上下文与选择顺序
+知识专家真实顺序为：先查询一次 RAG/Memory 并由 `ContextBuilder.build()` 生成候选上下文统计，再将 Builder 的**未裁剪** `raw_minimum_context_window` 交给 Policy，最后按已选 Profile 调用模型。当前采用方案 B：Router 的 Builder 窗口为所有可用 Profile `context_window / 1.10` 的最大整数值；local-only 来自 LOCAL_FAST，remote-only 来自 REMOTE_ADVANCED，hybrid 取两者最大值。因此不再固定绑定 `Settings.model_context`，不会先按本地窗口裁剪后再选择。
+
+`raw_estimated_input_tokens/raw_minimum_context_window` 是 Builder 规范化、去重后但 item 裁剪前的需求；`estimated_input_tokens/minimum_context_window` 是最终实际 messages 需求，`was_truncated` 明确标记裁剪。Policy 选择 raw 字段；调用前以最终字段再次验证。安全公式严格为 `ceil(minimum_context_window × 1.10)`，其中 minimum 已包含 reserved output，绝不重复加输出预算，也不放大 Profile 窗口。
+
+LOCAL_FAST 当前保守声明不支持 Tool、structured output、code reasoning、long reasoning；REMOTE_ADVANCED 声明支持这些能力。声明来自 `server.py` 的 Profile 装配，不依赖模型名称，Policy 不检查 DeepSeek/Qwen 字符串；测试使用显式 Fake Profile。hybrid 为 eager loading：启动立即构造远程客户端并加载本地 GGUF；本地加载失败会阻止启动，即使远程配置可用。其代价是更长启动时间和本地内存/显存占用，当前未改为 lazy loading。
+
+## 22. 第 7 天最终语义检查
+`raw_minimum_context_window` 不是所有 Profile 的绝对可执行硬约束：执行可行性只由 final `minimum_context_window` 经同一安全函数计算。raw 用于 AUTO 下判断本地是否会造成额外信息损失、优先选择可保留更多内容的远程 Profile、生成 `CONTEXT_WINDOW_REQUIRED`，并在 `matched_rules` 记录 `context_truncated`。即使 raw 超过全部 Profile，只要 final 由非 mandatory 内容裁剪得到且远程 final 校验通过，AUTO 选择远程；不会选择无法承载 raw 的本地。FORCE_LOCAL 在 mandatory 完整、final 满足本地安全窗口且只裁剪可选内容时允许本地，Decision 也带 `context_truncated`，且无 fallback。
+
+安全余量唯一来源是 `ModelSelectionPolicy.context_window_safety_ratio` 及其 `required_context_window()` / `maximum_safe_context_window()`：Builder 安全窗口、Policy final 可行性和最终调用前校验均复用这些方法。
+
