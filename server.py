@@ -15,6 +15,7 @@ from core.agent_router import AgentRouter
 from core.chat_service import ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
+from core.runtime import ModelProfile, ModelProfileId, ModelResolver
 from core.settings import Settings
 from tools.registry import register_all_tools
 
@@ -80,19 +81,23 @@ async def lifespan(app: FastAPI):
         )
         logger.warning("[KB Runtime] import failed: %s", knowledge_base_error)
 
-    if settings.llm_backend == "local":
-        engine = LocalLLMEngine(
+    engines = {}
+    profiles = []
+    if settings.llm_backend in {"local", "hybrid"}:
+        local_engine = LocalLLMEngine(
             model_path=settings.model_path,
             n_ctx=settings.model_context,
             n_threads=settings.model_threads,
             n_gpu_layers=settings.model_gpu_layers,
         )
-    else:
+        engines[ModelProfileId.LOCAL_FAST] = local_engine
+        profiles.append(ModelProfile(ModelProfileId.LOCAL_FAST, settings.model_context, settings.model_max_tokens, False, False, False, False, 1, 1))
+    if settings.llm_backend in {"remote", "hybrid"}:
         if not settings.remote_api_base_url:
             raise RuntimeError(
-                "LOCAL_AGENT_REMOTE_API_BASE_URL is required when LOCAL_AGENT_LLM_BACKEND != local"
+                "启用远程模型时必须配置 LOCAL_AGENT_REMOTE_API_BASE_URL"
             )
-        engine = RemoteLLMEngine(
+        remote_engine = RemoteLLMEngine(
             api_base_url=settings.remote_api_base_url,
             model_name=settings.remote_model_name,
             api_key=settings.remote_api_key,
@@ -100,6 +105,11 @@ async def lifespan(app: FastAPI):
             verify_tls=settings.remote_verify_tls,
             enable_thinking=settings.remote_enable_thinking,
         )
+        engines[ModelProfileId.REMOTE_ADVANCED] = remote_engine
+        profiles.append(ModelProfile(ModelProfileId.REMOTE_ADVANCED, settings.remote_context_window, settings.model_max_tokens, True, True, True, True, 2, 2))
+    if not engines:
+        raise RuntimeError("LOCAL_AGENT_LLM_BACKEND 必须是 local、remote 或 hybrid")
+    engine = engines.get(ModelProfileId.LOCAL_FAST) or engines[ModelProfileId.REMOTE_ADVANCED]
     router = AgentRouter(
         llm_engine=engine,
         memory_manager=memory_manager,
@@ -117,6 +127,8 @@ async def lifespan(app: FastAPI):
         orchestration_enabled=settings.orchestration_enabled,
         orchestration_max_agents=settings.orchestration_max_agents,
         knowledge_base_error=knowledge_base_error,
+        model_profiles=tuple(profiles),
+        model_resolver=ModelResolver(engines),
     )
     register_all_tools(router)
     chat_service = ChatService(router)
