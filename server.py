@@ -113,6 +113,7 @@ async def lifespan(app: FastAPI):
         rag_doc_max_chars=settings.rag_doc_max_chars,
         rag_context_max_chars=settings.rag_context_max_chars,
         max_tokens=settings.model_max_tokens,
+        model_context_window=settings.model_context,
         orchestration_enabled=settings.orchestration_enabled,
         orchestration_max_agents=settings.orchestration_max_agents,
         knowledge_base_error=knowledge_base_error,
