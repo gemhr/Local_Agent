@@ -132,6 +132,7 @@ class ModelContextRequirements:
     estimated_input_tokens: int; minimum_context_window: int; requires_long_context: bool
     was_truncated: bool; mandatory_content_near_limit: bool; source_count: int
     rag_item_count: int; tool_result_count: int; contains_code: bool; contains_structured_data: bool
+    raw_estimated_input_tokens: int = 0; raw_minimum_context_window: int = 0
 
 
 @dataclass(frozen=True)
@@ -195,6 +196,9 @@ class ContextBuilder:
                 for key in keys: winners[key] = item
             else: duplicate_count += 1
         unique = sorted(set(winners.values()), key=self._rank)
+        raw_rendered = self._render(unique)
+        raw_estimated = request.preexisting_messages_tokens + self.estimator.estimate(raw_rendered)
+        raw_minimum = raw_estimated + request.reserved_output_tokens
         included: list[ContextItem] = []; drops: list[ContextDropRecord] = []
         mandatory = [x for x in unique if x.mandatory]
         for item in mandatory:
@@ -221,7 +225,7 @@ class ContextBuilder:
         code = any("```" in x.content or re.search(r"^\s*(def |class |import |SELECT |curl )", x.content, re.M) for x in included)
         structured = any("|" in x.content or ("{" in x.content and "}" in x.content) or ("[" in x.content and "]" in x.content) for x in included)
         stats = ContextStats(estimated, input_budget, request.reserved_output_tokens, len(included), len(drops), duplicate_count, sum(x.truncated for x in drops), has_rag, has_memory, has_tool, estimated >= self.long_context_threshold)
-        requirements = ModelContextRequirements(estimated, estimated + request.reserved_output_tokens, stats.has_long_context, bool(stats.truncated_item_count), mandatory_tokens >= int(input_budget * .8), len({x.source_type for x in included}), sum(x.source_type == ContextSourceType.RAG_DOCUMENT for x in included), sum(x.source_type == ContextSourceType.TOOL_RESULT for x in included), code, structured)
+        requirements = ModelContextRequirements(estimated, estimated + request.reserved_output_tokens, stats.has_long_context, bool(stats.truncated_item_count), mandatory_tokens >= int(input_budget * .8), len({x.source_type for x in included}), sum(x.source_type == ContextSourceType.RAG_DOCUMENT for x in included), sum(x.source_type == ContextSourceType.TOOL_RESULT for x in included), code, structured, raw_estimated, raw_minimum)
         return ContextBuildResult(rendered, tuple(included), tuple(drops), stats, requirements)
 
     def _truncate_to_fit(self, included: list[ContextItem], item: ContextItem, budget: int) -> ContextItem | None:
