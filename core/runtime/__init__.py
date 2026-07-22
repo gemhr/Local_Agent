@@ -51,6 +51,14 @@ from core.runtime.state_machine import (
     StepEventType,
     StepStateEvent,
 )
+from core.runtime.scheduler import (
+    SchedulerClaimError,
+    SchedulerError,
+    SchedulerPlanStateMismatchError,
+    SchedulerSnapshot,
+    SerialScheduler,
+    StepClaim,
+)
 
 __all__ = [
     "AGENT_STATE_SCHEMA_VERSION",
@@ -85,6 +93,12 @@ __all__ = [
     "RunStatus",
     "RunEventType",
     "RunStateEvent",
+    "SchedulerClaimError",
+    "SchedulerError",
+    "SchedulerPlanStateMismatchError",
+    "SchedulerSnapshot",
+    "SerialScheduler",
+    "StepClaim",
     "StepEventType",
     "StepState",
     "StepStateEvent",
