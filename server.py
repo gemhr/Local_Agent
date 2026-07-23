@@ -3,11 +3,13 @@
 """FastAPI 后端入口。"""
 
 from contextlib import asynccontextmanager
+import asyncio
 import logging
+import uuid
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -15,7 +17,7 @@ from core.agent_router import AgentRouter
 from core.chat_service import ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
-from core.runtime import ModelProfile, ModelProfileId, ModelResolver
+from core.runtime import CancellationReason, ModelProfile, ModelProfileId, ModelResolver, process_run_registry
 from core.settings import Settings
 from tools.registry import register_all_tools
 
@@ -30,6 +32,15 @@ except Exception as exc:  # pragma: no cover
 settings = Settings.load()
 chat_service: Optional[ChatService] = None
 logger = logging.getLogger(__name__)
+SHUTDOWN_GRACE_SECONDS = 2.0
+
+
+def _next_or_none(stream):
+    """避免 StopIteration 穿透 Future 边界。"""
+    try:
+        return next(stream)
+    except StopIteration:
+        return None
 
 
 @asynccontextmanager
@@ -133,6 +144,12 @@ async def lifespan(app: FastAPI):
     register_all_tools(router)
     chat_service = ChatService(router)
     yield
+    cancelled = process_run_registry.cancel_all(CancellationReason.SYSTEM_SHUTDOWN)
+    remaining = await asyncio.to_thread(process_run_registry.wait_until_empty, SHUTDOWN_GRACE_SECONDS)
+    if remaining:
+        logger.warning("shutdown cleanup timed out for runs=%s", ",".join(remaining))
+    elif cancelled:
+        logger.info("shutdown cleanup completed for runs=%s", ",".join(cancelled))
     chat_service = None
 
 
@@ -145,6 +162,7 @@ class ChatRequest(BaseModel):
     agent_id: str
     query: str
     file_path: str = ""
+    run_id: str | None = None
 
 
 class DeleteMemoryRequest(BaseModel):
@@ -169,7 +187,7 @@ def require_service() -> ChatService:
 
 
 @app.post("/api/chat")
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(payload: ChatRequest, request: Request):
     """流式返回聊天结果。
 
     Args:
@@ -180,18 +198,52 @@ async def chat_endpoint(request: ChatRequest):
     """
     service = require_service()
 
-    def generate():
-        """将应用层生成器桥接为 HTTP 响应流。"""
-        try:
-            yield from service.stream_chat(
-                agent_id=request.agent_id,
-                query=request.query,
-                file_path=request.file_path,
-            )
-        except Exception as exc:
-            yield f"\n[server-error] {exc}"
+    run_id = payload.run_id or uuid.uuid4().hex
+    try:
+        uuid.UUID(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid run_id") from exc
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    async def generate():
+        """桥接同步文本生成器；这是自定义分块 HTTP 流，不是 SSE。"""
+        stream = service.stream_chat(
+            agent_id=payload.agent_id, query=payload.query, file_path=payload.file_path, run_id=run_id)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    process_run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
+                    return
+                try:
+                    chunk = await asyncio.to_thread(_next_or_none, stream)
+                except StopIteration:
+                    return
+                if chunk is None:
+                    return
+                yield chunk
+        except asyncio.CancelledError:
+            process_run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
+            raise
+        except (BrokenPipeError, ConnectionResetError):
+            process_run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
+
+    return StreamingResponse(generate(), media_type="text/plain", headers={"X-Run-Id": run_id})
+
+
+@app.post("/api/runtime/runs/{run_id}/cancel")
+async def cancel_run_endpoint(run_id: str):
+    """客户端只能请求用户主动取消，重复请求保持幂等。"""
+    try:
+        uuid.UUID(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid run_id") from exc
+    result = process_run_registry.cancel(run_id, CancellationReason.USER_CANCELLED)
+    if result is None:
+        return {"status": "inactive", "run_id": run_id}
+    return {"status": "cancelled" if result else "already_cancelled", "run_id": run_id}
 
 
 @app.get("/api/history/{agent_id}")

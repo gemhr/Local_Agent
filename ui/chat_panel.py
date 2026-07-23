@@ -34,6 +34,7 @@ class ChatPanel(QWidget):
     """
 
     message_sent = pyqtSignal(str, str, str)
+    stop_requested = pyqtSignal()
     request_more_history_signal = pyqtSignal(str)
     agent_switched_signal = pyqtSignal(str)
     memory_changed_signal = pyqtSignal(list, bool)
@@ -406,9 +407,15 @@ class ChatPanel(QWidget):
         self.send_btn.setFixedSize(85, 30)
         self.send_btn.setEnabled(False)
         self.send_btn.clicked.connect(self._emit_message)
+        self.stop_btn = QPushButton("停止")
+        self.stop_btn.setObjectName("StopBtn")
+        self.stop_btn.setFixedSize(85, 30)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop_requested.emit)
         button_layout = QHBoxLayout()
         button_layout.addStretch(1)
         button_layout.addWidget(self.send_btn)
+        button_layout.addWidget(self.stop_btn)
         input_layout.addWidget(self.attachment_label)
         input_layout.addWidget(self.input_box)
         input_layout.addLayout(button_layout)
@@ -628,7 +635,12 @@ class ChatPanel(QWidget):
 
     def _on_input_changed(self) -> None:
         """根据输入框和附件状态切换发送按钮可用性。"""
-        self.send_btn.setEnabled(bool(self.input_box.toPlainText().strip() or self.attached_file_path))
+        self.send_btn.setEnabled(not self.stop_btn.isEnabled() and bool(self.input_box.toPlainText().strip() or self.attached_file_path))
+
+    def set_streaming(self, streaming: bool) -> None:
+        """切换发送/停止按钮，避免并行写入同一聊天输出。"""
+        self.stop_btn.setEnabled(streaming)
+        self._on_input_changed()
 
     def _emit_message(self) -> None:
         """收集输入内容并发出发送信号。"""
