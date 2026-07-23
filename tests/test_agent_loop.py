@@ -183,8 +183,9 @@ class AgentLoopTests(unittest.TestCase):
         stream = AgentLoop().run_stream(run_context=context, agent_state=state, driver=driver)
         self.assertEqual(next(stream), "one:one")
         stream.close()
-        self.assertEqual(state.status, RunStatus.RUNNING)
-        self.assertEqual(state.steps["one"].status, StepStatus.RUNNING)
+        self.assertEqual(state.status, RunStatus.CANCELLED)
+        self.assertEqual(state.stop_reason, StopReason.CLIENT_DISCONNECTED)
+        self.assertEqual(state.steps["one"].status, StepStatus.CANCELLED)
 
     def test_legacy_driver_calls_router_once_and_keeps_chunks_and_context(self) -> None:
         class Router:

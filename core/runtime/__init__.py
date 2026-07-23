@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """LocalAgent 的最小运行时上下文基础组件。"""
 
-from core.runtime.cancellation import CancellationSource, CancellationToken, RunCancelledError
+from core.runtime.cancellation import CancellationReason, CancellationSource, CancellationToken, RunCancelledError
+from core.runtime.run_registry import RunHandle, RunRegistry, process_run_registry
+from core.runtime.timeout import OperationTimeoutError, OperationType, effective_timeout_seconds
 
 from core.runtime.state import (
     AGENT_STATE_SCHEMA_VERSION,
@@ -73,6 +75,8 @@ __all__ = [
     "AgentStateMachine",
     "AgentStateValidationError",
     "CancellationSource",
+    "CancellationReason", "RunHandle", "RunRegistry", "process_run_registry",
+    "OperationTimeoutError", "OperationType", "effective_timeout_seconds",
     "ContextBuilder", "ContextBuildRequest", "ContextBuildResult", "ContextBudgetExceededError",
     "ContextDropRecord", "ContextItem", "ContextSourceType", "ContextStats", "ContextTrustLevel",
     "DeterministicTokenEstimator", "ModelContextRequirements", "TokenEstimator",

@@ -335,7 +335,7 @@ class ChatServiceAgentStateTests(unittest.TestCase):
         self.assertEqual(states[-1].stop_reason, StopReason.USER_CANCELLED)
         self.assertEqual(states[-1].steps[LEGACY_AGENT_ROUTER_STEP_ID].status, StepStatus.CANCELLED)
 
-    def test_generator_close_does_not_mark_state_succeeded(self) -> None:
+    def test_generator_close_marks_state_cancelled(self) -> None:
         class FakeRouter:
             def chat_stream(self, user_query: str, agent_id: str = "core_router", run_context=None):
                 yield "partial"
@@ -346,9 +346,9 @@ class ChatServiceAgentStateTests(unittest.TestCase):
         stream = service.stream_chat(agent_id="code_expert", query="hi")
         self.assertEqual(next(stream), "partial")
         stream.close()
-        self.assertEqual(len(states), 1)
-        self.assertEqual(states[0].status, RunStatus.RUNNING)
-        self.assertEqual(states[0].steps[LEGACY_AGENT_ROUTER_STEP_ID].status, StepStatus.RUNNING)
+        self.assertEqual(len(states), 2)
+        self.assertEqual(states[-1].status, RunStatus.CANCELLED)
+        self.assertEqual(states[-1].steps[LEGACY_AGENT_ROUTER_STEP_ID].status, StepStatus.CANCELLED)
 
 
 if __name__ == "__main__":

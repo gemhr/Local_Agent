@@ -150,6 +150,7 @@ class RunContext:
         entry_agent_id: str,
         session_id: str = LEGACY_DEFAULT_SESSION_ID,
         trace_id: str | None = None,
+        run_id: str | None = None,
         timeout_seconds: float | None = None,
         cancellation_source: CancellationSource | None = None,
         clock: Clock | None = None,
@@ -159,6 +160,7 @@ class RunContext:
             entry_agent_id=entry_agent_id,
             session_id=session_id,
             trace_id=trace_id,
+            run_id=run_id,
             timeout_seconds=timeout_seconds,
             cancellation_source=cancellation_source,
             clock=clock,
@@ -184,6 +186,11 @@ class RunContext:
         """返回截止时间剩余秒数；无截止时间时返回 None。"""
         return self._deadline.remaining_seconds()
 
+    @property
+    def cancellation_token(self) -> CancellationToken:
+        """返回只读 Token，禁止经由 Context 取得取消源。"""
+        return self._cancellation_token
+
     def raise_if_inactive(self) -> None:
         """已请求取消或截止时间到期时引发异常。"""
         self._cancellation_token.raise_if_cancelled()
@@ -205,6 +212,7 @@ def create_run_context(
     entry_agent_id: str,
     session_id: str = LEGACY_DEFAULT_SESSION_ID,
     trace_id: str | None = None,
+    run_id: str | None = None,
     timeout_seconds: float | None = None,
     cancellation_source: CancellationSource | None = None,
     clock: Clock | None = None,
@@ -220,7 +228,7 @@ def create_run_context(
     source = cancellation_source or CancellationSource()
     deadline = Deadline(timeout_seconds=timeout_seconds, clock=active_clock)
     identifiers = RunIdentifiers(
-        run_id=uuid.uuid4().hex,
+        run_id=run_id or uuid.uuid4().hex,
         session_id=session_id,
         trace_id=trace_id or uuid.uuid4().hex,
     )
