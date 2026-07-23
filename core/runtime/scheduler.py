@@ -83,6 +83,14 @@ class SchedulerPlanStateMismatchError(SchedulerError):
         )
 
 
+class SchedulerPartialClaimError(SchedulerError):
+    """批量认领中途失败时保留已成功 Claim 的安全异常。"""
+
+    def __init__(self, *, plan: Plan, succeeded_step_ids: tuple[str, ...], step_id: str, current_state: str) -> None:
+        self.succeeded_step_ids = succeeded_step_ids
+        super().__init__(error_code="SCHEDULER_PARTIAL_CLAIM_FAILED", message="批量步骤认领部分成功", plan_id=plan.plan_id, plan_version=plan.version, step_id=step_id, current_state=current_state)
+
+
 class SchedulerClaimError(SchedulerError):
     """State Machine 未能安全完成 Step Claim 时引发。"""
 
@@ -127,6 +135,9 @@ class SchedulerSnapshot:
     is_complete: bool
     is_waiting: bool
     has_unresolved_pending: bool
+    claimable_step_ids: tuple[str, ...] = ()
+    max_parallelism: int = 1
+    available_slots: int = 0
 
 
 class SerialScheduler:
@@ -138,80 +149,63 @@ class SerialScheduler:
         self._binding: tuple[str, str, int, tuple[object, ...]] | None = None
 
     def prepare(
-        self, plan: Plan, state: AgentState, occurred_at: datetime
+        self, plan: Plan, state: AgentState, occurred_at: datetime, max_parallelism: int = 1
     ) -> SchedulerSnapshot:
         """注册尚不存在的 Plan Step，并返回传播 BLOCKED 后的快照。"""
         self._validate_utc(occurred_at)
+        self._validate_parallelism(max_parallelism)
         with self._claim_lock:
             graph = self._prepare_locked(plan, state)
             effective_at = self._effective_time(occurred_at, state)
             self._propagate_blocked(plan, graph, state, effective_at)
-            return self._build_snapshot(plan, graph, state)
+            return self._build_snapshot(plan, graph, state, max_parallelism)
 
-    def evaluate(self, plan: Plan, state: AgentState) -> SchedulerSnapshot:
+    def evaluate(self, plan: Plan, state: AgentState, max_parallelism: int = 1) -> SchedulerSnapshot:
         """传播可确定的 BLOCKED，并动态计算当前调度快照。"""
+        self._validate_parallelism(max_parallelism)
         with self._claim_lock:
             graph = PlanGraphValidator.validate(plan)
             self._validate_plan_state_alignment(plan, state)
             occurred_at = self._effective_time(datetime.now(UTC), state)
             self._propagate_blocked(plan, graph, state, occurred_at)
-            return self._build_snapshot(plan, graph, state)
+            return self._build_snapshot(plan, graph, state, max_parallelism)
 
-    def claim_next(
-        self,
-        plan: Plan,
-        state: AgentState,
-        occurred_at: datetime,
-    ) -> StepClaim | None:
-        """在同一锁内准备、传播、计算并通过 STARTED 原子认领一个 Step。"""
+    def claim_next(self, plan: Plan, state: AgentState, occurred_at: datetime) -> StepClaim | None:
+        """兼容串行入口，委托给批量认领接口。"""
+        claims = self.claim_ready(plan, state, max_parallelism=1, occurred_at=occurred_at)
+        return claims[0] if claims else None
+
+    def claim_ready(self, plan: Plan, state: AgentState, max_parallelism: int, occurred_at: datetime) -> tuple[StepClaim, ...]:
+        """在同一锁内按稳定拓扑顺序认领不超过容量的全部 Ready Step。"""
+        self._validate_parallelism(max_parallelism)
         self._validate_utc(occurred_at)
         with self._claim_lock:
             graph = self._prepare_locked(plan, state)
             effective_at = self._effective_time(occurred_at, state)
             self._propagate_blocked(plan, graph, state, effective_at)
-            if self._running_steps(plan, state):
-                return None
-            ready_steps = self._compute_ready_steps(plan, graph, state)
-            if not ready_steps:
-                return None
-
-            step = ready_steps[0]
-            claim_at = self._effective_time(effective_at, state)
-            try:
-                self._state_machine.apply_step_event(
-                    state,
-                    StepStateEvent(
-                        StepEventType.STARTED, step.step_id, occurred_at=claim_at
-                    ),
-                )
-            except Exception as exc:
-                current = state.steps.get(step.step_id)
-                raise SchedulerClaimError(
-                    plan=plan,
-                    step_id=step.step_id,
-                    current_state=(
-                        current.status.value if current is not None else "MISSING"
-                    ),
-                ) from exc
-
-            claimed = state.steps[step.step_id]
-            if (
-                claimed.status != StepStatus.RUNNING
-                or step.step_id not in state.active_step_ids
-            ):
-                raise SchedulerClaimError(
-                    plan=plan,
-                    step_id=step.step_id,
-                    current_state=claimed.status.value,
-                )
-            return StepClaim(
-                plan_id=plan.plan_id,
-                plan_version=plan.version,
-                step_id=step.step_id,
-                claimed_at=claimed.started_at or claim_at,
-                capability_requirements=step.capability_requirements,
-                preferred_agent=step.preferred_agent,
-            )
+            running_count = len(self._running_steps(plan, state))
+            available_slots = max(0, max_parallelism - running_count)
+            candidates = self._compute_ready_steps(plan, graph, state)[:available_slots]
+            # 在发送任何 STARTED 前完成所有候选的预检。
+            for step in candidates:
+                current = state.steps[step.step_id]
+                if current.status != StepStatus.PENDING or step.step_id in state.active_step_ids:
+                    raise SchedulerClaimError(plan=plan, step_id=step.step_id, current_state=current.status.value)
+            claims: list[StepClaim] = []
+            for step in candidates:
+                claim_at = self._effective_time(effective_at, state)
+                try:
+                    self._state_machine.apply_step_event(state, StepStateEvent(StepEventType.STARTED, step.step_id, occurred_at=claim_at))
+                except Exception as exc:
+                    current = state.steps.get(step.step_id)
+                    if claims:
+                        raise SchedulerPartialClaimError(plan=plan, succeeded_step_ids=tuple(item.step_id for item in claims), step_id=step.step_id, current_state=current.status.value if current else "MISSING") from exc
+                    raise SchedulerClaimError(plan=plan, step_id=step.step_id, current_state=current.status.value if current else "MISSING") from exc
+                claimed = state.steps[step.step_id]
+                if claimed.status != StepStatus.RUNNING or step.step_id not in state.active_step_ids:
+                    raise SchedulerPartialClaimError(plan=plan, succeeded_step_ids=tuple(item.step_id for item in claims), step_id=step.step_id, current_state=claimed.status.value)
+                claims.append(StepClaim(plan.plan_id, plan.version, step.step_id, claimed.started_at or claim_at, step.capability_requirements, step.preferred_agent))
+            return tuple(claims)
 
     def _prepare_locked(self, plan: Plan, state: AgentState) -> PlanGraph:
         # 必须在读取或修改 Runtime 状态前完成静态图校验。
@@ -328,7 +322,7 @@ class SerialScheduler:
     def _compute_ready_steps(
         self, plan: Plan, graph: PlanGraph, state: AgentState
     ) -> tuple[PlanStep, ...]:
-        if state.status != RunStatus.RUNNING or self._running_steps(plan, state):
+        if state.status != RunStatus.RUNNING:
             return ()
         ready: list[PlanStep] = []
         steps_by_id = {step.step_id: step for step in plan.steps}
@@ -355,10 +349,12 @@ class SerialScheduler:
             if state.steps[step.step_id].status == StepStatus.RUNNING
         )
 
-    def _build_snapshot(self, plan: Plan, graph: PlanGraph, state: AgentState) -> SchedulerSnapshot:
+    def _build_snapshot(self, plan: Plan, graph: PlanGraph, state: AgentState, max_parallelism: int = 1) -> SchedulerSnapshot:
         ready_step_ids = tuple(
             step.step_id for step in self._compute_ready_steps(plan, graph, state)
         )
+        available_slots = max(0, max_parallelism - len(self._running_steps(plan, state)))
+        claimable_step_ids = ready_step_ids[:available_slots]
         ordered_step_ids = graph.topological_order
         running_step_ids = tuple(
             step_id for step_id in ordered_step_ids if state.steps[step_id].status == StepStatus.RUNNING
@@ -386,10 +382,18 @@ class SerialScheduler:
             pending_step_ids=pending_step_ids,
             blocked_step_ids=blocked_step_ids,
             terminal_step_ids=terminal_step_ids,
+            claimable_step_ids=claimable_step_ids,
+            max_parallelism=max_parallelism,
+            available_slots=available_slots,
             is_complete=is_complete,
             is_waiting=is_waiting,
             has_unresolved_pending=has_unresolved_pending,
         )
+
+    @staticmethod
+    def _validate_parallelism(value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError("max_parallelism 必须是正整数")
 
     @staticmethod
     def _effective_time(occurred_at: datetime, state: AgentState) -> datetime:
