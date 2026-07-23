@@ -11,6 +11,7 @@ import sys
 import threading
 import json
 import faulthandler
+import uuid
 from datetime import datetime
 
 import requests
@@ -18,6 +19,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
 from core.settings import Settings
+from core.cancellation_client import request_run_cancellation
 from ui.chat_panel import ChatPanel
 from ui.desktop_pet import DesktopPet
 
@@ -67,8 +69,9 @@ class ApiWorker(QThread):
         self._session: requests.Session | None = None
         self._response: requests.Response | None = None
         self.protocol_buffer = ""
+        self.run_id = ""
 
-    def set_task(self, agent_id: str, query: str, file_path: str = "") -> None:
+    def set_task(self, agent_id: str, query: str, file_path: str = "", run_id: str = "") -> None:
         """设置下一次执行所需的请求参数。
 
         Args:
@@ -79,6 +82,7 @@ class ApiWorker(QThread):
         self.agent_id = agent_id
         self.query = query
         self.file_path = file_path
+        self.run_id = run_id
 
     def run(self) -> None:
         """向后端发送流式请求并分批发射文本片段。"""
@@ -92,6 +96,7 @@ class ApiWorker(QThread):
                         "agent_id": self.agent_id,
                         "query": self.query,
                         "file_path": self.file_path,
+                        "run_id": self.run_id,
                     },
                     stream=True,
                     timeout=300,
@@ -225,6 +230,7 @@ class MainController(QObject):
         self.pet.file_dropped.connect(self._handle_pet_file_drop)
         self.pet.quit_requested.connect(self._quit_application)
         self.chat_panel.message_sent.connect(self._handle_user_message)
+        self.chat_panel.stop_requested.connect(self._handle_stop_request)
         self.chat_panel.memory_changed_signal.connect(self._handle_memory_changed)
         self.chat_panel.request_more_history_signal.connect(self._fetch_older_history)
         self.chat_panel.agent_switched_signal.connect(self._load_agent_history_if_needed)
@@ -368,8 +374,24 @@ class MainController(QObject):
             self.chat_panel.append_system_msg("Assistant is still generating.", agent_id)
             return
         self.chat_panel.start_ai_msg(agent_id)
-        self.worker.set_task(agent_id, text, file_path)
+        self.chat_panel.set_streaming(True)
+        self.worker.set_task(agent_id, text, file_path, uuid.uuid4().hex)
         self.worker.start()
+
+    def _handle_stop_request(self) -> None:
+        """在独立短请求线程中先取消，再关闭阻塞中的流式 Worker。"""
+        run_id = self.worker.run_id
+        if not run_id or not self.worker.isRunning():
+            return
+        cancel_url = f"{self.api_base_url}/api/runtime/runs/{run_id}/cancel"
+
+        def cancel_then_close() -> None:
+            """此函数不在 ApiWorker 中运行，避免被 iter_content 阻塞。"""
+            request_run_cancellation(self.http.post, cancel_url)
+            # 网络失败时仍关闭本地响应；服务端可通过断开检测取消。
+            self.worker.cancel()
+
+        threading.Thread(target=cancel_then_close, daemon=True, name="run-cancel-request").start()
 
     def _on_worker_chunk(self, chunk: str) -> None:
         """将流式文本片段推送给聊天面板。"""
@@ -413,10 +435,14 @@ class MainController(QObject):
         final_text = self.chat_panel.active_ai_texts.get(agent_id, "")
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.chat_panel.update_agent_sidebar_preview(agent_id, final_text, now_str)
+        self.chat_panel.set_streaming(False)
+        self.worker.run_id = ""
 
     def _on_worker_error(self, error_msg: str) -> None:
         """将请求错误显示在聊天面板中。"""
         self.chat_panel.append_system_msg(error_msg, target_agent_id=self.worker.agent_id)
+        self.chat_panel.set_streaming(False)
+        self.worker.run_id = ""
 
     def _handle_memory_changed(self, agent_ids: list, delete_all: bool) -> None:
         """在记忆发生删除后同步刷新主界面历史状态。"""
