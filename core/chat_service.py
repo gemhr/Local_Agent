@@ -28,6 +28,7 @@ from core.runtime import (
     SerialScheduler,
     StepClaim,
     StepExecutionMode,
+    ModelInvocationResult,
 )
 
 
@@ -47,18 +48,22 @@ class _CoordinatedSingleAgentDriver:
         self._agent_id = agent_id
         self._persist = persist
         self.output: str | None = None
+        self.invocation_result: ModelInvocationResult | None = None
 
     def execute(self, claim: StepClaim, run_context) -> str:
         """执行由 Scheduler 已 Claim 的真实单 Agent 步骤。"""
         if claim.step_id != "answer" or claim.preferred_agent != self._agent_id:
             raise RuntimeError("Coordinated 单 Agent Claim 与 Driver 不匹配")
+        invocation_results: list[ModelInvocationResult] = []
         self.output = self._router.complete_single_agent(
             self._agent_id,
             self._user_query,
             run_context=run_context,
             capability_requirements=claim.capability_requirements,
             persist=self._persist,
+            invocation_result_out=invocation_results,
         )
+        self.invocation_result = invocation_results[0] if invocation_results else None
         return self.output
 
 

@@ -10,10 +10,12 @@ from typing import TYPE_CHECKING, Callable, Dict, Generator, Optional
 from core.memory_manager import MemoryManager
 from core.runtime import (
     ContextBuildRequest, ContextBuilder, ContextItem, ContextSourceType, ContextTrustLevel,
-    DeterministicTokenEstimator, ModelContextRequirements, ModelPreference, ModelProfile,
+    DeterministicTokenEstimator, ModelContextRequirements, ModelCostProfile, ModelPreference, ModelProfile,
     ModelProfileId, ModelResolver, ModelSelectionPolicy, ModelSelectionRequest,
     Plan, RiskLevel, RunContext, TaskCapabilityRequirements, create_single_step_plan,
     BudgetUsage, UsageSource, BudgetedModelStream,
+    GeneratorModelAdapter, ModelAdapterResolver, ModelCircuitBreakerRegistry,
+    ModelInvocationResult, ModelInvocationRouter, ModelRoutingPolicy,
 )
 
 if TYPE_CHECKING:
@@ -57,6 +59,9 @@ class AgentRouter:
         knowledge_base_error: str | None = None,
         model_profiles: tuple[ModelProfile, ...] | None = None,
         model_resolver: ModelResolver | None = None,
+        model_adapter_resolver: ModelAdapterResolver | None = None,
+        model_invocation_router: ModelInvocationRouter | None = None,
+        circuit_breaker_registry: ModelCircuitBreakerRegistry | None = None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -76,12 +81,47 @@ class AgentRouter:
         self.orchestration_enabled = orchestration_enabled
         self.orchestration_max_agents = orchestration_max_agents
         self.knowledge_base_error = knowledge_base_error
-        default_profile = ModelProfile(ModelProfileId.LOCAL_FAST, model_context_window, max_tokens, False, False, False, False, 1, 1)
+        default_cost = ModelCostProfile(
+            ModelProfileId.LOCAL_FAST,
+            False,
+            fixed_call_cost_units=1,
+            estimated_latency_ms=1,
+        )
+        default_profile = ModelProfile(
+            ModelProfileId.LOCAL_FAST,
+            model_context_window,
+            max_tokens,
+            False,
+            False,
+            False,
+            False,
+            1,
+            1,
+            default_cost,
+            False,
+            "local_default",
+        )
         self.model_profiles = model_profiles or (default_profile,)
         self.model_selection_policy = ModelSelectionPolicy()
+        self.model_routing_policy = ModelRoutingPolicy()
         # hybrid 使用可用 Profile 的最大安全窗口构建一次上下文，避免先按本地窗口裁剪。
         self.model_context_window = max(self.model_selection_policy.maximum_safe_context_window(profile.context_window) for profile in self.model_profiles)
         self.model_resolver = model_resolver or ModelResolver({self.model_profiles[0].profile_id: llm_engine})
+        self.model_adapter_resolver = model_adapter_resolver or ModelAdapterResolver(
+            {
+                profile.profile_id: GeneratorModelAdapter(
+                    self.model_resolver.resolve(profile.profile_id)
+                )
+                for profile in self.model_profiles
+            }
+        )
+        self.model_invocation_router = model_invocation_router or ModelInvocationRouter(
+            self.model_routing_policy
+        )
+        # AgentRouter 为应用生命周期对象，因此默认 Registry 跨 Run 共享。
+        self.circuit_breaker_registry = (
+            circuit_breaker_registry or ModelCircuitBreakerRegistry()
+        )
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256
         self.knowledge_rewrite_max_tokens = 128
@@ -641,6 +681,26 @@ class AgentRouter:
         capability_requirements: TaskCapabilityRequirements | None = None,
     ) -> tuple[object, ModelProfile]:
         """使用完整消息的近似上下文特征选择并解析一次首选模型。"""
+        decision, profile, _requirements = self._select_model_decision(
+            agent_id,
+            user_query,
+            messages,
+            context_requirements,
+            run_context,
+            capability_requirements,
+        )
+        return self.model_resolver.resolve(decision.selected_profile), profile
+
+    def _select_model_decision(
+        self,
+        agent_id: str,
+        user_query: str,
+        messages: list[dict[str, str]],
+        context_requirements: ModelContextRequirements | None = None,
+        run_context: RunContext | None = None,
+        capability_requirements: TaskCapabilityRequirements | None = None,
+    ):
+        """返回 Selection Decision、首次 Profile 与最终上下文需求。"""
         estimated = self._estimate_messages_tokens(messages)
         requirements = context_requirements or ModelContextRequirements(estimated, estimated + self.max_tokens, estimated >= 2048, False, False, len(messages), 0, 0, False, False)
         capabilities = capability_requirements
@@ -655,7 +715,7 @@ class AgentRouter:
         final_required = self.model_selection_policy.required_context_window(requirements.minimum_context_window)
         if profile.context_window < final_required:
             raise ValueError("所选模型无法满足最终消息的安全上下文窗口")
-        return self.model_resolver.resolve(decision.selected_profile), profile
+        return decision, profile, requirements
 
     def _reserve_model_call(self, run_context: RunContext | None, messages: list[dict[str, str]], max_tokens: int, profile: ModelProfile):
         """在真实模型请求前执行原子预留；未注入账本时保持旧路径兼容。"""
@@ -831,6 +891,8 @@ class AgentRouter:
         history_scope: str = DIRECT_MEMORY_SCOPE,
         run_context: RunContext | None = None,
         capability_requirements: TaskCapabilityRequirements | None = None,
+        unified_invocation: bool = False,
+        invocation_result_out: list[ModelInvocationResult] | None = None,
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
@@ -850,12 +912,48 @@ class AgentRouter:
             context_requirements_out[0] if context_requirements_out else None,
             run_context,
         )
+        if unified_invocation:
+            if (
+                run_context is None
+                or run_context.budget_ledger is None
+                or capability_requirements is None
+            ):
+                raise RuntimeError("统一 Invocation 路径需要 RunContext、BudgetLedger 和能力需求")
+            decision, _selected_profile, requirements = self._select_model_decision(
+                *selection_args,
+                capability_requirements=capability_requirements,
+            )
+            breaker_snapshots = self.circuit_breaker_registry.snapshots(
+                tuple(profile.effective_breaker_key for profile in self.model_profiles)
+            )
+            routing_decision = self.model_routing_policy.route(
+                selection_decision=decision,
+                capability_requirements=capability_requirements,
+                context_requirements=requirements,
+                profiles=self.model_profiles,
+                preference=ModelPreference.AUTO,
+                budget_snapshot=run_context.budget_ledger.snapshot(),
+                breaker_snapshots=breaker_snapshots,
+            )
+            invocation_result = self.model_invocation_router.invoke(
+                run_context=run_context,
+                budget_ledger=run_context.budget_ledger,
+                routing_decision=routing_decision,
+                messages=messages,
+                adapter_resolver=self.model_adapter_resolver,
+                circuit_breaker_registry=self.circuit_breaker_registry,
+                token_estimate=self._estimate_messages_tokens(messages),
+                max_tokens=self.max_tokens,
+                output_started=False,
+            )
+            if invocation_result_out is not None:
+                invocation_result_out.append(invocation_result)
+            return invocation_result.output
         if capability_requirements is None:
             selected_model, selected_profile = self._select_model(*selection_args)
         else:
             selected_model, selected_profile = self._select_model(
-                *selection_args,
-                capability_requirements=capability_requirements,
+                *selection_args, capability_requirements=capability_requirements
             )
         model_reservation = self._reserve_model_call(
             run_context,
@@ -950,6 +1048,8 @@ class AgentRouter:
         history_scope: str = DIRECT_MEMORY_SCOPE,
         run_context: RunContext | None = None,
         capability_requirements: TaskCapabilityRequirements | None = None,
+        unified_invocation: bool = False,
+        invocation_result_out: list[ModelInvocationResult] | None = None,
     ) -> str:
         """执行一次非流式智能体调用。"""
         if run_context is not None:
@@ -967,6 +1067,8 @@ class AgentRouter:
             history_scope=history_scope,
             run_context=run_context,
             capability_requirements=capability_requirements,
+            unified_invocation=unified_invocation,
+            invocation_result_out=invocation_result_out,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -987,6 +1089,7 @@ class AgentRouter:
         run_context: RunContext,
         capability_requirements: TaskCapabilityRequirements,
         persist: bool = True,
+        invocation_result_out: list[ModelInvocationResult] | None = None,
     ) -> str:
         """供 RunCoordinator Driver 使用的真实单 Agent 非流式业务入口。"""
         return self._run_agent_once(
@@ -995,6 +1098,8 @@ class AgentRouter:
             persist=persist,
             run_context=run_context,
             capability_requirements=capability_requirements,
+            unified_invocation=True,
+            invocation_result_out=invocation_result_out,
         )
 
     def _build_orchestration_event(self, event_type: str, **payload: object) -> str:

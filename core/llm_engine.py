@@ -10,6 +10,27 @@ from typing import Dict, Generator, List
 import requests
 
 
+class RemoteLLMError(RuntimeError):
+    """OpenAI-compatible Client 的安全错误，不保存 Provider 正文。"""
+
+    def __init__(
+        self,
+        safe_message: str,
+        *,
+        status_code: int | None = None,
+        model_failure_category: str | None = None,
+        safe_error_code: str = "REMOTE_MODEL_FAILURE",
+        provider_started: bool = True,
+        provider_responded: bool | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.model_failure_category = model_failure_category
+        self.safe_error_code = safe_error_code
+        self.provider_started = provider_started
+        self.provider_responded = provider_responded
+        super().__init__(safe_message)
+
+
 class LocalLLMEngine:
     """封装 llama-cpp 的模型加载与流式生成能力。"""
 
@@ -100,6 +121,8 @@ class RemoteLLMEngine:
         timeout_seconds: int = 60,
         verify_tls: bool = False,
         enable_thinking: bool = False,
+        provider_kind: str = "openai_compatible",
+        session: requests.Session | None = None,
     ) -> None:
         self.api_base_url = api_base_url.rstrip("/")
         self.model_name = model_name
@@ -107,6 +130,14 @@ class RemoteLLMEngine:
         self.timeout_seconds = timeout_seconds
         self.verify_tls = verify_tls
         self.enable_thinking = enable_thinking
+        self.provider_kind = provider_kind
+        # 统一 Invocation 本日不允许 Retry；显式覆盖 requests/urllib3 重试配置。
+        self._session = session or requests.Session()
+        self._session_lock = threading.Lock()
+        self._closed = False
+        no_retry_adapter = requests.adapters.HTTPAdapter(max_retries=0)
+        self._session.mount("http://", no_retry_adapter)
+        self._session.mount("https://", no_retry_adapter)
 
     def _build_headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -123,9 +154,8 @@ class RemoteLLMEngine:
         return f"{self.api_base_url}/v1/chat/completions"
 
     def _supports_deepseek_thinking(self) -> bool:
-        """只为声明为 DeepSeek 兼容的 Provider 发送专属参数。"""
-        provider_identity = f"{self.api_base_url} {self.model_name}".lower()
-        return "deepseek" in provider_identity
+        """只为显式声明的 DeepSeek Provider 发送专属参数。"""
+        return self.provider_kind == "deepseek"
 
     @staticmethod
     def _extract_content(payload: dict[str, Any]) -> str:
@@ -170,23 +200,40 @@ class RemoteLLMEngine:
                 body["reasoning_effort"] = "high"
         else:
             body["chat_template_kwargs"] = {"enable_thinking": effective_thinking}
-        response = requests.post(
-            url,
-            headers=self._build_headers(),
-            json=body,
-            timeout=self.timeout_seconds,
-            verify=self.verify_tls,
-        )
+        # requests.Session 不承诺线程安全；应用级共享 Engine 必须显式串行访问。
+        # close() 使用同一把锁，因此会等待当前请求返回，不主动强杀活跃调用。
+        with self._session_lock:
+            if self._closed:
+                raise RemoteLLMError(
+                    "Remote model client has been closed",
+                    model_failure_category="PROVIDER_CONFIGURATION_ERROR",
+                    safe_error_code="REMOTE_CLIENT_CLOSED",
+                    provider_started=False,
+                    provider_responded=False,
+                )
+            response = self._session.post(
+                url,
+                headers=self._build_headers(),
+                json=body,
+                timeout=self.timeout_seconds,
+                verify=self.verify_tls,
+            )
         if response.status_code >= 400:
-            raise RuntimeError(
-                "Remote API request failed: "
-                f"status={response.status_code}, "
-                f"response={response.text[:1200]}"
+            raise RemoteLLMError(
+                f"Remote API request failed: status={response.status_code}",
+                status_code=response.status_code,
+                safe_error_code="REMOTE_HTTP_ERROR",
+                provider_responded=True,
             )
         try:
             payload = response.json()
-        except Exception as exc:
-            raise RuntimeError(f"Remote API returned non-JSON payload: {response.text[:1200]}") from exc
+        except Exception:
+            raise RemoteLLMError(
+                "Remote API returned non-JSON payload",
+                model_failure_category="OUTPUT_VALIDATION_FAILED",
+                safe_error_code="REMOTE_RESPONSE_NOT_JSON",
+                provider_responded=True,
+            ) from None
         content = self._extract_content(payload)
         if not content.strip():
             choices = payload.get("choices") or []
@@ -195,10 +242,26 @@ class RemoteLLMEngine:
             finish_reason = first_choice.get("finish_reason")
             reasoning_content = message.get("reasoning_content") or ""
             if finish_reason == "length":
-                raise RuntimeError(
+                raise RemoteLLMError(
                     "Remote model output was truncated before producing final content: "
                     f"model={self.model_name}, max_tokens={max_tokens}, "
-                    f"reasoning_chars={len(reasoning_content)}"
+                    f"reasoning_chars={len(reasoning_content)}",
+                    model_failure_category="CONTEXT_LIMIT_EXCEEDED",
+                    safe_error_code="REMOTE_OUTPUT_TRUNCATED",
+                    provider_responded=True,
                 )
-            raise RuntimeError(f"Remote model returned empty content: payload={payload}")
+            raise RemoteLLMError(
+                "Remote model returned empty content",
+                model_failure_category="OUTPUT_VALIDATION_FAILED",
+                safe_error_code="REMOTE_EMPTY_CONTENT",
+                provider_responded=True,
+            )
         yield content
+
+    def close(self) -> None:
+        """等待活跃请求结束后幂等关闭共享 Session。"""
+        with self._session_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._session.close()

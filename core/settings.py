@@ -35,12 +35,25 @@ class Settings:
     llm_backend: str
     model_path: str
     remote_model_name: str
+    remote_provider_kind: str
     remote_api_base_url: str
     remote_api_key: str
     remote_timeout_seconds: int
     remote_verify_tls: bool
     remote_enable_thinking: bool
     remote_context_window: int
+    local_fixed_call_cost_units: int
+    local_input_cost_units_per_1k_tokens: int
+    local_output_cost_units_per_1k_tokens: int
+    local_estimated_latency_ms: int
+    remote_fixed_call_cost_units: int
+    remote_input_cost_units_per_1k_tokens: int
+    remote_output_cost_units_per_1k_tokens: int
+    remote_estimated_latency_ms: int
+    model_breaker_failure_threshold: int
+    model_breaker_recovery_timeout_seconds: int
+    model_breaker_half_open_max_calls: int
+    model_breaker_count_rate_limited: bool
     model_threads: int
     model_context: int
     model_gpu_layers: int
@@ -131,12 +144,52 @@ class Settings:
                 os.path.join(project_root, "data", "models", "qwen2.5-7b-instruct-q4_k_m.gguf"),
             ),
             remote_model_name=os.getenv("LOCAL_AGENT_REMOTE_MODEL_NAME", "Qwen3.5-27B"),
+            remote_provider_kind=os.getenv(
+                "LOCAL_AGENT_REMOTE_PROVIDER_KIND", "openai_compatible"
+            ).lower(),
             remote_api_base_url=os.getenv("LOCAL_AGENT_REMOTE_API_BASE_URL", ""),
             remote_api_key=os.getenv("LOCAL_AGENT_REMOTE_API_KEY", ""),
             remote_timeout_seconds=_env_int("LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS", 120),
             remote_verify_tls=os.getenv("LOCAL_AGENT_REMOTE_VERIFY_TLS", "0") == "1",
             remote_enable_thinking=os.getenv("LOCAL_AGENT_REMOTE_ENABLE_THINKING", "0") == "1",
             remote_context_window=_env_int("LOCAL_AGENT_REMOTE_CONTEXT_WINDOW", 32768),
+            local_fixed_call_cost_units=_env_int_at_least(
+                "LOCAL_AGENT_LOCAL_FIXED_CALL_COST_UNITS", 1, 0
+            ),
+            local_input_cost_units_per_1k_tokens=_env_int_at_least(
+                "LOCAL_AGENT_LOCAL_INPUT_COST_UNITS_PER_1K_TOKENS", 1, 0
+            ),
+            local_output_cost_units_per_1k_tokens=_env_int_at_least(
+                "LOCAL_AGENT_LOCAL_OUTPUT_COST_UNITS_PER_1K_TOKENS", 1, 0
+            ),
+            local_estimated_latency_ms=_env_int_at_least(
+                "LOCAL_AGENT_LOCAL_ESTIMATED_LATENCY_MS", 1000, 1
+            ),
+            remote_fixed_call_cost_units=_env_int_at_least(
+                "LOCAL_AGENT_REMOTE_FIXED_CALL_COST_UNITS", 10, 0
+            ),
+            remote_input_cost_units_per_1k_tokens=_env_int_at_least(
+                "LOCAL_AGENT_REMOTE_INPUT_COST_UNITS_PER_1K_TOKENS", 2, 0
+            ),
+            remote_output_cost_units_per_1k_tokens=_env_int_at_least(
+                "LOCAL_AGENT_REMOTE_OUTPUT_COST_UNITS_PER_1K_TOKENS", 4, 0
+            ),
+            remote_estimated_latency_ms=_env_int_at_least(
+                "LOCAL_AGENT_REMOTE_ESTIMATED_LATENCY_MS", 3000, 1
+            ),
+            model_breaker_failure_threshold=_env_int_at_least(
+                "LOCAL_AGENT_MODEL_BREAKER_FAILURE_THRESHOLD", 3, 1
+            ),
+            model_breaker_recovery_timeout_seconds=_env_int_at_least(
+                "LOCAL_AGENT_MODEL_BREAKER_RECOVERY_TIMEOUT_SECONDS", 30, 1
+            ),
+            model_breaker_half_open_max_calls=_env_int_at_least(
+                "LOCAL_AGENT_MODEL_BREAKER_HALF_OPEN_MAX_CALLS", 1, 1
+            ),
+            model_breaker_count_rate_limited=os.getenv(
+                "LOCAL_AGENT_MODEL_BREAKER_COUNT_RATE_LIMITED", "1"
+            )
+            == "1",
             model_threads=_env_int("LOCAL_AGENT_MODEL_THREADS", preset["model_threads"]),
             model_context=_env_int("LOCAL_AGENT_MODEL_CONTEXT", preset["model_context"]),
             model_gpu_layers=_env_int("LOCAL_AGENT_MODEL_GPU_LAYERS", 0),
