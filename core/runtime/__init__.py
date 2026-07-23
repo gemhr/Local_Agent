@@ -42,6 +42,7 @@ from core.runtime.model_context import (
     ModelContextRequirements, TokenEstimator,
 )
 from core.runtime.planning import Plan, PlanSource, PlanStep, PlanValidator, RiskLevel, TaskCapabilityRequirements, create_single_step_plan
+from core.runtime.plan_graph import PlanGraph, PlanGraphValidationError, PlanGraphValidator
 from core.runtime.model_selection import (ModelPreference, ModelProfile, ModelProfileId, ModelResolver, ModelSelectionDecision, ModelSelectionError, ModelSelectionPolicy, ModelSelectionReason, ModelSelectionRequest)
 from core.runtime.state_machine import (
     AgentStateMachine,
@@ -76,6 +77,7 @@ __all__ = [
     "ContextDropRecord", "ContextItem", "ContextSourceType", "ContextStats", "ContextTrustLevel",
     "DeterministicTokenEstimator", "ModelContextRequirements", "TokenEstimator",
     "Plan", "PlanSource", "PlanStep", "PlanValidator", "RiskLevel", "TaskCapabilityRequirements", "create_single_step_plan",
+    "PlanGraph", "PlanGraphValidationError", "PlanGraphValidator",
     "ModelPreference", "ModelProfile", "ModelProfileId", "ModelResolver", "ModelSelectionDecision", "ModelSelectionError", "ModelSelectionPolicy", "ModelSelectionReason", "ModelSelectionRequest",
     "CancellationToken",
     "Clock",

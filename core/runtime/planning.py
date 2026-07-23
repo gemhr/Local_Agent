@@ -81,24 +81,19 @@ class PlanValidator:
             raise ValueError("created_at 必须是带时区的 UTC 时间")
         if not isinstance(plan.source, PlanSource) or not plan.steps:
             raise ValueError("Plan 必须包含至少一个合法步骤")
-        ids: set[str] = set()
         for step in plan.steps:
             if not isinstance(step.step_id, str) or not step.step_id.strip():
                 raise ValueError("step_id 不能为空")
-            if step.step_id in ids:
-                raise ValueError("step_id 不允许重复")
-            ids.add(step.step_id)
-            if not isinstance(step.depends_on, tuple) or len(set(step.depends_on)) != len(step.depends_on):
-                raise ValueError("depends_on 必须是无重复的 tuple")
-            if step.step_id in step.depends_on:
-                raise ValueError("PlanStep 不允许自依赖")
+            if not isinstance(step.title, str) or not step.title.strip():
+                raise ValueError("title 不能为空")
+            if not isinstance(step.depends_on, tuple):
+                raise ValueError("depends_on 必须是 tuple")
+            if not all(isinstance(dependency, str) and dependency.strip() for dependency in step.depends_on):
+                raise ValueError("depends_on 只能包含非空步骤标识")
             if not isinstance(step.completion_criteria, str) or not step.completion_criteria.strip():
                 raise ValueError("completion_criteria 不能为空")
             if not isinstance(step.capability_requirements, TaskCapabilityRequirements):
                 raise ValueError("capability_requirements 必须合法")
-        for step in plan.steps:
-            if any(dependency not in ids for dependency in step.depends_on):
-                raise ValueError("depends_on 包含不存在的步骤")
 
 
 def create_single_step_plan(agent_id: str, requirements: TaskCapabilityRequirements) -> Plan:
