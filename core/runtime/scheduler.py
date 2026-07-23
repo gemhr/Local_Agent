@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import Lock
 
+from core.runtime.budget import BudgetLedger, BudgetUsage, BudgetReservation
 from core.runtime.planning import (
     Plan,
     PlanStep,
@@ -175,7 +176,7 @@ class SerialScheduler:
         claims = self.claim_ready(plan, state, max_parallelism=1, occurred_at=occurred_at)
         return claims[0] if claims else None
 
-    def claim_ready(self, plan: Plan, state: AgentState, max_parallelism: int, occurred_at: datetime) -> tuple[StepClaim, ...]:
+    def claim_ready(self, plan: Plan, state: AgentState, max_parallelism: int, occurred_at: datetime, *, budget_ledger: BudgetLedger | None = None) -> tuple[StepClaim, ...]:
         """在同一锁内按稳定拓扑顺序认领不超过容量的全部 Ready Step。"""
         self._validate_parallelism(max_parallelism)
         self._validate_utc(occurred_at)
@@ -186,6 +187,10 @@ class SerialScheduler:
             running_count = len(self._running_steps(plan, state))
             available_slots = max(0, max_parallelism - running_count)
             candidates = self._compute_ready_steps(plan, graph, state)[:available_slots]
+            reservation: BudgetReservation | None = None
+            if budget_ledger is not None:
+                # 预算预留在任何 STARTED 之前完成，避免并发 check-then-act。
+                reservation = budget_ledger.reserve(BudgetUsage(step_starts=len(candidates)), reservation_type="step_start")
             # 在发送任何 STARTED 前完成所有候选的预检。
             for step in candidates:
                 current = state.steps[step.step_id]
@@ -197,14 +202,26 @@ class SerialScheduler:
                 try:
                     self._state_machine.apply_step_event(state, StepStateEvent(StepEventType.STARTED, step.step_id, occurred_at=claim_at))
                 except Exception as exc:
+                    if reservation is not None:
+                        if claims:
+                            budget_ledger.commit(reservation, BudgetUsage(step_starts=len(claims)))
+                        else:
+                            budget_ledger.release(reservation)
                     current = state.steps.get(step.step_id)
                     if claims:
                         raise SchedulerPartialClaimError(plan=plan, succeeded_step_ids=tuple(item.step_id for item in claims), step_id=step.step_id, current_state=current.status.value if current else "MISSING") from exc
                     raise SchedulerClaimError(plan=plan, step_id=step.step_id, current_state=current.status.value if current else "MISSING") from exc
                 claimed = state.steps[step.step_id]
                 if claimed.status != StepStatus.RUNNING or step.step_id not in state.active_step_ids:
+                    if reservation is not None:
+                        if claims:
+                            budget_ledger.commit(reservation, BudgetUsage(step_starts=len(claims)))
+                        else:
+                            budget_ledger.release(reservation)
                     raise SchedulerPartialClaimError(plan=plan, succeeded_step_ids=tuple(item.step_id for item in claims), step_id=step.step_id, current_state=claimed.status.value)
                 claims.append(StepClaim(plan.plan_id, plan.version, step.step_id, claimed.started_at or claim_at, step.capability_requirements, step.preferred_agent))
+            if reservation is not None:
+                budget_ledger.commit(reservation, BudgetUsage(step_starts=len(claims)))
             return tuple(claims)
 
     def _prepare_locked(self, plan: Plan, state: AgentState) -> PlanGraph:

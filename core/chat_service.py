@@ -13,6 +13,8 @@ from core.runtime import (
     LEGACY_AGENT_ROUTER_STEP_ID,
     LegacyAgentRouterDriver,
     create_run_context,
+    BudgetLedger,
+    RunBudget,
 )
 
 
@@ -53,6 +55,8 @@ class ChatService:
         )
         # 在此生成器栈帧中保留取消源，避免丢失取消控制权。
         _cancellation_source = cancellation_source
+        # ChatService 是当前 Legacy 主链路的 Parent Runtime，单 Run 创建并持有账本。
+        run_context.attach_budget_ledger(BudgetLedger(RunBudget(), deadline_remaining=run_context.remaining_seconds))
         agent_state = AgentState.for_run_context(run_context.run_id)
         driver = LegacyAgentRouterDriver(self.router, user_query=final_query, agent_id=agent_id)
         loop = AgentLoop()
