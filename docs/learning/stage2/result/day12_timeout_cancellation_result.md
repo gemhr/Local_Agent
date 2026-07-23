@@ -138,6 +138,18 @@ HTTP finally 关闭流，ChatService finally 停 watcher 并 unregister；清理
 - 面试表达：注销是外层运行 finally 的最后动作。
 - 当前状态：已接入。
 
+### Bad Case 8：编排非流式路径将模型选择结果 tuple 当作模型对象调用
+
+- 类型：真实开发测试问题。
+- 触发条件：请求由 `core_router` 进入多智能体编排，或任意路径调用 `_run_agent_once()`，进而进入 `_complete_final_response()` 的非流式模型调用路径。
+- 故障表现：后端抛出 `AttributeError: 'tuple' object has no attribute 'generate'`；AgentLoop 记录执行失败；StreamingResponse 提前中断；桌面端显示 `API request failed: Response ended prematurely`。
+- 根因分析：`_select_model()` 的返回契约是 `(selected_model, selected_profile)` 二元组。流式 `_stream_final_response()` 已正确解包后调用 `selected_model.generate()`；但非流式 `_complete_final_response()` 曾将整个二元组赋给 `selected_model`，随后直接调用 `.generate()`。因此，当编排 delegate、知识专家委派或其他非直接回答路径进入 `_run_agent_once()` 时，会把 tuple 误当作模型对象。该问题与 Cancellation、RunRegistry、run_id、Deadline watcher 或 Summary 触发本身无直接因果关系；Summary 日志只是发生在同一请求中的相邻正常操作。
+- 修复方案：在 `_complete_final_response()` 中与流式路径保持一致，解包为 `selected_model, selected_profile`；向 `_select_model()` 传入同一 `run_context`；按选中的 Profile 进行模型预算预留；在 `finally` 中关闭同步模型流，并在迭代前后执行 Token 安全点检查。这样非流式 delegate 路径与流式主回答路径使用一致的模型选择、预算与资源清理语义。
+- 回归测试：新增非流式 delegate 回归测试，使用 `code_expert` 触发模型选择，通过 `_run_agent_once()` 验证真实模型对象的 `generate()` 被调用、返回预期结果，并避免 tuple `.generate()` 异常；同时回归知识路由、预算、模型选择、取消、Registry、AgentLoop、Scheduler 和 ParallelExecutor 测试。
+- 对应知识点：函数返回值契约；流式与非流式执行路径一致性；模型选择结果解包；资源生命周期；预算预留；Generator 异常传播；HTTP 流式响应错误边界。
+- 面试表达：模型选择函数返回的是“模型对象加 Profile 元数据”的二元组。流式路径正确解包，但编排 delegate 的非流式路径遗漏了解包，导致仅在委派调用时把 tuple 当模型使用。修复不只是拆包，还要让非流式路径复用 run_context、预算预留、Token 检查和 finally close，避免两条模型调用链语义漂移。
+- 当前状态：已修复，并已增加非流式 delegate 回归测试。
+
 ## 22. 测试命令和结果
 已执行目标 pytest、独立取消请求阻塞边界测试、Registry Grace Period 测试、compileall 与 diff 检查；全仓 pytest 结果见本次提交记录。
 
