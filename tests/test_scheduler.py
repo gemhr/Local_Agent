@@ -469,3 +469,18 @@ class SchedulerBoundaryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class SchedulerParallelClaimTests(unittest.TestCase):
+    def test_claim_ready_claims_stable_prefix_and_respects_existing_running(self) -> None:
+        source_plan = plan(step("b"), step("a"), step("c", depends_on=("a",)))
+        state = running_state()
+        scheduler = SerialScheduler()
+        first = scheduler.claim_ready(source_plan, state, 2, datetime.now(UTC))
+        self.assertEqual(tuple(item.step_id for item in first), ("b", "a"))
+        self.assertEqual(state.active_step_ids, {"a", "b"})
+        self.assertEqual(scheduler.claim_ready(source_plan, state, 2, datetime.now(UTC)), ())
+        self.assertEqual(scheduler.evaluate(source_plan, state, 2).available_slots, 0)
+
+    def test_claim_ready_rejects_bool_capacity(self) -> None:
+        with self.assertRaises(ValueError):
+            SerialScheduler().claim_ready(plan(step("a")), running_state(), True, datetime.now(UTC))
