@@ -11,10 +11,10 @@ import logging
 import re
 from typing import Protocol
 
-from core.runtime.cancellation import RunCancelledError
+from core.runtime.cancellation import CancellationReason, RunCancelledError
 from core.runtime.budget import BudgetExceededError
 from core.runtime.context import RunContext, RunDeadlineExceededError
-from core.runtime.state import AgentState, StopReason
+from core.runtime.state import AgentState, RunStatus, StopReason
 from core.runtime.state_machine import (
     AgentStateMachine,
     RunEventType,
@@ -302,6 +302,16 @@ class AgentLoop:
                     return
                 previous_observation = observation
         except GeneratorExit:
+            # 外层流提前关闭时不能遗留 RUNNING；HTTP 边界会先写入断开原因。
+            reason = _cancellation_reason(run_context.cancellation_token.reason, CancellationReason.CLIENT_DISCONNECTED)
+            if active_step_id is not None:
+                self._state_machine.apply_step_event(agent_state, StepStateEvent(
+                    StepEventType.CANCELLED, active_step_id, error_code=reason.value, error_message="运行已取消"))
+            if agent_state.status not in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED}:
+                self._state_machine.apply_run_event(agent_state, RunStateEvent(
+                    RunEventType.CANCELLED, stop_reason=_stop_reason_for_cancellation(reason),
+                    error_code=reason.value, error_message="运行已取消"))
+                self._observe(agent_state, state_observer)
             raise
         except BudgetExceededError:
             if active_step_id is not None:
@@ -332,14 +342,15 @@ class AgentLoop:
             logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
             raise
         except RunCancelledError:
+            reason = _cancellation_reason(run_context.cancellation_token.reason, CancellationReason.USER_CANCELLED)
             if active_step_id is not None:
                 self._state_machine.apply_step_event(
                     agent_state,
                     StepStateEvent(
                         StepEventType.CANCELLED,
                         active_step_id,
-                        error_code="USER_CANCELLED",
-                        error_message="Run cancelled",
+                        error_code=reason.value,
+                        error_message="运行已取消",
                     ),
                 )
                 active_step_id = None
@@ -347,9 +358,9 @@ class AgentLoop:
                 agent_state,
                 RunStateEvent(
                     RunEventType.CANCELLED,
-                    stop_reason=StopReason.USER_CANCELLED,
-                    error_code="USER_CANCELLED",
-                    error_message="Run cancelled",
+                    stop_reason=_stop_reason_for_cancellation(reason),
+                    error_code=reason.value,
+                    error_message="运行已取消",
                 ),
             )
             self._observe(agent_state, state_observer)
@@ -401,3 +412,16 @@ class AgentLoop:
     def _observe(agent_state: AgentState, observer: Callable[[AgentState], None] | None) -> None:
         if observer is not None:
             observer(agent_state)
+
+
+def _stop_reason_for_cancellation(reason: CancellationReason) -> StopReason:
+    """将取消域原因映射到唯一允许修改终态的 StopReason。"""
+    return StopReason(reason.value)
+
+
+def _cancellation_reason(value: CancellationReason | str | None, fallback: CancellationReason) -> CancellationReason:
+    """兼容旧 Token 的自由文本原因，运行终态仅使用固定枚举。"""
+    try:
+        return value if isinstance(value, CancellationReason) else CancellationReason(str(value))
+    except ValueError:
+        return fallback
