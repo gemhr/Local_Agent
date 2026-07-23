@@ -13,6 +13,7 @@ from core.runtime import (
     DeterministicTokenEstimator, ModelContextRequirements, ModelPreference, ModelProfile,
     ModelProfileId, ModelResolver, ModelSelectionPolicy, ModelSelectionRequest,
     RiskLevel, RunContext, TaskCapabilityRequirements, create_single_step_plan,
+    BudgetUsage, UsageSource, BudgetedModelStream,
 )
 
 if TYPE_CHECKING:
@@ -624,18 +625,31 @@ class AgentRouter:
             estimated_steps=1,
         )
 
-    def _select_model(self, agent_id: str, user_query: str, messages: list[dict[str, str]], context_requirements: ModelContextRequirements | None = None) -> object:
+    def _select_model(self, agent_id: str, user_query: str, messages: list[dict[str, str]], context_requirements: ModelContextRequirements | None = None, run_context: RunContext | None = None) -> tuple[object, ModelProfile]:
         """使用完整消息的近似上下文特征选择并解析一次首选模型。"""
         estimated = self._estimate_messages_tokens(messages)
         requirements = context_requirements or ModelContextRequirements(estimated, estimated + self.max_tokens, estimated >= 2048, False, False, len(messages), 0, 0, False, False)
         capabilities = self._capability_requirements(agent_id, user_query)
         create_single_step_plan(agent_id, capabilities)
-        decision = self.model_selection_policy.select(ModelSelectionRequest(agent_id, capabilities, requirements, ModelPreference.AUTO, self.model_profiles))
+        decision = self.model_selection_policy.select(ModelSelectionRequest(agent_id, capabilities, requirements, ModelPreference.AUTO, self.model_profiles, run_context.budget_ledger.snapshot() if run_context is not None and run_context.budget_ledger is not None else None))
         profile = next(profile for profile in self.model_profiles if profile.profile_id == decision.selected_profile)
         final_required = self.model_selection_policy.required_context_window(requirements.minimum_context_window)
         if profile.context_window < final_required:
             raise ValueError("所选模型无法满足最终消息的安全上下文窗口")
-        return self.model_resolver.resolve(decision.selected_profile)
+        return self.model_resolver.resolve(decision.selected_profile), profile
+
+    def _reserve_model_call(self, run_context: RunContext | None, messages: list[dict[str, str]], max_tokens: int, profile: ModelProfile):
+        """在真实模型请求前执行原子预留；未注入账本时保持旧路径兼容。"""
+        if run_context is None or run_context.budget_ledger is None:
+            return None
+        input_tokens = self._estimate_messages_tokens(messages)
+        metadata = profile.cost_profile
+        budget = run_context.budget_ledger.budget
+        if metadata is None and (budget.max_remote_model_calls is not None or budget.max_cost_units is not None):
+            from core.runtime.model_selection import ModelSelectionError
+            raise ModelSelectionError("MODEL_BUDGET_METADATA_MISSING", requested_profile=profile.profile_id)
+        cost = 0 if metadata is None else metadata.fixed_call_cost_units + (input_tokens * metadata.input_cost_units_per_1k_tokens + 999) // 1000 + (max_tokens * metadata.output_cost_units_per_1k_tokens + 999) // 1000
+        return run_context.budget_ledger.reserve(BudgetUsage(model_calls=1, remote_model_calls=int(metadata.is_remote) if metadata else 0, input_tokens=input_tokens, output_tokens=max_tokens, total_tokens=input_tokens + max_tokens, cost_units=cost), reservation_type="model_call")
 
     def _parse_tool_call(self, response_text: str) -> Optional[tuple[str, str]]:
         """解析工具规划结果。"""
@@ -732,7 +746,15 @@ class AgentRouter:
         tool_name, tool_args = tool_call
         if run_context is not None:
             run_context.raise_if_inactive()
-        observation = str(self.tools[tool_name]["func"](tool_args))
+        tool_reservation = None
+        if run_context is not None and run_context.budget_ledger is not None:
+            tool_reservation = run_context.budget_ledger.reserve(BudgetUsage(tool_calls=1), reservation_type="tool_call")
+        try:
+            observation = str(self.tools[tool_name]["func"](tool_args))
+        finally:
+            # 已进入真实 Tool 边界后，即使失败也正式计一次调用。
+            if tool_reservation is not None:
+                run_context.budget_ledger.commit(tool_reservation, BudgetUsage(tool_calls=1), usage_source=UsageSource.ESTIMATED)
         if run_context is not None:
             run_context.raise_if_inactive()
         observation = self._truncate_text(observation, 1600)
@@ -765,12 +787,21 @@ class AgentRouter:
         if run_context is not None:
             run_context.raise_if_inactive()
         final_response = ""
-        selected_model = self._select_model(agent_id, user_query, messages, context_requirements_out[0] if context_requirements_out else None)
-        for chunk in selected_model.generate(messages, max_tokens=self.max_tokens):
-            if run_context is not None:
-                run_context.raise_if_inactive()
-            final_response += chunk
-            yield chunk
+        selected_model, selected_profile = self._select_model(agent_id, user_query, messages, context_requirements_out[0] if context_requirements_out else None, run_context)
+        model_reservation = self._reserve_model_call(run_context, messages, self.max_tokens, selected_profile)
+        stream = selected_model.generate(messages, max_tokens=self.max_tokens)
+        if model_reservation is not None:
+            stream = BudgetedModelStream(stream, run_context.budget_ledger, model_reservation)
+        try:
+            for chunk in stream:
+                if run_context is not None:
+                    run_context.raise_if_inactive()
+                final_response += chunk
+                yield chunk
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
         return final_response
 
     def _complete_final_response(

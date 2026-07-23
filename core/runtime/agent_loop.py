@@ -12,6 +12,7 @@ import re
 from typing import Protocol
 
 from core.runtime.cancellation import RunCancelledError
+from core.runtime.budget import BudgetExceededError
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.state import AgentState, StopReason
 from core.runtime.state_machine import (
@@ -301,6 +302,12 @@ class AgentLoop:
                     return
                 previous_observation = observation
         except GeneratorExit:
+            raise
+        except BudgetExceededError:
+            if active_step_id is not None:
+                self._state_machine.apply_step_event(agent_state, StepStateEvent(StepEventType.FAILED, active_step_id, error_code="BUDGET_EXHAUSTED", error_message="预算额度不足"))
+            self._apply_failed_run_event(agent_state, RunEventType.BUDGET_EXHAUSTED, StopReason.BUDGET_EXHAUSTED, "BUDGET_EXHAUSTED", "预算额度不足")
+            self._observe(agent_state, state_observer)
             raise
         except RunDeadlineExceededError:
             if active_step_id is not None:
