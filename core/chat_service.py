@@ -3,6 +3,7 @@
 """聊天应用服务层。"""
 
 from collections.abc import Callable
+import threading
 from typing import Any, Generator, Optional
 
 from core.agent_router import AgentRouter
@@ -15,6 +16,9 @@ from core.runtime import (
     create_run_context,
     BudgetLedger,
     RunBudget,
+    CancellationReason,
+    RunHandle,
+    process_run_registry,
 )
 
 
@@ -35,7 +39,7 @@ class ChatService:
         self.router = router
         self._state_observer = state_observer
 
-    def stream_chat(self, agent_id: str, query: str, file_path: str = "") -> Generator[str, None, None]:
+    def stream_chat(self, agent_id: str, query: str, file_path: str = "", run_id: str | None = None) -> Generator[str, None, None]:
         """流式执行一次对话。
 
         Args:
@@ -52,14 +56,23 @@ class ChatService:
         run_context, cancellation_source = create_run_context(
             entry_agent_id=agent_id,
             session_id=LEGACY_DEFAULT_SESSION_ID,
+            run_id=run_id,
         )
         # 在此生成器栈帧中保留取消源，避免丢失取消控制权。
         _cancellation_source = cancellation_source
         # ChatService 是当前 Legacy 主链路的 Parent Runtime，单 Run 创建并持有账本。
         run_context.attach_budget_ledger(BudgetLedger(RunBudget(), deadline_remaining=run_context.remaining_seconds))
         agent_state = AgentState.for_run_context(run_context.run_id)
+        process_run_registry.register(RunHandle(run_context.run_id, cancellation_source, agent_state, "chat_service"))
         driver = LegacyAgentRouterDriver(self.router, user_query=final_query, agent_id=agent_id)
         loop = AgentLoop()
+        deadline_timer: threading.Timer | None = None
+        remaining = run_context.remaining_seconds()
+        if remaining is not None:
+            # Timer 只属于本 Run，finally 一定取消；不创建永久后台任务。
+            deadline_timer = threading.Timer(remaining, cancellation_source.cancel, args=(CancellationReason.DEADLINE_EXCEEDED,))
+            deadline_timer.daemon = True
+            deadline_timer.start()
         try:
             yield from loop.run_stream(
                 run_context=run_context,
@@ -67,7 +80,13 @@ class ChatService:
                 driver=driver,
                 state_observer=self._observe_state,
             )
+        except GeneratorExit:
+            cancellation_source.cancel(CancellationReason.CLIENT_DISCONNECTED)
+            raise
         finally:
+            if deadline_timer is not None:
+                deadline_timer.cancel()
+            process_run_registry.unregister(run_context.run_id)
             _ = _cancellation_source
 
     def _observe_state(self, agent_state: AgentState) -> None:

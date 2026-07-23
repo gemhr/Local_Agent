@@ -274,3 +274,21 @@ def test_knowledge_final_call_uses_selected_profile_once_and_preserves_messages(
     assert len(local.calls) == 1  # 查询改写使用既有默认模型入口。
     assert len(remote.calls) == 1
     assert [message["role"] for message in remote.calls[0][0]] == ["system", "user"]
+
+
+def test_non_streaming_delegate_unpacks_selected_model_and_uses_run_context() -> None:
+    """编排 delegate 走非流式路径时也必须消费 _select_model 的二元组。"""
+    local, remote = RecordingModel("local"), RecordingModel("delegate result")
+    profiles = (
+        ModelProfile(ModelProfileId.LOCAL_FAST, 128, 64, False, False, False, False, 1, 1),
+        ModelProfile(ModelProfileId.REMOTE_ADVANCED, 8192, 512, True, True, True, True, 2, 2),
+    )
+    router = AgentRouter(
+        llm_engine=local,
+        memory_manager=FakeMemory(),
+        max_tokens=64,
+        model_profiles=profiles,
+        model_resolver=ModelResolver({ModelProfileId.LOCAL_FAST: local, ModelProfileId.REMOTE_ADVANCED: remote}),
+    )
+    assert router._run_agent_once("code_expert", "检查运行级取消", persist=False) == "delegate result"
+    assert len(remote.calls) == 1
