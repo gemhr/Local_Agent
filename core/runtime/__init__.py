@@ -110,3 +110,15 @@ __all__ = [
     "SystemClock",
     "create_run_context",
 ]
+
+from core.runtime.parallel_execution import (
+    ParallelExecutionInfrastructureError, ParallelExecutionReport, ParallelExecutor,
+    ParallelFailureMode, ParallelExecutionPolicy, StepConcurrencySpec, StepExecutionDriver, StepExecutionMode,
+    StepExecutionOutcome,
+)
+
+__all__ += [
+    "ParallelExecutionInfrastructureError", "ParallelExecutionReport", "ParallelExecutor",
+    "ParallelFailureMode", "ParallelExecutionPolicy", "StepConcurrencySpec", "StepExecutionDriver", "StepExecutionMode",
+    "StepExecutionOutcome",
+]
