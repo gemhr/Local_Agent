@@ -823,10 +823,32 @@ class AgentRouter:
         )
         if run_context is not None:
             run_context.raise_if_inactive()
-        selected_model = self._select_model(agent_id, user_query, messages, context_requirements_out[0] if context_requirements_out else None)
+        selected_model, selected_profile = self._select_model(
+            agent_id,
+            user_query,
+            messages,
+            context_requirements_out[0] if context_requirements_out else None,
+            run_context,
+        )
+        model_reservation = self._reserve_model_call(
+            run_context,
+            messages,
+            self.max_tokens,
+            selected_profile,
+        )
+        stream = selected_model.generate(messages, max_tokens=self.max_tokens)
+        if model_reservation is not None:
+            stream = BudgetedModelStream(stream, run_context.budget_ledger, model_reservation)
         response = ""
-        for chunk in selected_model.generate(messages, max_tokens=self.max_tokens):
-            response += chunk
+        try:
+            for chunk in stream:
+                if run_context is not None:
+                    run_context.raise_if_inactive()
+                response += chunk
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
         return response
 
     def _parse_delegate_plan(self, response_text: str) -> list[dict[str, str]]:
