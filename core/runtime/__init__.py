@@ -62,6 +62,12 @@ from core.runtime.scheduler import (
     SerialScheduler,
     StepClaim,
 )
+from core.runtime.run_coordinator import (
+    RunCoordinator,
+    RunCoordinatorError,
+    RunCoordinatorResult,
+    RunFinalizationDecision,
+)
 
 __all__ = [
     "AGENT_STATE_SCHEMA_VERSION",
@@ -93,12 +99,16 @@ __all__ = [
     "InvalidStateTransitionError",
     "RunCancelledError",
     "RunContext",
+    "RunCoordinator",
+    "RunCoordinatorError",
+    "RunCoordinatorResult",
     "RunContextData",
     "RunDeadlineExceededError",
     "RunIdentifiers",
     "RunStatus",
     "RunEventType",
     "RunStateEvent",
+    "RunFinalizationDecision",
     "SchedulerClaimError",
     "SchedulerError",
     "SchedulerPlanStateMismatchError",
@@ -127,3 +137,16 @@ __all__ += [
     "StepExecutionOutcome",
 ]
 from core.runtime.budget import BudgetedModelStream, BudgetExceededError, BudgetLedger, BudgetPolicy, BudgetReservation, BudgetReservationError, BudgetSnapshot, BudgetUsage, RunBudget, UsageSource
+
+__all__ += [
+    "BudgetedModelStream",
+    "BudgetExceededError",
+    "BudgetLedger",
+    "BudgetPolicy",
+    "BudgetReservation",
+    "BudgetReservationError",
+    "BudgetSnapshot",
+    "BudgetUsage",
+    "RunBudget",
+    "UsageSource",
+]
