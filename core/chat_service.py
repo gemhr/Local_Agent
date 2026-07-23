@@ -19,7 +19,47 @@ from core.runtime import (
     CancellationReason,
     RunHandle,
     process_run_registry,
+    AgentStateMachine,
+    ParallelExecutionPolicy,
+    ParallelExecutor,
+    RunCoordinator,
+    RunCoordinatorResult,
+    RunBudget,
+    SerialScheduler,
+    StepClaim,
+    StepExecutionMode,
 )
+
+
+class _CoordinatedSingleAgentDriver:
+    """只执行业务 Adapter，不写 Run/Step 状态或 Registry。"""
+
+    def __init__(
+        self,
+        router: AgentRouter,
+        *,
+        user_query: str,
+        agent_id: str,
+        persist: bool,
+    ) -> None:
+        self._router = router
+        self._user_query = user_query
+        self._agent_id = agent_id
+        self._persist = persist
+        self.output: str | None = None
+
+    def execute(self, claim: StepClaim, run_context) -> str:
+        """执行由 Scheduler 已 Claim 的真实单 Agent 步骤。"""
+        if claim.step_id != "answer" or claim.preferred_agent != self._agent_id:
+            raise RuntimeError("Coordinated 单 Agent Claim 与 Driver 不匹配")
+        self.output = self._router.complete_single_agent(
+            self._agent_id,
+            self._user_query,
+            run_context=run_context,
+            capability_requirements=claim.capability_requirements,
+            persist=self._persist,
+        )
+        return self.output
 
 
 class ChatService:
@@ -93,6 +133,64 @@ class ChatService:
         """通知可选观察者，但不在服务对象上存储 AgentState。"""
         if self._state_observer is not None:
             self._state_observer(agent_state)
+
+    async def run_coordinated_agent(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        run_id: str | None = None,
+        budget: RunBudget | None = None,
+        persist: bool = True,
+    ) -> tuple[str | None, RunCoordinatorResult]:
+        """通过 RunCoordinator 执行一条真实的非流式单 Agent 路径。
+
+        默认 ``stream_chat`` 继续由 Legacy AgentLoop 持有生命周期；调用方必须
+        二选一，不能让同一个 run_id 同时进入 Legacy 与 Coordinated 路径。
+        """
+        run_context, cancellation_source = create_run_context(
+            entry_agent_id=agent_id,
+            session_id=LEGACY_DEFAULT_SESSION_ID,
+            run_id=run_id,
+        )
+        ledger = BudgetLedger(
+            budget or RunBudget(),
+            deadline_remaining=run_context.remaining_seconds,
+        )
+        run_context.attach_budget_ledger(ledger)
+        agent_state = AgentState.for_run_context(run_context.run_id)
+        plan = self.router.build_single_agent_plan(agent_id, query)
+        machine = AgentStateMachine()
+        policy = ParallelExecutionPolicy(max_concurrency=1)
+        coordinator = RunCoordinator(
+            run_context=run_context,
+            plan=plan,
+            agent_state=agent_state,
+            budget_ledger=ledger,
+            run_handle=RunHandle(
+                run_context.run_id,
+                cancellation_source,
+                agent_state,
+                "run_coordinator",
+            ),
+            scheduler=SerialScheduler(machine),
+            executor=ParallelExecutor(machine, max_concurrency=1),
+            run_registry=process_run_registry,
+            policy=policy,
+            state_machine=machine,
+        )
+        driver = _CoordinatedSingleAgentDriver(
+            self.router,
+            user_query=query,
+            agent_id=agent_id,
+            persist=persist,
+        )
+        result = await coordinator.execute(
+            driver=driver,
+            execution_mode=StepExecutionMode.SYNC_BLOCKING,
+        )
+        self._observe_state(agent_state)
+        return driver.output if result.status.value == "SUCCEEDED" else None, result
 
     def get_history(self, agent_id: str, limit: int, offset: int) -> list[dict]:
         """返回按显示顺序排列的一页历史消息。"""

@@ -12,7 +12,7 @@ from core.runtime import (
     ContextBuildRequest, ContextBuilder, ContextItem, ContextSourceType, ContextTrustLevel,
     DeterministicTokenEstimator, ModelContextRequirements, ModelPreference, ModelProfile,
     ModelProfileId, ModelResolver, ModelSelectionPolicy, ModelSelectionRequest,
-    RiskLevel, RunContext, TaskCapabilityRequirements, create_single_step_plan,
+    Plan, RiskLevel, RunContext, TaskCapabilityRequirements, create_single_step_plan,
     BudgetUsage, UsageSource, BudgetedModelStream,
 )
 
@@ -625,12 +625,31 @@ class AgentRouter:
             estimated_steps=1,
         )
 
-    def _select_model(self, agent_id: str, user_query: str, messages: list[dict[str, str]], context_requirements: ModelContextRequirements | None = None, run_context: RunContext | None = None) -> tuple[object, ModelProfile]:
+    def build_single_agent_plan(self, agent_id: str, user_query: str) -> Plan:
+        """为 Coordinated 单 Agent 路径创建一次确定性 Plan。"""
+        return create_single_step_plan(
+            agent_id, self._capability_requirements(agent_id, user_query)
+        )
+
+    def _select_model(
+        self,
+        agent_id: str,
+        user_query: str,
+        messages: list[dict[str, str]],
+        context_requirements: ModelContextRequirements | None = None,
+        run_context: RunContext | None = None,
+        capability_requirements: TaskCapabilityRequirements | None = None,
+    ) -> tuple[object, ModelProfile]:
         """使用完整消息的近似上下文特征选择并解析一次首选模型。"""
         estimated = self._estimate_messages_tokens(messages)
         requirements = context_requirements or ModelContextRequirements(estimated, estimated + self.max_tokens, estimated >= 2048, False, False, len(messages), 0, 0, False, False)
-        capabilities = self._capability_requirements(agent_id, user_query)
-        create_single_step_plan(agent_id, capabilities)
+        capabilities = capability_requirements
+        if capabilities is None:
+            # Legacy 路径仍保留临时 Plan；Coordinated 路径传入 Coordinator
+            # 长期持有的 PlanStep 能力需求，不在模型选择期创建第二个 Plan。
+            capabilities = self.build_single_agent_plan(
+                agent_id, user_query
+            ).steps[0].capability_requirements
         decision = self.model_selection_policy.select(ModelSelectionRequest(agent_id, capabilities, requirements, ModelPreference.AUTO, self.model_profiles, run_context.budget_ledger.snapshot() if run_context is not None and run_context.budget_ledger is not None else None))
         profile = next(profile for profile in self.model_profiles if profile.profile_id == decision.selected_profile)
         final_required = self.model_selection_policy.required_context_window(requirements.minimum_context_window)
@@ -811,6 +830,7 @@ class AgentRouter:
         *,
         history_scope: str = DIRECT_MEMORY_SCOPE,
         run_context: RunContext | None = None,
+        capability_requirements: TaskCapabilityRequirements | None = None,
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
@@ -823,13 +843,20 @@ class AgentRouter:
         )
         if run_context is not None:
             run_context.raise_if_inactive()
-        selected_model, selected_profile = self._select_model(
+        selection_args = (
             agent_id,
             user_query,
             messages,
             context_requirements_out[0] if context_requirements_out else None,
             run_context,
         )
+        if capability_requirements is None:
+            selected_model, selected_profile = self._select_model(*selection_args)
+        else:
+            selected_model, selected_profile = self._select_model(
+                *selection_args,
+                capability_requirements=capability_requirements,
+            )
         model_reservation = self._reserve_model_call(
             run_context,
             messages,
@@ -922,6 +949,7 @@ class AgentRouter:
         persist_scope: str = DIRECT_MEMORY_SCOPE,
         history_scope: str = DIRECT_MEMORY_SCOPE,
         run_context: RunContext | None = None,
+        capability_requirements: TaskCapabilityRequirements | None = None,
     ) -> str:
         """执行一次非流式智能体调用。"""
         if run_context is not None:
@@ -938,6 +966,7 @@ class AgentRouter:
             user_query=user_query,
             history_scope=history_scope,
             run_context=run_context,
+            capability_requirements=capability_requirements,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -949,6 +978,24 @@ class AgentRouter:
                 memory_scope=persist_scope,
             )
         return final_response
+
+    def complete_single_agent(
+        self,
+        agent_id: str,
+        user_query: str,
+        *,
+        run_context: RunContext,
+        capability_requirements: TaskCapabilityRequirements,
+        persist: bool = True,
+    ) -> str:
+        """供 RunCoordinator Driver 使用的真实单 Agent 非流式业务入口。"""
+        return self._run_agent_once(
+            agent_id=agent_id,
+            user_query=user_query,
+            persist=persist,
+            run_context=run_context,
+            capability_requirements=capability_requirements,
+        )
 
     def _build_orchestration_event(self, event_type: str, **payload: object) -> str:
         """构建前后端约定的编排状态事件。"""

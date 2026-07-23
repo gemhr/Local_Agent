@@ -10,7 +10,9 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Mapping, Protocol
 
+from core.runtime.budget import BudgetExceededError
 from core.runtime.context import RunContext
+from core.runtime.context import RunDeadlineExceededError
 from core.runtime.cancellation import RunCancelledError
 from core.runtime.scheduler import SerialScheduler, StepClaim
 from core.runtime.planning import Plan
@@ -157,7 +159,13 @@ class ParallelExecutor:
                         raise asyncio.CancelledError()
                     try:
                         result = await self._invoke(driver, claim, run_context, execution_mode)
-                    except (asyncio.CancelledError, RunCancelledError, ParallelExecutionInfrastructureError):
+                    except (
+                        asyncio.CancelledError,
+                        RunCancelledError,
+                        RunDeadlineExceededError,
+                        BudgetExceededError,
+                        ParallelExecutionInfrastructureError,
+                    ):
                         raise
                     except Exception:
                         # 在释放许可前先记录失败并触发 TaskGroup 取消，避免等待者抢到许可。
@@ -173,6 +181,8 @@ class ParallelExecutor:
             except RunCancelledError:
                 was_token_cancelled = True
                 outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.CANCELLED, error_code="RUN_CANCELLED", error_message="运行已请求取消")
+            except (BudgetExceededError, RunDeadlineExceededError):
+                raise
             except (ParallelExecutionInfrastructureError, _FailFastSignal):
                 raise
             except Exception:
@@ -180,6 +190,8 @@ class ParallelExecutor:
                 if failure_mode == ParallelFailureMode.FAIL_FAST:
                     raise _FailFastSignal() from None
 
+        budget_error: BudgetExceededError | None = None
+        deadline_error: RunDeadlineExceededError | None = None
         try:
             try:
                 async with asyncio.TaskGroup() as group:
@@ -187,7 +199,18 @@ class ParallelExecutor:
                         group.create_task(worker(claim))
             except* _FailFastSignal:
                 pass
+            except* BudgetExceededError as errors:
+                budget_error = errors.exceptions[0]
+            except* RunDeadlineExceededError as errors:
+                deadline_error = errors.exceptions[0]
+            if budget_error is not None:
+                raise budget_error
+            if deadline_error is not None:
+                raise deadline_error
         except asyncio.CancelledError:
+            self._cancel_unfinished(claims, outcomes, state)
+            raise
+        except (BudgetExceededError, RunDeadlineExceededError):
             self._cancel_unfinished(claims, outcomes, state)
             raise
         except Exception as exc:

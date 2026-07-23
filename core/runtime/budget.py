@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from math import isfinite
 from threading import Lock
-from time import monotonic
+from time import perf_counter as monotonic
 from typing import Callable
 from uuid import uuid4
 
