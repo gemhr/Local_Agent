@@ -87,3 +87,32 @@ def test_raw_overflow_allows_final_remote_and_force_local_with_optional_trim() -
     forced = ModelSelectionPolicy().select(request(context=local_trimmed, preference=ModelPreference.FORCE_LOCAL, profiles=(local, remote)))
     assert forced.selected_profile == ModelProfileId.LOCAL_FAST
     assert "context_truncated" in forced.matched_rules and forced.fallback_allowed is False
+
+from core.runtime.budget import BudgetLedger, RunBudget
+from core.runtime.model_selection import BudgetInsufficientAction, ModelCostProfile, ModelSelectionObjective
+
+def cost(profile_id, remote, fixed=0): return ModelCostProfile(profile_id, remote, fixed, 0, 0, 10)
+def snapshot(**kwargs): return BudgetLedger(RunBudget(**kwargs)).snapshot()
+def test_explicit_metadata_and_unknown_cost_fail_closed():
+    local=profile(ModelProfileId.LOCAL_FAST); remote=profile(ModelProfileId.REMOTE_ADVANCED)
+    local=ModelProfile(*local.__dict__.values()) if False else ModelProfile(ModelProfileId.LOCAL_FAST,4096,512,False,False,False,False,1,1,cost(ModelProfileId.LOCAL_FAST,False,0))
+    remote=ModelProfile(ModelProfileId.REMOTE_ADVANCED,16384,512,True,True,True,True,2,2,cost(ModelProfileId.REMOTE_ADVANCED,True,3))
+    assert ModelSelectionPolicy()._estimated_usage(remote,10).remote_model_calls==1
+    unknown=profile(ModelProfileId.REMOTE_ADVANCED, window=16384, tools=True, structured=True, code=True, long=True)
+    with pytest.raises(ModelSelectionError, match='MODEL_BUDGET_METADATA_MISSING'):
+        ModelSelectionPolicy().select(request(profiles=(local,unknown), context=ModelContextRequirements(10,20,False,False,False,1,0,0,False,False),)) if False else ModelSelectionPolicy().select(ModelSelectionRequest('x',TaskCapabilityRequirements(),ModelContextRequirements(10,20,False,False,False,1,0,0,False,False),ModelPreference.AUTO,(local,unknown),snapshot(max_remote_model_calls=1)))
+    with pytest.raises(ModelSelectionError, match='MODEL_BUDGET_METADATA_MISSING'):
+        ModelSelectionPolicy().select(ModelSelectionRequest('x',TaskCapabilityRequirements(),ModelContextRequirements(10,20,False,False,False,1,0,0,False,False),ModelPreference.AUTO,(local,unknown),None,ModelSelectionObjective.COST_FIRST))
+
+def test_budget_degrade_and_force_remote_fail_closed():
+    local=ModelProfile(ModelProfileId.LOCAL_FAST,4096,512,False,False,False,False,1,1,cost(ModelProfileId.LOCAL_FAST,False,0))
+    remote=ModelProfile(ModelProfileId.REMOTE_ADVANCED,16384,512,True,True,True,True,2,2,cost(ModelProfileId.REMOTE_ADVANCED,True,5))
+    req=ModelSelectionRequest('x',TaskCapabilityRequirements(requires_multi_agent=True),ModelContextRequirements(10,20,False,False,False,1,0,0,False,False),ModelPreference.AUTO,(local,remote),snapshot(max_cost_units=0),ModelSelectionObjective.QUALITY_FIRST,BudgetInsufficientAction.DEGRADE)
+    d=ModelSelectionPolicy().select(req); assert d.capability_preferred_profile_id==ModelProfileId.REMOTE_ADVANCED and d.selected_profile_id==ModelProfileId.LOCAL_FAST and d.budget_adjustment.name=='DOWNGRADE_TO_LOCAL' and d.quality_tradeoff_disclosed
+    with pytest.raises(ModelSelectionError): ModelSelectionPolicy().select(ModelSelectionRequest('x',TaskCapabilityRequirements(requires_multi_agent=True),req.context_requirements,ModelPreference.FORCE_REMOTE,(local,remote),snapshot(max_cost_units=0)))
+
+def test_budget_require_confirmation_is_not_a_model_selection():
+    local=ModelProfile(ModelProfileId.LOCAL_FAST,4096,512,False,False,False,False,1,1,cost(ModelProfileId.LOCAL_FAST,False,0))
+    remote=ModelProfile(ModelProfileId.REMOTE_ADVANCED,16384,512,True,True,True,True,2,2,cost(ModelProfileId.REMOTE_ADVANCED,True,5))
+    d=ModelSelectionPolicy().select(ModelSelectionRequest('x',TaskCapabilityRequirements(requires_multi_agent=True),ModelContextRequirements(10,20,False,False,False,1,0,0,False,False),ModelPreference.AUTO,(local,remote),snapshot(max_cost_units=0),ModelSelectionObjective.QUALITY_FIRST,BudgetInsufficientAction.REQUIRE_CONFIRMATION))
+    assert d.confirmation_required and d.selected_profile_id is None and d.capability_preferred_profile_id == ModelProfileId.REMOTE_ADVANCED

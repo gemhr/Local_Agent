@@ -130,6 +130,18 @@ class RunContext:
         self._deadline = deadline
         self._cancellation_token = cancellation_token
         self._clock = clock
+        self._budget_ledger = None
+
+    @property
+    def budget_ledger(self):
+        """返回本 Run 注入的预算账本；未迁移调用链时为 None。"""
+        return self._budget_ledger
+
+    def attach_budget_ledger(self, ledger: object) -> None:
+        """仅由 Parent Runtime 在创建 Run 时注入单一账本。"""
+        if self._budget_ledger is not None:
+            raise RuntimeError("RunContext 已绑定 BudgetLedger")
+        self._budget_ledger = ledger
 
     @classmethod
     def create(
