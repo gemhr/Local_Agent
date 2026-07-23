@@ -114,7 +114,9 @@ class ParallelExecutor:
 
     async def execute_ready(self, *, scheduler: SerialScheduler, plan: Plan, state: AgentState, occurred_at: datetime, run_context: RunContext, driver: StepExecutionDriver, policy: ParallelExecutionPolicy, execution_mode: StepExecutionMode = StepExecutionMode.ASYNC, concurrency_specs: Mapping[str, StepConcurrencySpec] | None = None) -> ParallelExecutionReport:
         """标准安全入口：同一 Policy 同时约束 Claim 和 Executor 容量。"""
-        claims = scheduler.claim_ready(plan, state, policy.max_concurrency, occurred_at)
+        ledger = run_context.budget_ledger
+        effective_concurrency = min(policy.max_concurrency, ledger.budget.max_concurrency) if ledger is not None and ledger.budget.max_concurrency is not None else policy.max_concurrency
+        claims = scheduler.claim_ready(plan, state, effective_concurrency, occurred_at, budget_ledger=ledger)
         return await self.execute(claims=claims, state=state, run_context=run_context, driver=driver, policy=policy, execution_mode=execution_mode, concurrency_specs=concurrency_specs)
 
     async def execute(self, *, claims: tuple[StepClaim, ...], state: AgentState, run_context: RunContext, driver: StepExecutionDriver, failure_mode: ParallelFailureMode = ParallelFailureMode.FAIL_FAST, execution_mode: StepExecutionMode = StepExecutionMode.ASYNC, concurrency_specs: Mapping[str, StepConcurrencySpec] | None = None, policy: ParallelExecutionPolicy | None = None) -> ParallelExecutionReport:
