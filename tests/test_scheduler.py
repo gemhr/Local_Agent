@@ -16,6 +16,7 @@ from core.runtime import (
     AgentState,
     AgentStateMachine,
     Plan,
+    PlanGraphValidationError,
     PlanSource,
     PlanStep,
     RiskLevel,
@@ -262,17 +263,27 @@ class SchedulerReadyAndSnapshotTests(unittest.TestCase):
         self.assertFalse(snapshot.has_unresolved_pending)
         self.assertEqual(state.status, RunStatus.RUNNING)
 
-    def test_cycle_is_only_reported_as_unresolved_pending(self) -> None:
+    def test_cycle_is_rejected_before_any_step_registration(self) -> None:
         source_plan = plan(step("a", depends_on=("b",)), step("b", depends_on=("a",)))
         state = running_state()
-        scheduler = SerialScheduler()
+        machine = RecordingStateMachine()
 
-        snapshot = scheduler.prepare(source_plan, state, datetime.now(UTC))
+        before = state.to_dict()
+        with self.assertRaises(PlanGraphValidationError) as captured:
+            SerialScheduler(machine).prepare(source_plan, state, datetime.now(UTC))
 
-        self.assertEqual(snapshot.ready_step_ids, ())
-        self.assertTrue(snapshot.has_unresolved_pending)
-        self.assertFalse(snapshot.is_complete)
-        self.assertFalse(snapshot.is_waiting)
+        self.assertEqual(captured.exception.error_code, "DEPENDENCY_CYCLE")
+        self.assertEqual(state.to_dict(), before)
+        self.assertEqual(machine.added_step_ids, [])
+        self.assertEqual(machine.step_events, [])
+
+    def test_claim_next_rejects_invalid_graph_before_registration(self) -> None:
+        source_plan = plan(step("a", depends_on=("missing",)))
+        state = running_state()
+        before = state.to_dict()
+        with self.assertRaises(PlanGraphValidationError):
+            SerialScheduler().claim_next(source_plan, state, datetime.now(UTC))
+        self.assertEqual(state.to_dict(), before)
 
 
 class SchedulerBlockedPropagationTests(unittest.TestCase):

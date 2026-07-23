@@ -11,9 +11,9 @@ from threading import Lock
 from core.runtime.planning import (
     Plan,
     PlanStep,
-    PlanValidator,
     TaskCapabilityRequirements,
 )
+from core.runtime.plan_graph import PlanGraph, PlanGraphValidator
 from core.runtime.state import AgentState, RunStatus, StepStatus
 from core.runtime.state_machine import AgentStateMachine, StepEventType, StepStateEvent
 
@@ -143,18 +143,19 @@ class SerialScheduler:
         """注册尚不存在的 Plan Step，并返回传播 BLOCKED 后的快照。"""
         self._validate_utc(occurred_at)
         with self._claim_lock:
-            self._prepare_locked(plan, state)
+            graph = self._prepare_locked(plan, state)
             effective_at = self._effective_time(occurred_at, state)
-            self._propagate_blocked(plan, state, effective_at)
-            return self._build_snapshot(plan, state)
+            self._propagate_blocked(plan, graph, state, effective_at)
+            return self._build_snapshot(plan, graph, state)
 
     def evaluate(self, plan: Plan, state: AgentState) -> SchedulerSnapshot:
         """传播可确定的 BLOCKED，并动态计算当前调度快照。"""
         with self._claim_lock:
+            graph = PlanGraphValidator.validate(plan)
             self._validate_plan_state_alignment(plan, state)
             occurred_at = self._effective_time(datetime.now(UTC), state)
-            self._propagate_blocked(plan, state, occurred_at)
-            return self._build_snapshot(plan, state)
+            self._propagate_blocked(plan, graph, state, occurred_at)
+            return self._build_snapshot(plan, graph, state)
 
     def claim_next(
         self,
@@ -165,12 +166,12 @@ class SerialScheduler:
         """在同一锁内准备、传播、计算并通过 STARTED 原子认领一个 Step。"""
         self._validate_utc(occurred_at)
         with self._claim_lock:
-            self._prepare_locked(plan, state)
+            graph = self._prepare_locked(plan, state)
             effective_at = self._effective_time(occurred_at, state)
-            self._propagate_blocked(plan, state, effective_at)
+            self._propagate_blocked(plan, graph, state, effective_at)
             if self._running_steps(plan, state):
                 return None
-            ready_steps = self._compute_ready_steps(plan, state)
+            ready_steps = self._compute_ready_steps(plan, graph, state)
             if not ready_steps:
                 return None
 
@@ -212,8 +213,9 @@ class SerialScheduler:
                 preferred_agent=step.preferred_agent,
             )
 
-    def _prepare_locked(self, plan: Plan, state: AgentState) -> None:
-        PlanValidator.validate(plan)
+    def _prepare_locked(self, plan: Plan, state: AgentState) -> PlanGraph:
+        # 必须在读取或修改 Runtime 状态前完成静态图校验。
+        graph = PlanGraphValidator.validate(plan)
         state.validate()
         self._validate_binding(plan, state)
         if state.status != RunStatus.RUNNING:
@@ -240,9 +242,9 @@ class SerialScheduler:
                     state, step_id=step.step_id, name=step.title
                 )
         self._binding = self._binding_value(plan, state)
+        return graph
 
     def _validate_plan_state_alignment(self, plan: Plan, state: AgentState) -> None:
-        PlanValidator.validate(plan)
         state.validate()
         self._validate_binding(plan, state)
         for step in plan.steps:
@@ -290,20 +292,20 @@ class SerialScheduler:
         return state.run_id, plan.plan_id, plan.version, scheduling_signature
 
     def _propagate_blocked(
-        self, plan: Plan, state: AgentState, occurred_at: datetime
+        self, plan: Plan, graph: PlanGraph, state: AgentState, occurred_at: datetime
     ) -> None:
         if state.status != RunStatus.RUNNING:
             return
         changed = True
         while changed:
             changed = False
-            for step in plan.steps:
-                current = state.steps[step.step_id]
+            for step_id in graph.topological_order:
+                current = state.steps[step_id]
                 if current.status != StepStatus.PENDING:
                     continue
                 dependency_statuses = (
                     state.steps[dependency_id].status
-                    for dependency_id in step.depends_on
+                    for dependency_id in graph.dependencies_of(step_id)
                 )
                 if not any(
                     status in _BLOCKING_DEPENDENCY_STATUSES
@@ -315,7 +317,7 @@ class SerialScheduler:
                     state,
                     StepStateEvent(
                         StepEventType.BLOCKED,
-                        step.step_id,
+                        step_id,
                         occurred_at=event_at,
                         error_code="DEPENDENCY_NOT_SUCCESSFUL",
                         error_message="前置步骤未成功，当前步骤无法执行",
@@ -324,13 +326,15 @@ class SerialScheduler:
                 changed = True
 
     def _compute_ready_steps(
-        self, plan: Plan, state: AgentState
+        self, plan: Plan, graph: PlanGraph, state: AgentState
     ) -> tuple[PlanStep, ...]:
         if state.status != RunStatus.RUNNING or self._running_steps(plan, state):
             return ()
         ready: list[PlanStep] = []
-        for step in plan.steps:
-            current = state.steps[step.step_id]
+        steps_by_id = {step.step_id: step for step in plan.steps}
+        for step_id in graph.topological_order:
+            step = steps_by_id[step_id]
+            current = state.steps[step_id]
             if (
                 current.status != StepStatus.PENDING
                 or step.step_id in state.active_step_ids
@@ -338,7 +342,7 @@ class SerialScheduler:
                 continue
             if all(
                 state.steps[dependency_id].status == StepStatus.SUCCEEDED
-                for dependency_id in step.depends_on
+                for dependency_id in graph.dependencies_of(step_id)
             ):
                 ready.append(step)
         return tuple(ready)
@@ -351,31 +355,26 @@ class SerialScheduler:
             if state.steps[step.step_id].status == StepStatus.RUNNING
         )
 
-    def _build_snapshot(self, plan: Plan, state: AgentState) -> SchedulerSnapshot:
+    def _build_snapshot(self, plan: Plan, graph: PlanGraph, state: AgentState) -> SchedulerSnapshot:
         ready_step_ids = tuple(
-            step.step_id for step in self._compute_ready_steps(plan, state)
+            step.step_id for step in self._compute_ready_steps(plan, graph, state)
         )
+        ordered_step_ids = graph.topological_order
         running_step_ids = tuple(
-            step.step_id for step in self._running_steps(plan, state)
+            step_id for step_id in ordered_step_ids if state.steps[step_id].status == StepStatus.RUNNING
         )
         pending_step_ids = tuple(
-            step.step_id
-            for step in plan.steps
-            if state.steps[step.step_id].status == StepStatus.PENDING
+            step_id for step_id in ordered_step_ids if state.steps[step_id].status == StepStatus.PENDING
         )
         blocked_step_ids = tuple(
-            step.step_id
-            for step in plan.steps
-            if state.steps[step.step_id].status == StepStatus.BLOCKED
+            step_id for step_id in ordered_step_ids if state.steps[step_id].status == StepStatus.BLOCKED
         )
         terminal_step_ids = tuple(
-            step.step_id
-            for step in plan.steps
-            if state.steps[step.step_id].status in _TERMINAL_STEP_STATUSES
+            step_id for step_id in ordered_step_ids if state.steps[step_id].status in _TERMINAL_STEP_STATUSES
         )
         is_complete = all(
-            state.steps[step.step_id].status == StepStatus.SUCCEEDED
-            for step in plan.steps
+            state.steps[step_id].status == StepStatus.SUCCEEDED
+            for step_id in ordered_step_ids
         )
         is_waiting = bool(running_step_ids) and not ready_step_ids
         has_unresolved_pending = (
