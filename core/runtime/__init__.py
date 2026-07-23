@@ -45,7 +45,7 @@ from core.runtime.model_context import (
 )
 from core.runtime.planning import Plan, PlanSource, PlanStep, PlanValidator, RiskLevel, TaskCapabilityRequirements, create_single_step_plan
 from core.runtime.plan_graph import PlanGraph, PlanGraphValidationError, PlanGraphValidator
-from core.runtime.model_selection import (ModelPreference, ModelProfile, ModelProfileId, ModelResolver, ModelSelectionDecision, ModelSelectionError, ModelSelectionPolicy, ModelSelectionReason, ModelSelectionRequest)
+from core.runtime.model_selection import (ModelCostProfile, ModelPreference, ModelProfile, ModelProfileId, ModelResolver, ModelSelectionDecision, ModelSelectionError, ModelSelectionObjective, ModelSelectionPolicy, ModelSelectionReason, ModelSelectionRequest)
 from core.runtime.state_machine import (
     AgentStateMachine,
     InvalidStateTransitionError,
@@ -88,7 +88,7 @@ __all__ = [
     "DeterministicTokenEstimator", "ModelContextRequirements", "TokenEstimator",
     "Plan", "PlanSource", "PlanStep", "PlanValidator", "RiskLevel", "TaskCapabilityRequirements", "create_single_step_plan",
     "PlanGraph", "PlanGraphValidationError", "PlanGraphValidator",
-    "ModelPreference", "ModelProfile", "ModelProfileId", "ModelResolver", "ModelSelectionDecision", "ModelSelectionError", "ModelSelectionPolicy", "ModelSelectionReason", "ModelSelectionRequest",
+    "ModelCostProfile", "ModelPreference", "ModelProfile", "ModelProfileId", "ModelResolver", "ModelSelectionDecision", "ModelSelectionError", "ModelSelectionObjective", "ModelSelectionPolicy", "ModelSelectionReason", "ModelSelectionRequest",
     "CancellationToken",
     "Clock",
     "Deadline",
@@ -149,4 +149,72 @@ __all__ += [
     "BudgetUsage",
     "RunBudget",
     "UsageSource",
+]
+
+from core.runtime.circuit_breaker import (
+    CircuitOpenError,
+    CircuitPermit,
+    CircuitPermitStateError,
+    ModelCircuitBreaker,
+    ModelCircuitBreakerConfig,
+    ModelCircuitBreakerRegistry,
+    ModelCircuitBreakerSnapshot,
+    ModelCircuitState,
+)
+from core.runtime.model_routing import (
+    ModelFailureCategory,
+    ModelRoutingCandidate,
+    ModelRoutingDecision,
+    ModelRoutingError,
+    ModelRoutingPolicy,
+    RoutingAdjustment,
+)
+from core.runtime.model_invocation import (
+    CircuitHealthOutcome,
+    GeneratorModelAdapter,
+    ModelAdapter,
+    ModelAdapterInvocationError,
+    ModelAdapterResolutionError,
+    ModelAdapterResolver,
+    ModelAdapterResponse,
+    ModelInvocationAttempt,
+    ModelInvocationChainError,
+    ModelInvocationConfirmationRequired,
+    ModelInvocationFailure,
+    ModelInvocationResult,
+    ModelInvocationRouter,
+    ModelUsageSource,
+    classify_model_failure,
+)
+
+__all__ += [
+    "CircuitHealthOutcome",
+    "CircuitOpenError",
+    "CircuitPermit",
+    "CircuitPermitStateError",
+    "GeneratorModelAdapter",
+    "ModelAdapter",
+    "ModelAdapterInvocationError",
+    "ModelAdapterResolutionError",
+    "ModelAdapterResolver",
+    "ModelAdapterResponse",
+    "ModelCircuitBreaker",
+    "ModelCircuitBreakerConfig",
+    "ModelCircuitBreakerRegistry",
+    "ModelCircuitBreakerSnapshot",
+    "ModelCircuitState",
+    "ModelFailureCategory",
+    "ModelInvocationAttempt",
+    "ModelInvocationChainError",
+    "ModelInvocationConfirmationRequired",
+    "ModelInvocationFailure",
+    "ModelInvocationResult",
+    "ModelInvocationRouter",
+    "ModelRoutingCandidate",
+    "ModelRoutingDecision",
+    "ModelRoutingError",
+    "ModelRoutingPolicy",
+    "ModelUsageSource",
+    "RoutingAdjustment",
+    "classify_model_failure",
 ]

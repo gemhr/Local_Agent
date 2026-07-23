@@ -17,7 +17,16 @@ from core.agent_router import AgentRouter
 from core.chat_service import ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
-from core.runtime import CancellationReason, ModelProfile, ModelProfileId, ModelResolver, process_run_registry
+from core.runtime import (
+    CancellationReason,
+    ModelCircuitBreakerConfig,
+    ModelCircuitBreakerRegistry,
+    ModelCostProfile,
+    ModelProfile,
+    ModelProfileId,
+    ModelResolver,
+    process_run_registry,
+)
 from core.settings import Settings
 from tools.registry import register_all_tools
 
@@ -41,6 +50,26 @@ def _next_or_none(stream):
         return next(stream)
     except StopIteration:
         return None
+
+
+def _close_model_engines(engines: dict) -> tuple[str, ...]:
+    """幂等关闭可关闭 Engine；单个关闭异常不阻断其余 Shutdown 清理。"""
+    error_codes = []
+    closed_ids = set()
+    for engine in engines.values():
+        identity = id(engine)
+        if identity in closed_ids:
+            continue
+        closed_ids.add(identity)
+        close = getattr(engine, "close", None)
+        if close is None:
+            continue
+        try:
+            close()
+        except Exception:
+            error_codes.append("MODEL_ENGINE_CLOSE_FAILED")
+            logger.warning("[Model Runtime] engine close failed", exc_info=True)
+    return tuple(error_codes)
 
 
 @asynccontextmanager
@@ -102,7 +131,29 @@ async def lifespan(app: FastAPI):
             n_gpu_layers=settings.model_gpu_layers,
         )
         engines[ModelProfileId.LOCAL_FAST] = local_engine
-        profiles.append(ModelProfile(ModelProfileId.LOCAL_FAST, settings.model_context, settings.model_max_tokens, False, False, False, False, 1, 1))
+        profiles.append(
+            ModelProfile(
+                ModelProfileId.LOCAL_FAST,
+                settings.model_context,
+                settings.model_max_tokens,
+                False,
+                False,
+                False,
+                False,
+                1,
+                1,
+                ModelCostProfile(
+                    ModelProfileId.LOCAL_FAST,
+                    False,
+                    settings.local_fixed_call_cost_units,
+                    settings.local_input_cost_units_per_1k_tokens,
+                    settings.local_output_cost_units_per_1k_tokens,
+                    settings.local_estimated_latency_ms,
+                ),
+                False,
+                "local_inference",
+            )
+        )
     if settings.llm_backend in {"remote", "hybrid"}:
         if not settings.remote_api_base_url:
             raise RuntimeError(
@@ -115,12 +166,43 @@ async def lifespan(app: FastAPI):
             timeout_seconds=settings.remote_timeout_seconds,
             verify_tls=settings.remote_verify_tls,
             enable_thinking=settings.remote_enable_thinking,
+            provider_kind=settings.remote_provider_kind,
         )
         engines[ModelProfileId.REMOTE_ADVANCED] = remote_engine
-        profiles.append(ModelProfile(ModelProfileId.REMOTE_ADVANCED, settings.remote_context_window, settings.model_max_tokens, True, True, True, True, 2, 2))
+        profiles.append(
+            ModelProfile(
+                ModelProfileId.REMOTE_ADVANCED,
+                settings.remote_context_window,
+                settings.model_max_tokens,
+                True,
+                True,
+                True,
+                True,
+                2,
+                2,
+                ModelCostProfile(
+                    ModelProfileId.REMOTE_ADVANCED,
+                    True,
+                    settings.remote_fixed_call_cost_units,
+                    settings.remote_input_cost_units_per_1k_tokens,
+                    settings.remote_output_cost_units_per_1k_tokens,
+                    settings.remote_estimated_latency_ms,
+                ),
+                True,
+                "remote_openai_compatible",
+            )
+        )
     if not engines:
         raise RuntimeError("LOCAL_AGENT_LLM_BACKEND 必须是 local、remote 或 hybrid")
     engine = engines.get(ModelProfileId.LOCAL_FAST) or engines[ModelProfileId.REMOTE_ADVANCED]
+    breaker_registry = ModelCircuitBreakerRegistry(
+        ModelCircuitBreakerConfig(
+            failure_threshold=settings.model_breaker_failure_threshold,
+            recovery_timeout_seconds=settings.model_breaker_recovery_timeout_seconds,
+            half_open_max_calls=settings.model_breaker_half_open_max_calls,
+            count_rate_limited=settings.model_breaker_count_rate_limited,
+        )
+    )
     router = AgentRouter(
         llm_engine=engine,
         memory_manager=memory_manager,
@@ -140,6 +222,7 @@ async def lifespan(app: FastAPI):
         knowledge_base_error=knowledge_base_error,
         model_profiles=tuple(profiles),
         model_resolver=ModelResolver(engines),
+        circuit_breaker_registry=breaker_registry,
     )
     register_all_tools(router)
     chat_service = ChatService(router)
@@ -150,6 +233,8 @@ async def lifespan(app: FastAPI):
         logger.warning("shutdown cleanup timed out for runs=%s", ",".join(remaining))
     elif cancelled:
         logger.info("shutdown cleanup completed for runs=%s", ",".join(cancelled))
+    # 先取消 Run 并等待 Grace Period，再关闭共享 Remote Session。
+    _close_model_engines(engines)
     chat_service = None
 
 

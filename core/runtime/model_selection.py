@@ -16,6 +16,7 @@ from core.runtime.planning import RiskLevel, TaskCapabilityRequirements
 class ModelProfileId(str, Enum):
     LOCAL_FAST = "local_fast"
     REMOTE_ADVANCED = "remote_advanced"
+    REMOTE_BACKUP = "remote_backup"
 
 class ModelPreference(str, Enum):
     AUTO = "auto"
@@ -60,13 +61,31 @@ class ModelProfile:
     supports_tools: bool; supports_structured_output: bool; supports_code_reasoning: bool; supports_long_reasoning: bool
     quality_tier: int; latency_tier: int
     cost_profile: ModelCostProfile | None = None
+    is_remote: bool | None = None
+    breaker_key: str | None = None
     def __post_init__(self) -> None:
         for name in ("context_window", "max_output_tokens", "quality_tier", "latency_tier"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0: raise ValueError(f"{name} 必须是正整数")
         if self.cost_profile is not None and self.cost_profile.profile_id != self.profile_id: raise ValueError("cost_profile.profile_id 必须匹配 profile_id")
+        if self.is_remote is not None and type(self.is_remote) is not bool: raise ValueError("is_remote 必须是 bool 或 None")
+        if self.breaker_key is not None and not self.breaker_key.strip(): raise ValueError("breaker_key 必须是非空字符串或 None")
         for name in ("supports_tools", "supports_structured_output", "supports_code_reasoning", "supports_long_reasoning"):
             if type(getattr(self, name)) is not bool: raise ValueError(f"{name} 必须是 bool")
+
+    @property
+    def effective_is_remote(self) -> bool:
+        """返回显式 Provider 范围；旧 Profile 仅按固定 Profile ID 契约兼容。"""
+        if self.is_remote is not None:
+            return self.is_remote
+        if self.cost_profile is not None:
+            return self.cost_profile.is_remote
+        return self.profile_id == ModelProfileId.REMOTE_ADVANCED
+
+    @property
+    def effective_breaker_key(self) -> str:
+        """返回显式 Breaker Key；旧 Profile 使用固定、安全兼容键。"""
+        return self.breaker_key or f"profile:{self.profile_id.value}"
 
 @dataclass(frozen=True, slots=True)
 class ModelSelectionRequest:
@@ -78,7 +97,7 @@ class ModelSelectionRequest:
 
 @dataclass(frozen=True, slots=True)
 class ModelSelectionDecision:
-    selected_profile: ModelProfileId; reason_code: ModelSelectionReason; reason_text: str; matched_rules: tuple[str, ...]; fallback_allowed: bool = False
+    selected_profile: ModelProfileId | None; reason_code: ModelSelectionReason; reason_text: str; matched_rules: tuple[str, ...]; fallback_allowed: bool = False
     capability_preferred_profile_id: ModelProfileId | None = None
     selected_profile_id: ModelProfileId | None = None
     selection_objective: ModelSelectionObjective = ModelSelectionObjective.QUALITY_FIRST
