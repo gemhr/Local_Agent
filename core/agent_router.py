@@ -16,6 +16,7 @@ from core.runtime import (
     BudgetUsage, UsageSource, BudgetedModelStream,
     GeneratorModelAdapter, ModelAdapterResolver, ModelCircuitBreakerRegistry,
     ModelInvocationResult, ModelInvocationRouter, ModelRoutingPolicy,
+    StepEventEmitter,
 )
 
 if TYPE_CHECKING:
@@ -893,6 +894,7 @@ class AgentRouter:
         capability_requirements: TaskCapabilityRequirements | None = None,
         unified_invocation: bool = False,
         invocation_result_out: list[ModelInvocationResult] | None = None,
+        event_emitter: StepEventEmitter | None = None,
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
@@ -945,6 +947,7 @@ class AgentRouter:
                 token_estimate=self._estimate_messages_tokens(messages),
                 max_tokens=self.max_tokens,
                 output_started=False,
+                event_emitter=event_emitter,
             )
             if invocation_result_out is not None:
                 invocation_result_out.append(invocation_result)
@@ -1050,6 +1053,7 @@ class AgentRouter:
         capability_requirements: TaskCapabilityRequirements | None = None,
         unified_invocation: bool = False,
         invocation_result_out: list[ModelInvocationResult] | None = None,
+        event_emitter: StepEventEmitter | None = None,
     ) -> str:
         """执行一次非流式智能体调用。"""
         if run_context is not None:
@@ -1069,6 +1073,7 @@ class AgentRouter:
             capability_requirements=capability_requirements,
             unified_invocation=unified_invocation,
             invocation_result_out=invocation_result_out,
+            event_emitter=event_emitter,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -1090,6 +1095,7 @@ class AgentRouter:
         capability_requirements: TaskCapabilityRequirements,
         persist: bool = True,
         invocation_result_out: list[ModelInvocationResult] | None = None,
+        event_emitter: StepEventEmitter | None = None,
     ) -> str:
         """供 RunCoordinator Driver 使用的真实单 Agent 非流式业务入口。"""
         return self._run_agent_once(
@@ -1100,6 +1106,7 @@ class AgentRouter:
             capability_requirements=capability_requirements,
             unified_invocation=True,
             invocation_result_out=invocation_result_out,
+            event_emitter=event_emitter,
         )
 
     def _build_orchestration_event(self, event_type: str, **payload: object) -> str:

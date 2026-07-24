@@ -18,6 +18,14 @@ from core.runtime.scheduler import SerialScheduler, StepClaim
 from core.runtime.planning import Plan
 from core.runtime.state import AgentState, StepStatus
 from core.runtime.state_machine import AgentStateMachine, StepEventType, StepStateEvent
+from core.runtime.event_channel import EventChannelClosedError
+from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
+from core.runtime.events import (
+    OutputDeltaPayload,
+    RuntimeEventType,
+    StepCompletedPayload,
+    StepStartedPayload,
+)
 
 
 class ParallelFailureMode(str, Enum):
@@ -109,16 +117,25 @@ class _FailFastSignal(Exception):
 
 class ParallelExecutor:
     """以 TaskGroup 受管并发执行已被 Scheduler Claim 的 Step。"""
-    def __init__(self, state_machine: AgentStateMachine | None = None, *, max_concurrency: int = 1) -> None:
+    def __init__(
+        self,
+        state_machine: AgentStateMachine | None = None,
+        *,
+        max_concurrency: int = 1,
+        event_emitter: RunEventEmitter | None = None,
+    ) -> None:
         self._validate_positive(max_concurrency, "max_concurrency")
         self._state_machine = state_machine or AgentStateMachine()
         self._max_concurrency = max_concurrency
+        self._event_emitter = event_emitter
 
     async def execute_ready(self, *, scheduler: SerialScheduler, plan: Plan, state: AgentState, occurred_at: datetime, run_context: RunContext, driver: StepExecutionDriver, policy: ParallelExecutionPolicy, execution_mode: StepExecutionMode = StepExecutionMode.ASYNC, concurrency_specs: Mapping[str, StepConcurrencySpec] | None = None) -> ParallelExecutionReport:
         """标准安全入口：同一 Policy 同时约束 Claim 和 Executor 容量。"""
         ledger = run_context.budget_ledger
         effective_concurrency = min(policy.max_concurrency, ledger.budget.max_concurrency) if ledger is not None and ledger.budget.max_concurrency is not None else policy.max_concurrency
         claims = scheduler.claim_ready(plan, state, effective_concurrency, occurred_at, budget_ledger=ledger)
+        for claim in claims:
+            await self._emit_step_started(claim)
         return await self.execute(claims=claims, state=state, run_context=run_context, driver=driver, policy=policy, execution_mode=execution_mode, concurrency_specs=concurrency_specs)
 
     async def execute(self, *, claims: tuple[StepClaim, ...], state: AgentState, run_context: RunContext, driver: StepExecutionDriver, failure_mode: ParallelFailureMode = ParallelFailureMode.FAIL_FAST, execution_mode: StepExecutionMode = StepExecutionMode.ASYNC, concurrency_specs: Mapping[str, StepConcurrencySpec] | None = None, policy: ParallelExecutionPolicy | None = None) -> ParallelExecutionReport:
@@ -137,10 +154,17 @@ class ParallelExecutor:
             self._preflight(driver, execution_mode, specs, claims)
             run_context.raise_if_inactive()
         except RunCancelledError:
-            self._cancel_claims(claims, state, "RUN_CANCELLED", "运行已请求取消")
+            await self._cancel_claims(
+                claims, state, "RUN_CANCELLED", "运行已请求取消"
+            )
             raise
         except ParallelExecutionInfrastructureError:
-            self._cancel_claims(claims, state, "EXECUTION_PREFLIGHT_FAILED", "执行前置校验失败")
+            await self._cancel_claims(
+                claims,
+                state,
+                "EXECUTION_PREFLIGHT_FAILED",
+                "执行前置校验失败",
+            )
             raise
         resource_semaphores = {key: asyncio.Semaphore(limit) for key, limit in self._resource_limits(specs, claims).items()}
         global_semaphore = asyncio.Semaphore(max_concurrency)
@@ -170,23 +194,48 @@ class ParallelExecutor:
                     except Exception:
                         # 在释放许可前先记录失败并触发 TaskGroup 取消，避免等待者抢到许可。
                         outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.FAILED, error_code="STEP_EXECUTION_FAILED", error_message="步骤业务执行失败")
+                        await self._emit_step_completed(
+                            claim, StepStatus.FAILED, "STEP_EXECUTION_FAILED"
+                        )
                         if failure_mode == ParallelFailureMode.FAIL_FAST:
                             fail_fast_triggered.set()
                             raise _FailFastSignal() from None
                         return
+                    if (
+                        self._event_emitter is not None
+                        and getattr(driver, "emits_user_output", False)
+                        and isinstance(result, str)
+                    ):
+                        await self._event_emitter.for_step(claim.step_id).emit(
+                            RuntimeEventType.OUTPUT_DELTA,
+                            OutputDeltaPayload(result),
+                            component="parallel_executor",
+                        )
                     outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.SUCCEEDED, result=result)
+                    await self._emit_step_completed(
+                        claim, StepStatus.SUCCEEDED, None
+                    )
             except asyncio.CancelledError:
                 outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.CANCELLED, error_code="STEP_CANCELLED", error_message="步骤执行已取消")
+                await self._emit_step_completed(
+                    claim, StepStatus.CANCELLED, "STEP_CANCELLED"
+                )
                 raise
             except RunCancelledError:
                 was_token_cancelled = True
                 outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.CANCELLED, error_code="RUN_CANCELLED", error_message="运行已请求取消")
+                await self._emit_step_completed(
+                    claim, StepStatus.CANCELLED, "RUN_CANCELLED"
+                )
             except (BudgetExceededError, RunDeadlineExceededError):
                 raise
             except (ParallelExecutionInfrastructureError, _FailFastSignal):
                 raise
             except Exception:
                 outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.FAILED, error_code="STEP_EXECUTION_FAILED", error_message="步骤业务执行失败")
+                await self._emit_step_completed(
+                    claim, StepStatus.FAILED, "STEP_EXECUTION_FAILED"
+                )
                 if failure_mode == ParallelFailureMode.FAIL_FAST:
                     raise _FailFastSignal() from None
 
@@ -208,17 +257,53 @@ class ParallelExecutor:
             if deadline_error is not None:
                 raise deadline_error
         except asyncio.CancelledError:
-            self._cancel_unfinished(claims, outcomes, state)
+            await self._cancel_unfinished(claims, outcomes, state)
             raise
         except (BudgetExceededError, RunDeadlineExceededError):
-            self._cancel_unfinished(claims, outcomes, state)
+            await self._cancel_unfinished(claims, outcomes, state)
             raise
         except Exception as exc:
-            self._cancel_unfinished(claims, outcomes, state)
+            await self._cancel_unfinished(claims, outcomes, state)
             raise ParallelExecutionInfrastructureError("EXECUTION_INFRASTRUCTURE_ERROR", "并行执行基础设施异常") from exc
-        self._cancel_unfinished(claims, outcomes, state)
+        await self._cancel_unfinished(claims, outcomes, state)
         ordered = tuple(outcomes[claim.step_id] for claim in claims)
         return ParallelExecutionReport(failure_mode, ordered, tuple(item.step_id for item in ordered if item.status == StepStatus.SUCCEEDED), tuple(item.step_id for item in ordered if item.status == StepStatus.FAILED), tuple(item.step_id for item in ordered if item.status == StepStatus.CANCELLED), was_token_cancelled)
+
+    async def _emit_step_started(self, claim: StepClaim) -> None:
+        """Scheduler 已成功写入 RUNNING 后再发布事实。"""
+        if self._event_emitter is None:
+            return
+        try:
+            await self._event_emitter.for_step(claim.step_id).emit(
+                RuntimeEventType.STEP_STARTED,
+                StepStartedPayload(StepStatus.RUNNING.value),
+                component="scheduler",
+            )
+        except (EventChannelClosedError, RuntimeError):
+            return
+
+    async def _emit_step_completed(
+        self,
+        claim: StepClaim,
+        status: StepStatus,
+        safe_error_code: str | None,
+    ) -> None:
+        """State Machine 已提交终态后发布并关闭该 StepEmitter。"""
+        if self._event_emitter is None:
+            return
+        emitter: StepEventEmitter = self._event_emitter.for_step(claim.step_id)
+        if emitter.is_closed:
+            return
+        try:
+            await emitter.emit(
+                RuntimeEventType.STEP_COMPLETED,
+                StepCompletedPayload(status.value, safe_error_code),
+                component="parallel_executor",
+                close=True,
+                ignore_run_cancellation=True,
+            )
+        except (EventChannelClosedError, RuntimeError):
+            return
 
     def _preflight(self, driver: StepExecutionDriver, mode: StepExecutionMode, specs: Mapping[str, StepConcurrencySpec], claims: tuple[StepClaim, ...]) -> None:
         is_async = inspect.iscoroutinefunction(driver.execute)
@@ -250,15 +335,21 @@ class ParallelExecutor:
         self._state_machine.apply_step_event(state, StepStateEvent(event_type, claim.step_id, occurred_at=ended_at, error_code=error_code, error_message=error_message))
         return StepExecutionOutcome(claim.step_id, status, current.started_at or claim.claimed_at, ended_at, result, error_code, error_message)
 
-    def _cancel_claims(self, claims: tuple[StepClaim, ...], state: AgentState, error_code: str, message: str) -> None:
+    async def _cancel_claims(self, claims: tuple[StepClaim, ...], state: AgentState, error_code: str, message: str) -> None:
         for claim in claims:
             if state.steps.get(claim.step_id) and state.steps[claim.step_id].status == StepStatus.RUNNING:
                 self._terminal(state, claim, StepStatus.CANCELLED, error_code=error_code, error_message=message)
+                await self._emit_step_completed(
+                    claim, StepStatus.CANCELLED, error_code
+                )
 
-    def _cancel_unfinished(self, claims: tuple[StepClaim, ...], outcomes: dict[str, StepExecutionOutcome], state: AgentState) -> None:
+    async def _cancel_unfinished(self, claims: tuple[StepClaim, ...], outcomes: dict[str, StepExecutionOutcome], state: AgentState) -> None:
         for claim in claims:
             if claim.step_id not in outcomes:
                 outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.CANCELLED, error_code="STEP_CANCELLED", error_message="步骤执行已取消")
+                await self._emit_step_completed(
+                    claim, StepStatus.CANCELLED, "STEP_CANCELLED"
+                )
 
     @staticmethod
     def _validate_positive(value: int, name: str) -> None:
