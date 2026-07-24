@@ -93,16 +93,40 @@ class ModelCompletedPayload:
 @dataclass(frozen=True, slots=True)
 class ToolStartedPayload:
     tool_name: str
+    invocation_id: str | None = None
+    attempt_id: str | None = None
+    retry_index: int | None = None
+    resource_key_digest: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.tool_name, "tool_name")
+        for value, name in (
+            (self.invocation_id, "invocation_id"),
+            (self.attempt_id, "attempt_id"),
+            (self.resource_key_digest, "resource_key_digest"),
+        ):
+            if value is not None:
+                _require_text(value, name)
+        if self.retry_index is not None:
+            _require_index(self.retry_index, "retry_index")
 
 
 @dataclass(frozen=True, slots=True)
 class ToolCompletedPayload:
+    """Runtime Attempt 已结束等待；Detached 同步 Worker 可能仍在执行。"""
+
     tool_name: str
     succeeded: bool
     safe_error_code: str | None = None
+    invocation_id: str | None = None
+    attempt_id: str | None = None
+    retry_index: int | None = None
+    side_effect_state: str | None = None
+    retry_disposition: str | None = None
+    resource_key_digest: str | None = None
+    worker_terminated: bool = True
+    execution_detached: bool = False
+    resource_release_pending: bool = False
 
     def __post_init__(self) -> None:
         _require_text(self.tool_name, "tool_name")
@@ -110,6 +134,28 @@ class ToolCompletedPayload:
             raise TypeError("succeeded 必须是 bool")
         if self.safe_error_code is not None:
             _require_text(self.safe_error_code, "safe_error_code")
+        for value, name in (
+            (self.invocation_id, "invocation_id"),
+            (self.attempt_id, "attempt_id"),
+            (self.side_effect_state, "side_effect_state"),
+            (self.retry_disposition, "retry_disposition"),
+            (self.resource_key_digest, "resource_key_digest"),
+        ):
+            if value is not None:
+                _require_text(value, name)
+        if self.retry_index is not None:
+            _require_index(self.retry_index, "retry_index")
+        for value, name in (
+            (self.worker_terminated, "worker_terminated"),
+            (self.execution_detached, "execution_detached"),
+            (self.resource_release_pending, "resource_release_pending"),
+        ):
+            if not isinstance(value, bool):
+                raise TypeError(f"{name} 必须是 bool")
+        if self.execution_detached and self.worker_terminated:
+            raise ValueError("Detached Worker 不能标记为已终止")
+        if self.execution_detached and not self.resource_release_pending:
+            raise ValueError("Detached Worker 必须等待资源清理")
 
 
 @dataclass(frozen=True, slots=True)
