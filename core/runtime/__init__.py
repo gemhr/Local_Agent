@@ -41,7 +41,7 @@ from core.runtime.agent_loop import (
 from core.runtime.model_context import (
     ContextBuilder, ContextBuildRequest, ContextBuildResult, ContextBudgetExceededError, ContextDropRecord,
     ContextItem, ContextSourceType, ContextStats, ContextTrustLevel, DeterministicTokenEstimator,
-    ModelContextRequirements, TokenEstimator,
+    MemoryContextRecord, MemoryProvenance, ModelContextRequirements, TokenEstimator,
 )
 from core.runtime.planning import Plan, PlanSource, PlanStep, PlanValidator, RiskLevel, TaskCapabilityRequirements, create_single_step_plan
 from core.runtime.plan_graph import PlanGraph, PlanGraphValidationError, PlanGraphValidator
@@ -77,6 +77,10 @@ from core.runtime.events import (
     OutputDeltaPayload,
     RunCompletedPayload,
     RunStartedPayload,
+    RetrievalBudgetPayload,
+    RetrievalCompletedPayload,
+    RetrievalStageCompletedPayload,
+    RetrievalStartedPayload,
     RuntimeEvent,
     RuntimeEventDraft,
     RuntimeEventPayload,
@@ -114,7 +118,8 @@ __all__ = [
     "OperationTimeoutError", "OperationType", "effective_timeout_seconds",
     "ContextBuilder", "ContextBuildRequest", "ContextBuildResult", "ContextBudgetExceededError",
     "ContextDropRecord", "ContextItem", "ContextSourceType", "ContextStats", "ContextTrustLevel",
-    "DeterministicTokenEstimator", "ModelContextRequirements", "TokenEstimator",
+    "DeterministicTokenEstimator", "MemoryContextRecord", "MemoryProvenance",
+    "ModelContextRequirements", "TokenEstimator",
     "Plan", "PlanSource", "PlanStep", "PlanValidator", "RiskLevel", "TaskCapabilityRequirements", "create_single_step_plan",
     "PlanGraph", "PlanGraphValidationError", "PlanGraphValidator",
     "ModelCostProfile", "ModelPreference", "ModelProfile", "ModelProfileId", "ModelResolver", "ModelSelectionDecision", "ModelSelectionError", "ModelSelectionObjective", "ModelSelectionPolicy", "ModelSelectionReason", "ModelSelectionRequest",
@@ -162,6 +167,10 @@ __all__ = [
     "RunCompletedPayload",
     "RunEventEmitter",
     "RunStartedPayload",
+    "RetrievalBudgetPayload",
+    "RetrievalCompletedPayload",
+    "RetrievalStageCompletedPayload",
+    "RetrievalStartedPayload",
     "RuntimeEvent",
     "RuntimeEventChannel",
     "RuntimeEventDraft",
@@ -189,6 +198,21 @@ __all__ += [
     "StepExecutionOutcome",
 ]
 from core.runtime.budget import BudgetedModelStream, BudgetExceededError, BudgetLedger, BudgetPolicy, BudgetReservation, BudgetReservationError, BudgetSnapshot, BudgetUsage, RunBudget, UsageSource
+from core.runtime.blocking_executor import (
+    BlockingExecutorAdmissionTimeout,
+    BlockingExecutorClosedError,
+    BlockingExecutorNestedSubmissionError,
+    BlockingExecutorSnapshot,
+    BlockingTaskHandle,
+    BlockingTaskKind,
+    BlockingTaskRecord,
+    BlockingTaskState,
+    BlockingTaskWaitState,
+    BoundedBlockingExecutor,
+    DEFAULT_BLOCKING_MAX_PENDING_TASKS,
+    DEFAULT_BLOCKING_MAX_WORKERS,
+    process_blocking_executor,
+)
 
 __all__ += [
     "BudgetedModelStream",
@@ -201,6 +225,19 @@ __all__ += [
     "BudgetUsage",
     "RunBudget",
     "UsageSource",
+    "BlockingExecutorAdmissionTimeout",
+    "BlockingExecutorClosedError",
+    "BlockingExecutorNestedSubmissionError",
+    "BlockingExecutorSnapshot",
+    "BlockingTaskHandle",
+    "BlockingTaskKind",
+    "BlockingTaskRecord",
+    "BlockingTaskState",
+    "BlockingTaskWaitState",
+    "BoundedBlockingExecutor",
+    "DEFAULT_BLOCKING_MAX_PENDING_TASKS",
+    "DEFAULT_BLOCKING_MAX_WORKERS",
+    "process_blocking_executor",
 ]
 
 from core.runtime.circuit_breaker import (
@@ -305,4 +342,76 @@ __all__ += [
     "ToolAdapterInvocationError", "ToolAdapterResponse",
     "AttemptSideEffectTracker", "ToolAttemptExecutor", "ToolExecutionContext",
     "ToolExecutionFailed", "ToolExecutionService",
+]
+
+from core.runtime.retrieval_contract import (
+    CitationBinding,
+    MaterializedDocument,
+    QueryRewriteStrategy,
+    RetrievalBudgetUsage,
+    RetrievalCandidate,
+    RetrievalErrorCategory,
+    RetrievalExecutionError,
+    RetrievalExecutionResult,
+    RetrievalExecutionSpec,
+    RetrievalExecutionStatus,
+    RetrievalInvocation,
+    RetrievalProvenance,
+    RetrievalStage,
+    RetrievalStageRecord,
+    RetrievalStageStatus,
+    RetrievalTransformation,
+    RetrievedChunk,
+    SourceMetadata,
+    content_digest,
+    normalize_query,
+    query_digest,
+)
+from core.runtime.retrieval_context import (
+    RetrievalDeadlineExceededError,
+    RetrievalExecutionContext,
+)
+from core.runtime.retrieval_adapters import (
+    QueryEmbedding,
+    RetrievalAdapter,
+    RetrievalAdapterError,
+    RuntimeKnowledgeRetrievalAdapter,
+)
+from core.runtime.retrieval_execution import RetrievalExecutionService
+from core.knowledge_base.vector_scores import (
+    VectorScoreSemantics,
+    normalize_vector_score,
+)
+
+__all__ += [
+    "CitationBinding",
+    "MaterializedDocument",
+    "QueryEmbedding",
+    "QueryRewriteStrategy",
+    "RetrievalAdapter",
+    "RetrievalAdapterError",
+    "RetrievalBudgetUsage",
+    "RetrievalCandidate",
+    "RetrievalDeadlineExceededError",
+    "RetrievalErrorCategory",
+    "RetrievalExecutionContext",
+    "RetrievalExecutionError",
+    "RetrievalExecutionResult",
+    "RetrievalExecutionService",
+    "RetrievalExecutionSpec",
+    "RetrievalExecutionStatus",
+    "RetrievalInvocation",
+    "RetrievalProvenance",
+    "RetrievalStage",
+    "RetrievalStageRecord",
+    "RetrievalStageStatus",
+    "RetrievalTransformation",
+    "RetrievedChunk",
+    "RuntimeKnowledgeRetrievalAdapter",
+    "SourceMetadata",
+    "content_digest",
+    "normalize_query",
+    "query_digest",
+    "VectorScoreSemantics",
+    "normalize_vector_score",
 ]

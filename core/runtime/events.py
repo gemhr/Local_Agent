@@ -23,6 +23,9 @@ class RuntimeEventType(str, Enum):
     MODEL_COMPLETED = "MODEL_COMPLETED"
     TOOL_STARTED = "TOOL_STARTED"
     TOOL_COMPLETED = "TOOL_COMPLETED"
+    RETRIEVAL_STARTED = "RETRIEVAL_STARTED"
+    RETRIEVAL_STAGE_COMPLETED = "RETRIEVAL_STAGE_COMPLETED"
+    RETRIEVAL_COMPLETED = "RETRIEVAL_COMPLETED"
     OUTPUT_DELTA = "OUTPUT_DELTA"
     STEP_COMPLETED = "STEP_COMPLETED"
     ERROR = "ERROR"
@@ -159,6 +162,127 @@ class ToolCompletedPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class RetrievalBudgetPayload:
+    """只包含 Retrieval 维度计数，不包含 Query、向量或正文。"""
+
+    retrieval_calls: int = 0
+    embedding_calls: int = 0
+    vector_queries: int = 0
+    keyword_queries: int = 0
+    document_reads: int = 0
+    context_chars: int = 0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "retrieval_calls",
+            "embedding_calls",
+            "vector_queries",
+            "keyword_queries",
+            "document_reads",
+            "context_chars",
+        ):
+            _require_index(getattr(self, name), name)
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalStartedPayload:
+    retrieval_id: str
+    query_digest: str
+    collection_count: int
+    top_k: int
+
+    def __post_init__(self) -> None:
+        _require_text(self.retrieval_id, "retrieval_id")
+        _require_text(self.query_digest, "query_digest")
+        _require_index(self.collection_count, "collection_count")
+        if self.collection_count <= 0:
+            raise ValueError("collection_count 必须是正整数")
+        _require_index(self.top_k, "top_k")
+        if self.top_k <= 0:
+            raise ValueError("top_k 必须是正整数")
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalStageCompletedPayload:
+    stage: str
+    status: str
+    duration_ms: int
+    input_count: int
+    output_count: int
+    degraded: bool
+    budget_usage: RetrievalBudgetPayload
+    safe_error_code: str | None = None
+    worker_terminated: bool = True
+    execution_detached: bool = False
+    background_work_pending: bool = False
+
+    def __post_init__(self) -> None:
+        _require_text(self.stage, "stage")
+        _require_text(self.status, "status")
+        _require_index(self.duration_ms, "duration_ms")
+        _require_index(self.input_count, "input_count")
+        _require_index(self.output_count, "output_count")
+        if not isinstance(self.degraded, bool):
+            raise TypeError("degraded 必须是 bool")
+        if not isinstance(self.budget_usage, RetrievalBudgetPayload):
+            raise TypeError("budget_usage 必须是 RetrievalBudgetPayload")
+        if self.safe_error_code is not None:
+            _require_text(self.safe_error_code, "safe_error_code")
+        for name in (
+            "worker_terminated",
+            "execution_detached",
+            "background_work_pending",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} 必须是 bool")
+        if self.execution_detached and self.worker_terminated:
+            raise ValueError("Detached Worker 不能标记为已终止")
+        if self.execution_detached and not self.background_work_pending:
+            raise ValueError("Detached Worker 必须标记后台工作待完成")
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalCompletedPayload:
+    retrieval_id: str
+    status: str
+    duration_ms: int
+    chunk_count: int
+    citation_count: int
+    degraded: bool
+    budget_usage: RetrievalBudgetPayload
+    safe_error_code: str | None = None
+    worker_terminated: bool = True
+    execution_detached: bool = False
+    background_work_pending: bool = False
+
+    def __post_init__(self) -> None:
+        _require_text(self.retrieval_id, "retrieval_id")
+        _require_text(self.status, "status")
+        _require_index(self.duration_ms, "duration_ms")
+        _require_index(self.chunk_count, "chunk_count")
+        _require_index(self.citation_count, "citation_count")
+        if self.chunk_count != self.citation_count:
+            raise ValueError("Retrieval 完成事件的 Chunk 与 Citation 数量必须一致")
+        if not isinstance(self.degraded, bool):
+            raise TypeError("degraded 必须是 bool")
+        if not isinstance(self.budget_usage, RetrievalBudgetPayload):
+            raise TypeError("budget_usage 必须是 RetrievalBudgetPayload")
+        if self.safe_error_code is not None:
+            _require_text(self.safe_error_code, "safe_error_code")
+        for name in (
+            "worker_terminated",
+            "execution_detached",
+            "background_work_pending",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} 必须是 bool")
+        if self.execution_detached and self.worker_terminated:
+            raise ValueError("Detached Worker 不能标记为已终止")
+        if self.execution_detached and not self.background_work_pending:
+            raise ValueError("Detached Worker 必须标记后台工作待完成")
+
+
+@dataclass(frozen=True, slots=True)
 class OutputDeltaPayload:
     """唯一允许承载最终用户可见正文的 Payload。"""
 
@@ -222,6 +346,9 @@ RuntimeEventPayload: TypeAlias = (
     | ModelCompletedPayload
     | ToolStartedPayload
     | ToolCompletedPayload
+    | RetrievalStartedPayload
+    | RetrievalStageCompletedPayload
+    | RetrievalCompletedPayload
     | OutputDeltaPayload
     | StepCompletedPayload
     | ErrorPayload
@@ -237,6 +364,9 @@ _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
     RuntimeEventType.MODEL_COMPLETED: ModelCompletedPayload,
     RuntimeEventType.TOOL_STARTED: ToolStartedPayload,
     RuntimeEventType.TOOL_COMPLETED: ToolCompletedPayload,
+    RuntimeEventType.RETRIEVAL_STARTED: RetrievalStartedPayload,
+    RuntimeEventType.RETRIEVAL_STAGE_COMPLETED: RetrievalStageCompletedPayload,
+    RuntimeEventType.RETRIEVAL_COMPLETED: RetrievalCompletedPayload,
     RuntimeEventType.OUTPUT_DELTA: OutputDeltaPayload,
     RuntimeEventType.STEP_COMPLETED: StepCompletedPayload,
     RuntimeEventType.ERROR: ErrorPayload,

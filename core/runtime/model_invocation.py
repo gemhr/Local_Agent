@@ -97,6 +97,7 @@ class GeneratorModelAdapter:
         *,
         max_tokens: int,
         on_started: Callable[[], None] | None = None,
+        generation_options: Mapping[str, object] | None = None,
     ) -> ModelAdapterResponse:
         chunks: list[str] = []
         provider_started = False
@@ -104,7 +105,11 @@ class GeneratorModelAdapter:
             provider_started = True
             if on_started is not None:
                 on_started()
-            stream = self._engine.generate(list(messages), max_tokens=max_tokens)
+            stream = self._engine.generate(
+                list(messages),
+                max_tokens=max_tokens,
+                **dict(generation_options or {}),
+            )
             for chunk in stream:
                 if chunk:
                     chunks.append(str(chunk))
@@ -303,6 +308,7 @@ class ModelInvocationRouter:
         max_tokens: int,
         output_started: bool = False,
         event_emitter: StepEventEmitter | None = None,
+        generation_options: Mapping[str, object] | None = None,
     ) -> ModelInvocationResult:
         if routing_decision.confirmation_required:
             raise ModelInvocationConfirmationRequired()
@@ -434,6 +440,7 @@ class ModelInvocationRouter:
                         messages,
                         max_tokens=max_tokens,
                         on_started=on_started,
+                        generation_options=generation_options,
                     )
                 else:
                     response = adapter.invoke(messages, max_tokens=max_tokens)
@@ -549,13 +556,50 @@ class ModelInvocationRouter:
                     break
                 continue
             actual = response.actual_usage
-            budget_ledger.commit(
-                reservation,
-                actual,
-                usage_source=(
-                    UsageSource.ACTUAL if actual is not None else UsageSource.ESTIMATED
-                ),
-            )
+            try:
+                budget_ledger.commit(
+                    reservation,
+                    actual,
+                    usage_source=(
+                        UsageSource.ACTUAL
+                        if actual is not None
+                        else UsageSource.ESTIMATED
+                    ),
+                )
+            except BudgetExceededError as exc:
+                # Provider 已成功响应，Circuit 视为健康；但实际 Token/Cost
+                # 超过原子可补差范围时不得把预算推过上限，也不得返回正文。
+                # 以原预留保守结算并向上返回预算失败。
+                budget_ledger.commit(
+                    reservation,
+                    None,
+                    usage_source=UsageSource.ESTIMATED,
+                )
+                permit.record_success()
+                attempts.append(
+                    self._attempt(
+                        index,
+                        candidate,
+                        True,
+                        False,
+                        ModelFailureCategory.BUDGET_EXHAUSTED,
+                        "BUDGET_EXHAUSTED",
+                        ModelUsageSource.ESTIMATED,
+                    )
+                )
+                if started_event_emitted:
+                    self._emit_attempt_completed(
+                        event_emitter,
+                        candidate=candidate,
+                        candidate_index=self._candidate_index(
+                            routing_decision, candidate.profile_id
+                        ),
+                        retry_index=retry_index,
+                        succeeded=False,
+                        safe_error_code="BUDGET_EXHAUSTED",
+                    )
+                exc.model_attempts = tuple(attempts)
+                raise
             permit.record_success()
             attempts.append(
                 self._attempt(
