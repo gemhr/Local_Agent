@@ -17,6 +17,10 @@ from core.runtime import (
     GeneratorModelAdapter, ModelAdapterResolver, ModelCircuitBreakerRegistry,
     ModelInvocationResult, ModelInvocationRouter, ModelRoutingPolicy,
     StepEventEmitter,
+    RunBudget, BudgetLedger,
+    ToolAdapter, ToolAdapterInvocationError, ToolErrorCategory,
+    ToolExecutionError, ToolExecutionFailed, ToolExecutionPhase,
+    ToolExecutionService, ToolSideEffectState, RetryDisposition,
 )
 
 if TYPE_CHECKING:
@@ -63,6 +67,7 @@ class AgentRouter:
         model_adapter_resolver: ModelAdapterResolver | None = None,
         model_invocation_router: ModelInvocationRouter | None = None,
         circuit_breaker_registry: ModelCircuitBreakerRegistry | None = None,
+        tool_execution_service: ToolExecutionService | None = None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -123,6 +128,10 @@ class AgentRouter:
         self.circuit_breaker_registry = (
             circuit_breaker_registry or ModelCircuitBreakerRegistry()
         )
+        # AgentRouter 是应用生命周期对象，因此 Tool 并发 Controller 跨 Run 共享。
+        self.tool_execution_service = (
+            tool_execution_service or ToolExecutionService()
+        )
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256
         self.knowledge_rewrite_max_tokens = 128
@@ -151,9 +160,28 @@ class AgentRouter:
         }
         self.delegate_agent_ids = ["data_analyst", "code_expert", "knowledge_expert"]
 
-    def register_tool(self, name: str, func: Callable[[str], str], description: str) -> None:
+    def register_tool(
+        self,
+        name: str,
+        func: Callable[[str], str],
+        description: str,
+        *,
+        adapter: ToolAdapter | None = None,
+    ) -> None:
         """注册一个可由模型触发的工具。"""
-        self.tools[name] = {"func": func, "description": description}
+        self.tools[name] = {
+            "func": func,
+            "description": description,
+            "adapter": adapter,
+        }
+
+    def attach_tool_adapter(self, name: str, adapter: ToolAdapter) -> None:
+        """在既有硬编码 Tool 映射上附着执行元数据，不创建第二套 Registry。"""
+        if name not in self.tools:
+            raise KeyError("只能为已注册 Tool 附着 Adapter")
+        if not isinstance(adapter, ToolAdapter):
+            raise TypeError("adapter 必须是 ToolAdapter")
+        self.tools[name]["adapter"] = adapter
 
     def _build_system_prompt(
         self,
@@ -814,6 +842,7 @@ class AgentRouter:
         history_scope: str = DIRECT_MEMORY_SCOPE,
         run_context: RunContext | None = None,
         context_requirements_out: list[ModelContextRequirements] | None = None,
+        event_emitter: StepEventEmitter | None = None,
     ) -> list[dict[str, str]]:
         """构建回答消息，并在需要时注入工具观察结果。"""
         if run_context is not None:
@@ -832,15 +861,52 @@ class AgentRouter:
         tool_name, tool_args = tool_call
         if run_context is not None:
             run_context.raise_if_inactive()
-        tool_reservation = None
-        if run_context is not None and run_context.budget_ledger is not None:
-            tool_reservation = run_context.budget_ledger.reserve(BudgetUsage(tool_calls=1), reservation_type="tool_call")
-        try:
-            observation = str(self.tools[tool_name]["func"](tool_args))
-        finally:
-            # 已进入真实 Tool 边界后，即使失败也正式计一次调用。
-            if tool_reservation is not None:
-                run_context.budget_ledger.commit(tool_reservation, BudgetUsage(tool_calls=1), usage_source=UsageSource.ESTIMATED)
+        tool_info = self.tools[tool_name]
+        adapter = tool_info.get("adapter")
+        if isinstance(adapter, ToolAdapter):
+            active_context = run_context
+            if active_context is None:
+                active_context = RunContext.create(entry_agent_id=agent_id)
+                active_context.attach_budget_ledger(BudgetLedger(RunBudget()))
+            try:
+                invocation = adapter.build_invocation(tool_args)
+            except ToolAdapterInvocationError as exc:
+                from uuid import uuid4
+
+                raise ToolExecutionFailed(
+                    ToolExecutionError(
+                        invocation_id=uuid4().hex,
+                        attempt_id=None,
+                        tool_name=tool_name,
+                        category=exc.category,
+                        safe_error_code=exc.safe_error_code,
+                        safe_message=exc.safe_message,
+                        phase=exc.phase,
+                        provider_started=False,
+                        side_effect_state=ToolSideEffectState.NOT_STARTED,
+                        retry_disposition=RetryDisposition.UNSAFE,
+                    )
+                ) from None
+            outcome = self.tool_execution_service.execute_sync(
+                invocation=invocation,
+                adapter=adapter,
+                run_context=active_context,
+                step_id=event_emitter.step_id if event_emitter is not None else "legacy-tool",
+                event_emitter=event_emitter,
+            )
+            if isinstance(outcome, ToolExecutionError):
+                raise ToolExecutionFailed(outcome)
+            observation = outcome.output.content
+        else:
+            # 未迁移 Tool 保留原 Legacy 直接调用和既有预算语义。
+            tool_reservation = None
+            if run_context is not None and run_context.budget_ledger is not None:
+                tool_reservation = run_context.budget_ledger.reserve(BudgetUsage(tool_calls=1), reservation_type="tool_call")
+            try:
+                observation = str(tool_info["func"](tool_args))
+            finally:
+                if tool_reservation is not None:
+                    run_context.budget_ledger.commit(tool_reservation, BudgetUsage(tool_calls=1), usage_source=UsageSource.ESTIMATED)
         if run_context is not None:
             run_context.raise_if_inactive()
         observation = self._truncate_text(observation, 1600)
@@ -910,6 +976,7 @@ class AgentRouter:
             history_scope=history_scope,
             run_context=run_context,
             context_requirements_out=context_requirements_out,
+            event_emitter=event_emitter,
         )
         if run_context is not None:
             run_context.raise_if_inactive()

@@ -4,6 +4,10 @@
 
 from tools.complex_workflow_simulator import complex_workflow_simulator
 from tools.local_tools import analyze_excel_data, get_system_status, list_files_in_dir
+from core.runtime.tool_adapters import (
+    ComplexWorkflowToolAdapter,
+    LegacyStringToolAdapter,
+)
 
 
 def register_all_tools(router) -> None:
@@ -27,6 +31,17 @@ def register_all_tools(router) -> None:
         func=get_system_status,
         description="Return basic local system status. No arguments required.",
     )
+    if hasattr(router, "attach_tool_adapter"):
+        router.attach_tool_adapter(
+            "get_system_status",
+            LegacyStringToolAdapter(
+            tool_name="get_system_status",
+            function=get_system_status,
+            default_timeout_seconds=3.0,
+            max_output_bytes=4096,
+            max_concurrency=2,
+            ),
+        )
     router.register_tool(
         name="complex_workflow_simulator",
         func=complex_workflow_simulator,
@@ -38,3 +53,7 @@ def register_all_tools(router) -> None:
             "NON_IDEMPOTENT_SIMULATION must only be selected explicitly."
         ),
     )
+    if hasattr(router, "attach_tool_adapter"):
+        router.attach_tool_adapter(
+            "complex_workflow_simulator", ComplexWorkflowToolAdapter()
+        )

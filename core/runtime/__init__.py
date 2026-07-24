@@ -243,6 +243,24 @@ from core.runtime.retry import (
     RateLimitRecoveryMode, RetryDecision, RetryExecutor, RetryPolicy,
     RetryableOperationKind, Sleeper, retry_allowed_by_idempotency,
 )
+from core.runtime.tool_contract import (
+    RetryDisposition, ToolErrorCategory, ToolExecutionError, ToolExecutionPhase,
+    ToolExecutionResult, ToolExecutionSpec, ToolExecutionStatus, ToolInvocation,
+    ToolOutput, ToolOutputValidationError, ToolSideEffectKind, ToolSideEffectState, build_tool_output,
+    canonical_json_digest, retry_disposition_for, safe_key_digest, thaw_json,
+)
+from core.runtime.tool_concurrency import (
+    ToolConcurrencyController, ToolResourceAcquireError, ToolResourceLease,
+    ToolWorkerRecord,
+)
+from core.runtime.tool_adapters import (
+    ComplexWorkflowToolAdapter, LegacyStringToolAdapter, ToolAdapter,
+    ToolAdapterInvocationError, ToolAdapterResponse,
+)
+from core.runtime.tool_execution import (
+    AttemptSideEffectTracker, ToolAttemptExecutor, ToolExecutionContext,
+    ToolExecutionFailed, ToolExecutionService,
+)
 
 __all__ += [
     "CircuitHealthOutcome",
@@ -277,4 +295,14 @@ __all__ += [
     "AsyncioSleeper", "CancellableRetrySleeper", "JitterMode", "OperationIdempotency", "RandomSource",
     "RateLimitRecoveryMode", "RetryDecision", "RetryExecutor", "RetryPolicy",
     "RetryableOperationKind", "Sleeper", "retry_allowed_by_idempotency",
+    "RetryDisposition", "ToolErrorCategory", "ToolExecutionError", "ToolExecutionPhase",
+    "ToolExecutionResult", "ToolExecutionSpec", "ToolExecutionStatus", "ToolInvocation",
+    "ToolOutput", "ToolOutputValidationError", "ToolSideEffectKind", "ToolSideEffectState", "build_tool_output",
+    "canonical_json_digest", "retry_disposition_for", "safe_key_digest", "thaw_json",
+    "ToolConcurrencyController", "ToolResourceAcquireError", "ToolResourceLease",
+    "ToolWorkerRecord",
+    "ComplexWorkflowToolAdapter", "LegacyStringToolAdapter", "ToolAdapter",
+    "ToolAdapterInvocationError", "ToolAdapterResponse",
+    "AttemptSideEffectTracker", "ToolAttemptExecutor", "ToolExecutionContext",
+    "ToolExecutionFailed", "ToolExecutionService",
 ]

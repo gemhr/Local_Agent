@@ -614,6 +614,7 @@ class ComplexWorkflowSimulationTool:
         lock_manager: WorkflowResourceLockManager | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         cancellation_probe: Callable[[], bool] | None = None,
+        before_side_effect: Callable[[], None] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         utc_now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -621,6 +622,7 @@ class ComplexWorkflowSimulationTool:
         self.lock_manager = lock_manager or WorkflowResourceLockManager()
         self._sleeper = sleeper
         self._cancellation_probe = cancellation_probe or (lambda: False)
+        self._before_side_effect = before_side_effect or (lambda: None)
         self._monotonic = monotonic
         self._utc_now = utc_now or (lambda: datetime.now(timezone.utc))
 
@@ -687,6 +689,8 @@ class ComplexWorkflowSimulationTool:
                 request, state, WorkflowStage.COMMIT_SIDE_EFFECTS
             )
             if request.execution_mode != WorkflowExecutionMode.DRY_RUN:
+                # Runtime Adapter 在这里注入正式 before_side_effect；Legacy 路径为空操作。
+                self._before_side_effect()
                 successful_ids = tuple(
                     result.item_id
                     for result in state.item_results
