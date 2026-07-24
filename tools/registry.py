@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """内置工具注册模块。"""
 
+from tools.complex_workflow_simulator import complex_workflow_simulator
 from tools.local_tools import analyze_excel_data, get_system_status, list_files_in_dir
 
 
@@ -25,4 +26,15 @@ def register_all_tools(router) -> None:
         name="get_system_status",
         func=get_system_status,
         description="Return basic local system status. No arguments required.",
+    )
+    router.register_tool(
+        name="complex_workflow_simulator",
+        func=complex_workflow_simulator,
+        description=(
+            "Run a deterministic local batch-workflow simulation. "
+            "Argument: one JSON object containing operation_id, resource_key, "
+            "idempotency_key, execution_mode, items, failure_injection, "
+            "processing_options, and metadata. "
+            "NON_IDEMPOTENT_SIMULATION must only be selected explicitly."
+        ),
     )
