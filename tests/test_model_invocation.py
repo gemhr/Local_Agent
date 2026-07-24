@@ -35,6 +35,8 @@ from core.runtime import (
     ModelSelectionObjective,
     ModelSelectionReason,
     RoutingAdjustment,
+    RetryExecutor,
+    RetryPolicy,
     RunBudget,
     RunCancelledError,
     RunStatus,
@@ -198,7 +200,7 @@ class ModelInvocationTests(unittest.TestCase):
         self.assertEqual(local.calls, 0)
         self.assertEqual(remote.calls, 1)
 
-    def test_transient_failure_falls_back_without_retry(self) -> None:
+    def test_open_circuit_blocks_retry_before_fallback(self) -> None:
         local = RecordingAdapter(
             [provider_error(ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE)]
         )
@@ -212,7 +214,20 @@ class ModelInvocationTests(unittest.TestCase):
         result = fixture.invoke(routing(LOCAL, REMOTE))
         self.assertEqual(result.executed_profile_id, ModelProfileId.REMOTE_ADVANCED)
         self.assertEqual((local.calls, remote.calls), (1, 1))
-        self.assertEqual(len(result.attempts), 2)
+        self.assertEqual(len(result.attempts), 3)
+        self.assertTrue(result.attempts[0].started)
+        self.assertFalse(result.attempts[1].started)
+        self.assertEqual(
+            result.attempts[1].failure_category,
+            ModelFailureCategory.CIRCUIT_OPEN,
+        )
+        self.assertEqual(
+            [
+                (attempt.candidate_index, attempt.retry_index)
+                for attempt in result.attempts
+            ],
+            [(0, 0), (0, 1), (1, 0)],
+        )
         self.assertEqual(fixture.ledger.snapshot().committed_usage.model_calls, 2)
 
     def test_rate_limit_can_downgrade_with_quality_disclosure(self) -> None:
@@ -268,7 +283,9 @@ class ModelInvocationTests(unittest.TestCase):
         )
         with self.assertRaises(ModelInvocationChainError):
             fixture.invoke(routing(LOCAL, REMOTE))
+        self.assertEqual(local.calls, 1)
         self.assertEqual(remote.calls, 0)
+        self.assertEqual(fixture.ledger.snapshot().committed_usage.retries, 0)
 
     def test_open_circuit_skips_without_budget_consumption(self) -> None:
         local = RecordingAdapter(
@@ -374,6 +391,15 @@ class ModelInvocationTests(unittest.TestCase):
         fixture = InvocationFixture({ModelProfileId.LOCAL_FAST: adapter})
         fixture.registry = ModelCircuitBreakerRegistry(
             ModelCircuitBreakerConfig(failure_threshold=2)
+        )
+        fixture.router = ModelInvocationRouter(
+            retry_executor=RetryExecutor(
+                RetryPolicy(
+                    max_attempts=1,
+                    base_delay_seconds=0,
+                    max_delay_seconds=0,
+                )
+            )
         )
         breaker = fixture.registry.get(LOCAL.effective_breaker_key)
         for expected_failures in (1, 0, 1):
@@ -666,7 +692,12 @@ class CoordinatedInvocationIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         local = RecordingAdapter(
-            [provider_error(ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE)]
+            [
+                provider_error(
+                    ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE
+                )
+                for _ in range(3)
+            ]
         )
         remote = RecordingAdapter(["fallback answer"])
 
@@ -699,14 +730,20 @@ class CoordinatedInvocationIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(output, "fallback answer")
         self.assertEqual(result.status, RunStatus.SUCCEEDED)
-        self.assertEqual((local.calls, remote.calls), (1, 1))
+        self.assertEqual((local.calls, remote.calls), (3, 1))
 
     async def test_all_candidates_failed_marks_step_and_run_failed(self) -> None:
         local = RecordingAdapter(
-            [provider_error(ModelFailureCategory.PROVIDER_TIMEOUT)]
+            [
+                provider_error(ModelFailureCategory.PROVIDER_TIMEOUT)
+                for _ in range(3)
+            ]
         )
         remote = RecordingAdapter(
-            [provider_error(ModelFailureCategory.RATE_LIMITED)]
+            [
+                provider_error(ModelFailureCategory.RATE_LIMITED)
+                for _ in range(3)
+            ]
         )
 
         class Placeholder:
@@ -737,7 +774,8 @@ class CoordinatedInvocationIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertIsNone(output)
         self.assertEqual(result.status, RunStatus.FAILED)
-        self.assertEqual((local.calls, remote.calls), (1, 1))
+        self.assertEqual(result.failed_step_ids, ("answer",))
+        self.assertEqual((local.calls, remote.calls), (3, 3))
 
 
 if __name__ == "__main__":
