@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Mapping, Protocol, Sequence
 
@@ -28,6 +28,7 @@ from core.runtime.model_routing import (
     RoutingAdjustment,
 )
 from core.runtime.model_selection import ModelProfileId
+from core.runtime.retry import RetryExecutor, RetryPolicy
 
 
 class ModelUsageSource(str, Enum):
@@ -144,6 +145,11 @@ class ModelInvocationAttempt:
     safe_error_code: str | None
     routing_adjustment: RoutingAdjustment
     usage_source: ModelUsageSource | None
+    # 新字段保持旧 Snapshot 的位置兼容，且只保存安全元数据。
+    candidate_index: int = 0
+    retry_index: int = 0
+    backoff_before_seconds: float = 0.0
+    circuit_state: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,10 +177,11 @@ class ModelInvocationChainError(RuntimeError):
         self,
         failure: ModelInvocationFailure,
         final_category: ModelFailureCategory,
+        safe_error_code: str | None = None,
     ) -> None:
         self.failure = failure
         self.failure_category = final_category
-        self.error_code = f"MODEL_CHAIN_{final_category.value}"
+        self.error_code = safe_error_code or f"MODEL_CHAIN_{final_category.value}"
         super().__init__("所有可用模型候选均未成功")
 
 
@@ -259,8 +266,17 @@ _BREAKER_FAILURES = frozenset(
 class ModelInvocationRouter:
     """统一协调候选、Circuit、预算、取消、截止时间与一次 Adapter 调用。"""
 
-    def __init__(self, routing_policy: ModelRoutingPolicy | None = None) -> None:
+    def __init__(
+        self,
+        routing_policy: ModelRoutingPolicy | None = None,
+        retry_executor: RetryExecutor | None = None,
+    ) -> None:
         self.routing_policy = routing_policy or ModelRoutingPolicy()
+        # 已迁移入口仍是同步 Adapter，不能在此阻塞 Event Loop 等待；默认只做
+        # 立即重试。生产 backoff 应由调用 async RetryExecutor 的入口显式注入。
+        self.retry_executor = retry_executor or RetryExecutor(
+            RetryPolicy(base_delay_seconds=0.0, max_delay_seconds=0.0)
+        )
 
     def invoke(
         self,
@@ -282,9 +298,16 @@ class ModelInvocationRouter:
         attempts: list[ModelInvocationAttempt] = []
         seen: set[ModelProfileId] = set()
         last_category = ModelFailureCategory.UNKNOWN_FAILURE
-        candidates = routing_decision.candidates
+        terminal_error_code: str | None = None
+        # list 允许在失败后仅为当前 Profile 插入下一次 Attempt；Router 仍只
+        # 负责 Profile 间 Fallback，RetryExecutor 是同 Profile Retry Owner。
+        candidates = list(routing_decision.candidates)
+        if len({candidate.profile_id for candidate in candidates}) != len(candidates):
+            raise RuntimeError("Routing Chain 不允许重复 Profile")
+        retry_indexes: dict[ModelProfileId, int] = {}
         for index, candidate in enumerate(candidates):
-            if candidate.profile_id in seen:
+            retry_index = retry_indexes.get(candidate.profile_id, 0)
+            if candidate.profile_id in seen and retry_index == 0:
                 raise RuntimeError("Routing Chain 不允许重复 Profile")
             seen.add(candidate.profile_id)
             run_context.raise_if_inactive()
@@ -334,7 +357,7 @@ class ModelInvocationRouter:
                 ):
                     break
                 continue
-            usage = self._estimated_usage(candidate, token_estimate, max_tokens)
+            usage = self._estimated_usage(candidate, token_estimate, max_tokens, retry_index)
             try:
                 reservation = budget_ledger.reserve(
                     usage,
@@ -419,6 +442,38 @@ class ModelInvocationRouter:
                         ModelUsageSource.ESTIMATED if started else None,
                     )
                 )
+                # 同 Profile 失败后由统一策略决定是否插入一次 Retry。插入的
+                # 候选不属于 Fallback，且每次会重新取得 Permit、原子预留预算。
+                decision = self.retry_executor.decide(
+                    category=category,
+                    retry_index=retry_index + 1,
+                    output_started=partial_output,
+                    remaining_seconds=run_context.remaining_seconds(),
+                    has_fallback=self._has_allowed_next(
+                        tuple(candidates), index, candidate, category, partial_output
+                    ),
+                    estimated_attempt_seconds=self._estimated_latency_seconds(candidate),
+                )
+                if decision.should_retry:
+                    retry_indexes[candidate.profile_id] = retry_index + 1
+                    # 同步真实入口不能阻塞 Event Loop；当前 Adapter 本身为同步，
+                    # 因此只支持零延迟策略，非零 backoff 由 async RetryExecutor 使用。
+                    # 记录 delay，调用前再次校验 deadline，避免隐藏 sleep。
+                    if decision.delay_seconds == 0:
+                        candidates.insert(index + 1, candidate)
+                        continue
+                    # 同步生产入口不能静默丢弃非零 delay 后立刻调用；明确返回
+                    # 安全失败，等待异步入口完成迁移。
+                    attempts[-1] = replace(
+                        attempts[-1], safe_error_code="SYNC_RETRY_DELAY_UNSUPPORTED"
+                    )
+                    terminal_error_code = "SYNC_RETRY_DELAY_UNSUPPORTED"
+                    break
+                if (
+                    category == ModelFailureCategory.RATE_LIMITED
+                    and self.retry_executor.policy.rate_limit_recovery_mode.value == "STOP"
+                ):
+                    break
                 if category in {
                     ModelFailureCategory.CANCELLED,
                     ModelFailureCategory.DEADLINE_EXCEEDED,
@@ -473,7 +528,7 @@ class ModelInvocationRouter:
                 routing_decision.capability_preferred_profile_id,
                 routing_decision.initial_selected_profile_id,
                 candidate.profile_id,
-                tuple(attempts),
+                self._with_retry_metadata(attempts, routing_decision.candidates),
                 (
                     candidate.adjustment == RoutingAdjustment.DOWNGRADE_TO_LOCAL
                     or (
@@ -488,9 +543,10 @@ class ModelInvocationRouter:
                 routing_decision.capability_preferred_profile_id,
                 routing_decision.initial_selected_profile_id,
                 None,
-                tuple(attempts),
+                self._with_retry_metadata(attempts, routing_decision.candidates),
             ),
             last_category,
+            terminal_error_code,
         )
 
     @staticmethod
@@ -522,6 +578,7 @@ class ModelInvocationRouter:
         candidate: ModelRoutingCandidate,
         input_tokens: int,
         max_tokens: int,
+        retry_index: int = 0,
     ) -> BudgetUsage:
         metadata = candidate.profile.cost_profile
         # 未配置成本时使用非零保守占位；生产 Profile 应显式配置并人工确认。
@@ -541,7 +598,15 @@ class ModelInvocationRouter:
             output_tokens=max_tokens,
             total_tokens=input_tokens + max_tokens,
             cost_units=cost_units,
+            retries=1 if retry_index > 0 else 0,
         )
+
+    @staticmethod
+    def _estimated_latency_seconds(candidate: ModelRoutingCandidate) -> float | None:
+        profile = candidate.profile.cost_profile
+        if profile is None or profile.estimated_latency_ms <= 0:
+            return None
+        return profile.estimated_latency_ms / 1000
 
     @staticmethod
     def _attempt(
@@ -564,6 +629,30 @@ class ModelInvocationRouter:
             candidate.adjustment,
             usage_source,
         )
+
+    @staticmethod
+    def _with_retry_metadata(
+        attempts: list[ModelInvocationAttempt],
+        original_candidates: tuple[ModelRoutingCandidate, ...],
+    ) -> tuple[ModelInvocationAttempt, ...]:
+        """在返回安全记录前，按原始候选链补齐稳定的候选/重试序号。"""
+        candidate_indexes = {
+            candidate.profile_id: index
+            for index, candidate in enumerate(original_candidates)
+        }
+        retries: dict[ModelProfileId, int] = {}
+        normalized: list[ModelInvocationAttempt] = []
+        for attempt in attempts:
+            retry_index = retries.get(attempt.profile_id, 0)
+            retries[attempt.profile_id] = retry_index + 1
+            normalized.append(
+                replace(
+                    attempt,
+                    candidate_index=candidate_indexes[attempt.profile_id],
+                    retry_index=retry_index,
+                )
+            )
+        return tuple(normalized)
 
     def _has_allowed_next(
         self,

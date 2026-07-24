@@ -186,6 +186,11 @@ from core.runtime.model_invocation import (
     ModelUsageSource,
     classify_model_failure,
 )
+from core.runtime.retry import (
+    AsyncioSleeper, CancellableRetrySleeper, JitterMode, OperationIdempotency, RandomSource,
+    RateLimitRecoveryMode, RetryDecision, RetryExecutor, RetryPolicy,
+    RetryableOperationKind, Sleeper, retry_allowed_by_idempotency,
+)
 
 __all__ += [
     "CircuitHealthOutcome",
@@ -217,4 +222,7 @@ __all__ += [
     "ModelUsageSource",
     "RoutingAdjustment",
     "classify_model_failure",
+    "AsyncioSleeper", "CancellableRetrySleeper", "JitterMode", "OperationIdempotency", "RandomSource",
+    "RateLimitRecoveryMode", "RetryDecision", "RetryExecutor", "RetryPolicy",
+    "RetryableOperationKind", "Sleeper", "retry_allowed_by_idempotency",
 ]

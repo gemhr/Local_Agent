@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import threading
+import asyncio
 from datetime import UTC, datetime
 from enum import Enum
 
@@ -53,6 +54,11 @@ class CancellationToken:
         reason = self.reason
         if reason is not None:
             raise RunCancelledError(reason)
+
+    async def wait_cancelled(self) -> None:
+        """异步等待取消，不占用事件循环；短超时确保取消 Task 可回收。"""
+        while not self._source._event.is_set():
+            await asyncio.to_thread(self._source._event.wait, 0.1)
 
 
 class CancellationSource:
