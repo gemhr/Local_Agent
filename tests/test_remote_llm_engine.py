@@ -5,6 +5,7 @@ import pytest
 
 from core.agent_router import AgentRouter
 from core.llm_engine import RemoteLLMEngine
+from core.runtime import BudgetLedger, RunBudget, create_run_context
 
 
 @dataclass
@@ -102,13 +103,16 @@ class RecordingLLM:
         yield "keyword"
 
 
-def test_knowledge_rewrite_uses_128_tokens_and_disables_thinking() -> None:
+def test_knowledge_rewrite_uses_unified_model_contract_with_128_tokens() -> None:
     llm = RecordingLLM()
     router = AgentRouter(llm_engine=llm, memory_manager=object())
+    context, _source = create_run_context(entry_agent_id="knowledge_expert")
+    context.attach_budget_ledger(BudgetLedger(RunBudget()))
 
-    assert router._rewrite_knowledge_query("question") == "keyword"
+    assert router._rewrite_knowledge_query("question", context, None) == "keyword"
     assert llm.calls[0]["max_tokens"] == 128
     assert llm.calls[0]["enable_thinking"] is False
+    assert context.budget_ledger.snapshot().committed_usage.model_calls == 1
 
 
 def test_remote_client_explicitly_disables_hidden_retries() -> None:

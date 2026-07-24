@@ -11,14 +11,48 @@ from time import perf_counter as monotonic
 from typing import Callable
 from uuid import uuid4
 
-_DIMENSIONS = ("step_starts", "model_calls", "remote_model_calls", "tool_calls", "input_tokens", "output_tokens", "total_tokens", "cost_units", "retries")
-_LIMITS = {"step_starts": "max_step_starts", "model_calls": "max_model_calls", "remote_model_calls": "max_remote_model_calls", "tool_calls": "max_tool_calls", "input_tokens": "max_input_tokens", "output_tokens": "max_output_tokens", "total_tokens": "max_total_tokens", "cost_units": "max_cost_units", "retries": "max_retries"}
+_DIMENSIONS = (
+    "step_starts",
+    "model_calls",
+    "remote_model_calls",
+    "tool_calls",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "cost_units",
+    "retries",
+    "retrieval_calls",
+    "embedding_calls",
+    "vector_queries",
+    "keyword_queries",
+    "document_reads",
+    "context_chars",
+)
+_LIMITS = {
+    "step_starts": "max_step_starts",
+    "model_calls": "max_model_calls",
+    "remote_model_calls": "max_remote_model_calls",
+    "tool_calls": "max_tool_calls",
+    "input_tokens": "max_input_tokens",
+    "output_tokens": "max_output_tokens",
+    "total_tokens": "max_total_tokens",
+    "cost_units": "max_cost_units",
+    "retries": "max_retries",
+    "retrieval_calls": "max_retrieval_calls",
+    "embedding_calls": "max_embedding_calls",
+    "vector_queries": "max_vector_queries",
+    "keyword_queries": "max_keyword_queries",
+    "document_reads": "max_document_reads",
+    "context_chars": "max_context_chars",
+}
 
 @dataclass(frozen=True, slots=True)
 class RunBudget:
     max_step_starts: int|None=None; max_model_calls: int|None=None; max_remote_model_calls: int|None=None; max_tool_calls: int|None=None
     max_input_tokens: int|None=None; max_output_tokens: int|None=None; max_total_tokens: int|None=None; max_cost_units: int|None=None
     max_elapsed_seconds: float|None=None; max_concurrency: int|None=None; max_retries: int|None=None
+    max_retrieval_calls: int|None=None; max_embedding_calls: int|None=None; max_vector_queries: int|None=None; max_keyword_queries: int|None=None
+    max_document_reads: int|None=None; max_context_chars: int|None=None
     def __post_init__(self):
         for item in fields(self):
             value = getattr(self, item.name)
@@ -32,6 +66,7 @@ class RunBudget:
 @dataclass(frozen=True, slots=True)
 class BudgetUsage:
     step_starts:int=0; model_calls:int=0; remote_model_calls:int=0; tool_calls:int=0; input_tokens:int=0; output_tokens:int=0; total_tokens:int=0; cost_units:int=0; retries:int=0
+    retrieval_calls:int=0; embedding_calls:int=0; vector_queries:int=0; keyword_queries:int=0; document_reads:int=0; context_chars:int=0
     _allow_independent_total: bool=False
     def __post_init__(self):
         for name in _DIMENSIONS:
@@ -87,10 +122,21 @@ class BudgetLedger:
             r=BudgetReservation(uuid4().hex,reservation_type,step_id,usage,datetime.now(UTC)); self._reservations[r.reservation_id]=r; return r
     def commit(self,reservation:BudgetReservation, actual_usage:BudgetUsage|None=None, *, usage_source:UsageSource=UsageSource.ACTUAL):
         with self._lock:
-            stored=self._reservations.pop(reservation.reservation_id,None)
+            stored=self._reservations.get(reservation.reservation_id)
             if stored != reservation: raise BudgetReservationError("Reservation 未知、已结算或已释放")
             actual=actual_usage if actual_usage is not None else reservation.reserved_usage
             # 调用发生且未知实际值时调用方传 None，保守结算预留。
+            # 实际值小于预留时原子退款；大于预留时在同一把锁内补差并重新校验，
+            # 不允许已完成调用把任何有限预算推到上限之外。
+            self._reservations.pop(reservation.reservation_id)
+            snapshot_without_current=self._snapshot_locked()
+            for dim in _DIMENSIONS:
+                limit=getattr(self.budget,_LIMITS[dim])
+                requested=getattr(actual,dim)
+                if limit is not None and getattr(self._committed,dim)+getattr(snapshot_without_current.reserved_usage,dim)+requested>limit:
+                    self._reservations[reservation.reservation_id]=reservation
+                    snapshot=self._snapshot_locked()
+                    raise BudgetExceededError(dim,requested,getattr(snapshot.remaining,dim),snapshot)
             self._committed=self._committed.plus(actual); return self._snapshot_locked()
     def release(self,reservation:BudgetReservation):
         with self._lock:

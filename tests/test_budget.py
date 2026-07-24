@@ -34,20 +34,35 @@ def test_time_and_policy():
 
 def usage(i=0,o=0,c=0): return BudgetUsage(input_tokens=i,output_tokens=o,total_tokens=i+o,cost_units=c)
 
-def test_actual_over_reservation_closes_and_blocks_future_reserve():
+def test_actual_over_reservation_is_atomically_rejected_without_overrun():
     ledger=BudgetLedger(RunBudget(max_input_tokens=3200,max_output_tokens=1100,max_total_tokens=4200,max_cost_units=7))
     r=ledger.reserve(usage(3000,1000,5),reservation_type='model')
-    snap=ledger.commit(r,usage(3200,1100,7))
-    assert snap.committed_usage.total_tokens == 4300
-    assert snap.remaining.total_tokens == 0 and 'total_tokens' in snap.exhausted_dimensions
-    with pytest.raises(BudgetExceededError): ledger.reserve(BudgetUsage(model_calls=1),reservation_type='next')
-    with pytest.raises(BudgetReservationError): ledger.commit(r)
-    with pytest.raises(BudgetReservationError): ledger.release(r)
+    with pytest.raises(BudgetExceededError):
+        ledger.commit(r,usage(3200,1100,7))
+    snap=ledger.snapshot()
+    assert snap.committed_usage.total_tokens == 0
+    assert snap.active_reservation_count == 1
+    ledger.release(r)
+    assert ledger.snapshot().remaining.total_tokens == 4200
 
 def test_actual_equal_and_smaller_return_unused_reservation():
     ledger=BudgetLedger(RunBudget(max_total_tokens=10))
     a=ledger.reserve(usage(3,3),reservation_type='x'); ledger.commit(a,usage(2,2)); assert ledger.snapshot().remaining.total_tokens==6
     b=ledger.reserve(usage(3,3),reservation_type='x'); ledger.commit(b,usage(3,3)); assert ledger.snapshot().committed_usage.total_tokens==10
+
+def test_actual_supplement_is_atomic_with_concurrent_reservations():
+    ledger=BudgetLedger(RunBudget(max_context_chars=10))
+    first=ledger.reserve(BudgetUsage(context_chars=4),reservation_type='context')
+    second=ledger.reserve(BudgetUsage(context_chars=3),reservation_type='context')
+    ledger.commit(first,BudgetUsage(context_chars=6))
+    snap=ledger.snapshot()
+    assert snap.committed_usage.context_chars==6
+    assert snap.reserved_usage.context_chars==3
+    assert snap.remaining.context_chars==1
+    with pytest.raises(BudgetExceededError):
+        ledger.commit(second,BudgetUsage(context_chars=5))
+    assert ledger.snapshot().active_reservation_count==1
+    ledger.release(second)
 
 class Lazy:
     def __init__(self, values=(), fail=False): self.values=iter(values); self.fail=fail; self.closed=False

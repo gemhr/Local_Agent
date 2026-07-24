@@ -140,6 +140,8 @@ class RecordingAdapter:
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, BaseException):
             raise outcome
+        if isinstance(outcome, ModelAdapterResponse):
+            return outcome
         return ModelAdapterResponse(str(outcome))
 
 
@@ -199,6 +201,36 @@ class ModelInvocationTests(unittest.TestCase):
         self.assertEqual(result.executed_profile_id, ModelProfileId.REMOTE_ADVANCED)
         self.assertEqual(local.calls, 0)
         self.assertEqual(remote.calls, 1)
+
+    def test_actual_usage_cannot_overrun_budget_or_leak_circuit_permit(self) -> None:
+        adapter = RecordingAdapter(
+            [
+                ModelAdapterResponse(
+                    "must not be returned",
+                    BudgetUsage(
+                        model_calls=1,
+                        input_tokens=10,
+                        output_tokens=30,
+                        total_tokens=40,
+                    ),
+                )
+            ]
+        )
+        fixture = InvocationFixture(
+            {ModelProfileId.LOCAL_FAST: adapter},
+            budget=RunBudget(max_total_tokens=35),
+        )
+        with self.assertRaises(BudgetExceededError):
+            fixture.invoke(routing(LOCAL))
+        snapshot = fixture.ledger.snapshot()
+        self.assertEqual(snapshot.committed_usage.total_tokens, 30)
+        self.assertEqual(snapshot.active_reservation_count, 0)
+        self.assertEqual(
+            fixture.registry.get(
+                LOCAL.effective_breaker_key
+            ).snapshot().half_open_active_calls,
+            0,
+        )
 
     def test_open_circuit_blocks_retry_before_fallback(self) -> None:
         local = RecordingAdapter(

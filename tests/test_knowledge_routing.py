@@ -271,9 +271,10 @@ def test_knowledge_final_call_uses_selected_profile_once_and_preserves_messages(
         model_profiles=profiles, model_resolver=ModelResolver({ModelProfileId.LOCAL_FAST: local, ModelProfileId.REMOTE_ADVANCED: remote}),
     )
     assert "remote" in list(router._stream_final_response("knowledge_expert", "讲讲 CDT"))
-    assert len(local.calls) == 1  # 查询改写使用既有默认模型入口。
-    assert len(remote.calls) == 1
-    assert [message["role"] for message in remote.calls[0][0]] == ["system", "user"]
+    # Query Rewrite 与最终回答都经过模型选择；本地窗口不足时二者均选择 remote。
+    assert len(local.calls) == 0
+    assert len(remote.calls) == 2
+    assert [message["role"] for message in remote.calls[1][0]] == ["system", "user"]
 
 
 def test_non_streaming_delegate_unpacks_selected_model_and_uses_run_context() -> None:

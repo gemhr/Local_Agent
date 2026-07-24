@@ -4,23 +4,31 @@
 
 import json
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Dict, Generator, Optional
 
 from core.memory_manager import MemoryManager
 from core.runtime import (
-    ContextBuildRequest, ContextBuilder, ContextItem, ContextSourceType, ContextTrustLevel,
+    ContextBuildRequest, ContextBuilder, ContextBudgetExceededError, ContextItem, ContextSourceType, ContextTrustLevel,
     DeterministicTokenEstimator, ModelContextRequirements, ModelCostProfile, ModelPreference, ModelProfile,
     ModelProfileId, ModelResolver, ModelSelectionPolicy, ModelSelectionRequest,
     Plan, RiskLevel, RunContext, TaskCapabilityRequirements, create_single_step_plan,
     BudgetUsage, UsageSource, BudgetedModelStream,
     GeneratorModelAdapter, ModelAdapterResolver, ModelCircuitBreakerRegistry,
-    ModelInvocationResult, ModelInvocationRouter, ModelRoutingPolicy,
+    ModelFailureCategory, ModelInvocationChainError, ModelInvocationConfirmationRequired,
+    ModelInvocationResult, ModelInvocationRouter, ModelRoutingError, ModelRoutingPolicy,
+    ModelSelectionError,
     StepEventEmitter,
     RunBudget, BudgetLedger,
     ToolAdapter, ToolAdapterInvocationError, ToolErrorCategory,
     ToolExecutionError, ToolExecutionFailed, ToolExecutionPhase,
     ToolExecutionService, ToolSideEffectState, RetryDisposition,
+    RetrievalErrorCategory, RetrievalExecutionError, RetrievalExecutionResult,
+    RetrievalExecutionService, RetrievalExecutionSpec, RetrievalExecutionStatus,
+    RetrievalAdapterError, RetrievalInvocation, RetrievalStage,
+    RetrievalStageStatus, RuntimeKnowledgeRetrievalAdapter,
+    RunCancelledError,
 )
 
 if TYPE_CHECKING:
@@ -34,6 +42,15 @@ class KnowledgeBaseUnavailableError(RuntimeError):
 
 class KnowledgeSourceNotFoundError(LookupError):
     """检索未找到足够相关的本地信源时引发。"""
+
+
+class KnowledgeRetrievalFailedError(RuntimeError):
+    """知识检索未合法完成；不得被上层改写为“未找到”。"""
+
+    def __init__(self, result: RetrievalExecutionResult) -> None:
+        self.result = result
+        error_code = result.error.safe_error_code if result.error else "RETRIEVAL_FAILED"
+        super().__init__(f"本次知识检索未完成，无法判断资料是否存在（{error_code}）。")
 
 
 class AgentRouter:
@@ -68,6 +85,7 @@ class AgentRouter:
         model_invocation_router: ModelInvocationRouter | None = None,
         circuit_breaker_registry: ModelCircuitBreakerRegistry | None = None,
         tool_execution_service: ToolExecutionService | None = None,
+        retrieval_execution_service: RetrievalExecutionService | None = None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -87,6 +105,29 @@ class AgentRouter:
         self.orchestration_enabled = orchestration_enabled
         self.orchestration_max_agents = orchestration_max_agents
         self.knowledge_base_error = knowledge_base_error
+        if retrieval_execution_service is not None:
+            self.retrieval_execution_service = retrieval_execution_service
+        elif db_manager is not None:
+            retrieval_adapter = RuntimeKnowledgeRetrievalAdapter(
+                db_manager,
+                query_rewriter=self._rewrite_knowledge_query,
+                query_term_extractor=self._extract_query_terms,
+                candidate_scorer=self._score_rag_candidate,
+            )
+            candidate_limit = max(self.rag_top_k * 2, 8)
+            self.retrieval_execution_service = RetrievalExecutionService(
+                retrieval_adapter,
+                spec=RetrievalExecutionSpec(
+                    max_candidates=candidate_limit,
+                    max_context_chunks=self.rag_top_k,
+                    max_context_chars=self.rag_context_max_chars,
+                    max_single_chunk_chars=self.rag_doc_max_chars,
+                    max_document_reads=candidate_limit,
+                ),
+                minimum_score=self.rag_min_score,
+            )
+        else:
+            self.retrieval_execution_service = None
         default_cost = ModelCostProfile(
             ModelProfileId.LOCAL_FAST,
             False,
@@ -387,8 +428,13 @@ class AgentRouter:
                     terms.add(cleaned)
         return sorted(terms)
 
-    def _rewrite_knowledge_query(self, user_query: str) -> str:
-        """提纯知识库检索词。"""
+    def _rewrite_knowledge_query(
+        self,
+        user_query: str,
+        run_context: RunContext,
+        event_emitter: StepEventEmitter | None,
+    ) -> str:
+        """通过唯一 Model Invocation Contract 提纯知识库检索词。"""
         rewrite_messages = [
             {
                 "role": "system",
@@ -399,12 +445,89 @@ class AgentRouter:
             },
             {"role": "user", "content": user_query},
         ]
-        rewritten = self._collect_model_response(
-            rewrite_messages,
-            max_tokens=self.knowledge_rewrite_max_tokens,
-            temperature=0.1,
-            enable_thinking=False,
+        estimated = self._estimate_messages_tokens(rewrite_messages)
+        requirements = ModelContextRequirements(
+            estimated_input_tokens=estimated,
+            minimum_context_window=estimated + self.knowledge_rewrite_max_tokens,
+            requires_long_context=False,
+            was_truncated=False,
+            mandatory_content_near_limit=False,
+            source_count=len(rewrite_messages),
+            rag_item_count=0,
+            tool_result_count=0,
+            contains_code=False,
+            contains_structured_data=False,
         )
+        capabilities = TaskCapabilityRequirements(
+            requires_rag=True,
+            risk_level=RiskLevel.LOW,
+            estimated_steps=1,
+        )
+        try:
+            result = self._invoke_model_contract(
+                agent_id="knowledge_expert",
+                user_query=user_query,
+                messages=rewrite_messages,
+                context_requirements=requirements,
+                run_context=run_context,
+                capability_requirements=capabilities,
+                max_tokens=self.knowledge_rewrite_max_tokens,
+                event_emitter=event_emitter,
+                generation_options={
+                    "temperature": 0.1,
+                    "enable_thinking": False,
+                },
+            )
+        except ModelInvocationChainError as exc:
+            if exc.failure_category in {
+                ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE,
+                ModelFailureCategory.RATE_LIMITED,
+                ModelFailureCategory.PROVIDER_CONFIGURATION_ERROR,
+                ModelFailureCategory.BUSINESS_FAILURE,
+                ModelFailureCategory.CIRCUIT_OPEN,
+                ModelFailureCategory.UNKNOWN_FAILURE,
+            }:
+                raise RetrievalAdapterError(
+                    RetrievalErrorCategory.QUERY_REWRITE_FAILED,
+                    exc.error_code,
+                    "查询改写未完成，可使用原始查询降级。",
+                ) from None
+            if exc.failure_category in {
+                ModelFailureCategory.PROVIDER_TIMEOUT,
+                ModelFailureCategory.DEADLINE_EXCEEDED,
+            }:
+                raise RetrievalAdapterError(
+                    RetrievalErrorCategory.TIMEOUT,
+                    "QUERY_REWRITE_TIMEOUT",
+                    "查询改写超时，不允许降级继续。",
+                ) from None
+            raise RetrievalAdapterError(
+                RetrievalErrorCategory.VALIDATION,
+                "QUERY_REWRITE_MODEL_REJECTED",
+                "查询改写未通过模型安全或校验策略。",
+            ) from None
+        except ModelSelectionError as exc:
+            if "BUDGET" in exc.reason_code.upper():
+                raise RetrievalAdapterError(
+                    RetrievalErrorCategory.BUDGET_EXHAUSTED,
+                    "QUERY_REWRITE_BUDGET_EXHAUSTED",
+                    "查询改写预算不足，未调用模型。",
+                ) from None
+            raise RetrievalAdapterError(
+                RetrievalErrorCategory.VALIDATION,
+                "QUERY_REWRITE_MODEL_VALIDATION_FAILED",
+                "查询改写未通过模型选择校验。",
+            ) from None
+        except (
+            ModelInvocationConfirmationRequired,
+            ModelRoutingError,
+        ):
+            raise RetrievalAdapterError(
+                RetrievalErrorCategory.VALIDATION,
+                "QUERY_REWRITE_MODEL_VALIDATION_FAILED",
+                "查询改写未通过模型路由校验。",
+            ) from None
+        rewritten = result.output
         cleaned = rewritten.strip().strip("\"'")
         return cleaned or user_query
 
@@ -464,106 +587,98 @@ class AgentRouter:
         source = metadata.get("source") or metadata.get("file_name") or ""
         return f"content:{source}:{normalized_content[:300]}"
 
-    def _build_rag_context(self, user_query: str) -> str:
-        """构建重写、扩召回与重排后的知识库上下文。"""
-        if not self.db_manager:
-            return ""
-
-        try:
-            rewritten_query = self._rewrite_knowledge_query(user_query)
-        except Exception:
-            rewritten_query = user_query
-        query_terms = self._extract_query_terms(rewritten_query, user_query)
-        candidate_k = max(self.rag_top_k * 2, 8)
-        candidates: dict[str, tuple[object, float]] = {}
-
-        for query in dict.fromkeys((rewritten_query, user_query)):
-            try:
-                docs_with_scores = self.db_manager.search_with_scores(
-                    query,
-                    k=candidate_k,
-                )
-            except Exception:
-                try:
-                    docs_with_scores = [
-                        (doc, 0.0)
-                        for doc in self.db_manager.search(query, k=candidate_k)
-                    ]
-                except Exception:
-                    docs_with_scores = []
-            for doc, score in docs_with_scores:
-                normalized = " ".join(doc.page_content.split())
-                if not normalized:
-                    continue
-                candidate_key = self._rag_candidate_key(doc, normalized)
-                previous = candidates.get(candidate_key)
-                normalized_score = min(1.0, max(0.0, float(score)))
-                if previous is None or normalized_score > previous[1]:
-                    candidates[candidate_key] = (doc, normalized_score)
-
-        keyword_search = getattr(self.db_manager, "keyword_search", None)
-        if callable(keyword_search) and query_terms:
-            try:
-                keyword_docs = keyword_search(query_terms, k=candidate_k)
-            except Exception:
-                keyword_docs = []
-            for doc in keyword_docs:
-                normalized = " ".join(doc.page_content.split())
-                if not normalized:
-                    continue
-                candidate_key = self._rag_candidate_key(doc, normalized)
-                previous = candidates.get(candidate_key)
-                keyword_score = 0.55
-                if previous is None or keyword_score > previous[1]:
-                    candidates[candidate_key] = (doc, keyword_score)
-
-        ranked_candidates = []
-        for doc, score in candidates.values():
-            normalized = " ".join(doc.page_content.split())
-            rerank_score = self._score_rag_candidate(
-                normalized,
-                score,
-                query_terms,
-                doc.metadata,
+    def _execute_knowledge_retrieval(
+        self,
+        user_query: str,
+        *,
+        run_context: RunContext | None = None,
+        event_emitter: StepEventEmitter | None = None,
+        defer_completed_event: bool = False,
+    ) -> RetrievalExecutionResult:
+        """通过唯一 Runtime Service 执行 Knowledge Expert 的真实检索。"""
+        if self.retrieval_execution_service is None or self.db_manager is None:
+            raise KnowledgeBaseUnavailableError(
+                "本地知识库当前不可用，请检查服务启动日志中的 [KB Runtime] 初始化错误。"
             )
-            ranked_candidates.append((rerank_score, doc))
-
-        ranked_candidates.sort(key=lambda item: item[0], reverse=True)
-        if not ranked_candidates:
-            return ""
-        relevance_floor = max(
-            self.rag_min_score,
-            ranked_candidates[0][0] - 0.20,
+        active_context = run_context
+        if active_context is None:
+            active_context = RunContext.create(entry_agent_id="knowledge_expert")
+            active_context.attach_budget_ledger(
+                BudgetLedger(
+                    RunBudget(),
+                    deadline_remaining=active_context.remaining_seconds,
+                )
+            )
+        collection_name = str(
+            getattr(self.db_manager, "collection_name", "local_knowledge_base")
+        )
+        candidate_k = max(self.rag_top_k * 2, 8)
+        invocation = RetrievalInvocation.create(
+            user_query,
+            collection_names=(collection_name,),
+            top_k=candidate_k,
+            rerank_top_k=self.rag_top_k,
+            requested_timeout_seconds=30.0,
+        )
+        return self.retrieval_execution_service.execute(
+            invocation,
+            run_context=active_context,
+            step_id=event_emitter.step_id if event_emitter is not None else "knowledge-retrieval",
+            event_emitter=event_emitter,
+            defer_completed_event=defer_completed_event,
         )
 
-        seen = set()
-        segments = []
-        total_chars = 0
-        for score, doc in ranked_candidates:
-            if score < relevance_floor:
-                continue
-            normalized = " ".join(doc.page_content.split())
-            dedup_key = normalized[:200]
-            if dedup_key in seen:
-                continue
-            seen.add(dedup_key)
+    def _emit_deferred_retrieval_events(
+        self,
+        result: RetrievalExecutionResult,
+        *,
+        event_emitter: StepEventEmitter | None,
+    ) -> None:
+        """在最终 Context Binding 后发布唯一 Stage/Completed 事实。"""
+        if self.retrieval_execution_service is None:
+            return
+        if (
+            result.stage_records
+            and result.stage_records[-1].stage == RetrievalStage.CONTEXT_BUILD
+            and result.stage_records[-1].status
+            != RetrievalStageStatus.SKIPPED
+        ):
+            self.retrieval_execution_service.emit_stage_event(
+                result.stage_records[-1],
+                event_emitter=event_emitter,
+            )
+        self.retrieval_execution_service.emit_completed_event(
+            result, event_emitter=event_emitter
+        )
 
-            snippet = normalized[: self.rag_doc_max_chars]
-            if total_chars + len(snippet) > self.rag_context_max_chars:
-                remaining = self.rag_context_max_chars - total_chars
-                if remaining <= 0:
-                    break
-                snippet = snippet[:remaining]
-
-            source = self._format_source_label(doc.metadata)
-            segments.append(f"[来源: {source}]\n{snippet}")
-            total_chars += len(snippet)
-            if len(segments) >= self.rag_top_k or total_chars >= self.rag_context_max_chars:
-                break
-
-        if not segments:
+    def _build_rag_context(
+        self,
+        user_query: str,
+        *,
+        run_context: RunContext | None = None,
+        event_emitter: StepEventEmitter | None = None,
+    ) -> str:
+        """兼容旧测试/调用方的字符串视图；真实执行已迁入 Runtime Service。"""
+        result = self._execute_knowledge_retrieval(
+            user_query,
+            run_context=run_context,
+            event_emitter=event_emitter,
+        )
+        if result.status == RetrievalExecutionStatus.EMPTY:
             return ""
-        return "\n\n".join(segments)
+        if result.status == RetrievalExecutionStatus.CANCELLED:
+            reason = (
+                run_context.cancellation_token.reason
+                if run_context is not None
+                else "RETRIEVAL_CANCELLED"
+            )
+            raise RunCancelledError(reason or "RETRIEVAL_CANCELLED")
+        if result.status in {
+            RetrievalExecutionStatus.FAILED,
+            RetrievalExecutionStatus.TIMED_OUT,
+        }:
+            raise KnowledgeRetrievalFailedError(result)
+        return result.rendered_context
 
     @staticmethod
     def _format_source_label(metadata: dict) -> str:
@@ -614,6 +729,8 @@ class AgentRouter:
         allow_delegation: bool = False,
         history_scope: str = DIRECT_MEMORY_SCOPE,
         context_requirements_out: list[ModelContextRequirements] | None = None,
+        run_context: RunContext | None = None,
+        event_emitter: StepEventEmitter | None = None,
     ) -> list[dict[str, str]]:
         """构建一次推理所需的完整消息序列。"""
         summary_text = ""
@@ -629,8 +746,6 @@ class AgentRouter:
         history = self._dedupe_current_user_message(history, user_query)
 
         system_prompt = self._build_system_prompt(agent_id, allow_delegation=allow_delegation)
-        if summary_text and agent_id != "knowledge_expert":
-            system_prompt = f"{system_prompt}\n\n对话摘要：\n{summary_text}"
 
         messages = [
             {
@@ -641,30 +756,86 @@ class AgentRouter:
         messages.extend({"role": row["role"], "content": row["content"]} for row in history)
 
         if agent_id == "knowledge_expert":
-            if self.db_manager is None:
-                raise KnowledgeBaseUnavailableError(
-                    "本地知识库当前不可用，请检查服务启动日志中的 [KB Runtime] 初始化错误。"
+            retrieval_result = self._execute_knowledge_retrieval(
+                user_query,
+                run_context=run_context,
+                event_emitter=event_emitter,
+                defer_completed_event=True,
+            )
+            if retrieval_result.status == RetrievalExecutionStatus.EMPTY:
+                self._emit_deferred_retrieval_events(
+                    retrieval_result, event_emitter=event_emitter
                 )
-            context = self._build_rag_context(user_query)
-            if context:
-                preexisting_messages_tokens = self._estimate_messages_tokens(messages)
-                preexisting_mandatory_tokens = self.context_builder.estimator.estimate(system_prompt)
-                context_items = [
-                    ContextItem("knowledge-user-request", ContextSourceType.CURRENT_USER_REQUEST,
-                        ContextTrustLevel.USER_CONTENT, user_query, 1000, datetime.now(timezone.utc)),
-                    ContextItem("knowledge-rag-documents", ContextSourceType.RAG_DOCUMENT,
-                        ContextTrustLevel.UNTRUSTED_EXTERNAL, context, 500, datetime.now(timezone.utc),
-                        source_ref="knowledge_base", citation_id="local-kb"),
-                ]
-                if summary_text:
-                    context_items.append(
-                        ContextItem("knowledge-memory-summary", ContextSourceType.MEMORY_SUMMARY,
-                            ContextTrustLevel.USER_CONTENT, summary_text, 700, datetime.now(timezone.utc),
-                            source_ref="memory_summary")
+                raise KnowledgeSourceNotFoundError(
+                    "未找到足够相关的本地知识库信源，知识专家已停止回答。"
+                )
+            if retrieval_result.status == RetrievalExecutionStatus.CANCELLED:
+                self._emit_deferred_retrieval_events(
+                    retrieval_result, event_emitter=event_emitter
+                )
+                reason = (
+                    run_context.cancellation_token.reason
+                    if run_context is not None
+                    else "RETRIEVAL_CANCELLED"
+                )
+                raise RunCancelledError(reason or "RETRIEVAL_CANCELLED")
+            if retrieval_result.status in {
+                RetrievalExecutionStatus.FAILED,
+                RetrievalExecutionStatus.TIMED_OUT,
+            }:
+                self._emit_deferred_retrieval_events(
+                    retrieval_result, event_emitter=event_emitter
+                )
+                raise KnowledgeRetrievalFailedError(retrieval_result)
+            preexisting_messages_tokens = self._estimate_messages_tokens(messages)
+            preexisting_mandatory_tokens = self.context_builder.estimator.estimate(system_prompt)
+            now = datetime.now(timezone.utc)
+            context_items = [
+                ContextItem(
+                    "knowledge-user-request",
+                    ContextSourceType.CURRENT_USER_REQUEST,
+                    ContextTrustLevel.USER_CONTENT,
+                    user_query,
+                    1000,
+                    now,
+                ),
+            ]
+            for index, chunk in enumerate(retrieval_result.final_chunks, start=1):
+                context_items.append(
+                    ContextItem(
+                        f"knowledge-rag-{chunk.context_block_id}",
+                        ContextSourceType.RAG_DOCUMENT,
+                        chunk.trust_level,
+                        chunk.text,
+                        max(1, 600 - index),
+                        now,
+                        source_ref=chunk.citation.display_label,
+                        citation_id=chunk.citation.citation_id,
+                        dedup_key=chunk.provenance.context_content_hash,
+                        # Retrieval 已完成最终选择和 Citation Binding；模型上下文
+                        # 不得再次静默截断或丢弃而留下错误引用。
+                        mandatory=True,
+                        preserve_content=True,
+                        payload_content_hash=chunk.citation.context_content_hash,
                     )
+                )
+            if summary_text:
+                context_items.append(
+                    ContextItem(
+                        "knowledge-memory-summary",
+                        ContextSourceType.MEMORY_SUMMARY,
+                        ContextTrustLevel.USER_CONTENT,
+                        summary_text,
+                        700,
+                        now,
+                        source_ref="memory_summary",
+                    )
+                )
+            try:
                 context_result = self.context_builder.build(
                     ContextBuildRequest(
-                        run_id="legacy-router", agent_id=agent_id,
+                        run_id=run_context.run_id if run_context is not None else "legacy-router",
+                        agent_id=agent_id,
                         items=context_items,
                         max_input_tokens=self.model_context_window,
                         reserved_output_tokens=self.max_tokens,
@@ -672,13 +843,82 @@ class AgentRouter:
                         preexisting_mandatory_tokens=preexisting_mandatory_tokens,
                     )
                 )
-                user_query = context_result.rendered_text
-                if context_requirements_out is not None:
-                    context_requirements_out.append(context_result.model_requirements)
-            else:
-                raise KnowledgeSourceNotFoundError(
-                    "未找到足够相关的本地知识库信源，知识专家已停止回答。"
+            except ContextBudgetExceededError:
+                records = retrieval_result.stage_records
+                if (
+                    records
+                    and records[-1].stage == RetrievalStage.CONTEXT_BUILD
+                ):
+                    records = records[:-1] + (
+                        replace(
+                            records[-1],
+                            status=RetrievalStageStatus.FAILED,
+                            output_count=0,
+                            safe_error_code="CONTEXT_BUILD_FAILED",
+                        ),
+                    )
+                failed_result = replace(
+                    retrieval_result,
+                    status=RetrievalExecutionStatus.FAILED,
+                    final_chunks=(),
+                    citations=(),
+                    stage_records=records,
+                    degraded=False,
+                    degradation_reasons=(),
+                    error=RetrievalExecutionError(
+                        RetrievalErrorCategory.CONTEXT_BUILD_FAILED,
+                        "CONTEXT_BUILD_FAILED",
+                        "最终模型上下文无法完整容纳 mandatory Retrieval 正文。",
+                        RetrievalStage.CONTEXT_BUILD,
+                    ),
                 )
+                self._emit_deferred_retrieval_events(
+                    failed_result, event_emitter=event_emitter
+                )
+                raise KnowledgeRetrievalFailedError(failed_result) from None
+            self._emit_deferred_retrieval_events(
+                retrieval_result, event_emitter=event_emitter
+            )
+            user_query = context_result.rendered_text
+            if context_requirements_out is not None:
+                context_requirements_out.append(context_result.model_requirements)
+        elif summary_text:
+            # Rolling Summary 始终是 USER_CONTENT，不能拼入 System Prompt。
+            preexisting_messages_tokens = self._estimate_messages_tokens(messages)
+            context_result = self.context_builder.build(
+                ContextBuildRequest(
+                    run_id=run_context.run_id if run_context is not None else "legacy-router",
+                    agent_id=agent_id,
+                    items=(
+                        ContextItem(
+                            f"{agent_id}-user-request",
+                            ContextSourceType.CURRENT_USER_REQUEST,
+                            ContextTrustLevel.USER_CONTENT,
+                            user_query,
+                            1000,
+                            datetime.now(timezone.utc),
+                        ),
+                        ContextItem(
+                            f"{agent_id}-memory-summary",
+                            ContextSourceType.MEMORY_SUMMARY,
+                            ContextTrustLevel.USER_CONTENT,
+                            summary_text,
+                            700,
+                            datetime.now(timezone.utc),
+                            source_ref="memory_summary",
+                        ),
+                    ),
+                    max_input_tokens=self.model_context_window,
+                    reserved_output_tokens=self.max_tokens,
+                    preexisting_messages_tokens=preexisting_messages_tokens,
+                    preexisting_mandatory_tokens=self.context_builder.estimator.estimate(
+                        system_prompt
+                    ),
+                )
+            )
+            user_query = context_result.rendered_text
+            if context_requirements_out is not None:
+                context_requirements_out.append(context_result.model_requirements)
 
         messages.append({"role": "user", "content": user_query})
         return messages
@@ -853,6 +1093,8 @@ class AgentRouter:
             allow_delegation=False,
             history_scope=history_scope,
             context_requirements_out=context_requirements_out,
+            run_context=run_context,
+            event_emitter=event_emitter,
         )
         tool_call = self._plan_tool_call(messages, agent_id)
         if not tool_call:
@@ -994,32 +1236,18 @@ class AgentRouter:
                 or capability_requirements is None
             ):
                 raise RuntimeError("统一 Invocation 路径需要 RunContext、BudgetLedger 和能力需求")
-            decision, _selected_profile, requirements = self._select_model_decision(
-                *selection_args,
-                capability_requirements=capability_requirements,
-            )
-            breaker_snapshots = self.circuit_breaker_registry.snapshots(
-                tuple(profile.effective_breaker_key for profile in self.model_profiles)
-            )
-            routing_decision = self.model_routing_policy.route(
-                selection_decision=decision,
-                capability_requirements=capability_requirements,
-                context_requirements=requirements,
-                profiles=self.model_profiles,
-                preference=ModelPreference.AUTO,
-                budget_snapshot=run_context.budget_ledger.snapshot(),
-                breaker_snapshots=breaker_snapshots,
-            )
-            invocation_result = self.model_invocation_router.invoke(
-                run_context=run_context,
-                budget_ledger=run_context.budget_ledger,
-                routing_decision=routing_decision,
+            invocation_result = self._invoke_model_contract(
+                agent_id=agent_id,
+                user_query=user_query,
                 messages=messages,
-                adapter_resolver=self.model_adapter_resolver,
-                circuit_breaker_registry=self.circuit_breaker_registry,
-                token_estimate=self._estimate_messages_tokens(messages),
+                context_requirements=(
+                    context_requirements_out[0]
+                    if context_requirements_out
+                    else None
+                ),
+                run_context=run_context,
+                capability_requirements=capability_requirements,
                 max_tokens=self.max_tokens,
-                output_started=False,
                 event_emitter=event_emitter,
             )
             if invocation_result_out is not None:
@@ -1051,6 +1279,59 @@ class AgentRouter:
             if close is not None:
                 close()
         return response
+
+    def _invoke_model_contract(
+        self,
+        *,
+        agent_id: str,
+        user_query: str,
+        messages: list[dict[str, str]],
+        context_requirements: ModelContextRequirements | None,
+        run_context: RunContext,
+        capability_requirements: TaskCapabilityRequirements,
+        max_tokens: int,
+        event_emitter: StepEventEmitter | None,
+        generation_options: dict[str, object] | None = None,
+    ) -> ModelInvocationResult:
+        """Model Adapter 的唯一同步入口；复用既有 Budget/Circuit/Retry/Event。"""
+        if run_context.budget_ledger is None:
+            raise RuntimeError("统一 Model Invocation 需要 BudgetLedger")
+        decision, _selected_profile, requirements = self._select_model_decision(
+            agent_id,
+            user_query,
+            messages,
+            context_requirements,
+            run_context,
+            capability_requirements,
+        )
+        breaker_snapshots = self.circuit_breaker_registry.snapshots(
+            tuple(
+                profile.effective_breaker_key
+                for profile in self.model_profiles
+            )
+        )
+        routing_decision = self.model_routing_policy.route(
+            selection_decision=decision,
+            capability_requirements=capability_requirements,
+            context_requirements=requirements,
+            profiles=self.model_profiles,
+            preference=ModelPreference.AUTO,
+            budget_snapshot=run_context.budget_ledger.snapshot(),
+            breaker_snapshots=breaker_snapshots,
+        )
+        return self.model_invocation_router.invoke(
+            run_context=run_context,
+            budget_ledger=run_context.budget_ledger,
+            routing_decision=routing_decision,
+            messages=messages,
+            adapter_resolver=self.model_adapter_resolver,
+            circuit_breaker_registry=self.circuit_breaker_registry,
+            token_estimate=self._estimate_messages_tokens(messages),
+            max_tokens=max_tokens,
+            output_started=False,
+            event_emitter=event_emitter,
+            generation_options=generation_options,
+        )
 
     def _parse_delegate_plan(self, response_text: str) -> list[dict[str, str]]:
         """解析核心 Agent 输出的委派计划。"""
@@ -1098,8 +1379,6 @@ class AgentRouter:
         )
         history = self._dedupe_current_user_message(history, user_query)
         system_prompt = self._build_system_prompt("core_router", allow_delegation=True)
-        if summary_text:
-            system_prompt = f"{system_prompt}\n\n对话摘要：\n{summary_text}"
         messages = [
             {
                 "role": "system",
@@ -1107,6 +1386,39 @@ class AgentRouter:
             }
         ]
         messages.extend({"role": row["role"], "content": row["content"]} for row in history)
+        if summary_text:
+            context_result = self.context_builder.build(
+                ContextBuildRequest(
+                    run_id="legacy-orchestration",
+                    agent_id="core_router",
+                    items=(
+                        ContextItem(
+                            "orchestration-user-request",
+                            ContextSourceType.CURRENT_USER_REQUEST,
+                            ContextTrustLevel.USER_CONTENT,
+                            user_query,
+                            1000,
+                            datetime.now(timezone.utc),
+                        ),
+                        ContextItem(
+                            "orchestration-memory-summary",
+                            ContextSourceType.MEMORY_SUMMARY,
+                            ContextTrustLevel.USER_CONTENT,
+                            summary_text,
+                            700,
+                            datetime.now(timezone.utc),
+                            source_ref="memory_summary",
+                        ),
+                    ),
+                    max_input_tokens=self.model_context_window,
+                    reserved_output_tokens=self.max_tokens,
+                    preexisting_messages_tokens=self._estimate_messages_tokens(messages),
+                    preexisting_mandatory_tokens=self.context_builder.estimator.estimate(
+                        system_prompt
+                    ),
+                )
+            )
+            user_query = context_result.rendered_text
         messages.append({"role": "user", "content": user_query})
         return messages
 

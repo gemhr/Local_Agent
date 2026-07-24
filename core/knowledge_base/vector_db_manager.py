@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+from core.knowledge_base.vector_scores import (
+    VectorScoreSemantics,
+    normalize_vector_score,
+)
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -15,6 +20,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 class VectorDBManager:
     """封装 Chroma 向量库的入库与检索操作。"""
+
+    vector_score_semantics = VectorScoreSemantics.NORMALIZED_RELEVANCE
+    chroma_by_vector_score_semantics = VectorScoreSemantics.RAW_DISTANCE
 
     def __init__(
         self,
@@ -61,6 +69,11 @@ class VectorDBManager:
             embedding_function=self.embeddings,
             persist_directory=self.db_persist_dir,
         )
+        self.embedding_model_id = local_model_path or "BAAI/bge-large-zh-v1.5"
+        # Sentence Transformer 与本地 Chroma 都是同步依赖；显式串行化单实例
+        # Query 调用，避免未知模型线程安全行为和并发查询状态交叉。
+        self._embedding_query_lock = threading.Lock()
+        self._vector_query_lock = threading.Lock()
 
     @staticmethod
     def _sanitize_metadata_value(value: Any) -> Any:
@@ -218,11 +231,44 @@ class VectorDBManager:
         if metadata_filter:
             kwargs["filter"] = metadata_filter
         results = self.vector_store.similarity_search_with_score(**kwargs)
-        normalized_results = []
-        for document, distance in results:
-            safe_distance = max(0.0, float(distance))
-            normalized_results.append((document, 1.0 / (1.0 + safe_distance)))
-        return normalized_results
+        return [
+            (
+                document,
+                normalize_vector_score(
+                    raw_distance, VectorScoreSemantics.RAW_DISTANCE
+                ),
+            )
+            for document, raw_distance in results
+        ]
+
+    def embed_query(self, query: str) -> List[float]:
+        """显式执行既有 HuggingFace Query Embedding，供 Runtime 分阶段控制。"""
+        with self._embedding_query_lock:
+            return [float(value) for value in self.embeddings.embed_query(query)]
+
+    def search_by_vector_with_scores(
+        self,
+        embedding: List[float],
+        k: int = 4,
+        metadata_filter: Dict[str, Any] | None = None,
+    ) -> List[tuple[Document, float]]:
+        """使用已生成向量查询 Chroma；底层 raw distance 在此只转换一次。"""
+        kwargs: Dict[str, Any] = {"embedding": embedding, "k": k}
+        if metadata_filter:
+            kwargs["filter"] = metadata_filter
+        with self._vector_query_lock:
+            results = self.vector_store.similarity_search_by_vector_with_relevance_scores(
+                **kwargs
+            )
+        return [
+            (
+                document,
+                normalize_vector_score(
+                    raw_distance, self.chroma_by_vector_score_semantics
+                ),
+            )
+            for document, raw_distance in results
+        ]
 
     def keyword_search(self, terms: List[str], k: int = 8) -> List[Document]:
         """使用 Chroma 文本索引补充精确术语召回。"""

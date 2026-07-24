@@ -42,6 +42,11 @@ _INSTRUCTION_SOURCES = frozenset({
     ContextSourceType.SYSTEM_INSTRUCTION, ContextSourceType.AGENT_INSTRUCTION,
 })
 _EXTERNAL_SOURCES = frozenset({ContextSourceType.RAG_DOCUMENT, ContextSourceType.TOOL_RESULT})
+_MEMORY_SOURCES = frozenset({
+    ContextSourceType.MEMORY_SUMMARY,
+    ContextSourceType.MEMORY_RETRIEVAL,
+    ContextSourceType.CHAT_HISTORY,
+})
 _PRIORITY_MIN, _PRIORITY_MAX = 0, 1000
 _ORCH_MARKER = "[[ORCH]]"
 
@@ -77,6 +82,8 @@ class ContextItem:
     citation_id: str = ""
     dedup_key: str = ""
     mandatory: bool = False
+    preserve_content: bool = False
+    payload_content_hash: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.item_id, str) or not self.item_id.strip(): raise ValueError("item_id 不能为空")
@@ -88,8 +95,67 @@ class ContextItem:
         if self.source_type in _INSTRUCTION_SOURCES and self.trust_level != ContextTrustLevel.TRUSTED_INSTRUCTION: raise ValueError("指令来源必须使用可信指令等级")
         if self.source_type == ContextSourceType.CURRENT_USER_REQUEST and self.trust_level != ContextTrustLevel.USER_CONTENT: raise ValueError("用户请求必须使用用户内容信任等级")
         if self.source_type in _EXTERNAL_SOURCES and self.trust_level == ContextTrustLevel.TRUSTED_INSTRUCTION: raise ValueError("外部内容不能是可信指令")
+        if self.source_type in _MEMORY_SOURCES and self.trust_level != ContextTrustLevel.USER_CONTENT: raise ValueError("Memory 与 Chat History 必须保持 USER_CONTENT")
+        if self.source_type in _MEMORY_SOURCES and self.citation_id: raise ValueError("Memory 不得生成或复用 RAG Citation")
         if self.source_ref and (self.source_ref.startswith("/") or re.search(r"(?i)(token|api[_-]?key|https?://[^ ]*(?:internal|localhost))", self.source_ref)): raise ValueError("source_ref 包含敏感定位信息")
         if self.dedup_key and (len(self.dedup_key) > 128 or self.dedup_key == self.content): raise ValueError("dedup_key 必须是短且稳定的标识")
+        if not isinstance(self.preserve_content, bool): raise TypeError("preserve_content 必须是 bool")
+        if self.preserve_content:
+            if self.source_type != ContextSourceType.RAG_DOCUMENT or not self.citation_id:
+                raise ValueError("仅带 Citation 的 RAG 正文可以声明不可变 Payload")
+            digest = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+            if self.payload_content_hash != digest:
+                raise ValueError("payload_content_hash 必须匹配不可变正文")
+        elif self.payload_content_hash:
+            raise ValueError("只有不可变 Payload 可以携带 payload_content_hash")
+
+
+@dataclass(frozen=True)
+class MemoryProvenance:
+    """Memory 独立来源身份；不冒充 RAG SourceMetadata。"""
+
+    memory_id: str
+    memory_type: str
+    record_id: str
+
+    def __post_init__(self) -> None:
+        for value, field_name in (
+            (self.memory_id, "memory_id"),
+            (self.memory_type, "memory_type"),
+            (self.record_id, "record_id"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} 不能为空")
+
+
+@dataclass(frozen=True)
+class MemoryContextRecord:
+    """Rolling/Phase/FTS5 Memory 进入 Context 前的最小强类型边界。"""
+
+    provenance: MemoryProvenance
+    source_type: ContextSourceType
+    content: str
+    created_at: datetime
+    priority: int = 700
+    trust_level: ContextTrustLevel = ContextTrustLevel.USER_CONTENT
+
+    def __post_init__(self) -> None:
+        if self.source_type not in _MEMORY_SOURCES:
+            raise ValueError("MemoryContextRecord 只能使用 Memory 来源类型")
+        if self.trust_level != ContextTrustLevel.USER_CONTENT:
+            raise ValueError("MemoryContextRecord 不得升级到指令信任级别")
+
+    def to_context_item(self) -> ContextItem:
+        return ContextItem(
+            item_id=self.provenance.memory_id,
+            source_type=self.source_type,
+            trust_level=self.trust_level,
+            content=self.content,
+            priority=self.priority,
+            created_at=self.created_at,
+            source_ref=self.provenance.memory_id,
+            dedup_key=self.provenance.record_id,
+        )
 
 
 @dataclass(frozen=True)
@@ -177,7 +243,12 @@ class ContextBuilder:
             else: chunks.append(f"## {title}")
             for item in group:
                 citation = f"\n[引用: {item.citation_id}]" if item.citation_id else ""
-                chunks.append(f"{item.content}{citation}")
+                source_label = (
+                    f"[来源: {item.source_ref}]\n"
+                    if source == ContextSourceType.RAG_DOCUMENT and item.source_ref
+                    else ""
+                )
+                chunks.append(f"{source_label}{item.content}{citation}")
         return "\n\n".join(chunks)
 
     def build(self, request: ContextBuildRequest) -> ContextBuildResult:
@@ -185,7 +256,19 @@ class ContextBuilder:
         budget = input_budget - request.preexisting_messages_tokens
         if budget < 0:
             raise ContextBudgetExceededError("preexisting_messages_exceed_budget", budget=input_budget, estimated_tokens=request.preexisting_messages_tokens)
-        normalized = [replace(item, content=self._normalize(item.content)) for item in request.items]
+        normalized = []
+        for item in request.items:
+            if item.preserve_content:
+                if _ORCH_MARKER in item.content:
+                    raise ValueError("内容包含编排标记")
+                digest = hashlib.sha256(item.content.encode("utf-8")).hexdigest()
+                if digest != item.payload_content_hash:
+                    raise ValueError("不可变 Payload Hash 在 Context Build 前发生变化")
+                normalized.append(item)
+            else:
+                normalized.append(
+                    replace(item, content=self._normalize(item.content))
+                )
         winners: dict[str, ContextItem] = {}
         duplicate_count = 0
         for item in sorted(normalized, key=self._rank):
