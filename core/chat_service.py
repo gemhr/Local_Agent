@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """聊天应用服务层。"""
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import AsyncIterator, Callable
 import threading
 from typing import Any, Generator, Optional
 
@@ -29,6 +30,12 @@ from core.runtime import (
     StepClaim,
     StepExecutionMode,
     ModelInvocationResult,
+    OutputDeltaPayload,
+    RunEventEmitter,
+    RuntimeEvent,
+    RuntimeEventChannel,
+    RuntimeEventTextAdapter,
+    StepEventEmitter,
 )
 
 
@@ -42,11 +49,14 @@ class _CoordinatedSingleAgentDriver:
         user_query: str,
         agent_id: str,
         persist: bool,
+        event_emitter: StepEventEmitter | None = None,
     ) -> None:
         self._router = router
         self._user_query = user_query
         self._agent_id = agent_id
         self._persist = persist
+        self._event_emitter = event_emitter
+        self.emits_user_output = True
         self.output: str | None = None
         self.invocation_result: ModelInvocationResult | None = None
 
@@ -62,6 +72,7 @@ class _CoordinatedSingleAgentDriver:
             capability_requirements=claim.capability_requirements,
             persist=self._persist,
             invocation_result_out=invocation_results,
+            event_emitter=self._event_emitter,
         )
         self.invocation_result = invocation_results[0] if invocation_results else None
         return self.output
@@ -74,6 +85,7 @@ class ChatService:
         self,
         router: AgentRouter,
         state_observer: Callable[[AgentState], None] | None = None,
+        event_channel_capacity: int = 32,
     ) -> None:
         """初始化应用服务。
 
@@ -83,6 +95,13 @@ class ChatService:
         """
         self.router = router
         self._state_observer = state_observer
+        if (
+            isinstance(event_channel_capacity, bool)
+            or not isinstance(event_channel_capacity, int)
+            or event_channel_capacity <= 0
+        ):
+            raise ValueError("event_channel_capacity 必须是正整数")
+        self._event_channel_capacity = event_channel_capacity
 
     def stream_chat(self, agent_id: str, query: str, file_path: str = "", run_id: str | None = None) -> Generator[str, None, None]:
         """流式执行一次对话。
@@ -153,6 +172,38 @@ class ChatService:
         默认 ``stream_chat`` 继续由 Legacy AgentLoop 持有生命周期；调用方必须
         二选一，不能让同一个 run_id 同时进入 Legacy 与 Coordinated 路径。
         """
+        events: list[RuntimeEvent] = []
+        results: list[RunCoordinatorResult] = []
+        async for event in self.stream_coordinated_agent_events(
+            agent_id,
+            query,
+            run_id=run_id,
+            budget=budget,
+            persist=persist,
+            _result_out=results,
+        ):
+            events.append(event)
+        output = "".join(
+            event.payload.text
+            for event in events
+            if isinstance(event.payload, OutputDeltaPayload)
+        )
+        if not results:
+            raise RuntimeError("Coordinated Runtime 未返回结构化结果")
+        result = results[0]
+        return output if result.status.value == "SUCCEEDED" else None, result
+
+    async def stream_coordinated_agent_events(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        run_id: str | None = None,
+        budget: RunBudget | None = None,
+        persist: bool = True,
+        _result_out: list[RunCoordinatorResult] | None = None,
+    ) -> AsyncIterator[RuntimeEvent]:
+        """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
         run_context, cancellation_source = create_run_context(
             entry_agent_id=agent_id,
             session_id=LEGACY_DEFAULT_SESSION_ID,
@@ -167,6 +218,16 @@ class ChatService:
         plan = self.router.build_single_agent_plan(agent_id, query)
         machine = AgentStateMachine()
         policy = ParallelExecutionPolicy(max_concurrency=1)
+        channel = RuntimeEventChannel(
+            self._event_channel_capacity,
+            run_id=run_context.run_id,
+            cancellation_token=run_context.cancellation_token,
+        )
+        emitter = RunEventEmitter(
+            run_id=run_context.run_id,
+            trace_id=run_context.trace_id,
+            channel=channel,
+        )
         coordinator = RunCoordinator(
             run_context=run_context,
             plan=plan,
@@ -179,23 +240,86 @@ class ChatService:
                 "run_coordinator",
             ),
             scheduler=SerialScheduler(machine),
-            executor=ParallelExecutor(machine, max_concurrency=1),
+            executor=ParallelExecutor(
+                machine, max_concurrency=1, event_emitter=emitter
+            ),
             run_registry=process_run_registry,
             policy=policy,
             state_machine=machine,
+            event_emitter=emitter,
         )
         driver = _CoordinatedSingleAgentDriver(
             self.router,
             user_query=query,
             agent_id=agent_id,
             persist=persist,
+            event_emitter=emitter.for_step("answer"),
         )
-        result = await coordinator.execute(
-            driver=driver,
-            execution_mode=StepExecutionMode.SYNC_BLOCKING,
+
+        async def produce() -> None:
+            try:
+                result = await coordinator.execute(
+                    driver=driver,
+                    execution_mode=StepExecutionMode.SYNC_BLOCKING,
+                )
+                if _result_out is not None:
+                    _result_out.append(result)
+                self._observe_state(agent_state)
+            finally:
+                await channel.close()
+
+        producer_task = asyncio.create_task(produce())
+        completed = False
+        try:
+            async for event in channel:
+                yield event
+            await producer_task
+            completed = True
+        except GeneratorExit:
+            cancellation_source.cancel(CancellationReason.CLIENT_DISCONNECTED)
+            await channel.abort()
+            producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
+            raise
+        except asyncio.CancelledError:
+            cancellation_source.cancel(CancellationReason.CLIENT_DISCONNECTED)
+            await channel.abort()
+            producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
+            raise
+        finally:
+            if not completed:
+                cancellation_source.cancel(
+                    CancellationReason.CLIENT_DISCONNECTED
+                )
+                await channel.abort()
+                if not producer_task.done():
+                    producer_task.cancel()
+                await asyncio.gather(producer_task, return_exceptions=True)
+
+    async def stream_coordinated_agent_text(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        run_id: str | None = None,
+        budget: RunBudget | None = None,
+        persist: bool = True,
+    ) -> AsyncIterator[str]:
+        """通过唯一 Transport Adapter 输出当前自定义纯文本分块协议。"""
+        adapter = RuntimeEventTextAdapter()
+        events = self.stream_coordinated_agent_events(
+            agent_id,
+            query,
+            run_id=run_id,
+            budget=budget,
+            persist=persist,
         )
-        self._observe_state(agent_state)
-        return driver.output if result.status.value == "SUCCEEDED" else None, result
+        try:
+            async for event in events:
+                yield adapter.encode(event)
+        finally:
+            await events.aclose()
 
     def get_history(self, agent_id: str, limit: int, offset: int) -> list[dict]:
         """返回按显示顺序排列的一页历史消息。"""

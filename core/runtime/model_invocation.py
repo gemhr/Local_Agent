@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from core.runtime.budget import (
     BudgetExceededError,
@@ -29,6 +29,12 @@ from core.runtime.model_routing import (
 )
 from core.runtime.model_selection import ModelProfileId
 from core.runtime.retry import RetryExecutor, RetryPolicy
+from core.runtime.event_emitter import StepEventEmitter
+from core.runtime.events import (
+    ModelCompletedPayload,
+    ModelStartedPayload,
+    RuntimeEventType,
+)
 
 
 class ModelUsageSource(str, Enum):
@@ -86,12 +92,18 @@ class GeneratorModelAdapter:
         self._engine = engine
 
     def invoke(
-        self, messages: Sequence[Mapping[str, str]], *, max_tokens: int
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        max_tokens: int,
+        on_started: Callable[[], None] | None = None,
     ) -> ModelAdapterResponse:
         chunks: list[str] = []
         provider_started = False
         try:
             provider_started = True
+            if on_started is not None:
+                on_started()
             stream = self._engine.generate(list(messages), max_tokens=max_tokens)
             for chunk in stream:
                 if chunk:
@@ -290,6 +302,7 @@ class ModelInvocationRouter:
         token_estimate: int,
         max_tokens: int,
         output_started: bool = False,
+        event_emitter: StepEventEmitter | None = None,
     ) -> ModelInvocationResult:
         if routing_decision.confirmation_required:
             raise ModelInvocationConfirmationRequired()
@@ -397,8 +410,33 @@ class ModelInvocationRouter:
                 exc.model_attempts = tuple(attempts)
                 raise
             try:
+                started_event_emitted = False
                 adapter = adapter_resolver.resolve(candidate.profile_id)
-                response = adapter.invoke(messages, max_tokens=max_tokens)
+                # Candidate、Context、Circuit、Budget、Cancellation/Deadline 与
+                # Adapter resolution 均已成功；进入 invoke 前由 Router 发布唯一
+                # MODEL_STARTED。第三方 Adapter 无需实现 callback 也有真实时间语义。
+                started_event_emitted = self._emit_attempt_started(
+                    event_emitter,
+                    candidate=candidate,
+                    candidate_index=self._candidate_index(
+                        routing_decision, candidate.profile_id
+                    ),
+                    retry_index=retry_index,
+                )
+
+                def on_started() -> None:
+                    # GeneratorModelAdapter 保留真实 Provider started callback，
+                    # 这里只确认事实，不重复发布第二个 MODEL_STARTED。
+                    return None
+
+                if isinstance(adapter, GeneratorModelAdapter):
+                    response = adapter.invoke(
+                        messages,
+                        max_tokens=max_tokens,
+                        on_started=on_started,
+                    )
+                else:
+                    response = adapter.invoke(messages, max_tokens=max_tokens)
             except Exception as exc:
                 category = classify_model_failure(exc)
                 last_category = category
@@ -442,6 +480,17 @@ class ModelInvocationRouter:
                         ModelUsageSource.ESTIMATED if started else None,
                     )
                 )
+                if started_event_emitted:
+                    self._emit_attempt_completed(
+                        event_emitter,
+                        candidate=candidate,
+                        candidate_index=self._candidate_index(
+                            routing_decision, candidate.profile_id
+                        ),
+                        retry_index=retry_index,
+                        succeeded=False,
+                        safe_error_code=_safe_error_code(exc, category),
+                    )
                 # 同 Profile 失败后由统一策略决定是否插入一次 Retry。插入的
                 # 候选不属于 Fallback，且每次会重新取得 Permit、原子预留预算。
                 decision = self.retry_executor.decide(
@@ -523,6 +572,17 @@ class ModelInvocationRouter:
                     ),
                 )
             )
+            if started_event_emitted:
+                self._emit_attempt_completed(
+                    event_emitter,
+                    candidate=candidate,
+                    candidate_index=self._candidate_index(
+                        routing_decision, candidate.profile_id
+                    ),
+                    retry_index=retry_index,
+                    succeeded=True,
+                    safe_error_code=None,
+                )
             return ModelInvocationResult(
                 response.output,
                 routing_decision.capability_preferred_profile_id,
@@ -548,6 +608,71 @@ class ModelInvocationRouter:
             last_category,
             terminal_error_code,
         )
+
+    @staticmethod
+    def _candidate_index(
+        routing_decision: ModelRoutingDecision, profile_id: ModelProfileId
+    ) -> int:
+        for index, candidate in enumerate(routing_decision.candidates):
+            if candidate.profile_id == profile_id:
+                return index
+        raise RuntimeError("Model Attempt 不属于原始 Routing Chain")
+
+    @staticmethod
+    def _emit_attempt_completed(
+        event_emitter: StepEventEmitter | None,
+        *,
+        candidate: ModelRoutingCandidate,
+        candidate_index: int,
+        retry_index: int,
+        succeeded: bool,
+        safe_error_code: str | None,
+    ) -> None:
+        """仅为已成功发布 Started 的 Attempt 发布 Completed。"""
+        if event_emitter is None:
+            return
+        try:
+            event_emitter.emit_from_worker(
+                RuntimeEventType.MODEL_COMPLETED,
+                ModelCompletedPayload(
+                    profile_id=candidate.profile_id.value,
+                    candidate_index=candidate_index,
+                    retry_index=retry_index,
+                    succeeded=succeeded,
+                    safe_error_code=safe_error_code,
+                ),
+                component="model_invocation",
+            )
+        except Exception:
+            # Transport 中止或事件发布故障不允许透明重放已发生的 Provider Attempt。
+            return
+
+    @staticmethod
+    def _emit_attempt_started(
+        event_emitter: StepEventEmitter | None,
+        *,
+        candidate: ModelRoutingCandidate,
+        candidate_index: int,
+        retry_index: int,
+    ) -> bool:
+        if event_emitter is None:
+            return False
+        try:
+            event_emitter.emit_from_worker(
+                RuntimeEventType.MODEL_STARTED,
+                ModelStartedPayload(
+                    profile_id=candidate.profile_id.value,
+                    candidate_index=candidate_index,
+                    retry_index=retry_index,
+                    routing_adjustment=candidate.adjustment.value,
+                    breaker_key=candidate.breaker_key,
+                ),
+                component="model_invocation",
+            )
+            return True
+        except Exception:
+            # Backpressure/Transport 故障不应让 Provider Attempt 被透明重放。
+            return False
 
     @staticmethod
     def _check_deadline(
