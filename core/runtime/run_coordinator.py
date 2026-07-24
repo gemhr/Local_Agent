@@ -35,6 +35,16 @@ from core.runtime.state_machine import (
     StepEventType,
     StepStateEvent,
 )
+from core.runtime.event_channel import EventChannelClosedError
+from core.runtime.event_emitter import RunEventEmitter
+from core.runtime.events import (
+    CancellationPayload,
+    ErrorPayload,
+    RunCompletedPayload,
+    RunStartedPayload,
+    RuntimeEventType,
+    StepCompletedPayload,
+)
 
 
 _TERMINAL_RUN_STATUSES = frozenset(
@@ -129,6 +139,7 @@ class RunCoordinator:
         run_registry: RunRegistry,
         policy: ParallelExecutionPolicy,
         state_machine: AgentStateMachine | None = None,
+        event_emitter: RunEventEmitter | None = None,
     ) -> None:
         self.run_context = run_context
         self.plan = plan
@@ -140,6 +151,7 @@ class RunCoordinator:
         self.run_registry = run_registry
         self.policy = policy
         self.state_machine = state_machine or AgentStateMachine()
+        self.event_emitter = event_emitter
 
         self._start_lock = threading.Lock()
         self._started = False
@@ -189,6 +201,7 @@ class RunCoordinator:
             self.state_machine.apply_run_event(
                 self.agent_state, RunStateEvent(RunEventType.STARTED)
             )
+            await self._emit_run_started()
             self._start_deadline_watcher()
             PlanGraphValidator.validate(self.plan)
             self.scheduler.prepare(
@@ -236,8 +249,9 @@ class RunCoordinator:
                 decision = self._infrastructure_decision(
                     "COORDINATOR_FINALIZATION_REQUIRED"
                 )
-            self._settle_active_steps(decision, cleanup_error_codes)
+            await self._settle_active_steps(decision, cleanup_error_codes)
             decision = self._finalize_once(decision)
+            await self._emit_terminal_events(decision)
             self._stop_deadline_watcher(cleanup_error_codes)
             await self._run_cleanup_callbacks(cleanup_error_codes)
             budget_snapshot = self._snapshot_budget(cleanup_error_codes)
@@ -442,7 +456,7 @@ class RunCoordinator:
             safe_message=_SAFE_MESSAGES.get(stop_reason, "运行已结束"),
         )
 
-    def _settle_active_steps(
+    async def _settle_active_steps(
         self,
         decision: RunFinalizationDecision,
         cleanup_error_codes: list[str],
@@ -461,12 +475,87 @@ class RunCoordinator:
                         error_message="运行终结前取消仍在执行的步骤",
                     ),
                 )
+                if self.event_emitter is not None:
+                    step_emitter = self.event_emitter.for_step(step_id)
+                    if not step_emitter.is_closed:
+                        try:
+                            await step_emitter.emit(
+                                RuntimeEventType.STEP_COMPLETED,
+                                StepCompletedPayload(
+                                    StepStatus.CANCELLED.value,
+                                    "RUN_TERMINATING",
+                                ),
+                                component="run_coordinator",
+                                close=True,
+                                ignore_run_cancellation=True,
+                            )
+                        except (EventChannelClosedError, RuntimeError):
+                            pass
             except Exception:
                 cleanup_error_codes.append("ACTIVE_STEP_CLEANUP_FAILED")
         if self.agent_state.active_step_ids:
             cleanup_error_codes.append("ACTIVE_STEP_LEAK")
             decision = self._infrastructure_decision("ACTIVE_STEP_LEAK")
         _ = decision
+
+    async def _emit_run_started(self) -> None:
+        if self.event_emitter is None:
+            return
+        try:
+            await self.event_emitter.emit(
+                RuntimeEventType.RUN_STARTED,
+                RunStartedPayload(self.agent_state.status.value),
+                component="run_coordinator",
+            )
+        except (EventChannelClosedError, RuntimeError):
+            return
+
+    async def _emit_terminal_events(
+        self, decision: RunFinalizationDecision
+    ) -> None:
+        """Run 状态提交后按 ERROR/CANCELLATION → RUN_COMPLETED 发布。"""
+        if self.event_emitter is None:
+            return
+        try:
+            if decision.status == RunStatus.CANCELLED:
+                await self.event_emitter.emit(
+                    RuntimeEventType.CANCELLATION,
+                    CancellationPayload(
+                        reason=decision.stop_reason.value,
+                        component="run_coordinator",
+                    ),
+                    component="run_coordinator",
+                    ignore_run_cancellation=True,
+                )
+            elif decision.status == RunStatus.FAILED:
+                await self.event_emitter.emit(
+                    RuntimeEventType.ERROR,
+                    ErrorPayload(
+                        safe_error_code=decision.error_code
+                        or "COORDINATOR_FAILED",
+                        safe_message=decision.safe_message,
+                        component="run_coordinator",
+                        fatal=True,
+                    ),
+                    component="run_coordinator",
+                    ignore_run_cancellation=True,
+                )
+            await self.event_emitter.emit(
+                RuntimeEventType.RUN_COMPLETED,
+                RunCompletedPayload(
+                    status=self.agent_state.status.value,
+                    stop_reason=(
+                        self.agent_state.stop_reason.value
+                        if self.agent_state.stop_reason is not None
+                        else decision.stop_reason.value
+                    ),
+                ),
+                component="run_coordinator",
+                ignore_run_cancellation=True,
+            )
+        except (EventChannelClosedError, RuntimeError):
+            # Client 已断开时不继续向废弃 Transport 投递 terminal event。
+            return
 
     def _finalize_once(
         self, decision: RunFinalizationDecision
