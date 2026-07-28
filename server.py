@@ -26,6 +26,7 @@ from core.runtime import (
     ModelProfileId,
     ModelResolver,
     RunCancelledError,
+    SQLiteRunEventJournal,
     process_run_registry,
 )
 from core.settings import Settings
@@ -226,7 +227,8 @@ async def lifespan(app: FastAPI):
         circuit_breaker_registry=breaker_registry,
     )
     register_all_tools(router)
-    chat_service = ChatService(router)
+    event_journal = SQLiteRunEventJournal(settings.event_journal_db_path)
+    chat_service = ChatService(router, event_journal=event_journal)
     yield
     cancelled = process_run_registry.cancel_all(CancellationReason.SYSTEM_SHUTDOWN)
     remaining = await asyncio.to_thread(process_run_registry.wait_until_empty, SHUTDOWN_GRACE_SECONDS)
@@ -236,6 +238,7 @@ async def lifespan(app: FastAPI):
         logger.info("shutdown cleanup completed for runs=%s", ",".join(cancelled))
     # 先取消 Run 并等待 Grace Period，再关闭共享 Remote Session。
     _close_model_engines(engines)
+    event_journal.close()
     chat_service = None
 
 

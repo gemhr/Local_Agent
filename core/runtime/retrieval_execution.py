@@ -30,6 +30,7 @@ from core.runtime.blocking_executor import (
 from core.runtime.cancellation import RunCancelledError
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.event_emitter import StepEventEmitter
+from core.runtime.event_journal import JournalError
 from core.runtime.retrieval_adapters import (
     QueryEmbedding,
     RetrievalAdapter,
@@ -78,7 +79,9 @@ class _StageTimedOut(TimeoutError):
 
 
 class _EventEmissionFailed(RuntimeError):
-    pass
+    def __init__(self, safe_error_code: str = "RETRIEVAL_EVENT_EMISSION_FAILED"):
+        self.safe_error_code = safe_error_code
+        super().__init__("Retrieval Runtime Event 发布失败")
 
 
 class RetrievalExecutionService:
@@ -692,7 +695,7 @@ class RetrievalExecutionService:
                 emit_completed=emit_completed_event,
                 event_emitter=event_emitter,
             )
-        except _EventEmissionFailed:
+        except _EventEmissionFailed as exc:
             usage = self._retrieval_usage_since(
                 ledger, retrieval_usage_baseline
             )
@@ -706,7 +709,7 @@ class RetrievalExecutionService:
                 RetrievalExecutionStatus.FAILED,
                 RetrievalExecutionError(
                     RetrievalErrorCategory.INTERNAL,
-                    "RETRIEVAL_EVENT_EMISSION_FAILED",
+                    exc.safe_error_code,
                     "Retrieval Runtime Event 发布失败；已执行阶段不会重跑。",
                     records[-1].stage if records else None,
                 ),
@@ -1474,6 +1477,8 @@ class RetrievalExecutionService:
                 ),
                 component="retrieval_execution",
             )
+        except JournalError as exc:
+            raise _EventEmissionFailed(exc.error_code.value) from None
         except BaseException:
             raise _EventEmissionFailed from None
 
@@ -1528,6 +1533,9 @@ class RetrievalExecutionService:
                 ),
                 component="retrieval_execution",
             )
+        except JournalError as exc:
+            if not ignore_failure:
+                raise _EventEmissionFailed(exc.error_code.value) from None
         except BaseException:
             if not ignore_failure:
                 raise _EventEmissionFailed from None
@@ -1570,6 +1578,9 @@ class RetrievalExecutionService:
                 payload,
                 component="retrieval_execution",
             )
+        except JournalError as exc:
+            if not ignore_failure:
+                raise _EventEmissionFailed(exc.error_code.value) from None
         except BaseException:
             if not ignore_failure:
                 raise _EventEmissionFailed from None

@@ -9,6 +9,7 @@ from enum import Enum
 from typing import AsyncIterator
 
 from core.runtime.cancellation import CancellationToken
+from core.runtime.event_journal import RunEventJournal
 from core.runtime.events import RuntimeEvent, RuntimeEventDraft
 
 
@@ -35,6 +36,7 @@ class RuntimeEventChannel:
         *,
         run_id: str,
         cancellation_token: CancellationToken | None = None,
+        journal: RunEventJournal | None = None,
     ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("capacity 必须是正整数且不能是 bool")
@@ -49,7 +51,10 @@ class RuntimeEventChannel:
         self._publish_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._abort_event = asyncio.Event()
-        self._sequence = 0
+        self._journal = journal
+        self._sequence = (
+            journal.last_sequence(run_id) or 0 if journal is not None else 0
+        )
         self._cancellation_token = cancellation_token
         self._consumer_attached = False
         self._end_enqueued = False
@@ -77,7 +82,11 @@ class RuntimeEventChannel:
         *,
         ignore_run_cancellation: bool = False,
     ) -> RuntimeEvent:
-        """按真实入队顺序分配序号；满队列时阻塞且不丢事件。"""
+        """在同一发布锁内按 Journal-first 顺序持久化并入队。
+
+        Channel 仍是 per-run sequence 的唯一所有者。Journal 成功后即消费
+        该 sequence；若随后 Transport 失败，记录保留且序号不会被复用。
+        """
         if not isinstance(draft, RuntimeEventDraft):
             raise TypeError("publish 只接受 RuntimeEventDraft")
         if draft.run_id != self.run_id:
@@ -89,10 +98,14 @@ class RuntimeEventChannel:
             self._ensure_open()
             sequence = self._sequence + 1
             event = RuntimeEvent.from_draft(draft, sequence)
+            if self._journal is not None:
+                self._journal.append(event)
+                self._sequence = sequence
             await self._put_interruptibly(
                 event, ignore_run_cancellation=ignore_run_cancellation
             )
-            self._sequence = sequence
+            if self._journal is None:
+                self._sequence = sequence
             return event
 
     async def close(self) -> None:

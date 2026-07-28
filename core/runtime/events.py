@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -375,6 +376,83 @@ _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
 }
 
 
+_JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
+    RunStartedPayload: ("status",),
+    StepStartedPayload: ("status",),
+    ModelStartedPayload: (
+        "profile_id",
+        "candidate_index",
+        "retry_index",
+        "routing_adjustment",
+        "breaker_key",
+    ),
+    ModelCompletedPayload: (
+        "profile_id",
+        "candidate_index",
+        "retry_index",
+        "succeeded",
+        "safe_error_code",
+    ),
+    ToolStartedPayload: (
+        "tool_name",
+        "invocation_id",
+        "attempt_id",
+        "retry_index",
+        "resource_key_digest",
+    ),
+    ToolCompletedPayload: (
+        "tool_name",
+        "succeeded",
+        "safe_error_code",
+        "invocation_id",
+        "attempt_id",
+        "retry_index",
+        "side_effect_state",
+        "retry_disposition",
+        "resource_key_digest",
+        "worker_terminated",
+        "execution_detached",
+        "resource_release_pending",
+    ),
+    RetrievalStartedPayload: (
+        "retrieval_id",
+        "query_digest",
+        "collection_count",
+        "top_k",
+    ),
+    RetrievalStageCompletedPayload: (
+        "stage",
+        "status",
+        "duration_ms",
+        "input_count",
+        "output_count",
+        "degraded",
+        "budget_usage",
+        "safe_error_code",
+        "worker_terminated",
+        "execution_detached",
+        "background_work_pending",
+    ),
+    RetrievalCompletedPayload: (
+        "retrieval_id",
+        "status",
+        "duration_ms",
+        "chunk_count",
+        "citation_count",
+        "degraded",
+        "budget_usage",
+        "safe_error_code",
+        "worker_terminated",
+        "execution_detached",
+        "background_work_pending",
+    ),
+    StepCompletedPayload: ("status", "safe_error_code"),
+    ErrorPayload: ("safe_error_code", "safe_message", "component", "fatal"),
+    CancellationPayload: ("reason", "component"),
+    RunCompletedPayload: ("status", "stop_reason"),
+}
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeEventDraft:
     """尚未分配全局序号的内部事件事实。"""
@@ -484,6 +562,126 @@ class RuntimeEvent:
         else:
             result["payload"] = asdict(self.payload)
         return result
+
+    def to_journal_dict(self) -> dict[str, object]:
+        """返回 Journal 专用安全投影，不包含任何业务正文。
+
+        该投影按强类型 Payload 的字段 allowlist 构造。OutputDelta 只记录
+        字符长度与摘要，调用方不得用 ``asdict(event)`` 替代此方法。
+        """
+        if isinstance(self.payload, OutputDeltaPayload):
+            safe_payload: dict[str, object] = {
+                "text_length": len(self.payload.text),
+                "text_digest": hashlib.sha256(
+                    self.payload.text.encode("utf-8")
+                ).hexdigest(),
+            }
+        else:
+            fields = _JOURNAL_PAYLOAD_FIELDS.get(type(self.payload))
+            if fields is None:  # pragma: no cover - _PAYLOAD_TYPES 的封闭性保护
+                raise TypeError("Runtime Event Payload 没有 Journal allowlist")
+            safe_payload = {
+                name: _to_journal_value(getattr(self.payload, name))
+                for name in fields
+            }
+        validate_journal_payload(self.event_type, safe_payload)
+        return {
+            "schema_version": self.schema_version,
+            "event_id": self.event_id,
+            "run_id": self.run_id,
+            "trace_id": self.trace_id,
+            "sequence": self.sequence,
+            "event_type": self.event_type.value,
+            "emitted_at": self.emitted_at.isoformat(),
+            "component": self.component,
+            "step_id": self.step_id,
+            "step_sequence": self.step_sequence,
+            "safe_payload": safe_payload,
+        }
+
+
+def _to_journal_value(value: object) -> object:
+    """只接受 Journal schema 明确允许的原子值与 Retrieval 计数。"""
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, RetrievalBudgetPayload):
+        return {
+            name: getattr(value, name)
+            for name in (
+                "retrieval_calls",
+                "embedding_calls",
+                "vector_queries",
+                "keyword_queries",
+                "document_reads",
+                "context_chars",
+            )
+        }
+    raise TypeError("Journal Payload 包含未允许的值类型")
+
+
+def validate_journal_payload(
+    event_type: RuntimeEventType, safe_payload: dict[str, object]
+) -> None:
+    """读取与写入两端共用的 event-type allowlist 严格校验。"""
+    if not isinstance(event_type, RuntimeEventType):
+        raise TypeError("event_type 必须是 RuntimeEventType")
+    if not isinstance(safe_payload, dict):
+        raise TypeError("safe_payload 必须是 dict")
+    if event_type is RuntimeEventType.OUTPUT_DELTA:
+        if set(safe_payload) != {"text_length", "text_digest"}:
+            raise ValueError("OutputDelta Journal Payload 字段不匹配")
+        text_length = safe_payload["text_length"]
+        text_digest = safe_payload["text_digest"]
+        if (
+            isinstance(text_length, bool)
+            or not isinstance(text_length, int)
+            or text_length < 0
+        ):
+            raise ValueError("text_length 必须是非负整数")
+        if (
+            not isinstance(text_digest, str)
+            or len(text_digest) != 64
+            or any(c not in "0123456789abcdef" for c in text_digest)
+        ):
+            raise ValueError("text_digest 必须是小写 SHA-256")
+        return
+    payload_type = _PAYLOAD_TYPES[event_type]
+    expected_fields = _JOURNAL_PAYLOAD_FIELDS.get(payload_type)
+    if expected_fields is None:  # pragma: no cover - 封闭类型映射保护
+        raise ValueError("Event Type 没有 Journal Payload allowlist")
+    if set(safe_payload) != set(expected_fields):
+        raise ValueError("Journal Payload 字段与 Event Type 不匹配")
+    budget_fields = {
+        "retrieval_calls",
+        "embedding_calls",
+        "vector_queries",
+        "keyword_queries",
+        "document_reads",
+        "context_chars",
+    }
+    for name, value in safe_payload.items():
+        if name == "budget_usage":
+            if not isinstance(value, dict) or set(value) != budget_fields:
+                raise ValueError("budget_usage 字段不匹配")
+            for count in value.values():
+                if (
+                    isinstance(count, bool)
+                    or not isinstance(count, int)
+                    or count < 0
+                ):
+                    raise ValueError("budget_usage 计数必须是非负整数")
+            continue
+        if value is None or isinstance(value, bool):
+            continue
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value < 0:
+                raise ValueError(f"{name} 必须是非负整数")
+            continue
+        if isinstance(value, str) and value.strip():
+            continue
+        raise ValueError(f"{name} 包含不允许的 Journal 值")
 
 
 def _validate_common(

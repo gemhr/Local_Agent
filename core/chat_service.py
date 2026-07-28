@@ -34,6 +34,7 @@ from core.runtime import (
     RunEventEmitter,
     RuntimeEvent,
     RuntimeEventChannel,
+    RunEventJournal,
     RuntimeEventTextAdapter,
     StepEventEmitter,
 )
@@ -86,6 +87,7 @@ class ChatService:
         router: AgentRouter,
         state_observer: Callable[[AgentState], None] | None = None,
         event_channel_capacity: int = 32,
+        event_journal: RunEventJournal | None = None,
     ) -> None:
         """初始化应用服务。
 
@@ -102,6 +104,7 @@ class ChatService:
         ):
             raise ValueError("event_channel_capacity 必须是正整数")
         self._event_channel_capacity = event_channel_capacity
+        self._event_journal = event_journal
 
     def stream_chat(self, agent_id: str, query: str, file_path: str = "", run_id: str | None = None) -> Generator[str, None, None]:
         """流式执行一次对话。
@@ -222,6 +225,7 @@ class ChatService:
             self._event_channel_capacity,
             run_id=run_context.run_id,
             cancellation_token=run_context.cancellation_token,
+            journal=self._event_journal,
         )
         emitter = RunEventEmitter(
             run_id=run_context.run_id,

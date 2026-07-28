@@ -28,6 +28,7 @@ from core.runtime.cancellation import (
 )
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.event_emitter import StepEventEmitter
+from core.runtime.event_journal import JournalError
 from core.runtime.events import (
     RuntimeEventType,
     ToolCompletedPayload,
@@ -308,6 +309,25 @@ class ToolAttemptExecutor:
             if isinstance(completed, ToolExecutionError):
                 raise ToolAttemptFailed(completed)
             return result
+        except JournalError as exc:
+            # Started 写入失败时 Tool 尚未调用；Completed 写入失败时也禁止重试，
+            # 避免重复业务副作用。统一返回安全、不可重试的 Journal 错误。
+            state = tracker.mark_unknown_if_started()
+            raise ToolAttemptFailed(
+                ToolExecutionError(
+                    invocation_id=invocation.invocation_id,
+                    attempt_id=attempt_id,
+                    tool_name=spec.tool_name,
+                    category=ToolErrorCategory.INTERNAL,
+                    safe_error_code=exc.error_code.value,
+                    safe_message=exc.safe_message,
+                    phase=ToolExecutionPhase.INVOCATION,
+                    provider_started=provider_started,
+                    side_effect_state=state,
+                    retry_disposition=RetryDisposition.UNSAFE,
+                    retry_index=retry_index,
+                )
+            ) from None
         except ToolOutputValidationError as exc:
             error = ToolExecutionError(
                 invocation_id=invocation.invocation_id,
@@ -725,6 +745,8 @@ class ToolAttemptExecutor:
                 ignore_run_cancellation=True,
             )
             return result if result is not None else error
+        except JournalError:
+            raise
         except BaseException:
             # Completed 发布失败发生在 Tool 已执行之后，必须保守停止，绝不透明重试。
             source = result if result is not None else error

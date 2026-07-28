@@ -100,6 +100,28 @@ from core.runtime.event_emitter import (
     RunEventEmitter,
     StepEventEmitter,
 )
+from core.runtime.event_journal import (
+    JOURNAL_SCHEMA_VERSION,
+    JournalAppendStatus,
+    JournalError,
+    JournalErrorCode,
+    JournalRecord,
+    RunEventJournal,
+)
+from core.runtime.event_journal_store import (
+    InMemoryRunEventJournal,
+    SQLiteRunEventJournal,
+)
+from core.runtime.event_consumer import (
+    ConsumerErrorCode,
+    EventConsumptionCheckpoint,
+    EventConsumptionCheckpointStore,
+    EventConsumptionStatus,
+    EventConsumerError,
+    IdempotentEventConsumer,
+    InMemoryEventConsumptionCheckpointStore,
+    SQLiteEventConsumptionCheckpointStore,
+)
 from core.runtime.stream_adapter import RuntimeEventTextAdapter
 
 __all__ = [
@@ -160,7 +182,20 @@ __all__ = [
     "ErrorPayload",
     "EventChannelClosedError",
     "EventChannelState",
+    "EventConsumptionCheckpoint",
+    "EventConsumptionCheckpointStore",
+    "EventConsumptionStatus",
+    "EventConsumerError",
     "EventEmitterSyncError",
+    "ConsumerErrorCode",
+    "IdempotentEventConsumer",
+    "InMemoryEventConsumptionCheckpointStore",
+    "InMemoryRunEventJournal",
+    "JOURNAL_SCHEMA_VERSION",
+    "JournalAppendStatus",
+    "JournalError",
+    "JournalErrorCode",
+    "JournalRecord",
     "ModelCompletedPayload",
     "ModelStartedPayload",
     "OutputDeltaPayload",
@@ -177,6 +212,9 @@ __all__ = [
     "RuntimeEventPayload",
     "RuntimeEventTextAdapter",
     "RuntimeEventType",
+    "RunEventJournal",
+    "SQLiteEventConsumptionCheckpointStore",
+    "SQLiteRunEventJournal",
     "StepCompletedPayload",
     "StepEventEmitter",
     "StepStartedPayload",

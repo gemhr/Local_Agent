@@ -30,6 +30,7 @@ from core.runtime.model_routing import (
 from core.runtime.model_selection import ModelProfileId
 from core.runtime.retry import RetryExecutor, RetryPolicy
 from core.runtime.event_emitter import StepEventEmitter
+from core.runtime.event_journal import JournalError
 from core.runtime.events import (
     ModelCompletedPayload,
     ModelStartedPayload,
@@ -444,6 +445,11 @@ class ModelInvocationRouter:
                     )
                 else:
                     response = adapter.invoke(messages, max_tokens=max_tokens)
+            except JournalError:
+                # Provider 尚未调用；Journal 失败必须终止本次调用且不得 fallback/retry。
+                budget_ledger.release(reservation)
+                permit.abandon()
+                raise
             except Exception as exc:
                 category = classify_model_failure(exc)
                 last_category = category
@@ -687,6 +693,9 @@ class ModelInvocationRouter:
                 ),
                 component="model_invocation",
             )
+        except JournalError:
+            # Provider 已完成也不能把持久化失败伪装成成功；同时禁止透明重试。
+            raise
         except Exception:
             # Transport 中止或事件发布故障不允许透明重放已发生的 Provider Attempt。
             return
@@ -714,6 +723,8 @@ class ModelInvocationRouter:
                 component="model_invocation",
             )
             return True
+        except JournalError:
+            raise
         except Exception:
             # Backpressure/Transport 故障不应让 Provider Attempt 被透明重放。
             return False
