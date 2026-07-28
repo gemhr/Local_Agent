@@ -3,6 +3,7 @@
 """智能体路由与多智能体编排模块。"""
 
 import json
+import logging
 import re
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -34,6 +35,9 @@ from core.runtime import (
 if TYPE_CHECKING:
     from core.knowledge_base.vector_db_manager import VectorDBManager
     from core.llm_engine import LocalLLMEngine
+
+
+logger = logging.getLogger(__name__)
 
 
 class KnowledgeBaseUnavailableError(RuntimeError):
@@ -383,10 +387,16 @@ class AgentRouter:
             return self.memory_manager.get_summary_record(agent_id)["summary"]
         recent_messages = list(reversed(recent_messages))
 
-        print(
-            "[Summary] trigger detected: "
-            f"agent={agent_id}, total_messages={total_messages}, "
-            f"threshold={self.summary_trigger_messages}, keep_recent={self.summary_keep_recent}"
+        logger.info(
+            "Memory summary threshold reached",
+            extra={
+                "component": "agent_router",
+                "phase": "memory_summary",
+                "status": "STARTED",
+                "total_messages": total_messages,
+                "summary_threshold": self.summary_trigger_messages,
+                "keep_recent": self.summary_keep_recent,
+            },
         )
 
         cutoff_id = recent_messages[0]["id"] - 1
@@ -398,10 +408,14 @@ class AgentRouter:
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
         if not new_messages:
-            print(
-                "[Summary] skipped: "
-                f"agent={agent_id}, reason=no_new_messages, "
-                f"last_message_id={summary_record['last_message_id']}, cutoff_id={cutoff_id}"
+            logger.info(
+                "Memory summary skipped",
+                extra={
+                    "component": "agent_router",
+                    "phase": "memory_summary",
+                    "status": "SKIPPED",
+                    "safe_error_code": "SUMMARY_NO_NEW_MESSAGES",
+                },
             )
             return str(summary_record["summary"])
 
@@ -411,10 +425,14 @@ class AgentRouter:
             merged_summary = self._fallback_summary(str(summary_record["summary"]), new_messages)
 
         self.memory_manager.save_summary(agent_id, merged_summary, cutoff_id)
-        print(
-            "[Summary] updated: "
-            f"agent={agent_id}, summarized_messages={len(new_messages)}, "
-            f"new_last_message_id={cutoff_id}"
+        logger.info(
+            "Memory summary completed",
+            extra={
+                "component": "agent_router",
+                "phase": "memory_summary",
+                "status": "COMPLETED",
+                "summarized_messages": len(new_messages),
+            },
         )
         return merged_summary
 

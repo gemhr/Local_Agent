@@ -229,6 +229,10 @@ class ToolAttemptExecutor:
         provider_started = False
         started_at = datetime.now(UTC)
         started_monotonic = time.monotonic()
+
+        def elapsed_ms() -> int:
+            return max(0, int((time.monotonic() - started_monotonic) * 1000))
+
         try:
             context.raise_if_cancelled()
             lease = await concurrency_controller.acquire(
@@ -344,7 +348,9 @@ class ToolAttemptExecutor:
                 retry_index=retry_index,
             )
             if started_event_emitted:
-                error = await self._emit_completed(event_emitter, error=error)
+                error = await self._emit_completed(
+                    event_emitter, error=error, duration_ms=elapsed_ms()
+                )
             raise ToolAttemptFailed(error) from None
         except ToolAdapterInvocationError as exc:
             if exc.side_effect_state_authoritative:
@@ -361,7 +367,9 @@ class ToolAttemptExecutor:
                 exc=exc,
             )
             if started_event_emitted:
-                error = await self._emit_completed(event_emitter, error=error)
+                error = await self._emit_completed(
+                    event_emitter, error=error, duration_ms=elapsed_ms()
+                )
             raise ToolAttemptFailed(error) from None
         except _ToolTimedOut as exc:
             if exc.response is not None:
@@ -399,7 +407,9 @@ class ToolAttemptExecutor:
                 resource_release_pending=exc.lingering,
             )
             if started_event_emitted:
-                error = await self._emit_completed(event_emitter, error=error)
+                error = await self._emit_completed(
+                    event_emitter, error=error, duration_ms=elapsed_ms()
+                )
             raise ToolAttemptFailed(error) from None
         except BudgetExceededError as exc:
             raise ToolAttemptFailed(
@@ -448,6 +458,7 @@ class ToolAttemptExecutor:
             if started_event_emitted:
                 await self._emit_completed(
                     event_emitter,
+                    duration_ms=elapsed_ms(),
                     error=ToolExecutionError(
                         invocation_id=invocation.invocation_id,
                         attempt_id=attempt_id,
@@ -496,7 +507,9 @@ class ToolAttemptExecutor:
                 status=ToolExecutionStatus.TIMED_OUT,
             )
             if started_event_emitted:
-                error = await self._emit_completed(event_emitter, error=error)
+                error = await self._emit_completed(
+                    event_emitter, error=error, duration_ms=elapsed_ms()
+                )
             raise ToolAttemptFailed(error) from None
         except ToolAttemptFailed:
             raise
@@ -520,7 +533,9 @@ class ToolAttemptExecutor:
                 retry_index=retry_index,
             )
             if started_event_emitted:
-                error = await self._emit_completed(event_emitter, error=error)
+                error = await self._emit_completed(
+                    event_emitter, error=error, duration_ms=elapsed_ms()
+                )
             raise ToolAttemptFailed(error) from None
         finally:
             if reservation is not None:
@@ -705,6 +720,7 @@ class ToolAttemptExecutor:
         *,
         result: ToolExecutionResult | None = None,
         error: ToolExecutionError | None = None,
+        duration_ms: int | None = None,
     ):
         if event_emitter is None:
             return result if result is not None else error
@@ -722,9 +738,13 @@ class ToolAttemptExecutor:
                     worker_terminated=result.worker_terminated,
                     execution_detached=result.execution_detached,
                     resource_release_pending=result.resource_release_pending,
+                    duration_ms=result.duration_ms,
+                    status=result.status.value,
                 )
             else:
                 assert error is not None
+                if duration_ms is None:
+                    raise ValueError("Tool error Completed 必须携带 duration_ms")
                 payload = ToolCompletedPayload(
                     tool_name=error.tool_name,
                     succeeded=False,
@@ -737,6 +757,8 @@ class ToolAttemptExecutor:
                     worker_terminated=error.worker_terminated,
                     execution_detached=error.execution_detached,
                     resource_release_pending=error.resource_release_pending,
+                    duration_ms=duration_ms,
+                    status=error.status.value,
                 )
             await event_emitter.emit(
                 RuntimeEventType.TOOL_COMPLETED,
@@ -815,14 +837,14 @@ class ToolExecutionService:
                 side_effect_state=ToolSideEffectState.NOT_STARTED,
                 retry_disposition=RetryDisposition.UNSAFE,
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError):
             return ToolExecutionError(
                 invocation_id=invocation.invocation_id,
                 attempt_id=None,
                 tool_name=invocation.tool_name,
                 category=ToolErrorCategory.VALIDATION,
                 safe_error_code="TOOL_CONTRACT_VALIDATION_FAILED",
-                safe_message=str(exc),
+                safe_message="Tool contract validation failed.",
                 phase=ToolExecutionPhase.VALIDATION,
                 provider_started=False,
                 side_effect_state=ToolSideEffectState.NOT_STARTED,

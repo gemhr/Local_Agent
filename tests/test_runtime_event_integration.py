@@ -282,6 +282,8 @@ class RuntimeEventIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(RuntimeEventType.CANCELLATION, types)
         self.assertEqual(types[-1], RuntimeEventType.RUN_COMPLETED)
         self.assertEqual(events[-1].payload.status, RunStatus.CANCELLED.value)
+        self.assertIsInstance(events[-1].payload.duration_ms, int)
+        self.assertGreaterEqual(events[-1].payload.duration_ms, 0)
 
 
 class ModelStartedTimingTests(unittest.IsolatedAsyncioTestCase):
@@ -412,6 +414,8 @@ class ModelStartedTimingTests(unittest.IsolatedAsyncioTestCase):
         started, completed = events
         self.assertEqual(started.event_type, RuntimeEventType.MODEL_STARTED)
         self.assertEqual(completed.event_type, RuntimeEventType.MODEL_COMPLETED)
+        self.assertIsInstance(completed.payload.duration_ms, int)
+        self.assertGreaterEqual(completed.payload.duration_ms, 0)
         self.assertLessEqual(started.emitted_at, adapter.entered_at)
         self.assertGreaterEqual(completed.emitted_at, adapter.returned_at)
         self.assertLess(started.emitted_at, completed.emitted_at)

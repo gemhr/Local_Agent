@@ -13,6 +13,10 @@ from enum import Enum
 from typing import Callable, Generic, TypeVar
 from uuid import uuid4
 
+from core.runtime.observability import (
+    NoopRuntimeInfrastructureMetricsHook,
+    RuntimeInfrastructureMetricsHook,
+)
 
 T = TypeVar("T")
 
@@ -113,6 +117,7 @@ class BoundedBlockingExecutor:
         max_workers: int = 4,
         max_pending_tasks: int = 8,
         thread_name_prefix: str = "runtime-blocking",
+        metrics_hook: RuntimeInfrastructureMetricsHook | None = None,
     ) -> None:
         for value, name in (
             (max_workers, "max_workers"),
@@ -131,6 +136,7 @@ class BoundedBlockingExecutor:
         self._idle = threading.Condition(self._lock)
         self._records: dict[str, BlockingTaskRecord] = {}
         self._accepting = True
+        self._metrics_hook = metrics_hook or NoopRuntimeInfrastructureMetricsHook()
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix=thread_name_prefix,
@@ -155,6 +161,7 @@ class BoundedBlockingExecutor:
             raise TypeError("kind 必须是 BlockingTaskKind")
         if not run_id.strip() or not operation_id.strip():
             raise ValueError("run_id 和 operation_id 不能为空")
+        wait_started = time.perf_counter()
         while True:
             cancellation_check()
             remaining = remaining_seconds()
@@ -167,6 +174,12 @@ class BoundedBlockingExecutor:
                     raise BlockingExecutorClosedError("执行器已关闭")
             if self._admission.acquire(timeout=min(0.05, remaining)):
                 break
+        try:
+            self._metrics_hook.blocking_executor_wait_observed(
+                duration_seconds=time.perf_counter() - wait_started
+            )
+        except Exception:
+            pass
 
         task_id = uuid4().hex
         record = BlockingTaskRecord(
@@ -192,6 +205,12 @@ class BoundedBlockingExecutor:
             raise
         future.add_done_callback(lambda _future: self._complete(task_id))
         return BlockingTaskHandle(self, task_id, future)
+
+    def set_metrics_hook(
+        self, metrics_hook: RuntimeInfrastructureMetricsHook
+    ) -> None:
+        """应用装配期注入 Hook；Hook 失败不影响任务执行。"""
+        self._metrics_hook = metrics_hook
 
     def snapshot(self) -> BlockingExecutorSnapshot:
         with self._lock:

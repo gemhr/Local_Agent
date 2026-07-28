@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -38,12 +39,14 @@ from core.runtime.state_machine import (
 from core.runtime.event_channel import EventChannelClosedError
 from core.runtime.event_emitter import RunEventEmitter
 from core.runtime.events import (
+    BudgetExhaustedPayload,
     CancellationPayload,
     ErrorPayload,
     RunCompletedPayload,
     RunStartedPayload,
     RuntimeEventType,
     StepCompletedPayload,
+    TimeoutPayload,
 )
 
 
@@ -155,6 +158,8 @@ class RunCoordinator:
 
         self._start_lock = threading.Lock()
         self._started = False
+        self._started_monotonic: float | None = None
+        self._budget_dimension = "unknown"
         self._finalize_lock = threading.Lock()
         self._finalization_decision: RunFinalizationDecision | None = None
         self._cleanup_lock = threading.Lock()
@@ -215,7 +220,8 @@ class RunCoordinator:
                 execution_mode=execution_mode,
                 concurrency_specs=concurrency_specs,
             )
-        except BudgetExceededError:
+        except BudgetExceededError as exc:
+            self._budget_dimension = exc.dimension
             decision = self._budget_decision()
         except RunDeadlineExceededError:
             decision = self._deadline_decision()
@@ -346,6 +352,7 @@ class RunCoordinator:
                     "同一 Coordinator 不允许执行两次",
                 )
             self._started = True
+            self._started_monotonic = time.monotonic()
 
     def _validate_ownership(self) -> None:
         run_id = self.run_context.run_id
@@ -479,11 +486,27 @@ class RunCoordinator:
                     step_emitter = self.event_emitter.for_step(step_id)
                     if not step_emitter.is_closed:
                         try:
+                            step = self.agent_state.steps[step_id]
+                            duration_ms = (
+                                max(
+                                    0,
+                                    int(
+                                        (
+                                            step.ended_at - step.started_at
+                                        ).total_seconds()
+                                        * 1000
+                                    ),
+                                )
+                                if step.started_at is not None
+                                and step.ended_at is not None
+                                else 0
+                            )
                             await step_emitter.emit(
                                 RuntimeEventType.STEP_COMPLETED,
                                 StepCompletedPayload(
                                     StepStatus.CANCELLED.value,
                                     "RUN_TERMINATING",
+                                    duration_ms=duration_ms,
                                 ),
                                 component="run_coordinator",
                                 close=True,
@@ -517,17 +540,40 @@ class RunCoordinator:
         if self.event_emitter is None:
             return
         try:
+            if decision.stop_reason is StopReason.BUDGET_EXHAUSTED:
+                await self.event_emitter.emit(
+                    RuntimeEventType.BUDGET_EXHAUSTED,
+                    BudgetExhaustedPayload(
+                        component="run", dimension=self._budget_dimension
+                    ),
+                    component="run_coordinator",
+                    ignore_run_cancellation=True,
+                )
+            elif decision.stop_reason is StopReason.DEADLINE_EXCEEDED:
+                await self.event_emitter.emit(
+                    RuntimeEventType.TIMEOUT,
+                    TimeoutPayload(component="run"),
+                    component="run_coordinator",
+                    ignore_run_cancellation=True,
+                )
             if decision.status == RunStatus.CANCELLED:
                 await self.event_emitter.emit(
                     RuntimeEventType.CANCELLATION,
                     CancellationPayload(
                         reason=decision.stop_reason.value,
-                        component="run_coordinator",
+                        component="run",
                     ),
                     component="run_coordinator",
                     ignore_run_cancellation=True,
                 )
-            elif decision.status == RunStatus.FAILED:
+            elif (
+                decision.status == RunStatus.FAILED
+                and decision.stop_reason
+                not in {
+                    StopReason.BUDGET_EXHAUSTED,
+                    StopReason.DEADLINE_EXCEEDED,
+                }
+            ):
                 await self.event_emitter.emit(
                     RuntimeEventType.ERROR,
                     ErrorPayload(
@@ -548,6 +594,19 @@ class RunCoordinator:
                         self.agent_state.stop_reason.value
                         if self.agent_state.stop_reason is not None
                         else decision.stop_reason.value
+                    ),
+                    duration_ms=(
+                        max(
+                            0,
+                            int(
+                                (
+                                    time.monotonic() - self._started_monotonic
+                                )
+                                * 1000
+                            ),
+                        )
+                        if self._started_monotonic is not None
+                        else 0
                     ),
                 ),
                 component="run_coordinator",

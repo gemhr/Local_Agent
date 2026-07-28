@@ -190,6 +190,7 @@ async def test_events_pair_only_after_resource_and_budget_and_hide_output():
         RuntimeEventType.TOOL_STARTED,
         RuntimeEventType.TOOL_COMPLETED,
     ]
+    assert events[-1].payload.duration_ms == result.duration_ms
     safe = str([event.to_safe_dict() for event in events])
     assert "secret-output" not in safe
     assert "secret-argument" not in safe

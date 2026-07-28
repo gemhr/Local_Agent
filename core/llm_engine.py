@@ -3,11 +3,15 @@
 """本地大语言模型推理封装。"""
 
 import os
+import logging
 import threading
 from typing import Any
 from typing import Dict, Generator, List
 
 import requests
+
+
+logger = logging.getLogger(__name__)
 
 
 class RemoteLLMError(RuntimeError):
@@ -50,11 +54,20 @@ class LocalLLMEngine:
             n_gpu_layers: 卸载到 GPU 的层数；为 0 时表示纯 CPU。
         """
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
+            raise FileNotFoundError("Local model file is unavailable")
 
         from llama_cpp import Llama
 
-        print(f"[LLM] Loading model: {os.path.basename(model_path)} ...")
+        logger.info(
+            "Local model initialization started",
+            extra={
+                "component": "llm_engine",
+                "phase": "initialization",
+                "status": "STARTED",
+                "configured": True,
+                "model_profile": "local",
+            },
+        )
         self.llm = Llama(
             model_path=model_path,
             n_ctx=n_ctx,
@@ -65,7 +78,15 @@ class LocalLLMEngine:
         # llama.cpp 的 Python 封装不适合被多个请求并发复用，
         # 这里串行化生成流程，避免同一实例被同时推进。
         self._generate_lock = threading.Lock()
-        print("[LLM] Model loaded.")
+        logger.info(
+            "Local model initialization completed",
+            extra={
+                "component": "llm_engine",
+                "phase": "initialization",
+                "status": "COMPLETED",
+                "model_profile": "local",
+            },
+        )
 
     def generate(
         self,

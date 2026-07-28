@@ -29,6 +29,8 @@ class RuntimeEventType(str, Enum):
     RETRIEVAL_COMPLETED = "RETRIEVAL_COMPLETED"
     OUTPUT_DELTA = "OUTPUT_DELTA"
     STEP_COMPLETED = "STEP_COMPLETED"
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    TIMEOUT = "TIMEOUT"
     ERROR = "ERROR"
     CANCELLATION = "CANCELLATION"
     RUN_COMPLETED = "RUN_COMPLETED"
@@ -83,6 +85,7 @@ class ModelCompletedPayload:
     retry_index: int
     succeeded: bool
     safe_error_code: str | None = None
+    duration_ms: int = 0
 
     def __post_init__(self) -> None:
         _require_text(self.profile_id, "profile_id")
@@ -92,6 +95,7 @@ class ModelCompletedPayload:
             raise TypeError("succeeded 必须是 bool")
         if self.safe_error_code is not None:
             _require_text(self.safe_error_code, "safe_error_code")
+        _require_index(self.duration_ms, "duration_ms")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +135,8 @@ class ToolCompletedPayload:
     worker_terminated: bool = True
     execution_detached: bool = False
     resource_release_pending: bool = False
+    duration_ms: int = 0
+    status: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.tool_name, "tool_name")
@@ -138,6 +144,7 @@ class ToolCompletedPayload:
             raise TypeError("succeeded 必须是 bool")
         if self.safe_error_code is not None:
             _require_text(self.safe_error_code, "safe_error_code")
+        _require_index(self.duration_ms, "duration_ms")
         for value, name in (
             (self.invocation_id, "invocation_id"),
             (self.attempt_id, "attempt_id"),
@@ -149,6 +156,8 @@ class ToolCompletedPayload:
                 _require_text(value, name)
         if self.retry_index is not None:
             _require_index(self.retry_index, "retry_index")
+        if self.status is not None:
+            _require_text(self.status, "status")
         for value, name in (
             (self.worker_terminated, "worker_terminated"),
             (self.execution_detached, "execution_detached"),
@@ -298,11 +307,35 @@ class OutputDeltaPayload:
 class StepCompletedPayload:
     status: str
     safe_error_code: str | None = None
+    duration_ms: int = 0
 
     def __post_init__(self) -> None:
         _require_text(self.status, "status")
         if self.safe_error_code is not None:
             _require_text(self.safe_error_code, "safe_error_code")
+        _require_index(self.duration_ms, "duration_ms")
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetExhaustedPayload:
+    component: str
+    dimension: str = "unknown"
+    safe_error_code: str = "BUDGET_EXHAUSTED"
+
+    def __post_init__(self) -> None:
+        _require_text(self.component, "component")
+        _require_text(self.dimension, "dimension")
+        _require_text(self.safe_error_code, "safe_error_code")
+
+
+@dataclass(frozen=True, slots=True)
+class TimeoutPayload:
+    component: str
+    safe_error_code: str = "DEADLINE_EXCEEDED"
+
+    def __post_init__(self) -> None:
+        _require_text(self.component, "component")
+        _require_text(self.safe_error_code, "safe_error_code")
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,10 +367,12 @@ class CancellationPayload:
 class RunCompletedPayload:
     status: str
     stop_reason: str
+    duration_ms: int = 0
 
     def __post_init__(self) -> None:
         _require_text(self.status, "status")
         _require_text(self.stop_reason, "stop_reason")
+        _require_index(self.duration_ms, "duration_ms")
 
 
 RuntimeEventPayload: TypeAlias = (
@@ -352,6 +387,8 @@ RuntimeEventPayload: TypeAlias = (
     | RetrievalCompletedPayload
     | OutputDeltaPayload
     | StepCompletedPayload
+    | BudgetExhaustedPayload
+    | TimeoutPayload
     | ErrorPayload
     | CancellationPayload
     | RunCompletedPayload
@@ -370,6 +407,8 @@ _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
     RuntimeEventType.RETRIEVAL_COMPLETED: RetrievalCompletedPayload,
     RuntimeEventType.OUTPUT_DELTA: OutputDeltaPayload,
     RuntimeEventType.STEP_COMPLETED: StepCompletedPayload,
+    RuntimeEventType.BUDGET_EXHAUSTED: BudgetExhaustedPayload,
+    RuntimeEventType.TIMEOUT: TimeoutPayload,
     RuntimeEventType.ERROR: ErrorPayload,
     RuntimeEventType.CANCELLATION: CancellationPayload,
     RuntimeEventType.RUN_COMPLETED: RunCompletedPayload,
@@ -392,6 +431,7 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "retry_index",
         "succeeded",
         "safe_error_code",
+        "duration_ms",
     ),
     ToolStartedPayload: (
         "tool_name",
@@ -413,6 +453,8 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "worker_terminated",
         "execution_detached",
         "resource_release_pending",
+        "duration_ms",
+        "status",
     ),
     RetrievalStartedPayload: (
         "retrieval_id",
@@ -446,10 +488,24 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "execution_detached",
         "background_work_pending",
     ),
-    StepCompletedPayload: ("status", "safe_error_code"),
+    StepCompletedPayload: ("status", "safe_error_code", "duration_ms"),
+    BudgetExhaustedPayload: ("component", "dimension", "safe_error_code"),
+    TimeoutPayload: ("component", "safe_error_code"),
     ErrorPayload: ("safe_error_code", "safe_message", "component", "fatal"),
     CancellationPayload: ("reason", "component"),
-    RunCompletedPayload: ("status", "stop_reason"),
+    RunCompletedPayload: ("status", "stop_reason", "duration_ms"),
+}
+
+# 仅用于读取第 20 天收尾前已写入的 schema v1 记录。新事件始终写出这些字段；
+# 旧记录缺少权威 duration 时可继续校验和消费，但无法补造 Histogram。
+_LEGACY_OPTIONAL_JOURNAL_FIELDS: dict[
+    RuntimeEventType, frozenset[str]
+] = {
+    RuntimeEventType.MODEL_COMPLETED: frozenset({"duration_ms"}),
+    RuntimeEventType.TOOL_COMPLETED: frozenset({"duration_ms", "status"}),
+    RuntimeEventType.STEP_COMPLETED: frozenset({"duration_ms"}),
+    RuntimeEventType.RUN_COMPLETED: frozenset({"duration_ms"}),
+    RuntimeEventType.BUDGET_EXHAUSTED: frozenset({"dimension"}),
 }
 
 
@@ -651,7 +707,15 @@ def validate_journal_payload(
     expected_fields = _JOURNAL_PAYLOAD_FIELDS.get(payload_type)
     if expected_fields is None:  # pragma: no cover - 封闭类型映射保护
         raise ValueError("Event Type 没有 Journal Payload allowlist")
-    if set(safe_payload) != set(expected_fields):
+    actual_fields = set(safe_payload)
+    expected_field_set = set(expected_fields)
+    optional_legacy_fields = _LEGACY_OPTIONAL_JOURNAL_FIELDS.get(
+        event_type, frozenset()
+    )
+    if (
+        not actual_fields <= expected_field_set
+        or not expected_field_set - optional_legacy_fields <= actual_fields
+    ):
         raise ValueError("Journal Payload 字段与 Event Type 不匹配")
     budget_fields = {
         "retrieval_calls",

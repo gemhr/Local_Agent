@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+import time
 from typing import Callable, Mapping, Protocol, Sequence
 
 from core.runtime.budget import (
@@ -419,6 +420,7 @@ class ModelInvocationRouter:
             try:
                 started_event_emitted = False
                 adapter = adapter_resolver.resolve(candidate.profile_id)
+                attempt_started_monotonic = time.monotonic()
                 # Candidate、Context、Circuit、Budget、Cancellation/Deadline 与
                 # Adapter resolution 均已成功；进入 invoke 前由 Router 发布唯一
                 # MODEL_STARTED。第三方 Adapter 无需实现 callback 也有真实时间语义。
@@ -503,6 +505,13 @@ class ModelInvocationRouter:
                         retry_index=retry_index,
                         succeeded=False,
                         safe_error_code=_safe_error_code(exc, category),
+                        duration_ms=max(
+                            0,
+                            int(
+                                (time.monotonic() - attempt_started_monotonic)
+                                * 1000
+                            ),
+                        ),
                     )
                 # 同 Profile 失败后由统一策略决定是否插入一次 Retry。插入的
                 # 候选不属于 Fallback，且每次会重新取得 Permit、原子预留预算。
@@ -603,6 +612,13 @@ class ModelInvocationRouter:
                         retry_index=retry_index,
                         succeeded=False,
                         safe_error_code="BUDGET_EXHAUSTED",
+                        duration_ms=max(
+                            0,
+                            int(
+                                (time.monotonic() - attempt_started_monotonic)
+                                * 1000
+                            ),
+                        ),
                     )
                 exc.model_attempts = tuple(attempts)
                 raise
@@ -632,6 +648,12 @@ class ModelInvocationRouter:
                     retry_index=retry_index,
                     succeeded=True,
                     safe_error_code=None,
+                    duration_ms=max(
+                        0,
+                        int(
+                            (time.monotonic() - attempt_started_monotonic) * 1000
+                        ),
+                    ),
                 )
             return ModelInvocationResult(
                 response.output,
@@ -677,6 +699,7 @@ class ModelInvocationRouter:
         retry_index: int,
         succeeded: bool,
         safe_error_code: str | None,
+        duration_ms: int,
     ) -> None:
         """仅为已成功发布 Started 的 Attempt 发布 Completed。"""
         if event_emitter is None:
@@ -690,6 +713,7 @@ class ModelInvocationRouter:
                     retry_index=retry_index,
                     succeeded=succeeded,
                     safe_error_code=safe_error_code,
+                    duration_ms=duration_ms,
                 ),
                 component="model_invocation",
             )

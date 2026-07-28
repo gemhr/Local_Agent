@@ -26,8 +26,23 @@ from core.runtime import (
     ModelProfileId,
     ModelResolver,
     RunCancelledError,
+    SQLiteEventConsumptionCheckpointStore,
     SQLiteRunEventJournal,
     process_run_registry,
+)
+from core.runtime.blocking_executor import process_blocking_executor
+from core.runtime.metrics import (
+    ApplicationRuntimeGaugeProvider,
+    InMemoryMetricsRecorder,
+    MetricLabelPolicy,
+    RecorderInfrastructureMetricsHook,
+    RuntimeMetricsCollector,
+    RuntimeMetricsProjector,
+)
+from core.runtime.observability_dispatcher import RuntimeObservabilityDispatcher
+from core.runtime.structured_logging import (
+    JsonStructuredRuntimeLogger,
+    StructuredLogProjector,
 )
 from core.settings import Settings
 from tools.registry import register_all_tools
@@ -70,7 +85,15 @@ def _close_model_engines(engines: dict) -> tuple[str, ...]:
             close()
         except Exception:
             error_codes.append("MODEL_ENGINE_CLOSE_FAILED")
-            logger.warning("[Model Runtime] engine close failed", exc_info=True)
+            logger.warning(
+                "Model runtime close failed safely",
+                extra={
+                    "safe_error_code": "MODEL_ENGINE_CLOSE_FAILED",
+                    "component": "model_runtime",
+                    "phase": "shutdown",
+                    "status": "FAILED",
+                },
+            )
     return tuple(error_codes)
 
 
@@ -99,29 +122,42 @@ async def lifespan(app: FastAPI):
                 query_prompt_name=settings.embedding_query_prompt_name or None,
             )
             logger.info(
-                "[KB Runtime] collection=%s, chroma_dir=%s, model=%s, count=%s",
-                settings.knowledge_collection_name,
-                settings.chroma_dir,
-                settings.embedding_model_path,
-                db_manager.count(),
+                "Knowledge base runtime initialized",
+                extra={
+                    "component": "knowledge_base",
+                    "phase": "initialization",
+                    "status": "COMPLETED",
+                    "configured": True,
+                    "storage_type": "chroma",
+                    "document_count": db_manager.count(),
+                },
             )
-        except Exception as exc:
-            knowledge_base_error = f"{type(exc).__name__}: {exc}"
+        except Exception:
+            knowledge_base_error = "KNOWLEDGE_BASE_INITIALIZATION_FAILED"
             logger.warning(
-                "[KB Runtime] initialization failed: collection=%s, "
-                "chroma_dir=%s, model=%s, error=%s",
-                settings.knowledge_collection_name,
-                settings.chroma_dir,
-                settings.embedding_model_path,
-                exc,
+                "Knowledge base runtime initialization failed safely",
+                extra={
+                    "safe_error_code": knowledge_base_error,
+                    "component": "knowledge_base",
+                    "phase": "initialization",
+                    "status": "FAILED",
+                    "configured": True,
+                    "storage_type": "chroma",
+                },
             )
     else:
-        knowledge_base_error = (
-            f"{type(vector_db_import_error).__name__}: {vector_db_import_error}"
-            if vector_db_import_error is not None
-            else "VectorDBManager is unavailable"
+        knowledge_base_error = "KNOWLEDGE_BASE_IMPORT_FAILED"
+        logger.warning(
+            "Knowledge base runtime import failed safely",
+            extra={
+                "safe_error_code": knowledge_base_error,
+                "component": "knowledge_base",
+                "phase": "import",
+                "status": "FAILED",
+                "configured": VectorDBManager is not None,
+                "storage_type": "chroma",
+            },
         )
-        logger.warning("[KB Runtime] import failed: %s", knowledge_base_error)
 
     engines = {}
     profiles = []
@@ -227,8 +263,51 @@ async def lifespan(app: FastAPI):
         circuit_breaker_registry=breaker_registry,
     )
     register_all_tools(router)
-    event_journal = SQLiteRunEventJournal(settings.event_journal_db_path)
-    chat_service = ChatService(router, event_journal=event_journal)
+    runtime_metrics = InMemoryMetricsRecorder(
+        label_policy=MetricLabelPolicy(
+            tool_name_allowlist=frozenset(settings.metrics_tool_name_allowlist)
+        )
+    )
+    infrastructure_metrics = RecorderInfrastructureMetricsHook(runtime_metrics)
+    process_blocking_executor.set_metrics_hook(infrastructure_metrics)
+    gauge_provider = ApplicationRuntimeGaugeProvider(
+        run_registry=process_run_registry,
+        blocking_executor=process_blocking_executor,
+        tool_workers=router.tool_execution_service.concurrency_controller,
+        circuit_registry=breaker_registry,
+    )
+    logger_checkpoints = SQLiteEventConsumptionCheckpointStore(
+        settings.observability_checkpoint_db_path
+    )
+    metrics_checkpoints = SQLiteEventConsumptionCheckpointStore(
+        settings.observability_checkpoint_db_path
+    )
+    observability_dispatcher = RuntimeObservabilityDispatcher(
+        logger_projector=StructuredLogProjector(
+            JsonStructuredRuntimeLogger()
+        ),
+        metrics_projector=RuntimeMetricsProjector(runtime_metrics),
+        logger_checkpoint_store=logger_checkpoints,
+        metrics_checkpoint_store=metrics_checkpoints,
+        queue_capacity=settings.observability_queue_capacity,
+        infrastructure_hook=infrastructure_metrics,
+        gauge_provider=gauge_provider,
+    )
+    event_journal = SQLiteRunEventJournal(
+        settings.event_journal_db_path,
+        metrics_hook=infrastructure_metrics,
+    )
+    chat_service = ChatService(
+        router,
+        event_journal=event_journal,
+        observability_dispatcher=observability_dispatcher,
+        gauge_provider=gauge_provider,
+    )
+    app.state.runtime_metrics = runtime_metrics
+    app.state.runtime_metrics_collector = RuntimeMetricsCollector(
+        runtime_metrics, gauge_provider
+    )
+    app.state.runtime_observability = observability_dispatcher
     yield
     cancelled = process_run_registry.cancel_all(CancellationReason.SYSTEM_SHUTDOWN)
     remaining = await asyncio.to_thread(process_run_registry.wait_until_empty, SHUTDOWN_GRACE_SECONDS)
@@ -238,7 +317,12 @@ async def lifespan(app: FastAPI):
         logger.info("shutdown cleanup completed for runs=%s", ",".join(cancelled))
     # 先取消 Run 并等待 Grace Period，再关闭共享 Remote Session。
     _close_model_engines(engines)
+    await observability_dispatcher.close(
+        settings.observability_shutdown_timeout_seconds
+    )
     event_journal.close()
+    logger_checkpoints.close()
+    metrics_checkpoints.close()
     chat_service = None
 
 
