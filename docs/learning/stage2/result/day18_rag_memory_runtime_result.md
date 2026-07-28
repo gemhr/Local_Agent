@@ -661,6 +661,34 @@ AgentRouter 仅把 `EMPTY` 映射为 `KnowledgeSourceNotFoundError`；FAILED/TIM
 - 回归测试：同 Query 去重、Keyword 零预算、排队取消不收费、运行超时不退款、Context chars 原子补差、并发 Reservation。
 - 当前状态：已修复。
 
+### Bad Case 18：用户主动停止被 ASGI 误报为未处理异常
+
+- 类型：真实故障；Legacy Chat Stream 的 Domain Cancellation 与 HTTP Transport 边界不完整。
+- 触发条件：桌面端正在读取 `/api/chat` 流式响应时，用户点击“停止”；客户端使用同一个 `run_id` 调用 `/api/runtime/runs/{run_id}/cancel`，服务端成功写入 `CancellationReason.USER_CANCELLED`。
+- 故障表现：取消接口先返回 `200 OK`，生成链路随后在合作式安全点抛出 `RunCancelledError("USER_CANCELLED")`；聊天流没有把该异常转换为正常终止，Uvicorn 最终记录 `Exception in ASGI application` 和完整 Traceback。表象像服务端生成失败，但取消请求实际已经成功。
+- 异常传播链：`cancel_run_endpoint()` -> `RunRegistry.cancel()` -> `CancellationToken.raise_if_cancelled()` -> `RunContext.raise_if_inactive()` -> `AgentRouter`/`AgentLoop` -> `ChatService.stream_chat()` -> `asyncio.to_thread(_next_or_none, stream)` -> `StreamingResponse` -> Starlette/ASGI。
+- 根因分析：`RunCancelledError` 是项目定义的受控业务终止异常，继承自 `RuntimeError`，并不属于 `asyncio.CancelledError`。`AgentLoop` 捕获它后会先把 Step/Run 结算为 `CANCELLED`，再重新抛出以通知上层停止推进；但 `server.py::chat_endpoint.generate()` 只处理了 `asyncio.CancelledError`、`BrokenPipeError` 和 `ConnectionResetError`，遗漏了 `RunCancelledError`。响应头已经发送后，该异常无法再转换为新的 HTTP 错误响应，只能穿透流式响应并被 ASGI 当成应用异常。
+- 影响边界：Run/Step 状态仍会正确落为 `CANCELLED`，`ChatService` 的 `finally` 仍会注销 Run、取消 Deadline Timer 并关闭同步流，因此没有证据表明本案例造成 RunRegistry 泄漏或错误终态；真正错误的是 Transport 把预期取消记录成服务器故障，并以异常方式截断响应流。
+- 修复方案：在 `server.py::chat_endpoint.generate()` 的流式传输边界显式捕获 `RunCancelledError` 并直接结束生成器。状态结算继续由 `AgentLoop` 负责，资源回收继续由 `ChatService/server` 的 `finally` 负责；不恢复旧版 `except Exception`，保证普通 `RuntimeError` 等真实故障仍然穿透并可观测。
+- 回归测试：新增 `tests/test_server_stream_cancellation.py::test_chat_stream_treats_run_cancellation_as_normal_completion`，验证流先输出部分内容、随后发生 `USER_CANCELLED` 时能够正常结束且底层同步流被关闭；新增 `test_chat_stream_does_not_hide_unexpected_errors`，验证非取消 `RuntimeError` 仍向上传播。定向回归为 `40 passed, 3 subtests passed`，当前全仓回归为 `443 passed, 42 subtests passed`。
+- 对应知识点：Domain Cancellation 与 Task Cancellation 的类型区分、StreamingResponse 已发送响应头后的异常语义、状态结算与传输适配分层、合作式取消、安全清理、负向测试防止过度吞异常。
+- 面试表达：取消不是失败，也不是所有层都应吞掉异常。Runtime 层先用类型化异常完成 `CANCELLED` 结算并通知停止，Transport 层再把该受控终态映射为流的正常结束；同时用反向测试保证真正的未知异常不会被取消处理器隐藏。
+- 当前状态：已修复并通过全仓回归。
+
+### Bad Case 19：Worker 已停止但发送按钮永久禁用
+
+- 类型：真实前端状态机故障；异步 Worker 生命周期与 UI Streaming 状态没有统一终态。
+- 触发条件：桌面端正在通过 `requests.Response.iter_content()` 读取聊天流时，用户第一次点击“停止”。取消线程先请求服务端取消，再调用 `ApiWorker.cancel()` 设置 Qt interruption flag，并从另一个线程关闭当前 Response 和 Session。
+- 故障表现：后端正常停止且不再打印异常，`ApiWorker` 线程也已经退出，但停止按钮仍保持启用，发送按钮即使在输入新内容后也不会重新启用；切换智能体或聊天界面同样无法恢复，只能重启应用。
+- 异常传播链：`ChatPanel.stop_requested` -> `MainController._handle_stop_request()` -> 独立 `cancel_then_close` 线程 -> `request_run_cancellation()` -> `ApiWorker.cancel()` -> `Response.close()` -> `iter_content()` 抛出连接读取异常 -> `ApiWorker.run()` 的 `except Exception`。
+- 根因分析：主动取消造成的读取异常进入 `except Exception` 后，代码发现 `isInterruptionRequested() == True`，因此正确地不发送 `error_signal`；但自定义 `finished_signal` 只位于 `try` 的正常完成路径，异常路径也不会发送它。按钮复位和 `run_id` 清理只挂在 `_on_worker_finished()` 与 `_on_worker_error()` 上，两个 Handler 都没有被调用，最终形成“线程真实状态已结束、UI 状态仍为 Streaming”的状态分裂。
+- 禁用机制：`ChatPanel._on_input_changed()` 使用 `not self.stop_btn.isEnabled() and bool(input or attachment)` 决定发送按钮状态。遗留的停止按钮一直为 Enabled，使条件第一项永久为 False；智能体切换只更新 `current_agent_id`、聊天 Stack 和历史加载，不负责修改这个全局 Streaming 状态，因此切换界面无法自愈。遗留的 `worker.run_id` 也不会被清空，而再次点击停止会因 `worker.isRunning() == False` 直接返回。
+- 修复方案：将“业务成功”“真实错误”和“Worker 生命周期结束”拆成三个信号语义。`finished_signal` 只负责正常完成后的最终渲染，`error_signal` 只负责显示真实错误，新增 `settled_signal` 并在 `ApiWorker.run()` 的 `finally` 中无条件且仅一次发出；`MainController._on_worker_settled()` 统一执行 `set_streaming(False)` 和清空 `worker.run_id`。这样用户取消不会被伪装成成功或错误，而所有退出路径都能恢复 UI。
+- 回归测试：新增 `tests/test_api_worker.py`。`test_interrupted_worker_emits_settled_without_success_or_error` 验证取消读取异常只发送 `settled`；`test_completed_worker_emits_success_before_settled` 验证成功顺序为 `finished -> settled`；`test_failed_worker_emits_error_before_settled` 验证真实故障顺序为 `error -> settled`；`test_worker_settled_resets_shared_streaming_state_and_run_id` 验证统一 Handler 关闭 Streaming 状态并清空 Run ID。定向回归为 `7 passed`，当前全仓回归为 `447 passed, 42 subtests passed`。
+- 对应知识点：异步 UI 状态机、Worker 生命周期终态、业务结果与资源结算分离、`try/except/finally` 语义、Qt Signal 的职责拆分、取消路径测试、跨线程关闭阻塞 I/O。
+- 面试表达：线程退出不等于界面自动知道任务结束。成功、错误、取消可以有不同业务表现，但必须共享唯一的生命周期结算信号；把按钮解锁只放在成功或错误 Handler 中，会漏掉“预期取消导致异常退出”这一条合法终态路径。
+- 当前状态：已修复并通过全仓回归。
+
 ## 29. 测试命令和结果
 
 指定 Runtime 回归：
@@ -788,7 +816,7 @@ git diff --check
 - Runtime Event：三类强类型、安全计数事件。
 - Knowledge Expert：真实主入口已迁移，失败不再统一“未找到”。
 - 测试结果：指定 `92 passed + 12 subtests`；全仓 `441 passed + 42 subtests`；compileall、lock、diff check 全部通过。
-- Bad Case：本文件第 28 节共 17 项，已区分真实发现与假设构造。
+- Bad Case：本文件第 28 节共 19 项，已区分真实发现与假设构造。
 
 需要人工确认的问题：
 
