@@ -295,7 +295,7 @@ async def test_real_coordinator_commits_state_before_journal():
         (RuntimeEventType.RUN_COMPLETED, "SUCCEEDED"),
     ]
     records = journal.read_after(context.run_id, 0, 10)
-    assert records[-1].safe_payload == {
-        "status": "SUCCEEDED",
-        "stop_reason": "COMPLETED",
-    }
+    assert records[-1].safe_payload["status"] == "SUCCEEDED"
+    assert records[-1].safe_payload["stop_reason"] == "COMPLETED"
+    assert isinstance(records[-1].safe_payload["duration_ms"], int)
+    assert records[-1].safe_payload["duration_ms"] >= 0

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -20,6 +21,10 @@ from core.runtime.event_journal import (
     validate_read_arguments,
 )
 from core.runtime.events import RuntimeEvent, RuntimeEventType
+from core.runtime.observability import (
+    NoopRuntimeInfrastructureMetricsHook,
+    RuntimeInfrastructureMetricsHook,
+)
 
 
 _TERMINAL_EVENT_TYPE = RuntimeEventType.RUN_COMPLETED
@@ -67,13 +72,39 @@ def _append_decision(
 class InMemoryRunEventJournal:
     """线程安全的进程内 Journal，主要用于测试与本地装配。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        metrics_hook: RuntimeInfrastructureMetricsHook | None = None,
+    ) -> None:
         self._records_by_id: dict[str, JournalRecord] = {}
         self._records_by_run: dict[str, dict[int, JournalRecord]] = {}
         self._lock = threading.RLock()
         self._closed = False
+        self._metrics_hook = metrics_hook or NoopRuntimeInfrastructureMetricsHook()
 
     def append(self, event: RuntimeEvent) -> JournalAppendStatus:
+        started = time.perf_counter()
+        try:
+            status = self._append_impl(event)
+        except Exception:
+            try:
+                self._metrics_hook.journal_append_failed(
+                    duration_seconds=time.perf_counter() - started
+                )
+            except Exception:
+                pass
+            raise
+        try:
+            self._metrics_hook.journal_append_succeeded(
+                duration_seconds=time.perf_counter() - started,
+                duplicate=status is JournalAppendStatus.DUPLICATE,
+            )
+        except Exception:
+            pass
+        return status
+
+    def _append_impl(self, event: RuntimeEvent) -> JournalAppendStatus:
         try:
             record = JournalRecord.from_event(event)
         except JournalError:
@@ -177,13 +208,19 @@ class InMemoryRunEventJournal:
 class SQLiteRunEventJournal:
     """基于单个本地 SQLite 文件的事务型 append-only Journal。"""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        metrics_hook: RuntimeInfrastructureMetricsHook | None = None,
+    ) -> None:
         if not isinstance(db_path, str) or not db_path.strip():
             raise ValueError("db_path 必须是非空字符串")
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._closed = False
+        self._metrics_hook = metrics_hook or NoopRuntimeInfrastructureMetricsHook()
         try:
             self._connection = sqlite3.connect(
                 db_path,
@@ -230,6 +267,27 @@ class SQLiteRunEventJournal:
             ) from exc
 
     def append(self, event: RuntimeEvent) -> JournalAppendStatus:
+        started = time.perf_counter()
+        try:
+            status = self._append_impl(event)
+        except Exception:
+            try:
+                self._metrics_hook.journal_append_failed(
+                    duration_seconds=time.perf_counter() - started
+                )
+            except Exception:
+                pass
+            raise
+        try:
+            self._metrics_hook.journal_append_succeeded(
+                duration_seconds=time.perf_counter() - started,
+                duplicate=status is JournalAppendStatus.DUPLICATE,
+            )
+        except Exception:
+            pass
+        return status
+
+    def _append_impl(self, event: RuntimeEvent) -> JournalAppendStatus:
         try:
             record = JournalRecord.from_event(event)
         except JournalError:

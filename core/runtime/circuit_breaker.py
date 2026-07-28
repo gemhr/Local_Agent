@@ -220,3 +220,9 @@ class ModelCircuitBreakerRegistry:
         self, breaker_keys: tuple[str, ...]
     ) -> dict[str, ModelCircuitBreakerSnapshot]:
         return {key: self.get(key).snapshot() for key in dict.fromkeys(breaker_keys)}
+
+    def snapshot_all(self) -> tuple[ModelCircuitBreakerSnapshot, ...]:
+        """返回现有 Breaker 的低基数状态快照，不创建新 Breaker。"""
+        with self._lock:
+            breakers = tuple(self._breakers.values())
+        return tuple(breaker.snapshot() for breaker in breakers)

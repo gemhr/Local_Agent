@@ -68,6 +68,10 @@ class Settings:
     embedding_batch_size: int
     memory_db_path: str
     event_journal_db_path: str
+    observability_checkpoint_db_path: str
+    observability_queue_capacity: int
+    observability_shutdown_timeout_seconds: int
+    metrics_tool_name_allowlist: tuple[str, ...]
     knowledge_collection_name: str
     rag_top_k: int
     rag_min_score: float
@@ -225,6 +229,28 @@ class Settings:
                 os.path.join(
                     project_root, "data", "database", "runtime_event_journal.db"
                 ),
+            ),
+            observability_checkpoint_db_path=os.getenv(
+                "LOCAL_AGENT_OBSERVABILITY_CHECKPOINT_DB_PATH",
+                os.path.join(
+                    project_root,
+                    "data",
+                    "database",
+                    "runtime_observability_checkpoint.db",
+                ),
+            ),
+            observability_queue_capacity=_env_int_at_least(
+                "LOCAL_AGENT_OBSERVABILITY_QUEUE_CAPACITY", 256, 1
+            ),
+            observability_shutdown_timeout_seconds=_env_int_at_least(
+                "LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS", 5, 1
+            ),
+            metrics_tool_name_allowlist=tuple(
+                value.strip()
+                for value in os.getenv(
+                    "LOCAL_AGENT_METRICS_TOOL_NAME_ALLOWLIST", ""
+                ).split(",")
+                if value.strip()
             ),
             rag_top_k=_env_int("LOCAL_AGENT_RAG_TOP_K", preset["rag_top_k"]),
             rag_min_score=_env_float_in_range("LOCAL_AGENT_RAG_MIN_SCORE", 0.55, 0.0, 1.0),

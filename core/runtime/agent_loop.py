@@ -12,9 +12,9 @@ import re
 from typing import Protocol
 
 from core.runtime.cancellation import CancellationReason, RunCancelledError
-from core.runtime.budget import BudgetExceededError
+from core.runtime.budget import BudgetExceededError, BudgetLedger
 from core.runtime.context import RunContext, RunDeadlineExceededError
-from core.runtime.state import AgentState, RunStatus, StopReason
+from core.runtime.state import AgentState, RunStatus, StepStatus, StopReason
 from core.runtime.state_machine import (
     AgentStateMachine,
     RunEventType,
@@ -30,6 +30,65 @@ LEGACY_AGENT_ROUTER_STEP_ID = "legacy-agent-router"
 LEGACY_AGENT_ROUTER_STEP_NAME = "Legacy AgentRouter execution"
 ORCHESTRATION_EVENT_PREFIX = "[[ORCH]]"
 _SAFE_DEDUP_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def safe_agent_state_summary(
+    agent_state: AgentState, run_context: RunContext
+) -> dict[str, object]:
+    """只返回生命周期与计数，不包含输出、Step 结果或错误正文。"""
+    step_counts = {
+        status.value: sum(
+            step.status is status for step in agent_state.steps.values()
+        )
+        for status in StepStatus
+    }
+    budget_usage: dict[str, int] = {}
+    ledger = run_context.budget_ledger
+    if isinstance(ledger, BudgetLedger):
+        try:
+            committed = ledger.snapshot().committed_usage
+            budget_usage = {
+                "step_starts": committed.step_starts,
+                "model_calls": committed.model_calls,
+                "tool_calls": committed.tool_calls,
+                "retrieval_calls": committed.retrieval_calls,
+                "total_tokens": committed.total_tokens,
+                "cost_units": committed.cost_units,
+                "retries": committed.retries,
+            }
+        except Exception:
+            budget_usage = {}
+    return {
+        "run_id": agent_state.run_id,
+        "trace_id": run_context.trace_id,
+        "run_status": agent_state.status.value,
+        "stop_reason": (
+            agent_state.stop_reason.value
+            if agent_state.stop_reason is not None
+            else None
+        ),
+        "step_count": len(agent_state.steps),
+        "step_status_counts": step_counts,
+        "budget_usage": budget_usage,
+        "terminal": agent_state.status
+        in {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED},
+    }
+
+
+def _log_safe_agent_state(
+    agent_state: AgentState, run_context: RunContext
+) -> None:
+    logger.info(
+        "Agent runtime state",
+        extra={
+            "component": "agent_loop",
+            "phase": "terminal",
+            "status": agent_state.status.value,
+            "runtime_summary": safe_agent_state_summary(
+                agent_state, run_context
+            ),
+        },
+    )
 
 
 class ActionOutcome(str, Enum):
@@ -298,7 +357,7 @@ class AgentLoop:
                         ),
                     )
                     self._observe(agent_state, state_observer)
-                    logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
+                    _log_safe_agent_state(agent_state, run_context)
                     return
                 previous_observation = observation
         except GeneratorExit:
@@ -339,7 +398,7 @@ class AgentLoop:
                 "Run deadline exceeded",
             )
             self._observe(agent_state, state_observer)
-            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
+            _log_safe_agent_state(agent_state, run_context)
             raise
         except RunCancelledError:
             reason = _cancellation_reason(run_context.cancellation_token.reason, CancellationReason.USER_CANCELLED)
@@ -364,7 +423,7 @@ class AgentLoop:
                 ),
             )
             self._observe(agent_state, state_observer)
-            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
+            _log_safe_agent_state(agent_state, run_context)
             raise
         except Exception:
             if active_step_id is not None:
@@ -386,8 +445,16 @@ class AgentLoop:
                 "Agent execution failed",
             )
             self._observe(agent_state, state_observer)
-            logger.exception("Agent loop execution failed")
-            logger.info("AgentState final", extra={"agent_state": agent_state.to_dict()})
+            logger.error(
+                "Agent loop execution failed safely",
+                extra={
+                    "safe_error_code": "AGENT_LOOP_UNHANDLED_ERROR",
+                    "component": "agent_loop",
+                    "phase": "execution",
+                    "status": "FAILED",
+                },
+            )
+            _log_safe_agent_state(agent_state, run_context)
             raise
 
     def _apply_failed_run_event(

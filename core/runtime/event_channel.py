@@ -6,11 +6,19 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
-from typing import AsyncIterator
+from typing import AsyncIterator, Protocol
 
 from core.runtime.cancellation import CancellationToken
-from core.runtime.event_journal import RunEventJournal
+from core.runtime.event_journal import (
+    JournalAppendStatus,
+    JournalRecord,
+    RunEventJournal,
+)
 from core.runtime.events import RuntimeEvent, RuntimeEventDraft
+
+
+class ObservabilityRecordSubmitter(Protocol):
+    def try_submit(self, record: JournalRecord) -> bool: ...
 
 
 class EventChannelState(str, Enum):
@@ -37,6 +45,7 @@ class RuntimeEventChannel:
         run_id: str,
         cancellation_token: CancellationToken | None = None,
         journal: RunEventJournal | None = None,
+        observability_dispatcher: ObservabilityRecordSubmitter | None = None,
     ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("capacity 必须是正整数且不能是 bool")
@@ -52,6 +61,7 @@ class RuntimeEventChannel:
         self._close_lock = asyncio.Lock()
         self._abort_event = asyncio.Event()
         self._journal = journal
+        self._observability_dispatcher = observability_dispatcher
         self._sequence = (
             journal.last_sequence(run_id) or 0 if journal is not None else 0
         )
@@ -99,8 +109,19 @@ class RuntimeEventChannel:
             sequence = self._sequence + 1
             event = RuntimeEvent.from_draft(draft, sequence)
             if self._journal is not None:
-                self._journal.append(event)
+                append_status = self._journal.append(event)
                 self._sequence = sequence
+                if (
+                    append_status is JournalAppendStatus.APPENDED
+                    and self._observability_dispatcher is not None
+                ):
+                    try:
+                        self._observability_dispatcher.try_submit(
+                            JournalRecord.from_event(event)
+                        )
+                    except Exception:
+                        # Observability 永远不能改变 Journal 或 Runtime Transport。
+                        pass
             await self._put_interruptibly(
                 event, ignore_run_cancellation=ignore_run_cancellation
             )

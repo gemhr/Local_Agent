@@ -8,6 +8,8 @@ import threading
 from typing import Any, Generator, Optional
 
 from core.agent_router import AgentRouter
+from core.runtime.metrics import ApplicationRuntimeGaugeProvider
+from core.runtime.observability_dispatcher import RuntimeObservabilityDispatcher
 from core.runtime import (
     AgentLoop,
     AgentState,
@@ -88,6 +90,8 @@ class ChatService:
         state_observer: Callable[[AgentState], None] | None = None,
         event_channel_capacity: int = 32,
         event_journal: RunEventJournal | None = None,
+        observability_dispatcher: RuntimeObservabilityDispatcher | None = None,
+        gauge_provider: ApplicationRuntimeGaugeProvider | None = None,
     ) -> None:
         """初始化应用服务。
 
@@ -105,6 +109,8 @@ class ChatService:
             raise ValueError("event_channel_capacity 必须是正整数")
         self._event_channel_capacity = event_channel_capacity
         self._event_journal = event_journal
+        self._observability_dispatcher = observability_dispatcher
+        self._gauge_provider = gauge_provider
 
     def stream_chat(self, agent_id: str, query: str, file_path: str = "", run_id: str | None = None) -> Generator[str, None, None]:
         """流式执行一次对话。
@@ -226,7 +232,10 @@ class ChatService:
             run_id=run_context.run_id,
             cancellation_token=run_context.cancellation_token,
             journal=self._event_journal,
+            observability_dispatcher=self._observability_dispatcher,
         )
+        if self._gauge_provider is not None:
+            self._gauge_provider.register_channel(channel)
         emitter = RunEventEmitter(
             run_id=run_context.run_id,
             trace_id=run_context.trace_id,
@@ -300,6 +309,8 @@ class ChatService:
                 if not producer_task.done():
                     producer_task.cancel()
                 await asyncio.gather(producer_task, return_exceptions=True)
+            if self._gauge_provider is not None:
+                self._gauge_provider.unregister_channel(channel)
 
     async def stream_coordinated_agent_text(
         self,

@@ -56,6 +56,17 @@ class RunRegistry:
                 return handle.snapshot() if handle else None
             return {key: value.snapshot() for key, value in self._handles.items()}
 
+    def observability_snapshot(self) -> dict[str, int]:
+        """返回低基数生命周期 Gauge，不暴露任何 run_id。"""
+        with self._lock:
+            return {
+                "active_runs": len(self._handles),
+                "active_steps": sum(
+                    len(handle.agent_state.active_step_ids)
+                    for handle in self._handles.values()
+                ),
+            }
+
     def cancel(self, run_id: str, reason: CancellationReason) -> bool | None:
         handle = self.get(run_id)
         return None if handle is None else handle.cancellation_source.cancel(reason)
