@@ -48,12 +48,14 @@ class ApiWorker(QThread):
         chunk_signal: 向界面发送缓冲后的增量文本。
         finished_signal: 当前请求完成时发出。
         error_signal: 当前请求失败时发出错误提示。
+        settled_signal: 当前 Worker 无论以何种原因退出时发出。
     """
 
     chunk_signal = pyqtSignal(str)
     status_signal = pyqtSignal(dict)
     finished_signal = pyqtSignal()
     error_signal = pyqtSignal(str)
+    settled_signal = pyqtSignal()
 
     def __init__(self, api_url: str) -> None:
         """初始化工作线程。
@@ -127,6 +129,8 @@ class ApiWorker(QThread):
         finally:
             self._response = None
             self._session = None
+            # 正常完成、真实错误和用户取消都必须通知 UI 收口运行状态。
+            self.settled_signal.emit()
 
     def cancel(self) -> None:
         """请求中断当前流式调用。"""
@@ -204,6 +208,7 @@ class MainController(QObject):
         self.worker.status_signal.connect(self._on_worker_status)
         self.worker.finished_signal.connect(self._on_worker_finished)
         self.worker.error_signal.connect(self._on_worker_error)
+        self.worker.settled_signal.connect(self._on_worker_settled)
 
         # 每个智能体单独维护分页偏移量，避免切换会话时互相污染。
         self.agent_history_offsets: dict[str, int] = {}
@@ -435,12 +440,13 @@ class MainController(QObject):
         final_text = self.chat_panel.active_ai_texts.get(agent_id, "")
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.chat_panel.update_agent_sidebar_preview(agent_id, final_text, now_str)
-        self.chat_panel.set_streaming(False)
-        self.worker.run_id = ""
 
     def _on_worker_error(self, error_msg: str) -> None:
         """将请求错误显示在聊天面板中。"""
         self.chat_panel.append_system_msg(error_msg, target_agent_id=self.worker.agent_id)
+
+    def _on_worker_settled(self) -> None:
+        """统一收口成功、失败和用户取消后的前端运行状态。"""
         self.chat_panel.set_streaming(False)
         self.worker.run_id = ""
 

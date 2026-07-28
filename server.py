@@ -25,6 +25,7 @@ from core.runtime import (
     ModelProfile,
     ModelProfileId,
     ModelResolver,
+    RunCancelledError,
     process_run_registry,
 )
 from core.settings import Settings
@@ -305,6 +306,10 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                 if chunk is None:
                     return
                 yield chunk
+        except RunCancelledError:
+            # 受控取消是流的正常终态；AgentLoop 已记录 CANCELLED 状态，
+            # 此处只负责阻止业务异常穿透 StreamingResponse/ASGI 边界。
+            return
         except asyncio.CancelledError:
             process_run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
             raise
