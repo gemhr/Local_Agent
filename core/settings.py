@@ -67,6 +67,7 @@ class Settings:
     embedding_query_prompt_name: str
     embedding_batch_size: int
     memory_db_path: str
+    event_journal_db_path: str
     knowledge_collection_name: str
     rag_top_k: int
     rag_min_score: float
@@ -218,6 +219,12 @@ class Settings:
             memory_db_path=os.getenv(
                 "LOCAL_AGENT_MEMORY_DB_PATH",
                 os.path.join(project_root, "data", "database", "agent_memory.db"),
+            ),
+            event_journal_db_path=os.getenv(
+                "LOCAL_AGENT_EVENT_JOURNAL_DB_PATH",
+                os.path.join(
+                    project_root, "data", "database", "runtime_event_journal.db"
+                ),
             ),
             rag_top_k=_env_int("LOCAL_AGENT_RAG_TOP_K", preset["rag_top_k"]),
             rag_min_score=_env_float_in_range("LOCAL_AGENT_RAG_MIN_SCORE", 0.55, 0.0, 1.0),
