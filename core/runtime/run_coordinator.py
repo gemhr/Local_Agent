@@ -48,6 +48,9 @@ from core.runtime.events import (
     StepCompletedPayload,
     TimeoutPayload,
 )
+from core.runtime.tracing import (NoopSpanRecorder, activate_span,
+                                  install_trace_context, reset_trace_context,
+                                  start_span_safely)
 
 
 _TERMINAL_RUN_STATUSES = frozenset(
@@ -143,6 +146,7 @@ class RunCoordinator:
         policy: ParallelExecutionPolicy,
         state_machine: AgentStateMachine | None = None,
         event_emitter: RunEventEmitter | None = None,
+        span_recorder=None,
     ) -> None:
         self.run_context = run_context
         self.plan = plan
@@ -155,6 +159,7 @@ class RunCoordinator:
         self.policy = policy
         self.state_machine = state_machine or AgentStateMachine()
         self.event_emitter = event_emitter
+        self.span_recorder = span_recorder or NoopSpanRecorder()
 
         self._start_lock = threading.Lock()
         self._started = False
@@ -190,6 +195,12 @@ class RunCoordinator:
         self._mark_started_once()
         self._validate_ownership()
 
+        run_span = start_span_safely(self.span_recorder,
+            trace_id=self.run_context.trace_id, run_id=self.run_context.run_id,
+            component="runtime", operation="run"
+        )
+        trace_token = install_trace_context(run_span.context)
+
         registered = False
         cleanup_error_codes: list[str] = []
         decision: RunFinalizationDecision | None = None
@@ -208,13 +219,16 @@ class RunCoordinator:
             )
             await self._emit_run_started()
             self._start_deadline_watcher()
-            PlanGraphValidator.validate(self.plan)
-            self.scheduler.prepare(
-                self.plan,
-                self.agent_state,
-                self._event_time(),
-                self.policy.max_concurrency,
+            planner_span = start_span_safely(self.span_recorder,
+                trace_id=self.run_context.trace_id, run_id=self.run_context.run_id,
+                component="planner", operation="plan"
             )
+            with activate_span(planner_span):
+                PlanGraphValidator.validate(self.plan)
+                self.scheduler.prepare(
+                    self.plan, self.agent_state, self._event_time(),
+                    self.policy.max_concurrency,
+                )
             decision = await self._execute_batches(
                 driver=driver,
                 execution_mode=execution_mode,
@@ -264,11 +278,16 @@ class RunCoordinator:
             if registered:
                 self._unregister(cleanup_error_codes)
 
-        return self._build_result(
+        result = self._build_result(
             decision=decision,
             budget_snapshot=budget_snapshot,
             cleanup_error_codes=cleanup_error_codes,
         )
+        if result.status is RunStatus.SUCCEEDED: run_span.end_ok()
+        elif result.status is RunStatus.CANCELLED: run_span.end_cancelled(result.error_code or "CANCELLED")
+        else: run_span.end_error(result.error_code or "RUN_FAILED")
+        reset_trace_context(trace_token)
+        return result
 
     async def _execute_batches(
         self,

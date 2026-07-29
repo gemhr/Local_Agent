@@ -55,6 +55,8 @@ class RuntimeLogRecord:
     level: RuntimeLogLevel
     run_id: str
     trace_id: str
+    span_id: str | None
+    parent_span_id: str | None
     step_id: str | None
     component: str
     event_id: str
@@ -97,6 +99,8 @@ class RuntimeLogRecord:
             "level": self.level.value,
             "run_id": self.run_id,
             "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
             "step_id": self.step_id,
             "component": self.component,
             "event_id": self.event_id,
@@ -231,6 +235,8 @@ class StructuredLogProjector:
             level=runtime_log_level(record),
             run_id=record.run_id,
             trace_id=record.trace_id,
+            span_id=record.span_id,
+            parent_span_id=record.parent_span_id,
             step_id=record.step_id,
             component=record.component,
             event_id=record.event_id,
