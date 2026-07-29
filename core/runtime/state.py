@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import Enum
+import threading
 from typing import ClassVar
 
 
@@ -201,6 +202,12 @@ class AgentState:
     final_output: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    _runtime_lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     SUPPORTED_SCHEMA_VERSION: ClassVar[int] = AGENT_STATE_SCHEMA_VERSION
 
@@ -353,20 +360,33 @@ class AgentState:
 
     def to_dict(self) -> dict[str, object]:
         """将状态序列化为确定性的适用于 JSON 的基础类型。"""
-        self.validate()
-        return {
-            "schema_version": self.schema_version,
-            "run_id": self.run_id,
-            "status": self.status.value,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "steps": [self.steps[step_id].to_dict() for step_id in sorted(self.steps)],
-            "active_step_ids": sorted(self.active_step_ids),
-            "stop_reason": self.stop_reason.value if self.stop_reason else None,
-            "final_output": self.final_output,
-            "error_code": self.error_code,
-            "error_message": self.error_message,
-        }
+        with self._runtime_lock:
+            self.validate()
+            return {
+                "schema_version": self.schema_version,
+                "run_id": self.run_id,
+                "status": self.status.value,
+                "created_at": self.created_at.isoformat(),
+                "updated_at": self.updated_at.isoformat(),
+                "steps": [
+                    self.steps[step_id].to_dict() for step_id in sorted(self.steps)
+                ],
+                "active_step_ids": sorted(self.active_step_ids),
+                "stop_reason": self.stop_reason.value if self.stop_reason else None,
+                "final_output": self.final_output,
+                "error_code": self.error_code,
+                "error_message": self.error_message,
+            }
+
+    def snapshot_copy(self) -> "AgentState":
+        """Capture one detached, internally consistent state view."""
+        with self._runtime_lock:
+            return AgentState.from_dict(self.to_dict())
+
+    @property
+    def runtime_lock(self) -> threading.RLock:
+        """Unique minimal synchronization boundary for runtime transitions."""
+        return self._runtime_lock
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> "AgentState":

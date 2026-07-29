@@ -32,6 +32,12 @@ class EventChannelClosedError(RuntimeError):
     """Channel 不再接受事件时抛出。"""
 
 
+class JournalWatermarkError(RuntimeError):
+    """Safe fail-closed marker for Channel/Journal sequence disagreement."""
+
+    error_code = "JOURNAL_WATERMARK_MISMATCH"
+
+
 _END = object()
 
 
@@ -65,6 +71,7 @@ class RuntimeEventChannel:
         self._sequence = (
             journal.last_sequence(run_id) or 0 if journal is not None else 0
         )
+        self._publications_in_flight = 0
         self._cancellation_token = cancellation_token
         self._consumer_attached = False
         self._end_enqueued = False
@@ -86,6 +93,22 @@ class RuntimeEventChannel:
     def consumer_attached(self) -> bool:
         return self._consumer_attached
 
+    @property
+    def publications_in_flight(self) -> int:
+        return self._publications_in_flight
+
+    async def capture_journal_watermark(self) -> int:
+        """Capture the existing sequence owner under the publish lock."""
+        async with self._publish_lock:
+            channel_sequence = self._sequence
+            if self._journal is not None:
+                journal_sequence = self._journal.last_sequence(self.run_id) or 0
+                if journal_sequence != channel_sequence:
+                    raise JournalWatermarkError(
+                        "journal and channel watermarks do not match"
+                    )
+            return channel_sequence
+
     async def publish(
         self,
         draft: RuntimeEventDraft,
@@ -103,31 +126,35 @@ class RuntimeEventChannel:
             raise ValueError("事件 run_id 与 Channel 所属 Run 不一致")
         # close 一旦进入 CLOSING，新调用无需排在 in-flight Publisher 后等待。
         self._ensure_open()
-        async with self._publish_lock:
-            # 与 close 竞争时再次校验；只有通过此处的调用才是 accepted Publisher。
-            self._ensure_open()
-            sequence = self._sequence + 1
-            event = RuntimeEvent.from_draft(draft, sequence)
-            if self._journal is not None:
-                append_status = self._journal.append(event)
-                self._sequence = sequence
-                if (
-                    append_status is JournalAppendStatus.APPENDED
-                    and self._observability_dispatcher is not None
-                ):
-                    try:
-                        self._observability_dispatcher.try_submit(
-                            JournalRecord.from_event(event)
-                        )
-                    except Exception:
-                        # Observability 永远不能改变 Journal 或 Runtime Transport。
-                        pass
-            await self._put_interruptibly(
-                event, ignore_run_cancellation=ignore_run_cancellation
-            )
-            if self._journal is None:
-                self._sequence = sequence
-            return event
+        self._publications_in_flight += 1
+        try:
+            async with self._publish_lock:
+                # 与 close 竞争时再次校验；只有通过此处的调用才是 accepted Publisher。
+                self._ensure_open()
+                sequence = self._sequence + 1
+                event = RuntimeEvent.from_draft(draft, sequence)
+                if self._journal is not None:
+                    append_status = self._journal.append(event)
+                    self._sequence = sequence
+                    if (
+                        append_status is JournalAppendStatus.APPENDED
+                        and self._observability_dispatcher is not None
+                    ):
+                        try:
+                            self._observability_dispatcher.try_submit(
+                                JournalRecord.from_event(event)
+                            )
+                        except Exception:
+                            # Observability 永远不能改变 Journal 或 Runtime Transport。
+                            pass
+                await self._put_interruptibly(
+                    event, ignore_run_cancellation=ignore_run_cancellation
+                )
+                if self._journal is None:
+                    self._sequence = sequence
+                return event
+        finally:
+            self._publications_in_flight -= 1
 
     async def close(self) -> None:
         """幂等正常关闭；保留已排队事件，并把 End Sentinel 放在最后。"""

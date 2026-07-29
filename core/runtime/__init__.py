@@ -95,6 +95,7 @@ from core.runtime.events import (
 from core.runtime.event_channel import (
     EventChannelClosedError,
     EventChannelState,
+    JournalWatermarkError,
     RuntimeEventChannel,
 )
 from core.runtime.event_emitter import (
@@ -185,6 +186,7 @@ __all__ = [
     "ErrorPayload",
     "EventChannelClosedError",
     "EventChannelState",
+    "JournalWatermarkError",
     "EventConsumptionCheckpoint",
     "EventConsumptionCheckpointStore",
     "EventConsumptionStatus",
@@ -609,4 +611,45 @@ __all__ += [
     "snapshot_canonical_json",
     "snapshot_from_json",
     "snapshot_to_json",
+]
+
+from core.runtime.activity import RuntimeActivityProvider, RuntimeActivityTracker
+from core.runtime.checkpoint import (
+    CheckpointBarrier,
+    CheckpointCoordinator,
+    default_runtime_metadata,
+)
+from core.runtime.checkpoint_contract import (
+    CheckpointBarrierState,
+    CheckpointKind,
+    CheckpointMode,
+    CheckpointResult,
+    CheckpointStatus,
+    RuntimeActivitySnapshot,
+    SchedulerClaimGateSnapshot,
+    SchedulerClaimGateState,
+)
+from core.runtime.claim_gate import (
+    SchedulerClaimGate,
+    SchedulerClaimGateBusyError,
+    SchedulerClaimGateClosedError,
+)
+
+__all__ += [
+    "CheckpointBarrier",
+    "CheckpointBarrierState",
+    "CheckpointCoordinator",
+    "CheckpointKind",
+    "CheckpointMode",
+    "CheckpointResult",
+    "CheckpointStatus",
+    "RuntimeActivityProvider",
+    "RuntimeActivitySnapshot",
+    "RuntimeActivityTracker",
+    "SchedulerClaimGate",
+    "SchedulerClaimGateBusyError",
+    "SchedulerClaimGateClosedError",
+    "SchedulerClaimGateSnapshot",
+    "SchedulerClaimGateState",
+    "default_runtime_metadata",
 ]

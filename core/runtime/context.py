@@ -131,6 +131,7 @@ class RunContext:
         self._cancellation_token = cancellation_token
         self._clock = clock
         self._budget_ledger = None
+        self._activity_tracker = None
 
     @property
     def budget_ledger(self):
@@ -142,6 +143,18 @@ class RunContext:
         if self._budget_ledger is not None:
             raise RuntimeError("RunContext 已绑定 BudgetLedger")
         self._budget_ledger = ledger
+
+    @property
+    def activity_tracker(self):
+        """Return the per-run content-free tracker when coordinated runtime attached it."""
+        return self._activity_tracker
+
+    def attach_activity_tracker(self, tracker: object) -> None:
+        if self._activity_tracker is not None:
+            raise RuntimeError("RunContext already has a RuntimeActivityTracker")
+        if getattr(tracker, "run_id", None) != self.run_id:
+            raise ValueError("RuntimeActivityTracker run_id mismatch")
+        self._activity_tracker = tracker
 
     @classmethod
     def create(

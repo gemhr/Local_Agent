@@ -13,8 +13,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from core.runtime.activity import RuntimeActivityProvider, RuntimeActivityTracker
 from core.runtime.budget import BudgetExceededError, BudgetLedger, BudgetSnapshot
 from core.runtime.cancellation import CancellationReason, RunCancelledError
+from core.runtime.checkpoint import CheckpointCoordinator, default_runtime_metadata
+from core.runtime.checkpoint_contract import (
+    CheckpointKind,
+    CheckpointMode,
+    CheckpointResult,
+)
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.parallel_execution import (
     ParallelExecutionInfrastructureError,
@@ -148,6 +155,8 @@ class RunCoordinator:
         state_machine: AgentStateMachine | None = None,
         event_emitter: RunEventEmitter | None = None,
         span_recorder=None,
+        snapshot_store=None,
+        runtime_metadata=None,
     ) -> None:
         self.run_context = run_context
         self.plan = plan
@@ -161,6 +170,48 @@ class RunCoordinator:
         self.state_machine = state_machine or AgentStateMachine()
         self.event_emitter = event_emitter
         self.span_recorder = span_recorder or NoopSpanRecorder()
+        tracker = run_context.activity_tracker
+        if tracker is None:
+            tracker = RuntimeActivityTracker(run_context.run_id)
+            run_context.attach_activity_tracker(tracker)
+        self.activity_tracker = tracker
+        event_channel = event_emitter.channel if event_emitter is not None else None
+        self.checkpoint_coordinator = None
+        if snapshot_store is not None:
+            if event_channel is None:
+                raise ValueError("snapshot_store requires an event-backed coordinator")
+            PlanGraphValidator.validate(plan)
+            with agent_state.runtime_lock:
+                for step in plan.steps:
+                    existing = agent_state.steps.get(step.step_id)
+                    if existing is not None and existing.name != step.title:
+                        raise ValueError("Plan and AgentState step definitions differ")
+                for step in plan.steps:
+                    if step.step_id not in agent_state.steps:
+                        self.state_machine.register_plan_step(
+                            agent_state,
+                            step_id=step.step_id,
+                            name=step.title,
+                        )
+            provider = RuntimeActivityProvider(
+                run_id=run_context.run_id,
+                tracker=tracker,
+                claim_gate=scheduler.claim_gate,
+                agent_state=agent_state,
+                budget_ledger=budget_ledger,
+                event_channel=event_channel,
+            )
+            self.checkpoint_coordinator = CheckpointCoordinator(
+                run_context=run_context,
+                plan=plan,
+                agent_state=agent_state,
+                budget_ledger=budget_ledger,
+                event_channel=event_channel,
+                snapshot_store=snapshot_store,
+                claim_gate=scheduler.claim_gate,
+                activity_provider=provider,
+                runtime_metadata=runtime_metadata or default_runtime_metadata(),
+            )
 
         self._start_lock = threading.Lock()
         self._started = False
@@ -172,6 +223,29 @@ class RunCoordinator:
         self._cleanup_callbacks: list[CleanupCallback] = []
         self._deadline_watcher: threading.Timer | None = None
         self._executor_task: asyncio.Task[Any] | None = None
+
+    async def create_checkpoint(
+        self,
+        *,
+        mode: CheckpointMode,
+        checkpoint_kind: CheckpointKind,
+        timeout: float | None,
+        cancellation_token=None,
+        shutdown_token=None,
+    ) -> CheckpointResult:
+        """Explicit opt-in entry; this does not schedule automatic checkpoints."""
+        if self.checkpoint_coordinator is None:
+            raise RunCoordinatorError(
+                "CHECKPOINT_NOT_CONFIGURED",
+                "Coordinator 未注入 SnapshotStore",
+            )
+        return await self.checkpoint_coordinator.capture(
+            mode=mode,
+            checkpoint_kind=checkpoint_kind,
+            timeout=timeout,
+            cancellation_token=cancellation_token,
+            shutdown_token=shutdown_token,
+        )
 
     def add_cleanup_callback(self, callback: CleanupCallback) -> None:
         """在执行前登记 Run 级清理回调；清理时按逆序运行。"""
