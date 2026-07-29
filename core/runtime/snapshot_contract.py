@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any
 
 from core.runtime.budget import BudgetSnapshot as RuntimeBudgetSnapshot
+from core.runtime.checkpoint_contract import CheckpointKind, RuntimeActivitySnapshot
 from core.runtime.planning import Plan, PlanStep, PlanValidator
 from core.runtime.snapshot_serialization import (
     parse_utc,
@@ -109,6 +110,34 @@ def _require_digest(value: object, field_name: str) -> str:
     if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
     return value
+
+
+def _activity_snapshot_from_payload(
+    payload: object,
+) -> RuntimeActivitySnapshot | None:
+    if payload is None:
+        return None
+    if not isinstance(payload, Mapping):
+        raise ValueError("activity_snapshot must be an object or null")
+    expected = {item.name for item in fields(RuntimeActivitySnapshot)}
+    if set(payload) != expected:
+        raise ValueError("activity_snapshot fields do not match the v1 schema")
+    return RuntimeActivitySnapshot(
+        claim_in_progress=payload["claim_in_progress"],
+        running_step_count=payload["running_step_count"],
+        budget_reservation_count=payload["budget_reservation_count"],
+        model_attempts_active=payload["model_attempts_active"],
+        tool_attempts_active=payload["tool_attempts_active"],
+        retrievals_active=payload["retrievals_active"],
+        detached_tool_workers=payload["detached_tool_workers"],
+        detached_retrieval_workers=payload["detached_retrieval_workers"],
+        event_publications_in_flight=payload["event_publications_in_flight"],
+        step_workers_active=payload["step_workers_active"],
+        activity_unknown=payload["activity_unknown"],
+        captured_at=parse_utc(
+            payload["captured_at"], "activity_snapshot.captured_at"
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,7 +335,8 @@ class StepStateSnapshot:
     step_id: str
     status: str
     in_flight: bool
-    attempt_count: int
+    execution_started: bool
+    attempt_count: int | None
     started_at: datetime | None
     completed_at: datetime | None
     duration_ms: int | None
@@ -320,7 +350,28 @@ class StepStateSnapshot:
             raise ValueError("in_flight must be bool")
         if self.in_flight != (status is StepStatus.RUNNING):
             raise ValueError("only RUNNING is an in-flight step status")
-        require_int(self.attempt_count, "attempt_count", minimum=0)
+        if type(self.execution_started) is not bool:
+            raise ValueError("execution_started must be bool")
+        if self.execution_started != (self.started_at is not None):
+            raise ValueError("execution_started must match started_at presence")
+        if status in {
+            StepStatus.PENDING,
+            StepStatus.BLOCKED,
+            StepStatus.SKIPPED,
+        } and self.execution_started:
+            raise ValueError("unstarted step status cannot have execution_started")
+        if status in {
+            StepStatus.RUNNING,
+            StepStatus.SUCCEEDED,
+            StepStatus.FAILED,
+        } and not self.execution_started:
+            raise ValueError("started step status requires execution_started")
+        if self.attempt_count is not None:
+            require_int(self.attempt_count, "attempt_count", minimum=0)
+            if self.execution_started != (self.attempt_count > 0):
+                raise ValueError(
+                    "exact attempt_count must agree with execution_started"
+                )
         if self.started_at is not None:
             require_utc(self.started_at, "started_at")
         if self.completed_at is not None:
@@ -344,11 +395,6 @@ class StepStateSnapshot:
         result: str | None = None,
     ) -> "StepStateSnapshot":
         step.validate()
-        count = (
-            attempt_count
-            if attempt_count is not None
-            else (1 if step.started_at is not None else 0)
-        )
         duration_ms = None
         if step.started_at is not None and step.ended_at is not None:
             duration_ms = max(
@@ -364,7 +410,8 @@ class StepStateSnapshot:
             step_id=_safe_identifier(step.step_id),
             status=step.status.value,
             in_flight=step.status is StepStatus.RUNNING,
-            attempt_count=count,
+            execution_started=step.started_at is not None,
+            attempt_count=attempt_count,
             started_at=step.started_at,
             completed_at=step.ended_at,
             duration_ms=duration_ms,
@@ -380,6 +427,7 @@ class StepStateSnapshot:
             step_id=payload.get("step_id"),
             status=payload.get("status"),
             in_flight=payload.get("in_flight"),
+            execution_started=payload.get("execution_started"),
             attempt_count=payload.get("attempt_count"),
             started_at=(
                 parse_utc(payload["started_at"], "started_at")
@@ -663,6 +711,7 @@ class RunSnapshot:
     runtime_metadata: RuntimeMetadata
     checkpoint_kind: str
     quiescent: bool
+    activity_snapshot: RuntimeActivitySnapshot | None
     created_at: datetime
     payload_digest: str
 
@@ -690,23 +739,32 @@ class RunSnapshot:
             StopReason(self.stop_reason)
         if self.cancellation_reason is not None:
             StopReason(self.cancellation_reason)
-        if not isinstance(self.step_states, tuple) or self.step_states != (
-            self.state_snapshot.step_states
-        ):
-            raise ValueError("step_states must equal state_snapshot.step_states")
-        if self.run_status != self.state_snapshot.run_status:
-            raise ValueError("run_status must match state_snapshot")
-        if self.stop_reason != self.state_snapshot.stop_reason:
-            raise ValueError("stop_reason must match state_snapshot")
-        if self.cancellation_reason != self.state_snapshot.cancellation_reason:
-            raise ValueError("cancellation_reason must match state_snapshot")
         if not isinstance(self.runtime_metadata, RuntimeMetadata):
             raise ValueError("runtime_metadata must be RuntimeMetadata")
-        _require_safe_token(self.checkpoint_kind, "checkpoint_kind")
+        checkpoint_kind = CheckpointKind(self.checkpoint_kind)
         if type(self.quiescent) is not bool:
             raise ValueError("quiescent must be bool")
+        if self.activity_snapshot is not None and not isinstance(
+            self.activity_snapshot, RuntimeActivitySnapshot
+        ):
+            raise ValueError("activity_snapshot must be RuntimeActivitySnapshot")
+        if (
+            checkpoint_kind is not CheckpointKind.OBSERVATION
+            and self.activity_snapshot is None
+        ):
+            raise ValueError("checkpoint snapshot requires activity_snapshot")
+        if self.quiescent and (
+            self.activity_snapshot is None or not self.activity_snapshot.quiescent
+        ):
+            raise ValueError("quiescent snapshot requires quiescent activity")
+        if (
+            checkpoint_kind is CheckpointKind.NON_QUIESCENT_AUDIT
+            and self.quiescent
+        ):
+            raise ValueError("audit checkpoint must be non-quiescent")
         require_utc(self.created_at, "created_at")
         _require_digest(self.payload_digest, "payload_digest")
+        self.validate_consistency()
 
     @classmethod
     def create(
@@ -721,8 +779,9 @@ class RunSnapshot:
         budget_snapshot: BudgetSnapshot,
         last_journal_sequence: int,
         runtime_metadata: RuntimeMetadata,
-        checkpoint_kind: str,
+        checkpoint_kind: str | CheckpointKind,
         quiescent: bool,
+        activity_snapshot: RuntimeActivitySnapshot | None = None,
         created_at: datetime | None = None,
     ) -> "RunSnapshot":
         created = created_at if created_at is not None else datetime.now(timezone.utc)
@@ -741,8 +800,13 @@ class RunSnapshot:
             cancellation_reason=state_snapshot.cancellation_reason,
             step_states=state_snapshot.step_states,
             runtime_metadata=runtime_metadata,
-            checkpoint_kind=checkpoint_kind,
+            checkpoint_kind=(
+                checkpoint_kind.value
+                if isinstance(checkpoint_kind, CheckpointKind)
+                else checkpoint_kind
+            ),
             quiescent=quiescent,
+            activity_snapshot=activity_snapshot,
             created_at=created,
         )
         return cls(
@@ -768,6 +832,7 @@ class RunSnapshot:
             runtime_metadata=self.runtime_metadata,
             checkpoint_kind=self.checkpoint_kind,
             quiescent=self.quiescent,
+            activity_snapshot=self.activity_snapshot,
             created_at=self.created_at,
         )
 
@@ -776,8 +841,41 @@ class RunSnapshot:
         return dict(values)
 
     def verify_digest(self) -> None:
+        self.validate_consistency()
         if sha256_digest(self.digest_source()) != self.payload_digest:
             raise ValueError("snapshot digest verification failed")
+
+    def validate_consistency(self) -> None:
+        """Fail closed on semantic cross-field corruption without payload details."""
+        if not isinstance(self.step_states, tuple) or self.step_states != (
+            self.state_snapshot.step_states
+        ):
+            raise ValueError("snapshot step states are inconsistent")
+        if self.run_status != self.state_snapshot.run_status:
+            raise ValueError("snapshot run status is inconsistent")
+        if self.stop_reason != self.state_snapshot.stop_reason:
+            raise ValueError("snapshot stop reason is inconsistent")
+        if self.cancellation_reason != self.state_snapshot.cancellation_reason:
+            raise ValueError("snapshot cancellation reason is inconsistent")
+        plan_ids = tuple(item.step_id for item in self.plan_snapshot.steps)
+        state_ids = tuple(item.step_id for item in self.state_snapshot.step_states)
+        top_ids = tuple(item.step_id for item in self.step_states)
+        if plan_ids != state_ids or state_ids != top_ids:
+            raise ValueError("snapshot step ID sets are inconsistent")
+        from core.runtime.plan_fingerprint import PlanFingerprinter
+
+        if (
+            PlanFingerprinter.fingerprint_snapshot(self.plan_snapshot)
+            != self.plan_fingerprint
+        ):
+            raise ValueError("snapshot plan fingerprint is inconsistent")
+        if self.quiescent and any(item.in_flight for item in self.step_states):
+            raise ValueError("quiescent snapshot cannot contain running steps")
+        if self.quiescent and (
+            self.budget_snapshot.reservation_count != 0
+            or any(value != 0 for value in self.budget_snapshot.reserved.values())
+        ):
+            raise ValueError("quiescent snapshot cannot contain budget reservations")
 
     def to_payload(self) -> dict[str, object]:
         payload = to_primitive(self.digest_source())
@@ -822,6 +920,9 @@ class RunSnapshot:
             ),
             checkpoint_kind=payload.get("checkpoint_kind"),
             quiescent=payload.get("quiescent"),
+            activity_snapshot=_activity_snapshot_from_payload(
+                payload.get("activity_snapshot")
+            ),
             created_at=parse_utc(payload.get("created_at"), "created_at"),
             payload_digest=payload.get("payload_digest"),
         )

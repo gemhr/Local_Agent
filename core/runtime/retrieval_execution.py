@@ -175,6 +175,9 @@ class RetrievalExecutionService:
         )
         token = install_trace_context(handle.context)
         recorder_token = install_span_recorder(recorder)
+        activity_tracker = run_context.activity_tracker
+        if activity_tracker is not None:
+            activity_tracker.increment("retrievals_active")
         try:
             result = self._execute_impl(
                 invocation,
@@ -203,6 +206,8 @@ class RetrievalExecutionService:
             handle.end_error()
             raise
         finally:
+            if activity_tracker is not None:
+                activity_tracker.decrement("retrievals_active")
             reset_trace_context(token)
             reset_span_recorder(recorder_token)
 
@@ -1102,6 +1107,17 @@ class RetrievalExecutionService:
         timeout_seconds: float,
     ) -> T:
         deadline = time.monotonic() + timeout_seconds
+
+        def track_detached(state: BlockingTaskWaitState) -> None:
+            if not state.execution_detached:
+                return
+            tracker = context.run_context.activity_tracker
+            if tracker is not None:
+                tracker.increment("detached_retrieval_workers")
+                future.add_done_callback(
+                    lambda: tracker.decrement("detached_retrieval_workers")
+                )
+
         try:
             while True:
                 context.raise_if_cancelled()
@@ -1110,7 +1126,9 @@ class RetrievalExecutionService:
                     context.remaining_seconds(),
                 )
                 if remaining <= 0:
-                    raise _StageTimedOut(future.cancel_or_detach())
+                    state = future.cancel_or_detach()
+                    track_detached(state)
+                    raise _StageTimedOut(state)
                 try:
                     return future.result(timeout=min(0.05, remaining))
                 except concurrent.futures.TimeoutError:
@@ -1119,6 +1137,7 @@ class RetrievalExecutionService:
             raise
         except BaseException as exc:
             state = future.cancel_or_detach()
+            track_detached(state)
             setattr(exc, "worker_terminated", state.worker_terminated)
             setattr(exc, "execution_detached", state.execution_detached)
             setattr(

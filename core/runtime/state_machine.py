@@ -228,15 +228,39 @@ class AgentStateMachine:
 
     def add_step(self, state: AgentState, *, step_id: str, name: str) -> None:
         """在 RUNNING Run 中原子注册一个 PENDING Step。"""
-        state.validate()
-        if state.status != RunStatus.RUNNING:
-            self._raise_run(state, "ADD_STEP", "只有 RUNNING Run 可以注册 Step")
+        with state.runtime_lock:
+            state.validate()
+            if state.status != RunStatus.RUNNING:
+                self._raise_run(state, "ADD_STEP", "只有 RUNNING Run 可以注册 Step")
+            self._register_step_locked(state, step_id=step_id, name=name)
+
+    def register_plan_step(
+        self, state: AgentState, *, step_id: str, name: str
+    ) -> None:
+        """Register immutable Plan structure before the Run starts or while running."""
+        with state.runtime_lock:
+            state.validate()
+            if state.status not in {RunStatus.CREATED, RunStatus.RUNNING}:
+                self._raise_run(
+                    state,
+                    "REGISTER_PLAN_STEP",
+                    "只有 CREATED/RUNNING Run 可以注册 Plan Step",
+                )
+            self._register_step_locked(state, step_id=step_id, name=name)
+
+    def _register_step_locked(
+        self, state: AgentState, *, step_id: str, name: str
+    ) -> None:
         candidate = self._clone(state)
         candidate.add_step(step_id, name)
         self._commit(state, candidate)
 
     def apply_run_event(self, state: AgentState, event: RunStateEvent) -> None:
         """校验并原子应用一个 Run 状态事件。"""
+        with state.runtime_lock:
+            self._apply_run_event_locked(state, event)
+
+    def _apply_run_event_locked(self, state: AgentState, event: RunStateEvent) -> None:
         state.validate()
         if state.status in _TERMINAL_RUN_STATUSES:
             self._raise_run(state, event.event_type.value, "终态 Run 拒绝所有后续事件")
@@ -270,6 +294,10 @@ class AgentStateMachine:
 
     def apply_step_event(self, state: AgentState, event: StepStateEvent) -> None:
         """校验并原子应用一个 Step 状态事件。"""
+        with state.runtime_lock:
+            self._apply_step_event_locked(state, event)
+
+    def _apply_step_event_locked(self, state: AgentState, event: StepStateEvent) -> None:
         step = state.steps.get(event.step_id)
         if (
             step is not None

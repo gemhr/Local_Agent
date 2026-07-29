@@ -188,6 +188,9 @@ class ParallelExecutor:
                 component="step", operation="execute", step_id=claim.step_id,
                 parent_context=parent_context,
             )
+            activity_tracker = run_context.activity_tracker
+            if activity_tracker is not None:
+                activity_tracker.increment("step_workers_active")
             try:  # 覆盖等待全局/资源许可、Driver、to_thread 等待及终态提交前的取消。
                 with activate_span(step_span):
                     await self._emit_step_started(claim)
@@ -248,6 +251,9 @@ class ParallelExecutor:
                 )
                 if failure_mode == ParallelFailureMode.FAIL_FAST:
                     raise _FailFastSignal() from None
+            finally:
+                if activity_tracker is not None:
+                    activity_tracker.decrement("step_workers_active")
 
         budget_error: BudgetExceededError | None = None
         deadline_error: RunDeadlineExceededError | None = None

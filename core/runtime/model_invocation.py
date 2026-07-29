@@ -338,6 +338,9 @@ class ModelInvocationRouter:
         )
         token = install_trace_context(handle.context)
         recorder_token = install_span_recorder(recorder)
+        activity_tracker = run_context.activity_tracker
+        if activity_tracker is not None:
+            activity_tracker.increment("model_attempts_active")
         try:
             result = self._invoke_impl(
                 run_context=run_context,
@@ -371,6 +374,8 @@ class ModelInvocationRouter:
             handle.end_ok()
             return result
         finally:
+            if activity_tracker is not None:
+                activity_tracker.decrement("model_attempts_active")
             reset_trace_context(token)
             reset_span_recorder(recorder_token)
 

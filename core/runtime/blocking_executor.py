@@ -106,6 +106,10 @@ class BlockingTaskHandle(Generic[T]):
         self._owner._mark_detached(self.task_id)
         return BlockingTaskWaitState(False, True, True)
 
+    def add_done_callback(self, callback: Callable[[], None]) -> None:
+        """Register content-free cleanup work without exposing the Future."""
+        self._future.add_done_callback(lambda _future: callback())
+
 
 class BoundedBlockingExecutor:
     """同时限制运行中与排队中的同步调用数量。"""

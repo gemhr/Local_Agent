@@ -231,6 +231,9 @@ class ToolAttemptExecutor:
             handle.set_safe_attribute("retry_index", retry_index)
         token = install_trace_context(handle.context)
         recorder_token = install_span_recorder(recorder)
+        activity_tracker = run_context.activity_tracker
+        if activity_tracker is not None:
+            activity_tracker.increment("tool_attempts_active")
         try:
             result = await self._execute_impl(
                 invocation=invocation,
@@ -275,6 +278,8 @@ class ToolAttemptExecutor:
             handle.end_ok()
             return result
         finally:
+            if activity_tracker is not None:
+                activity_tracker.decrement("tool_attempts_active")
             reset_trace_context(token)
             reset_span_recorder(recorder_token)
 
@@ -751,12 +756,17 @@ class ToolAttemptExecutor:
             return
         release_deferred["value"] = True
         context.concurrency_controller.mark_worker_detached(context.attempt_id)
+        activity_tracker = context.run_context.activity_tracker
+        if activity_tracker is not None:
+            activity_tracker.increment("detached_tool_workers")
 
         def cleanup(_done: Future) -> None:
             # Detached Worker 后续只释放全部 Permit 并注销安全 Tracker，
             # 不发布第二个 Completed，也不接触 Run/Step 状态。
             lease.release()
             context.concurrency_controller.complete_worker(context.attempt_id)
+            if activity_tracker is not None:
+                activity_tracker.decrement("detached_tool_workers")
 
         future.add_done_callback(cleanup)
 
