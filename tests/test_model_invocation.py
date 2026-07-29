@@ -14,6 +14,7 @@ from core.runtime import (
     CancellationReason,
     CircuitHealthOutcome,
     GeneratorModelAdapter,
+    InMemorySpanRecorder,
     ModelAdapterInvocationError,
     ModelAdapterResolver,
     ModelAdapterResponse,
@@ -40,6 +41,7 @@ from core.runtime import (
     RunBudget,
     RunCancelledError,
     RunStatus,
+    SpanStatus,
     TaskCapabilityRequirements,
     create_run_context,
 )
@@ -187,6 +189,44 @@ class InvocationFixture:
 
 
 class ModelInvocationTests(unittest.TestCase):
+    def test_trace_invocation_owns_retry_attempt_siblings(self) -> None:
+        recorder = InMemorySpanRecorder()
+        failure = provider_error(ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE)
+        adapter = RecordingAdapter([failure, "ok"])
+        fixture = InvocationFixture({ModelProfileId.LOCAL_FAST: adapter})
+        fixture.registry = ModelCircuitBreakerRegistry(
+            ModelCircuitBreakerConfig(failure_threshold=3)
+        )
+        fixture.router = ModelInvocationRouter(
+            retry_executor=RetryExecutor(
+                RetryPolicy(
+                    max_attempts=2,
+                    base_delay_seconds=0,
+                    max_delay_seconds=0,
+                )
+            ),
+            span_recorder=recorder,
+        )
+
+        result = fixture.invoke(routing(LOCAL))
+
+        self.assertEqual(result.output, "ok")
+        records = recorder.snapshot()
+        invocation = next(r for r in records if r.component == "model_invocation")
+        attempts = [r for r in records if r.component == "model_attempt"]
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual({r.parent_span_id for r in attempts}, {invocation.span_id})
+        self.assertEqual(len({r.span_id for r in attempts}), 2)
+        self.assertEqual(
+            [r.attributes["retry_index"] for r in attempts],
+            [0, 1],
+        )
+        self.assertEqual(
+            [r.status for r in attempts],
+            [SpanStatus.ERROR, SpanStatus.OK],
+        )
+        self.assertEqual(recorder.health_snapshot().active_span_count, 0)
+
     def test_initial_selection_reaches_resolver_and_adapter_once(self) -> None:
         local = RecordingAdapter(["local"])
         remote = RecordingAdapter(["remote"])
@@ -330,6 +370,8 @@ class ModelInvocationTests(unittest.TestCase):
                 ModelProfileId.REMOTE_ADVANCED: remote,
             }
         )
+        recorder = InMemorySpanRecorder()
+        fixture.router = ModelInvocationRouter(span_recorder=recorder)
         breaker = fixture.registry.get(LOCAL.effective_breaker_key)
         breaker.acquire_permission().record_failure()
         failure_count = breaker.snapshot().consecutive_failures
@@ -359,6 +401,13 @@ class ModelInvocationTests(unittest.TestCase):
             len({attempt.profile_id for attempt in result.attempts}),
             len(result.attempts),
         )
+        circuit_span = next(
+            record
+            for record in recorder.snapshot()
+            if record.component == "model_attempt"
+            and record.error_code == "MODEL_CIRCUIT_OPEN"
+        )
+        self.assertFalse(circuit_span.attributes["provider_started"])
 
     def test_force_local_open_circuit_cannot_escape_to_remote(self) -> None:
         local = RecordingAdapter(["must not run"])

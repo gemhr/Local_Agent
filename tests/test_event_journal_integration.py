@@ -11,6 +11,7 @@ from core.runtime import (
     BudgetLedger,
     EventChannelClosedError,
     InMemoryRunEventJournal,
+    InMemorySpanRecorder,
     JournalError,
     JournalErrorCode,
     OutputDeltaPayload,
@@ -262,6 +263,7 @@ async def test_real_coordinator_commits_state_before_journal():
         trace_id=context.trace_id,
         channel=channel,
     )
+    recorder = InMemorySpanRecorder()
     coordinator = RunCoordinator(
         run_context=context,
         plan=plan,
@@ -278,6 +280,7 @@ async def test_real_coordinator_commits_state_before_journal():
         policy=ParallelExecutionPolicy(max_concurrency=1),
         state_machine=machine,
         event_emitter=emitter,
+        span_recorder=recorder,
     )
 
     class Driver:
@@ -299,3 +302,24 @@ async def test_real_coordinator_commits_state_before_journal():
     assert records[-1].safe_payload["stop_reason"] == "COMPLETED"
     assert isinstance(records[-1].safe_payload["duration_ms"], int)
     assert records[-1].safe_payload["duration_ms"] >= 0
+    run_span = next(item for item in recorder.snapshot() if item.component == "runtime")
+    step_span = next(item for item in recorder.snapshot() if item.component == "step")
+    run_events = [
+        item
+        for item in records
+        if item.event_type in {
+            RuntimeEventType.RUN_STARTED,
+            RuntimeEventType.RUN_COMPLETED,
+        }
+    ]
+    step_events = [
+        item
+        for item in records
+        if item.event_type in {
+            RuntimeEventType.STEP_STARTED,
+            RuntimeEventType.STEP_COMPLETED,
+        }
+    ]
+    assert {item.span_id for item in run_events} == {run_span.span_id}
+    assert {item.span_id for item in step_events} == {step_span.span_id}
+    assert {item.parent_span_id for item in step_events} == {run_span.span_id}

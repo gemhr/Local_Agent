@@ -14,6 +14,8 @@ from core.runtime import (
     BoundedBlockingExecutor,
     CancellationReason,
     CancellationSource,
+    InMemorySpanRecorder,
+    ModelInvocationRouter,
     QueryEmbedding,
     QueryRewriteStrategy,
     RetrievalAdapterError,
@@ -188,6 +190,30 @@ def test_successful_pipeline_records_every_stage_and_budget() -> None:
     )
     assert len(result.final_chunks) == len(result.citations) == 2
     assert result.budget_usage.retrieval_calls == 1
+
+
+def test_trace_retrieval_owns_only_executed_stage_spans() -> None:
+    adapter = FakeRetrievalAdapter()
+    context, _source = make_context()
+    recorder = InMemorySpanRecorder()
+    result = RetrievalExecutionService(adapter, span_recorder=recorder).execute(
+        make_invocation(), run_context=context
+    )
+
+    records = recorder.snapshot()
+    retrieval = next(r for r in records if r.component == "retrieval")
+    stages = [r for r in records if r.component == "retrieval_stage"]
+    executed = [
+        record
+        for record in result.stage_records
+        if record.status is not RetrievalStageStatus.SKIPPED
+    ]
+    assert len(stages) == len(executed)
+    assert {r.parent_span_id for r in stages} == {retrieval.span_id}
+    assert {r.attributes["retrieval_stage"] for r in stages} == {
+        record.stage.value for record in executed
+    }
+    assert recorder.health_snapshot().active_span_count == 0
     assert result.budget_usage.embedding_calls == 2
     assert result.budget_usage.vector_queries == 2
     assert result.budget_usage.keyword_queries == 1
@@ -205,6 +231,47 @@ def test_successful_pipeline_records_every_stage_and_budget() -> None:
         "context_chars": ledger_usage.context_chars,
     }
     assert "original query" not in str(result.to_safe_dict())
+
+
+def test_query_rewrite_model_invocation_is_child_of_rewrite_stage() -> None:
+    class StubModelRouter(ModelInvocationRouter):
+        def _invoke_impl(self, **kwargs):
+            return "rewritten query"
+
+    class ModelRewriteAdapter(FakeRetrievalAdapter):
+        def __init__(self):
+            super().__init__()
+            self.router = StubModelRouter()
+
+        def rewrite_query(self, query: str, *, run_context, event_emitter) -> str:
+            return self.router.invoke(
+                run_context=run_context,
+                event_emitter=event_emitter,
+                budget_ledger=None,
+                routing_decision=None,
+                messages=(),
+                adapter_resolver=None,
+                circuit_breaker_registry=None,
+                token_estimate=0,
+                max_tokens=0,
+            )
+
+    recorder = InMemorySpanRecorder()
+    context, _source = make_context()
+    RetrievalExecutionService(
+        ModelRewriteAdapter(), span_recorder=recorder
+    ).execute(make_invocation(), run_context=context)
+    records = recorder.snapshot()
+    rewrite = next(
+        record
+        for record in records
+        if record.component == "retrieval_stage"
+        and record.attributes["retrieval_stage"] == RetrievalStage.QUERY_REWRITE.value
+    )
+    model = next(
+        record for record in records if record.component == "model_invocation"
+    )
+    assert model.parent_span_id == rewrite.span_id
 
 
 def test_empty_is_only_returned_after_valid_zero_candidate_query() -> None:

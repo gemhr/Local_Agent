@@ -311,16 +311,18 @@ from core.runtime.tracing import (
     SpanHandle,
     SpanRecord,
     SpanRecorder,
+    SpanRecorderHealth,
     SpanStatus,
     TraceContext,
     activate_span,
     current_trace_context,
+    current_span_recorder,
 )
 __all__ += [
     "DENIED_SPAN_ATTRIBUTES", "SAFE_SPAN_ATTRIBUTES", "InMemorySpanRecorder",
     "NoopSpanRecorder", "OpenTelemetryCompatibleSpanAdapter", "SpanHandle",
-    "SpanRecord", "SpanRecorder", "SpanStatus", "TraceContext",
-    "activate_span", "current_trace_context",
+    "SpanRecord", "SpanRecorder", "SpanRecorderHealth", "SpanStatus", "TraceContext",
+    "activate_span", "current_trace_context", "current_span_recorder",
 ]
 
 from core.runtime.parallel_execution import (

@@ -43,7 +43,7 @@ def _append_decision(
         if (
             existing_id.run_id == record.run_id
             and existing_id.sequence == record.sequence
-            and existing_id.event_digest == record.event_digest
+            and existing_id.is_duplicate_of(record)
         ):
             return JournalAppendStatus.DUPLICATE
         raise JournalError(

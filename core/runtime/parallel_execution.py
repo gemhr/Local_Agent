@@ -129,16 +129,13 @@ class ParallelExecutor:
         self._state_machine = state_machine or AgentStateMachine()
         self._max_concurrency = max_concurrency
         self._event_emitter = event_emitter
-        from core.runtime.tracing import NoopSpanRecorder
-        self._span_recorder = span_recorder or NoopSpanRecorder()
+        self._span_recorder = span_recorder
 
     async def execute_ready(self, *, scheduler: SerialScheduler, plan: Plan, state: AgentState, occurred_at: datetime, run_context: RunContext, driver: StepExecutionDriver, policy: ParallelExecutionPolicy, execution_mode: StepExecutionMode = StepExecutionMode.ASYNC, concurrency_specs: Mapping[str, StepConcurrencySpec] | None = None) -> ParallelExecutionReport:
         """标准安全入口：同一 Policy 同时约束 Claim 和 Executor 容量。"""
         ledger = run_context.budget_ledger
         effective_concurrency = min(policy.max_concurrency, ledger.budget.max_concurrency) if ledger is not None and ledger.budget.max_concurrency is not None else policy.max_concurrency
         claims = scheduler.claim_ready(plan, state, effective_concurrency, occurred_at, budget_ledger=ledger)
-        for claim in claims:
-            await self._emit_step_started(claim)
         return await self.execute(claims=claims, state=state, run_context=run_context, driver=driver, policy=policy, execution_mode=execution_mode, concurrency_specs=concurrency_specs)
 
     async def execute(self, *, claims: tuple[StepClaim, ...], state: AgentState, run_context: RunContext, driver: StepExecutionDriver, failure_mode: ParallelFailureMode = ParallelFailureMode.FAIL_FAST, execution_mode: StepExecutionMode = StepExecutionMode.ASYNC, concurrency_specs: Mapping[str, StepConcurrencySpec] | None = None, policy: ParallelExecutionPolicy | None = None) -> ParallelExecutionReport:
@@ -177,15 +174,23 @@ class ParallelExecutor:
 
         async def worker(claim: StepClaim) -> None:
             nonlocal was_token_cancelled
-            from core.runtime.tracing import activate_span, current_trace_context, start_span_safely
+            from core.runtime.tracing import (
+                NoopSpanRecorder,
+                activate_span,
+                current_span_recorder,
+                current_trace_context,
+                start_span_safely,
+            )
             parent_context = current_trace_context()
-            step_span = start_span_safely(self._span_recorder,
+            recorder = self._span_recorder or current_span_recorder() or NoopSpanRecorder()
+            step_span = start_span_safely(recorder,
                 trace_id=run_context.trace_id, run_id=run_context.run_id,
                 component="step", operation="execute", step_id=claim.step_id,
                 parent_context=parent_context,
             )
             try:  # 覆盖等待全局/资源许可、Driver、to_thread 等待及终态提交前的取消。
                 with activate_span(step_span):
+                    await self._emit_step_started(claim)
                     run_context.raise_if_inactive()
                     spec = specs.get(claim.step_id, StepConcurrencySpec())
                     async with global_semaphore, resource_semaphores[spec.resource_key]:

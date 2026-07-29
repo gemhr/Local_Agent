@@ -21,6 +21,7 @@ from core.runtime import (
     BlockingTaskKind,
     BoundedBlockingExecutor,
     CancellationReason,
+    InMemorySpanRecorder,
     ModelAdapterInvocationError,
     ModelAdapterResolver,
     ModelAdapterResponse,
@@ -543,7 +544,8 @@ async def test_retrieval_runtime_events_are_typed_and_content_safe() -> None:
         trace_id=context.trace_id,
         channel=channel,
     ).for_step("answer")
-    service = RetrievalExecutionService(EventAdapter())
+    recorder = InMemorySpanRecorder()
+    service = RetrievalExecutionService(EventAdapter(), span_recorder=recorder)
     invocation = RetrievalInvocation.create(
         "private query body",
         collection_names=("kb",),
@@ -564,13 +566,34 @@ async def test_retrieval_runtime_events_are_typed_and_content_safe() -> None:
     assert result.status == RetrievalExecutionStatus.SUCCEEDED
     assert events[0].event_type == RuntimeEventType.RETRIEVAL_STARTED
     assert events[-1].event_type == RuntimeEventType.RETRIEVAL_COMPLETED
+    retrieval_span = next(
+        record for record in recorder.snapshot() if record.component == "retrieval"
+    )
+    assert events[0].span_id == retrieval_span.span_id
+    assert events[-1].span_id == retrieval_span.span_id
+    stage_spans = {
+        record.attributes["retrieval_stage"]: record
+        for record in recorder.snapshot()
+        if record.component == "retrieval_stage"
+    }
+    for event in events:
+        if event.event_type is RuntimeEventType.RETRIEVAL_STAGE_COMPLETED:
+            span = stage_spans[event.payload.stage]
+            assert event.span_id == span.span_id
+            assert event.parent_span_id == span.parent_span_id
     assert len(
         [
             event
             for event in events
             if event.event_type == RuntimeEventType.RETRIEVAL_STAGE_COMPLETED
         ]
-    ) == 6
+    ) == len(
+        [
+            record
+            for record in result.stage_records
+            if record.status is not RetrievalStageStatus.SKIPPED
+        ]
+    )
     safe = str([event.to_safe_dict() for event in events])
     assert "private query body" not in safe
     assert "private chunk body" not in safe

@@ -61,6 +61,15 @@ from core.runtime.retrieval_contract import (
     content_digest,
     query_digest,
 )
+from core.runtime.tracing import (
+    NoopSpanRecorder,
+    current_span_recorder,
+    install_span_recorder,
+    install_trace_context,
+    reset_span_recorder,
+    reset_trace_context,
+    start_span_safely,
+)
 
 
 T = TypeVar("T")
@@ -96,6 +105,7 @@ class RetrievalExecutionService:
         blocking_executor: BoundedBlockingExecutor | None = None,
         max_sync_workers: int | None = None,
         max_pending_tasks: int | None = None,
+        span_recorder=None,
     ) -> None:
         if (
             isinstance(minimum_score, bool)
@@ -140,8 +150,63 @@ class RetrievalExecutionService:
             )
         else:
             self.blocking_executor = process_blocking_executor
+        self.span_recorder = span_recorder
+        self._trace_lock = threading.Lock()
+        self._deferred_retrieval_spans: dict[str, object] = {}
+        self._deferred_stage_contexts: dict[int, object] = {}
 
     def execute(
+        self,
+        invocation: RetrievalInvocation,
+        *,
+        run_context: RunContext,
+        step_id: str = "retrieval",
+        event_emitter: StepEventEmitter | None = None,
+        defer_completed_event: bool = False,
+    ) -> RetrievalExecutionResult:
+        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        handle = start_span_safely(
+            recorder,
+            trace_id=run_context.trace_id,
+            run_id=run_context.run_id,
+            component="retrieval",
+            operation="execute",
+            step_id=step_id,
+        )
+        token = install_trace_context(handle.context)
+        recorder_token = install_span_recorder(recorder)
+        try:
+            result = self._execute_impl(
+                invocation,
+                run_context=run_context,
+                step_id=step_id,
+                event_emitter=event_emitter,
+                defer_completed_event=defer_completed_event,
+            )
+            if handle.context is not None:
+                handle.set_safe_attribute("output_count", len(result.final_chunks))
+                handle.set_safe_attribute("citation_count", len(result.citations))
+                handle.set_safe_attribute("degraded", result.degraded)
+            if defer_completed_event:
+                with self._trace_lock:
+                    self._deferred_retrieval_spans[result.retrieval_id] = handle
+            else:
+                self._end_retrieval_span(handle, result)
+            return result
+        except RunCancelledError:
+            handle.end_cancelled("RUN_CANCELLED")
+            raise
+        except (RunDeadlineExceededError, RetrievalDeadlineExceededError, TimeoutError):
+            handle.end_timed_out()
+            raise
+        except BaseException:
+            handle.end_error()
+            raise
+        finally:
+            reset_trace_context(token)
+            reset_span_recorder(recorder_token)
+
+    def _execute_impl(
         self,
         invocation: RetrievalInvocation,
         *,
@@ -741,6 +806,58 @@ class RetrievalExecutionService:
             )
 
     def _run_stage(
+        self,
+        context: RetrievalExecutionContext,
+        records: list[RetrievalStageRecord],
+        stage: RetrievalStage,
+        **kwargs,
+    ) -> T:
+        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        handle = start_span_safely(
+            recorder,
+            trace_id=context.run_context.trace_id,
+            run_id=context.run_context.run_id,
+            component="retrieval_stage",
+            operation=stage.value.lower(),
+            step_id=context.step_id,
+        )
+        if handle.context is not None:
+            handle.set_safe_attribute("retrieval_stage", stage.value)
+            handle.set_safe_attribute("input_count", kwargs["input_count"])
+        token = install_trace_context(handle.context)
+        recorder_token = install_span_recorder(recorder)
+        try:
+            value = self._run_stage_impl(context, records, stage, **kwargs)
+            record = records[-1]
+            if handle.context is not None:
+                handle.set_safe_attribute("output_count", record.output_count)
+                handle.set_safe_attribute("degraded", record.degraded)
+            deferred = not kwargs.get("emit_event", True) and handle.context is not None
+            if deferred:
+                with self._trace_lock:
+                    self._deferred_stage_contexts[id(record)] = handle
+            else:
+                handle.end_ok()
+            return value
+        except RunCancelledError:
+            handle.end_cancelled("RETRIEVAL_CANCELLED")
+            raise
+        except (RunDeadlineExceededError, RetrievalDeadlineExceededError, _StageTimedOut):
+            handle.end_timed_out("RETRIEVAL_TIMEOUT")
+            raise
+        except BaseException:
+            error_code = (
+                records[-1].safe_error_code
+                if records and records[-1].stage is stage and records[-1].safe_error_code
+                else "RETRIEVAL_STAGE_FAILED"
+            )
+            handle.end_error(error_code)
+            raise
+        finally:
+            reset_trace_context(token)
+            reset_span_recorder(recorder_token)
+
+    def _run_stage_impl(
         self,
         context: RetrievalExecutionContext,
         records: list[RetrievalStageRecord],
@@ -1429,7 +1546,6 @@ class RetrievalExecutionService:
             safe_error_code=safe_error_code,
         )
         records.append(record)
-        self._emit_stage(context, record)
 
     def _skip_after(
         self,
@@ -1505,8 +1621,17 @@ class RetrievalExecutionService:
         """发布上层延迟 Context Binding 的唯一 Stage 完成事实。"""
         if not isinstance(record, RetrievalStageRecord):
             raise TypeError("record 必须是 RetrievalStageRecord")
+        with self._trace_lock:
+            deferred_handle = self._deferred_stage_contexts.pop(id(record), None)
         if event_emitter is None:
+            if deferred_handle is not None:
+                deferred_handle.end_ok()
             return
+        trace_token = (
+            install_trace_context(deferred_handle.context)
+            if deferred_handle is not None
+            else None
+        )
         from core.runtime.events import (
             RetrievalBudgetPayload,
             RetrievalStageCompletedPayload,
@@ -1539,6 +1664,24 @@ class RetrievalExecutionService:
         except BaseException:
             if not ignore_failure:
                 raise _EventEmissionFailed from None
+        finally:
+            if deferred_handle is not None:
+                if record.status is RetrievalStageStatus.CANCELLED:
+                    deferred_handle.end_cancelled(
+                        record.safe_error_code or "RETRIEVAL_CANCELLED"
+                    )
+                elif record.status is RetrievalStageStatus.TIMED_OUT:
+                    deferred_handle.end_timed_out(
+                        record.safe_error_code or "RETRIEVAL_TIMEOUT"
+                    )
+                elif record.status is RetrievalStageStatus.FAILED:
+                    deferred_handle.end_error(
+                        record.safe_error_code or "RETRIEVAL_STAGE_FAILED"
+                    )
+                else:
+                    deferred_handle.end_ok()
+            if trace_token is not None:
+                reset_trace_context(trace_token)
 
     def _emit_completed_result(
         self,
@@ -1594,11 +1737,41 @@ class RetrievalExecutionService:
         """为上层延迟 Context Binding 发布唯一 Retrieval 完成事实。"""
         if not isinstance(result, RetrievalExecutionResult):
             raise TypeError("result 必须是 RetrievalExecutionResult")
-        self._emit_completed_result(
-            result,
-            event_emitter=event_emitter,
-            ignore_failure=False,
+        with self._trace_lock:
+            handle = self._deferred_retrieval_spans.pop(result.retrieval_id, None)
+        trace_token = (
+            install_trace_context(handle.context)
+            if handle is not None
+            else None
         )
+        try:
+            self._emit_completed_result(
+                result,
+                event_emitter=event_emitter,
+                ignore_failure=False,
+            )
+        finally:
+            if handle is not None:
+                self._end_retrieval_span(handle, result)
+            if trace_token is not None:
+                reset_trace_context(trace_token)
+
+    @staticmethod
+    def _end_retrieval_span(handle, result: RetrievalExecutionResult) -> None:
+        if result.status is RetrievalExecutionStatus.CANCELLED:
+            handle.end_cancelled(
+                result.error.safe_error_code if result.error else "RETRIEVAL_CANCELLED"
+            )
+        elif result.status is RetrievalExecutionStatus.TIMED_OUT:
+            handle.end_timed_out(
+                result.error.safe_error_code if result.error else "RETRIEVAL_TIMEOUT"
+            )
+        elif result.status is RetrievalExecutionStatus.FAILED:
+            handle.end_error(
+                result.error.safe_error_code if result.error else "RETRIEVAL_FAILED"
+            )
+        else:
+            handle.end_ok()
 
 
 __all__ = ["RetrievalExecutionService"]

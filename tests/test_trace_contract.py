@@ -1,4 +1,5 @@
 import pytest
+from core.runtime import InMemoryMetricsRecorder
 from core.runtime.tracing import InMemorySpanRecorder, SpanStatus, TraceContext
 
 def test_contract_and_attribute_policy():
@@ -10,3 +11,39 @@ def test_contract_and_attribute_policy():
 
 def test_context_validation():
     with pytest.raises(ValueError): TraceContext('', 'span', None, 'run')
+
+def test_health_snapshot_and_dropped_span_metric():
+    metrics = InMemoryMetricsRecorder()
+    recorder = InMemorySpanRecorder(metrics_recorder=metrics)
+    handle = recorder.start_span(
+        trace_id="trace", run_id="run", component="model_attempt", operation="attempt"
+    )
+    assert recorder.health_snapshot().active_span_count == 1
+    handle.end_ok()
+    handle.end_error()
+    assert recorder.health_snapshot().active_span_count == 0
+    assert recorder.health_snapshot().completed_span_count == 1
+    recorder.close()
+    dropped = recorder.start_span(
+        trace_id="trace", run_id="run", component="model_attempt", operation="attempt"
+    )
+    assert dropped.context is None
+    assert recorder.health_snapshot().dropped_span_count == 1
+    assert metrics.snapshot().counter(
+        "runtime_trace_dropped_spans_total",
+        {"component": "model_attempt", "reason": "recorder_start_failed"},
+    ) == 1
+
+def test_close_ends_all_active_spans_and_local_health_survives_metrics_failure():
+    class BrokenMetrics:
+        def increment_counter(self, *args, **kwargs):
+            raise RuntimeError("metrics unavailable")
+
+    recorder = InMemorySpanRecorder(metrics_recorder=BrokenMetrics())
+    recorder.start_span(
+        trace_id="trace", run_id="run", component="tool_attempt", operation="attempt"
+    )
+    recorder.close()
+    health = recorder.health_snapshot()
+    assert health.active_span_count == 0
+    assert health.dropped_span_count == 1

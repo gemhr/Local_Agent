@@ -21,6 +21,7 @@ from core.runtime import (
     BudgetLedger,
     BudgetUsage,
     CancellationReason,
+    InMemorySpanRecorder,
     ParallelExecutionInfrastructureError,
     ParallelExecutionPolicy,
     ParallelExecutor,
@@ -141,6 +142,7 @@ class CoordinatorFixture:
         scheduler: SerialScheduler | None = None,
         executor: ParallelExecutor | None = None,
         machine: AgentStateMachine | None = None,
+        span_recorder=None,
     ) -> None:
         self.context, self.source = create_run_context(entry_agent_id="test_agent")
         self.ledger = BudgetLedger(
@@ -176,10 +178,21 @@ class CoordinatorFixture:
             run_registry=self.registry,
             policy=self.policy,
             state_machine=self.machine,
+            span_recorder=span_recorder,
         )
 
 
 class RunCoordinatorOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_trace_active_span_invariant_after_success(self) -> None:
+        recorder = InMemorySpanRecorder()
+        fixture = CoordinatorFixture(span_recorder=recorder)
+        result = await fixture.coordinator.execute(driver=AsyncDriver())
+        self.assertEqual(result.status, RunStatus.SUCCEEDED)
+        self.assertEqual(recorder.health_snapshot().active_span_count, 0)
+        run = next(r for r in recorder.snapshot() if r.component == "runtime")
+        step = next(r for r in recorder.snapshot() if r.component == "step")
+        self.assertEqual(step.parent_span_id, run.span_id)
+
     async def test_single_step_success_and_per_run_ownership(self) -> None:
         fixture = CoordinatorFixture()
         result = await fixture.coordinator.execute(driver=AsyncDriver())
@@ -279,9 +292,11 @@ class RunCoordinatorSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.blocked_step_ids, ("join",))
 
     async def test_fail_fast_sibling_cancel_does_not_cancel_run(self) -> None:
+        recorder = InMemorySpanRecorder()
         fixture = CoordinatorFixture(
             make_plan({"bad": (), "sibling": ()}),
             policy=ParallelExecutionPolicy(2, ParallelFailureMode.FAIL_FAST),
+            span_recorder=recorder,
         )
         result = await fixture.coordinator.execute(
             driver=AsyncDriver(failing={"bad"})
@@ -291,6 +306,7 @@ class RunCoordinatorSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.failed_step_ids, ("bad",))
         self.assertEqual(result.cancelled_step_ids, ("sibling",))
         self.assertFalse(fixture.source.token.is_cancelled())
+        self.assertEqual(recorder.health_snapshot().active_span_count, 0)
 
     async def test_cancelled_step_without_run_token_converges_to_no_action(self) -> None:
         fixture = CoordinatorFixture()
@@ -304,6 +320,22 @@ class RunCoordinatorSchedulingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RunCoordinatorDecisionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_trace_active_span_invariant_after_cancel_and_timeout(self) -> None:
+        cancelled_recorder = InMemorySpanRecorder()
+        cancelled = CoordinatorFixture(span_recorder=cancelled_recorder)
+        cancelled.source.cancel(CancellationReason.USER_CANCELLED)
+        await cancelled.coordinator.execute(driver=AsyncDriver())
+        self.assertEqual(cancelled_recorder.health_snapshot().active_span_count, 0)
+
+        class DeadlineDriver:
+            async def execute(self, claim, run_context):
+                raise RunDeadlineExceededError("deadline")
+
+        timeout_recorder = InMemorySpanRecorder()
+        timed_out = CoordinatorFixture(span_recorder=timeout_recorder)
+        await timed_out.coordinator.execute(driver=DeadlineDriver())
+        self.assertEqual(timeout_recorder.health_snapshot().active_span_count, 0)
+
     async def test_run_level_cancellation_mapping(self) -> None:
         cases = (
             (

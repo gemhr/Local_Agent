@@ -61,6 +61,15 @@ from core.runtime.tool_contract import (
     retry_disposition_for,
     safe_key_digest,
 )
+from core.runtime.tracing import (
+    NoopSpanRecorder,
+    current_span_recorder,
+    install_span_recorder,
+    install_trace_context,
+    reset_span_recorder,
+    reset_trace_context,
+    start_span_safely,
+)
 
 
 class AttemptSideEffectTracker:
@@ -185,6 +194,7 @@ class ToolAttemptExecutor:
         *,
         sync_timeout_grace_seconds: float = 0.05,
         sync_workers: int = 16,
+        span_recorder=None,
     ) -> None:
         if sync_timeout_grace_seconds < 0:
             raise ValueError("sync_timeout_grace_seconds 必须是非负数")
@@ -192,8 +202,83 @@ class ToolAttemptExecutor:
         self._sync_executor = ThreadPoolExecutor(
             max_workers=sync_workers, thread_name_prefix="tool-attempt"
         )
+        self.span_recorder = span_recorder
 
     async def execute(
+        self,
+        *,
+        invocation: ToolInvocation,
+        adapter: ToolAdapter,
+        spec: ToolExecutionSpec,
+        run_context: RunContext,
+        budget_ledger: BudgetLedger,
+        concurrency_controller: ToolConcurrencyController,
+        step_id: str,
+        retry_index: int,
+        event_emitter: StepEventEmitter | None,
+    ) -> ToolExecutionResult:
+        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        handle = start_span_safely(
+            recorder,
+            trace_id=run_context.trace_id,
+            run_id=run_context.run_id,
+            component="tool_attempt",
+            operation="attempt",
+            step_id=step_id,
+        )
+        if handle.context is not None:
+            handle.set_safe_attribute("tool_name", invocation.tool_name)
+            handle.set_safe_attribute("retry_index", retry_index)
+        token = install_trace_context(handle.context)
+        recorder_token = install_span_recorder(recorder)
+        try:
+            result = await self._execute_impl(
+                invocation=invocation,
+                adapter=adapter,
+                spec=spec,
+                run_context=run_context,
+                budget_ledger=budget_ledger,
+                concurrency_controller=concurrency_controller,
+                step_id=step_id,
+                retry_index=retry_index,
+                event_emitter=event_emitter,
+            )
+        except ToolAttemptFailed as failed:
+            error = failed.error
+            if handle.context is not None:
+                handle.set_safe_attribute("provider_started", error.provider_started)
+                handle.set_safe_attribute("side_effect_state", error.side_effect_state.value)
+                handle.set_safe_attribute("retry_disposition", error.retry_disposition.value)
+                handle.set_safe_attribute("execution_detached", error.execution_detached)
+            if error.status is ToolExecutionStatus.TIMED_OUT:
+                handle.end_timed_out(error.safe_error_code)
+            elif error.status is ToolExecutionStatus.CANCELLED:
+                handle.end_cancelled(error.safe_error_code)
+            else:
+                handle.end_error(error.safe_error_code)
+            raise
+        except RunCancelledError:
+            handle.end_cancelled("RUN_CANCELLED")
+            raise
+        except (RunDeadlineExceededError, TimeoutError):
+            handle.end_timed_out()
+            raise
+        except BaseException:
+            handle.end_error()
+            raise
+        else:
+            if handle.context is not None:
+                handle.set_safe_attribute("provider_started", True)
+                handle.set_safe_attribute("side_effect_state", result.side_effect_state.value)
+                handle.set_safe_attribute("retry_disposition", result.retry_disposition.value)
+                handle.set_safe_attribute("execution_detached", result.execution_detached)
+            handle.end_ok()
+            return result
+        finally:
+            reset_trace_context(token)
+            reset_span_recorder(recorder_token)
+
+    async def _execute_impl(
         self,
         *,
         invocation: ToolInvocation,
@@ -800,6 +885,7 @@ class ToolExecutionService:
         concurrency_controller: ToolConcurrencyController | None = None,
         retry_executor: RetryExecutor | None = None,
         attempt_executor: ToolAttemptExecutor | None = None,
+        span_recorder=None,
     ) -> None:
         self.concurrency_controller = (
             concurrency_controller or ToolConcurrencyController()
@@ -808,8 +894,62 @@ class ToolExecutionService:
             RetryPolicy(base_delay_seconds=0, max_delay_seconds=0)
         )
         self.attempt_executor = attempt_executor or ToolAttemptExecutor()
+        self.span_recorder = span_recorder
 
     async def execute(
+        self,
+        *,
+        invocation: ToolInvocation,
+        adapter: ToolAdapter,
+        run_context: RunContext,
+        step_id: str,
+        event_emitter: StepEventEmitter | None = None,
+    ) -> ToolExecutionResult | ToolExecutionError:
+        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        handle = start_span_safely(
+            recorder,
+            trace_id=run_context.trace_id,
+            run_id=run_context.run_id,
+            component="tool_invocation",
+            operation="invoke",
+            step_id=step_id,
+        )
+        if handle.context is not None:
+            handle.set_safe_attribute("tool_name", invocation.tool_name)
+        token = install_trace_context(handle.context)
+        recorder_token = install_span_recorder(recorder)
+        try:
+            result = await self._execute_impl(
+                invocation=invocation,
+                adapter=adapter,
+                run_context=run_context,
+                step_id=step_id,
+                event_emitter=event_emitter,
+            )
+            if isinstance(result, ToolExecutionError):
+                if result.status is ToolExecutionStatus.TIMED_OUT:
+                    handle.end_timed_out(result.safe_error_code)
+                elif result.status is ToolExecutionStatus.CANCELLED:
+                    handle.end_cancelled(result.safe_error_code)
+                else:
+                    handle.end_error(result.safe_error_code)
+            else:
+                handle.end_ok()
+            return result
+        except RunCancelledError:
+            handle.end_cancelled("RUN_CANCELLED")
+            raise
+        except (RunDeadlineExceededError, TimeoutError):
+            handle.end_timed_out()
+            raise
+        except BaseException:
+            handle.end_error()
+            raise
+        finally:
+            reset_trace_context(token)
+            reset_span_recorder(recorder_token)
+
+    async def _execute_impl(
         self,
         *,
         invocation: ToolInvocation,
