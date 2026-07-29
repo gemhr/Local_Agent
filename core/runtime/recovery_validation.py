@@ -24,6 +24,8 @@ from core.runtime.recovery_contract import (
     RecoveryProjection,
     RecoveryReason,
     RecoveryStatus,
+    ResumeDataAvailability,
+    ToolRecoveryDecisionStatus,
 )
 from core.runtime.snapshot_contract import (
     SNAPSHOT_SCHEMA_VERSION,
@@ -36,6 +38,7 @@ from core.runtime.snapshot_store import (
     SnapshotStoreError,
 )
 from core.runtime.state import RunStatus, StepStatus
+from core.runtime.tool_recovery import ToolRecoveryDecisionEngine
 
 
 _TERMINAL_RUN_STATUSES = frozenset(
@@ -322,9 +325,21 @@ class RecoveryValidator:
                 **identity,
             )
 
+        tool_decisions = ToolRecoveryDecisionEngine.decide(
+            reduced.tool_evidence, projection
+        )
+        resume_data = _resume_data_availability(snapshot, projection)
         reasons = _snapshot_reconciliation_reasons(snapshot)
         for reason in reduced.reconciliation_reasons:
-            _append_reason(reasons, reason)
+            if reason not in {
+                RecoveryReason.TOOL_SIDE_EFFECT_EVIDENCE,
+                RecoveryReason.TOOL_OUTCOME_UNKNOWN,
+                RecoveryReason.TOOL_COMPENSATION_FAILED,
+            }:
+                _append_reason(reasons, reason)
+        _append_tool_decision_reasons(
+            reasons, tool_decisions, reduced.tool_evidence
+        )
         blocking_ids = tuple(
             sorted(
                 {
@@ -342,7 +357,24 @@ class RecoveryValidator:
         if blocking_ids:
             _append_reason(reasons, RecoveryReason.RUNNING_STEP_PRESENT)
 
-        if reasons:
+        checkpoint_kind = CheckpointKind(snapshot.checkpoint_kind)
+        dependency_output_blocked = (
+            checkpoint_kind is CheckpointKind.STEP_BOUNDARY
+            and resume_data.pending_steps_present
+            and resume_data.completed_dependency_results_required
+            and not resume_data.completed_dependency_results_available
+        )
+        if dependency_output_blocked:
+            _append_reason(
+                reasons, RecoveryReason.DEPENDENCY_OUTPUT_UNAVAILABLE
+            )
+            _append_reason(
+                reasons,
+                RecoveryReason.STEP_RESULT_REHYDRATION_UNSUPPORTED,
+            )
+            status = RecoveryStatus.UNSUPPORTED
+            resume_ready = False
+        elif reasons:
             status = RecoveryStatus.REQUIRES_RECONCILIATION
             resume_ready = False
         elif RunStatus(projection.run_status) in _TERMINAL_RUN_STATUSES:
@@ -367,6 +399,9 @@ class RecoveryValidator:
             reduced_projection=projection,
             tool_evidence=reduced.tool_evidence,
             resume_prerequisites_satisfied=resume_ready,
+            tool_decisions=tool_decisions,
+            resume_data_availability=resume_data,
+            output_reconstruction_supported=False,
         )
 
     def _read_tail(
@@ -512,6 +547,86 @@ def _snapshot_reconciliation_reasons(
     ):
         _append_reason(reasons, RecoveryReason.RUNTIME_ACTIVITY_PRESENT)
     return reasons
+
+
+def _resume_data_availability(
+    snapshot: RunSnapshot,
+    projection: RecoveryProjection,
+) -> ResumeDataAvailability:
+    pending_statuses = {
+        StepStatus.PENDING.value,
+        StepStatus.BLOCKED.value,
+    }
+    pending_ids = {
+        step_id
+        for step_id, state in projection.step_states.items()
+        if state.status in pending_statuses
+    }
+    completed_dependencies_required = any(
+        step.step_id in pending_ids
+        and any(
+            dependency in projection.step_states
+            and projection.step_states[dependency].status
+            == StepStatus.SUCCEEDED.value
+            for dependency in step.dependency_step_ids
+        )
+        for step in snapshot.plan_snapshot.steps
+    )
+    # Snapshot TextSummary values are only length/digest evidence. The current
+    # CheckpointBarrier has no result body store or rehydration owner.
+    return ResumeDataAvailability(
+        pending_steps_present=bool(pending_ids),
+        completed_dependency_results_required=(
+            completed_dependencies_required
+        ),
+        completed_dependency_results_available=(
+            not completed_dependencies_required
+        ),
+        result_rehydration_supported=False,
+        output_reconstruction_supported=False,
+    )
+
+
+def _append_tool_decision_reasons(
+    reasons: list[RecoveryReason],
+    decisions: tuple,
+    evidence: tuple,
+) -> None:
+    for decision in decisions:
+        if (
+            decision.status
+            is ToolRecoveryDecisionStatus.MANUAL_RECONCILIATION
+        ):
+            if "COMPENSATION_FAILED" in decision.reasons:
+                _append_reason(
+                    reasons, RecoveryReason.TOOL_COMPENSATION_FAILED
+                )
+            elif "OUTCOME_UNKNOWN" in decision.reasons:
+                _append_reason(reasons, RecoveryReason.TOOL_OUTCOME_UNKNOWN)
+            elif any("PAIRING" in item for item in decision.reasons):
+                _append_reason(
+                    reasons, RecoveryReason.TOOL_EVENT_PAIRING_INVALID
+                )
+            else:
+                _append_reason(
+                    reasons, RecoveryReason.TOOL_SIDE_EFFECT_EVIDENCE
+                )
+        elif (
+            decision.status
+            is ToolRecoveryDecisionStatus.INSUFFICIENT_EVIDENCE
+        ):
+            _append_reason(
+                reasons, RecoveryReason.TOOL_EVIDENCE_INSUFFICIENT
+            )
+            if any(
+                item.invocation_identity_digest
+                == decision.invocation_identity_digest
+                and item.side_effect_state == "COMMITTED"
+                for item in evidence
+            ):
+                _append_reason(
+                    reasons, RecoveryReason.TOOL_SIDE_EFFECT_EVIDENCE
+                )
 
 
 def _journal_read_failure(

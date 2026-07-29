@@ -13,6 +13,7 @@ from uuid import uuid4
 
 
 RUNTIME_EVENT_SCHEMA_VERSION = 2
+TOOL_EVIDENCE_SCHEMA_VERSION = 1
 
 
 class RuntimeEventType(str, Enum):
@@ -101,10 +102,27 @@ class ModelCompletedPayload:
 @dataclass(frozen=True, slots=True)
 class ToolStartedPayload:
     tool_name: str
+    # Legacy v1/v2 identity fields. New evidence-bearing events never set
+    # these fields and persist only stable digests.
     invocation_id: str | None = None
     attempt_id: str | None = None
     retry_index: int | None = None
     resource_key_digest: str | None = None
+    tool_evidence_schema_version: int | None = None
+    invocation_identity_digest: str | None = None
+    attempt_identity_digest: str | None = None
+    side_effect_kind: str | None = None
+    idempotency_kind: str | None = None
+    idempotency_key_digest: str | None = None
+    replay_supported: bool | None = None
+    side_effect_state: str | None = None
+    compensation_state: str | None = None
+    retry_disposition: str | None = None
+    outcome_classification: str | None = None
+    execution_detached: bool | None = None
+    worker_terminated: bool | None = None
+    provider_started: bool | None = None
+    safe_error_code: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.tool_name, "tool_name")
@@ -117,6 +135,7 @@ class ToolStartedPayload:
                 _require_text(value, name)
         if self.retry_index is not None:
             _require_index(self.retry_index, "retry_index")
+        _validate_tool_evidence_fields(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +156,16 @@ class ToolCompletedPayload:
     resource_release_pending: bool = False
     duration_ms: int = 0
     status: str | None = None
+    tool_evidence_schema_version: int | None = None
+    invocation_identity_digest: str | None = None
+    attempt_identity_digest: str | None = None
+    side_effect_kind: str | None = None
+    idempotency_kind: str | None = None
+    idempotency_key_digest: str | None = None
+    replay_supported: bool | None = None
+    compensation_state: str | None = None
+    outcome_classification: str | None = None
+    provider_started: bool | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.tool_name, "tool_name")
@@ -169,6 +198,7 @@ class ToolCompletedPayload:
             raise ValueError("Detached Worker 不能标记为已终止")
         if self.execution_detached and not self.resource_release_pending:
             raise ValueError("Detached Worker 必须等待资源清理")
+        _validate_tool_evidence_fields(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,6 +528,44 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
 
 # 仅用于读取第 20 天收尾前已写入的 schema v1 记录。新事件始终写出这些字段；
 # 旧记录缺少权威 duration 时可继续校验和消费，但无法补造 Histogram。
+_LEGACY_TOOL_STARTED_JOURNAL_FIELDS = _JOURNAL_PAYLOAD_FIELDS[
+    ToolStartedPayload
+]
+_LEGACY_TOOL_COMPLETED_JOURNAL_FIELDS = _JOURNAL_PAYLOAD_FIELDS[
+    ToolCompletedPayload
+]
+_TOOL_EVIDENCE_FIELDS = (
+    "tool_evidence_schema_version",
+    "invocation_identity_digest",
+    "attempt_identity_digest",
+    "side_effect_kind",
+    "idempotency_kind",
+    "idempotency_key_digest",
+    "replay_supported",
+    "side_effect_state",
+    "compensation_state",
+    "retry_disposition",
+    "outcome_classification",
+    "execution_detached",
+    "worker_terminated",
+    "provider_started",
+    "safe_error_code",
+)
+_TOOL_STARTED_EVIDENCE_JOURNAL_FIELDS = (
+    "tool_name",
+    "retry_index",
+    *_TOOL_EVIDENCE_FIELDS,
+)
+_TOOL_COMPLETED_EVIDENCE_JOURNAL_FIELDS = (
+    "tool_name",
+    "succeeded",
+    "retry_index",
+    "duration_ms",
+    "status",
+    *_TOOL_EVIDENCE_FIELDS,
+)
+
+
 _LEGACY_OPTIONAL_JOURNAL_FIELDS: dict[
     RuntimeEventType, frozenset[str]
 ] = {
@@ -623,6 +691,15 @@ class RuntimeEvent:
                 "text_length": len(self.payload.text),
                 "text": self.payload.text,
             }
+        elif isinstance(
+            self.payload, (ToolStartedPayload, ToolCompletedPayload)
+        ) and self.payload.tool_evidence_schema_version is not None:
+            fields = _journal_payload_fields(self.payload)
+            assert fields is not None
+            result["payload"] = {
+                name: _to_journal_value(getattr(self.payload, name))
+                for name in fields
+            }
         else:
             result["payload"] = asdict(self.payload)
         return result
@@ -641,7 +718,7 @@ class RuntimeEvent:
                 ).hexdigest(),
             }
         else:
-            fields = _JOURNAL_PAYLOAD_FIELDS.get(type(self.payload))
+            fields = _journal_payload_fields(self.payload)
             if fields is None:  # pragma: no cover - _PAYLOAD_TYPES 的封闭性保护
                 raise TypeError("Runtime Event Payload 没有 Journal allowlist")
             safe_payload = {
@@ -713,15 +790,32 @@ def validate_journal_payload(
         ):
             raise ValueError("text_digest 必须是小写 SHA-256")
         return
-    payload_type = _PAYLOAD_TYPES[event_type]
-    expected_fields = _JOURNAL_PAYLOAD_FIELDS.get(payload_type)
+    evidence_schema = safe_payload.get("tool_evidence_schema_version")
+    if (
+        event_type is RuntimeEventType.TOOL_STARTED
+        and evidence_schema is not None
+    ):
+        expected_fields = _TOOL_STARTED_EVIDENCE_JOURNAL_FIELDS
+        optional_fields = frozenset()
+        _validate_persisted_tool_evidence(safe_payload)
+    elif (
+        event_type is RuntimeEventType.TOOL_COMPLETED
+        and evidence_schema is not None
+    ):
+        expected_fields = _TOOL_COMPLETED_EVIDENCE_JOURNAL_FIELDS
+        optional_fields = frozenset()
+        _validate_persisted_tool_evidence(safe_payload)
+    else:
+        payload_type = _PAYLOAD_TYPES[event_type]
+        expected_fields = _JOURNAL_PAYLOAD_FIELDS.get(payload_type)
+        optional_fields = _LEGACY_OPTIONAL_JOURNAL_FIELDS.get(
+            event_type, frozenset()
+        )
     if expected_fields is None:  # pragma: no cover - 封闭类型映射保护
         raise ValueError("Event Type 没有 Journal Payload allowlist")
     actual_fields = set(safe_payload)
     expected_field_set = set(expected_fields)
-    optional_legacy_fields = _LEGACY_OPTIONAL_JOURNAL_FIELDS.get(
-        event_type, frozenset()
-    )
+    optional_legacy_fields = optional_fields
     if (
         not actual_fields <= expected_field_set
         or not expected_field_set - optional_legacy_fields <= actual_fields
@@ -756,6 +850,112 @@ def validate_journal_payload(
         if isinstance(value, str) and value.strip():
             continue
         raise ValueError(f"{name} 包含不允许的 Journal 值")
+
+
+def _journal_payload_fields(
+    payload: RuntimeEventPayload,
+) -> tuple[str, ...] | None:
+    if isinstance(payload, ToolStartedPayload):
+        if payload.tool_evidence_schema_version is not None:
+            return _TOOL_STARTED_EVIDENCE_JOURNAL_FIELDS
+        return _LEGACY_TOOL_STARTED_JOURNAL_FIELDS
+    if isinstance(payload, ToolCompletedPayload):
+        if payload.tool_evidence_schema_version is not None:
+            return _TOOL_COMPLETED_EVIDENCE_JOURNAL_FIELDS
+        return _LEGACY_TOOL_COMPLETED_JOURNAL_FIELDS
+    return _JOURNAL_PAYLOAD_FIELDS.get(type(payload))
+
+
+def _validate_tool_evidence_fields(payload: object) -> None:
+    version = getattr(payload, "tool_evidence_schema_version")
+    if version is None:
+        return
+    if version != TOOL_EVIDENCE_SCHEMA_VERSION:
+        raise ValueError("unsupported tool_evidence_schema_version")
+    for name in ("invocation_identity_digest", "attempt_identity_digest"):
+        value = getattr(payload, name)
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+    for name in (
+        "side_effect_kind",
+        "idempotency_kind",
+        "side_effect_state",
+        "compensation_state",
+        "retry_disposition",
+        "outcome_classification",
+    ):
+        _require_text(getattr(payload, name), name)
+    key_digest = getattr(payload, "idempotency_key_digest")
+    if key_digest is not None and (
+        not isinstance(key_digest, str)
+        or len(key_digest) != 64
+        or any(char not in "0123456789abcdef" for char in key_digest)
+    ):
+        raise ValueError(
+            "idempotency_key_digest must be a lowercase SHA-256 digest"
+        )
+    for name in (
+        "replay_supported",
+        "execution_detached",
+        "worker_terminated",
+        "provider_started",
+    ):
+        if type(getattr(payload, name)) is not bool:
+            raise TypeError(f"{name} must be bool")
+    safe_error_code = getattr(payload, "safe_error_code")
+    if safe_error_code is not None:
+        _require_text(safe_error_code, "safe_error_code")
+
+
+def _validate_persisted_tool_evidence(
+    safe_payload: dict[str, object],
+) -> None:
+    version = safe_payload.get("tool_evidence_schema_version")
+    if (
+        isinstance(version, bool)
+        or version != TOOL_EVIDENCE_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported tool evidence payload schema")
+    for name in ("invocation_identity_digest", "attempt_identity_digest"):
+        value = safe_payload.get(name)
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+    key_digest = safe_payload.get("idempotency_key_digest")
+    if key_digest is not None and (
+        not isinstance(key_digest, str)
+        or len(key_digest) != 64
+        or any(char not in "0123456789abcdef" for char in key_digest)
+    ):
+        raise ValueError(
+            "idempotency_key_digest must be a lowercase SHA-256 digest"
+        )
+    for name in (
+        "side_effect_kind",
+        "idempotency_kind",
+        "side_effect_state",
+        "compensation_state",
+        "retry_disposition",
+        "outcome_classification",
+    ):
+        value = safe_payload.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+    for name in (
+        "replay_supported",
+        "execution_detached",
+        "worker_terminated",
+        "provider_started",
+    ):
+        if type(safe_payload.get(name)) is not bool:
+            raise ValueError(f"{name} must be bool")
 
 
 def _validate_common(

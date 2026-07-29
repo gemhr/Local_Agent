@@ -205,7 +205,7 @@ class LimitedJournalTailReducer:
 
         model_started: dict[tuple[object, ...], int] = {}
         retrieval_started: dict[str, int] = {}
-        tool_started: dict[tuple[str | None, str | None, str], int] = {}
+        tool_started: dict[tuple[object, ...], int] = {}
 
         for record in records:
             event_type = record.event_type
@@ -357,30 +357,88 @@ def _tool_evidence(
     record: JournalRecord, *, started: bool
 ) -> ToolRecoveryEvidence:
     payload = record.safe_payload
+    evidence_version = payload.get("tool_evidence_schema_version")
+    versioned = isinstance(evidence_version, int) and not isinstance(
+        evidence_version, bool
+    )
     return ToolRecoveryEvidence(
         tool_name=_required_text(payload.get("tool_name")),
-        invocation_identity_digest=_identity_digest(
-            payload.get("invocation_id")
+        invocation_identity_digest=_evidence_identity_digest(
+            payload,
+            digest_name="invocation_identity_digest",
+            legacy_name="invocation_id",
+            versioned=versioned,
         ),
-        attempt_identity_digest=_identity_digest(payload.get("attempt_id")),
-        # The current journal schema does not persist ToolSideEffectKind.
-        side_effect_kind=None,
+        attempt_identity_digest=_evidence_identity_digest(
+            payload,
+            digest_name="attempt_identity_digest",
+            legacy_name="attempt_id",
+            versioned=versioned,
+        ),
+        side_effect_kind=_optional_text(payload.get("side_effect_kind")),
         side_effect_state=(
-            "STARTED" if started else _optional_text(payload.get("side_effect_state"))
+            (
+                _optional_text(payload.get("side_effect_state"))
+                if versioned
+                else "STARTED"
+            )
+            if started
+            else _optional_text(payload.get("side_effect_state"))
         ),
         retry_disposition=(
-            None if started else _optional_text(payload.get("retry_disposition"))
+            (
+                _optional_text(payload.get("retry_disposition"))
+                if versioned
+                else None
+            )
+            if started
+            else _optional_text(payload.get("retry_disposition"))
         ),
         execution_detached=(
-            False if started else payload.get("execution_detached") is True
+            payload.get("execution_detached") is True
         ),
         worker_terminated=(
-            False if started else payload.get("worker_terminated") is True
+            payload.get("worker_terminated") is True
         ),
         safe_error_code=(
-            None if started else _safe_error_code(payload.get("safe_error_code"))
+            _safe_error_code(payload.get("safe_error_code"))
         ),
         sequence=record.sequence,
+        event_kind="STARTED" if started else "COMPLETED",
+        step_id=record.step_id,
+        attempt_sequence=(
+            _nonnegative_int(payload.get("retry_index"))
+            if payload.get("retry_index") is not None
+            else None
+        ),
+        tool_evidence_schema_version=(
+            evidence_version if versioned else None
+        ),
+        idempotency_kind=_optional_text(payload.get("idempotency_kind")),
+        idempotency_key_digest=_optional_digest(
+            payload.get("idempotency_key_digest")
+        ),
+        replay_supported=(
+            payload.get("replay_supported")
+            if type(payload.get("replay_supported")) is bool
+            else None
+        ),
+        compensation_state=_optional_text(
+            payload.get("compensation_state")
+        ),
+        outcome_classification=_optional_text(
+            payload.get("outcome_classification")
+        ),
+        provider_started=(
+            payload.get("provider_started")
+            if type(payload.get("provider_started")) is bool
+            else None
+        ),
+        succeeded=(
+            payload.get("succeeded")
+            if type(payload.get("succeeded")) is bool
+            else None
+        ),
     )
 
 
@@ -404,11 +462,15 @@ def _collect_tool_risk(
 
 def _tool_key(
     item: ToolRecoveryEvidence,
-) -> tuple[str | None, str | None, str]:
+) -> tuple[object, ...]:
+    if (
+        item.invocation_identity_digest is None
+        or item.attempt_identity_digest is None
+    ):
+        return ("UNIDENTIFIED", item.sequence)
     return (
         item.invocation_identity_digest,
         item.attempt_identity_digest,
-        item.tool_name,
     )
 
 
@@ -503,6 +565,29 @@ def _identity_digest(value: object) -> str | None:
     if value is None:
         return None
     return text_digest(_required_text(value))
+
+
+def _evidence_identity_digest(
+    payload: dict[str, object],
+    *,
+    digest_name: str,
+    legacy_name: str,
+    versioned: bool,
+) -> str | None:
+    if versioned:
+        return _optional_digest(payload.get(digest_name))
+    return _identity_digest(payload.get(legacy_name))
+
+
+def _optional_digest(value: object) -> str | None:
+    if value is None:
+        return None
+    text = _required_text(value)
+    if len(text) != 64 or any(
+        char not in "0123456789abcdef" for char in text
+    ):
+        _corrupted()
+    return text
 
 
 def _append_reason(

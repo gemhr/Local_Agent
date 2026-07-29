@@ -202,8 +202,16 @@ async def test_committed_idempotent_failure_replays_same_invocation_once():
         first_completed.retry_disposition
         == RetryDisposition.SAFE_WITH_IDEMPOTENCY_KEY.value
     )
-    assert events[0].payload.invocation_id == events[2].payload.invocation_id
-    assert events[0].payload.attempt_id != events[2].payload.attempt_id
+    assert (
+        events[0].payload.invocation_identity_digest
+        == events[2].payload.invocation_identity_digest
+    )
+    assert (
+        events[0].payload.attempt_identity_digest
+        != events[2].payload.attempt_identity_digest
+    )
+    assert events[0].payload.invocation_id is None
+    assert events[0].payload.attempt_id is None
     assert events[0].payload.retry_index == 0
     assert events[2].payload.retry_index == 1
 
