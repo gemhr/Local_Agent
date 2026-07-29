@@ -28,7 +28,7 @@ class RuntimeEventSchemaTests(unittest.IsolatedAsyncioTestCase):
                 payload=RunStartedPayload("RUNNING"),
             )
         )
-        self.assertEqual(event.schema_version, 1)
+        self.assertEqual(event.schema_version, 2)
         self.assertTrue(event.event_id)
         self.assertEqual(event.sequence, 1)
         self.assertEqual(event.emitted_at.utcoffset().total_seconds(), 0)

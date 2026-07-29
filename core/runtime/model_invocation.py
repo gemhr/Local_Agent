@@ -37,6 +37,15 @@ from core.runtime.events import (
     ModelStartedPayload,
     RuntimeEventType,
 )
+from core.runtime.tracing import (
+    NoopSpanRecorder,
+    current_span_recorder,
+    install_span_recorder,
+    install_trace_context,
+    reset_span_recorder,
+    reset_trace_context,
+    start_span_safely,
+)
 
 
 class ModelUsageSource(str, Enum):
@@ -289,6 +298,7 @@ class ModelInvocationRouter:
         self,
         routing_policy: ModelRoutingPolicy | None = None,
         retry_executor: RetryExecutor | None = None,
+        span_recorder=None,
     ) -> None:
         self.routing_policy = routing_policy or ModelRoutingPolicy()
         # 已迁移入口仍是同步 Adapter，不能在此阻塞 Event Loop 等待；默认只做
@@ -296,8 +306,75 @@ class ModelInvocationRouter:
         self.retry_executor = retry_executor or RetryExecutor(
             RetryPolicy(base_delay_seconds=0.0, max_delay_seconds=0.0)
         )
+        self.span_recorder = span_recorder
 
     def invoke(
+        self,
+        *,
+        run_context: RunContext,
+        budget_ledger: BudgetLedger,
+        routing_decision: ModelRoutingDecision,
+        messages: Sequence[Mapping[str, str]],
+        adapter_resolver: ModelAdapterResolver,
+        circuit_breaker_registry: ModelCircuitBreakerRegistry,
+        token_estimate: int,
+        max_tokens: int,
+        output_started: bool = False,
+        event_emitter: StepEventEmitter | None = None,
+        generation_options: Mapping[str, object] | None = None,
+    ) -> ModelInvocationResult:
+        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        handle = start_span_safely(
+            recorder,
+            trace_id=run_context.trace_id,
+            run_id=run_context.run_id,
+            component="model_invocation",
+            operation="invoke",
+            step_id=(
+                event_emitter.step_id
+                if event_emitter is not None
+                else None
+            ),
+        )
+        token = install_trace_context(handle.context)
+        recorder_token = install_span_recorder(recorder)
+        try:
+            result = self._invoke_impl(
+                run_context=run_context,
+                budget_ledger=budget_ledger,
+                routing_decision=routing_decision,
+                messages=messages,
+                adapter_resolver=adapter_resolver,
+                circuit_breaker_registry=circuit_breaker_registry,
+                token_estimate=token_estimate,
+                max_tokens=max_tokens,
+                output_started=output_started,
+                event_emitter=event_emitter,
+                generation_options=generation_options,
+            )
+        except RunCancelledError:
+            handle.end_cancelled("RUN_CANCELLED")
+            raise
+        except (RunDeadlineExceededError, TimeoutError):
+            handle.end_timed_out()
+            raise
+        except BudgetExceededError:
+            handle.end_error("BUDGET_EXHAUSTED")
+            raise
+        except ModelInvocationChainError as exc:
+            handle.end_error(exc.error_code)
+            raise
+        except BaseException:
+            handle.end_error()
+            raise
+        else:
+            handle.end_ok()
+            return result
+        finally:
+            reset_trace_context(token)
+            reset_span_recorder(recorder_token)
+
+    def _invoke_impl(
         self,
         *,
         run_context: RunContext,
@@ -345,6 +422,10 @@ class ModelInvocationRouter:
                         "MODEL_CONTEXT_WINDOW_INSUFFICIENT",
                     )
                 )
+                self._record_pre_provider_attempt_span(
+                    run_context, event_emitter, candidate, index, retry_index,
+                    "MODEL_CONTEXT_WINDOW_INSUFFICIENT",
+                )
                 if not self._has_allowed_next(
                     candidates,
                     index,
@@ -368,6 +449,10 @@ class ModelInvocationRouter:
                         last_category,
                         "MODEL_CIRCUIT_OPEN",
                     )
+                )
+                self._record_pre_provider_attempt_span(
+                    run_context, event_emitter, candidate, index, retry_index,
+                    "MODEL_CIRCUIT_OPEN",
                 )
                 if not self._has_allowed_next(
                     candidates,
@@ -396,6 +481,10 @@ class ModelInvocationRouter:
                         "BUDGET_EXHAUSTED",
                     )
                 )
+                self._record_pre_provider_attempt_span(
+                    run_context, event_emitter, candidate, index, retry_index,
+                    "BUDGET_EXHAUSTED",
+                )
                 exc.model_attempts = tuple(attempts)
                 raise
             try:
@@ -415,8 +504,21 @@ class ModelInvocationRouter:
                         _safe_error_code(exc, category),
                     )
                 )
+                self._record_pre_provider_attempt_span(
+                    run_context, event_emitter, candidate, index, retry_index,
+                    _safe_error_code(exc, category),
+                    timed_out=isinstance(exc, (RunDeadlineExceededError, TimeoutError)),
+                    cancelled=isinstance(exc, RunCancelledError),
+                )
                 exc.model_attempts = tuple(attempts)
                 raise
+            attempt_span, attempt_trace_token = self._start_model_attempt_span(
+                run_context,
+                event_emitter,
+                candidate,
+                self._candidate_index(routing_decision, candidate.profile_id),
+                retry_index,
+            )
             try:
                 started_event_emitted = False
                 adapter = adapter_resolver.resolve(candidate.profile_id)
@@ -451,6 +553,8 @@ class ModelInvocationRouter:
                 # Provider 尚未调用；Journal 失败必须终止本次调用且不得 fallback/retry。
                 budget_ledger.release(reservation)
                 permit.abandon()
+                attempt_span.end_error("MODEL_STARTED_EVENT_FAILED")
+                reset_trace_context(attempt_trace_token)
                 raise
             except Exception as exc:
                 category = classify_model_failure(exc)
@@ -495,24 +599,36 @@ class ModelInvocationRouter:
                         ModelUsageSource.ESTIMATED if started else None,
                     )
                 )
-                if started_event_emitted:
-                    self._emit_attempt_completed(
-                        event_emitter,
-                        candidate=candidate,
-                        candidate_index=self._candidate_index(
-                            routing_decision, candidate.profile_id
-                        ),
-                        retry_index=retry_index,
-                        succeeded=False,
-                        safe_error_code=_safe_error_code(exc, category),
-                        duration_ms=max(
-                            0,
-                            int(
-                                (time.monotonic() - attempt_started_monotonic)
-                                * 1000
+                try:
+                    if started_event_emitted:
+                        self._emit_attempt_completed(
+                            event_emitter,
+                            candidate=candidate,
+                            candidate_index=self._candidate_index(
+                                routing_decision, candidate.profile_id
                             ),
-                        ),
-                    )
+                            retry_index=retry_index,
+                            succeeded=False,
+                            safe_error_code=_safe_error_code(exc, category),
+                            duration_ms=max(
+                                0,
+                                int(
+                                    (time.monotonic() - attempt_started_monotonic)
+                                    * 1000
+                                ),
+                            ),
+                        )
+                finally:
+                    if attempt_span.context is not None:
+                        attempt_span.set_safe_attribute("provider_started", started)
+                    attempt_error_code = _safe_error_code(exc, category)
+                    if category is ModelFailureCategory.CANCELLED:
+                        attempt_span.end_cancelled(attempt_error_code)
+                    elif category is ModelFailureCategory.DEADLINE_EXCEEDED:
+                        attempt_span.end_timed_out(attempt_error_code)
+                    else:
+                        attempt_span.end_error(attempt_error_code)
+                    reset_trace_context(attempt_trace_token)
                 # 同 Profile 失败后由统一策略决定是否插入一次 Retry。插入的
                 # 候选不属于 Fallback，且每次会重新取得 Permit、原子预留预算。
                 decision = self.retry_executor.decide(
@@ -570,6 +686,12 @@ class ModelInvocationRouter:
                 ):
                     break
                 continue
+            except BaseException:
+                budget_ledger.release(reservation)
+                permit.abandon()
+                attempt_span.end_cancelled("MODEL_ATTEMPT_ABORTED")
+                reset_trace_context(attempt_trace_token)
+                raise
             actual = response.actual_usage
             try:
                 budget_ledger.commit(
@@ -602,24 +724,30 @@ class ModelInvocationRouter:
                         ModelUsageSource.ESTIMATED,
                     )
                 )
-                if started_event_emitted:
-                    self._emit_attempt_completed(
-                        event_emitter,
-                        candidate=candidate,
-                        candidate_index=self._candidate_index(
-                            routing_decision, candidate.profile_id
-                        ),
-                        retry_index=retry_index,
-                        succeeded=False,
-                        safe_error_code="BUDGET_EXHAUSTED",
-                        duration_ms=max(
-                            0,
-                            int(
-                                (time.monotonic() - attempt_started_monotonic)
-                                * 1000
+                try:
+                    if started_event_emitted:
+                        self._emit_attempt_completed(
+                            event_emitter,
+                            candidate=candidate,
+                            candidate_index=self._candidate_index(
+                                routing_decision, candidate.profile_id
                             ),
-                        ),
-                    )
+                            retry_index=retry_index,
+                            succeeded=False,
+                            safe_error_code="BUDGET_EXHAUSTED",
+                            duration_ms=max(
+                                0,
+                                int(
+                                    (time.monotonic() - attempt_started_monotonic)
+                                    * 1000
+                                ),
+                            ),
+                        )
+                finally:
+                    if attempt_span.context is not None:
+                        attempt_span.set_safe_attribute("provider_started", True)
+                    attempt_span.end_error("BUDGET_EXHAUSTED")
+                    reset_trace_context(attempt_trace_token)
                 exc.model_attempts = tuple(attempts)
                 raise
             permit.record_success()
@@ -638,23 +766,29 @@ class ModelInvocationRouter:
                     ),
                 )
             )
-            if started_event_emitted:
-                self._emit_attempt_completed(
-                    event_emitter,
-                    candidate=candidate,
-                    candidate_index=self._candidate_index(
-                        routing_decision, candidate.profile_id
-                    ),
-                    retry_index=retry_index,
-                    succeeded=True,
-                    safe_error_code=None,
-                    duration_ms=max(
-                        0,
-                        int(
-                            (time.monotonic() - attempt_started_monotonic) * 1000
+            try:
+                if started_event_emitted:
+                    self._emit_attempt_completed(
+                        event_emitter,
+                        candidate=candidate,
+                        candidate_index=self._candidate_index(
+                            routing_decision, candidate.profile_id
                         ),
-                    ),
-                )
+                        retry_index=retry_index,
+                        succeeded=True,
+                        safe_error_code=None,
+                        duration_ms=max(
+                            0,
+                            int(
+                                (time.monotonic() - attempt_started_monotonic) * 1000
+                            ),
+                        ),
+                    )
+            finally:
+                if attempt_span.context is not None:
+                    attempt_span.set_safe_attribute("provider_started", True)
+                attempt_span.end_ok()
+                reset_trace_context(attempt_trace_token)
             return ModelInvocationResult(
                 response.output,
                 routing_decision.capability_preferred_profile_id,
@@ -680,6 +814,56 @@ class ModelInvocationRouter:
             last_category,
             terminal_error_code,
         )
+
+    def _start_model_attempt_span(
+        self,
+        run_context: RunContext,
+        event_emitter: StepEventEmitter | None,
+        candidate: ModelRoutingCandidate,
+        candidate_index: int,
+        retry_index: int,
+    ):
+        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        handle = start_span_safely(
+            recorder,
+            trace_id=run_context.trace_id,
+            run_id=run_context.run_id,
+            component="model_attempt",
+            operation="attempt",
+            step_id=event_emitter.step_id if event_emitter is not None else None,
+        )
+        if handle.context is not None:
+            handle.set_safe_attribute("model_profile", candidate.profile_id.value)
+            handle.set_safe_attribute("candidate_index", candidate_index)
+            handle.set_safe_attribute("retry_index", retry_index)
+        return handle, install_trace_context(handle.context)
+
+    def _record_pre_provider_attempt_span(
+        self,
+        run_context: RunContext,
+        event_emitter: StepEventEmitter | None,
+        candidate: ModelRoutingCandidate,
+        candidate_index: int,
+        retry_index: int,
+        error_code: str,
+        *,
+        timed_out: bool = False,
+        cancelled: bool = False,
+    ) -> None:
+        handle, token = self._start_model_attempt_span(
+            run_context, event_emitter, candidate, candidate_index, retry_index
+        )
+        try:
+            if handle.context is not None:
+                handle.set_safe_attribute("provider_started", False)
+            if cancelled:
+                handle.end_cancelled(error_code)
+            elif timed_out:
+                handle.end_timed_out(error_code)
+            else:
+                handle.end_error(error_code)
+        finally:
+            reset_trace_context(token)
 
     @staticmethod
     def _candidate_index(

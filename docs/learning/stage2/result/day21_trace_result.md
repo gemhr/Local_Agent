@@ -234,3 +234,191 @@ Recorder start 降级 Noop；sink record 异常被 Handle 隔离；不会导致�
 - 若正在 cherry-pick 同一提交且确认本地已含全部内容，使用 `git cherry-pick --skip`，不要把所有文件盲目标成 ours/theirs；
 - 若本地基线不是 `667941f`，先保存工作区并将本地 Day 20 分支与 `667941f` 对齐，再 cherry-pick；如本地确有独立修改，应按文件语义合并，而不是重复加入新增文件；
 - 可用 `git patch-id --stable` 或 `git cherry` 判断不同 commit hash 是否其实包含相同 patch。
+
+---
+
+## 30. 本轮增量完成：真实 Invocation / Attempt / Stage 接入
+
+> 本节为 2026-07-29 在本地真实路径上的继续实现记录。以上 1～29 节为原始 Day 21 文档，保持不改写；本轮结果仅在此后增量追加。
+
+### 1. 完成范围
+
+本次完成 Coordinated Runtime 的真实 Model、Tool、Retrieval 调用链接入，以及 Event/Journal/Log 身份、Journal v1/v2 摘要兼容、Dropped Span 指标和 Active Span 不变量。
+
+未实现 Snapshot、Replay、默认 API 迁移、Prometheus、Collector、Jaeger 或第 22/23 天内容。附件第八点“跨平台 uv 测试环境”按用户说明忽略：当前在本地真实 Windows 路径运行，未修改 `pyproject.toml`、`uv.lock` 或本地 `llama_cpp_python` wheel 策略。
+
+### 2. Trace 所有权与传播
+
+- `RunContext.trace_id` 仍是唯一 Trace ID Owner。
+- `RunCoordinator` 创建 Run root span，并把当前 Span Recorder 与 Trace Context 一起安装到 ContextVar。
+- `ParallelExecutor` 的真实 worker 创建 Step span；并行 Step 共享 Run parent，不互相串联。
+- `BoundedBlockingExecutor` 继续通过 `copy_context()` 把 Trace Context 和当前 Recorder 传播到同步 worker。
+- 所有 token 均在 `finally` 中 reset；不同 Run 不共享当前 span。
+- Recorder start 失败降级为无身份 Noop handle，Event 使用 `span_id=null`，不会伪造 span ID。
+
+### 3. Model Invocation / Attempt
+
+真实 Owner：
+
+```text
+ModelInvocationRouter
+└── Model Invocation Span
+    ├── Model Attempt Span (candidate/retry 0)
+    ├── Model Attempt Span (retry 1)
+    └── Model Attempt Span (fallback candidate)
+```
+
+- 一次 `invoke` 只有一个 Invocation span。
+- 每个 retry、fallback、circuit-open、context-limit、budget-exhausted 或真实 provider attempt 都有独立 Attempt span。
+- Attempt 的 `parent_span_id` 等于 Invocation span ID；Invocation parent 来自当前 Step 或 Query Rewrite Stage。
+- Circuit Open 等 provider 未启动路径记录 `provider_started=false`，不记录 token、cost 或 provider duration。
+- Provider attempt 的 `MODEL_STARTED` 与 `MODEL_COMPLETED` 在 Attempt span 作用域内发布，Completed 在 span end/reset 前发布。
+- Recorder 失败不进入 Model retry/fallback 判定。
+- Span 只保存 profile、candidate/retry index、provider_started 和安全错误码，不保存 prompt、messages、output、URL、API key 或异常正文。
+
+### 4. Tool Invocation / Attempt
+
+真实 Owner：
+
+```text
+ToolExecutionService
+└── Tool Invocation Span
+    ├── ToolAttemptExecutor / Tool Attempt Span (retry 0)
+    └── ToolAttemptExecutor / Tool Attempt Span (idempotent replay/retry 1)
+```
+
+- 稳定 `ToolInvocation` 对应一个 Invocation span，每个真实 Attempt 对应独立子 span。
+- Retry/幂等 replay 保持同一 Invocation parent；NON_IDEMPOTENT 的既有禁止重试语义不变。
+- Attempt span 只记录 tool name、retry index、provider_started、side-effect state、retry disposition 和 detached 元数据。
+- `TOOL_STARTED`/`TOOL_COMPLETED` 在对应 Attempt span 内发布。
+- 同步 timeout 在 Runtime 停止等待时结束 Attempt span；detached worker 后续只释放 permit/lease，不修改或重开 span。
+- Resource Conflict、Output Too Large、Cancellation、Timeout、Compensation Failure 和 Outcome Unknown 沿用既有业务状态映射。
+
+### 5. Retrieval / Stage 与 Query Rewrite
+
+真实 Owner：
+
+```text
+RetrievalExecutionService
+└── Retrieval Span
+    ├── Query Rewrite Stage Span
+    │   └── Model Invocation Span
+    │       └── Model Attempt Span
+    ├── Embedding Stage Span
+    ├── Vector Retrieve Stage Span
+    ├── Keyword Retrieve Stage Span
+    ├── Rerank Stage Span
+    ├── Document Load Stage Span
+    └── Context Build Stage Span
+```
+
+- `_run_stage` 只为实际执行的 Stage 创建 span；`SKIPPED` 只保留结果记录，不创建 span，也不发布虚假的 Stage Completed event。
+- Stage span 记录 stage、input/output count 和 degraded 标记，不记录 query、embedding、chunk、citation 正文、memory 或路径。
+- Query Rewrite Stage 激活期间调用内部 `ModelInvocationRouter`，所以 Model Invocation 的实际 parent 是 Query Rewrite span，而不是 Step。
+- `RETRIEVAL_STARTED`/`RETRIEVAL_COMPLETED` 使用 Retrieval span 身份。
+- `RETRIEVAL_STAGE_COMPLETED` 使用对应 Stage span 身份。
+- 延迟 Context Binding 路径保留 Retrieval/Context Build handle，先发布完成事件，再结束并 reset span。
+- EMPTY、FAILED、CANCELLED、TIMED_OUT、DEGRADED 继续按真实结果映射；detached worker 不覆盖已结束 span。
+
+### 6. Event / Journal / Structured Log 身份
+
+已验证：
+
+```text
+RUN_STARTED.span_id == RUN_COMPLETED.span_id == Run Span ID
+STEP_STARTED.span_id == STEP_COMPLETED.span_id == Step Span ID
+MODEL_STARTED.span_id == MODEL_COMPLETED.span_id == Model Attempt Span ID
+TOOL_STARTED.span_id == TOOL_COMPLETED.span_id == Tool Attempt Span ID
+RETRIEVAL_STARTED.span_id == RETRIEVAL_COMPLETED.span_id == Retrieval Span ID
+RETRIEVAL_STAGE_COMPLETED.span_id == 对应 Stage Span ID
+```
+
+Event、JournalRecord 与 Structured Log 保留相同的 nullable `span_id`/`parent_span_id`。Event 只读取当前 span，不创建 ID；Recorder 降级时身份为 null。
+
+### 7. Journal Schema 与 Digest 兼容
+
+- 新 Runtime Event schema：v2。
+- 新 Journal schema：v2。
+- v1 Runtime Event 仍可读取，用于旧记录兼容。
+- v1 Journal digest 严格按旧字段计算，不包含 `span_id`/`parent_span_id`。
+- v2 Journal digest 包含 `span_id`/`parent_span_id`。
+- SQLite 启动时只为旧表增加 nullable span 列，不改写 append-only 行。
+- 测试手工创建了不含 span 列的真实 v1/Day 19 结构数据库；读取后旧记录保持 `span_id=null` 并通过旧摘要校验。
+- 同一旧 Event 的无 span 重复仍识别为 Duplicate；同一 Event ID 带新 span 身份时返回 `EVENT_ID_CONFLICT`。
+- `read_after`、`get_by_event_id`、`last_sequence` 与 terminal invariant 均保持兼容。
+
+### 8. Dropped Span 指标与安全快照
+
+Day 20 Metric Descriptor 已注册：
+
+```text
+runtime_trace_dropped_spans_total{component,reason}
+```
+
+固定 reason：
+
+```text
+recorder_start_failed
+recorder_end_failed
+adapter_failed
+flush_failed
+queue_full
+```
+
+- start/end 检测每次只增加一次；Handle first-end-wins，重复结束不重复计数。
+- Metrics Recorder 失败不会影响业务；`SpanRecorderHealth` 的本地计数仍保留。
+- Trace health 不生成 RuntimeEvent，避免 Trace → Metrics → Event 循环。
+- 普通日志不暴露 active span ID 列表。
+
+安全快照字段：
+
+```text
+active_span_count
+completed_span_count
+dropped_span_count
+```
+
+成功、取消、超时、TaskGroup sibling failure 和 detached worker timeout 测试均验证 `active_span_count == 0`；Recorder close 也会收口 active handle。
+
+### 9. 测试结果
+
+本地 Windows 真实路径执行结果：
+
+```text
+目标 pytest:
+180 passed, 16 subtests passed
+
+全仓 pytest:
+523 passed, 42 subtests passed
+
+compileall:
+通过
+
+uv lock --check:
+通过（Resolved 157 packages）
+
+git diff --check:
+通过
+```
+
+### 10. 完成清单
+
+- Model Invocation span：完成。
+- Model Attempt span：完成。
+- Retry/Fallback hierarchy：完成。
+- Tool Invocation span：完成。
+- Tool Attempt span：完成。
+- Idempotency Replay hierarchy：完成，复用 Invocation、Attempt 为兄弟节点。
+- Retrieval span：完成。
+- Retrieval Stage span：完成，仅真实执行 Stage。
+- Query Rewrite Model parent：Query Rewrite Stage。
+- Run/Step/Model/Tool/Retrieval event span：完成并验证。
+- Journal schema version：v2。
+- Old journal digest：v1 旧字段。
+- New journal digest：v2 含 span 身份。
+- Old SQLite compatibility：完成，使用手工 v1 fixture。
+- Dropped span metric：完成。
+- Active span after run/cancel/timeout：均为 0。
+- ContextVar cleanup：完成。
+- Windows wheel strategy：按用户指示不改动、不纳入本次修复。
+- 需要人工确认的问题：无。

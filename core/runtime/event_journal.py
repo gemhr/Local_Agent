@@ -19,7 +19,8 @@ from core.runtime.events import (
 )
 
 
-JOURNAL_SCHEMA_VERSION = 1
+JOURNAL_SCHEMA_VERSION = 2
+SUPPORTED_JOURNAL_SCHEMA_VERSIONS = frozenset({1, JOURNAL_SCHEMA_VERSION})
 MAX_READ_LIMIT = 1000
 
 
@@ -132,7 +133,7 @@ class JournalRecord:
 
     def __post_init__(self) -> None:
         _require_positive_int(self.journal_schema_version, "journal_schema_version")
-        if self.journal_schema_version != JOURNAL_SCHEMA_VERSION:
+        if self.journal_schema_version not in SUPPORTED_JOURNAL_SCHEMA_VERSIONS:
             raise ValueError("不支持的 journal_schema_version")
         _require_positive_int(self.event_schema_version, "event_schema_version")
         _require_text(self.event_id, "event_id")
@@ -185,8 +186,6 @@ class JournalRecord:
             "event_id": event.event_id,
             "run_id": event.run_id,
             "trace_id": event.trace_id,
-            "span_id": event.span_id,
-            "parent_span_id": event.parent_span_id,
             "sequence": event.sequence,
             "emitted_at": event.emitted_at.isoformat(),
             "event_type": event.event_type.value,
@@ -196,6 +195,8 @@ class JournalRecord:
             "safe_payload": safe_payload,
             "payload_digest": payload_digest,
         }
+        digest_source["span_id"] = event.span_id
+        digest_source["parent_span_id"] = event.parent_span_id
         return cls(
             journal_schema_version=JOURNAL_SCHEMA_VERSION,
             event_schema_version=event.schema_version,
@@ -230,14 +231,12 @@ class JournalRecord:
             )
 
     def _event_digest_source(self, payload_digest: str) -> dict[str, object]:
-        return {
+        source = {
             "journal_schema_version": self.journal_schema_version,
             "event_schema_version": self.event_schema_version,
             "event_id": self.event_id,
             "run_id": self.run_id,
             "trace_id": self.trace_id,
-            "span_id": self.span_id,
-            "parent_span_id": self.parent_span_id,
             "sequence": self.sequence,
             "emitted_at": self.emitted_at.isoformat(),
             "event_type": self.event_type.value,
@@ -247,6 +246,24 @@ class JournalRecord:
             "safe_payload": self.safe_payload,
             "payload_digest": payload_digest,
         }
+        if self.journal_schema_version >= 2:
+            source["span_id"] = self.span_id
+            source["parent_span_id"] = self.parent_span_id
+        return source
+
+    def is_duplicate_of(self, candidate: "JournalRecord") -> bool:
+        """Use the stored record's schema when identifying a duplicate."""
+        if self.run_id != candidate.run_id or self.sequence != candidate.sequence:
+            return False
+        if self.journal_schema_version >= 2:
+            return self.event_digest == candidate.event_digest
+        if candidate.span_id is not None or candidate.parent_span_id is not None:
+            return False
+        legacy_source = dict(candidate._event_digest_source(candidate.payload_digest))
+        legacy_source["journal_schema_version"] = 1
+        legacy_source.pop("span_id", None)
+        legacy_source.pop("parent_span_id", None)
+        return self.event_digest == _digest(legacy_source)
 
     def __repr__(self) -> str:
         return (

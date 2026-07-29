@@ -7,6 +7,7 @@ import pytest
 
 from core.runtime import (
     BudgetLedger,
+    InMemorySpanRecorder,
     OperationIdempotency,
     RetryPolicy,
     RetryDisposition,
@@ -28,6 +29,7 @@ from core.runtime import (
     RunEventEmitter,
     RuntimeEventChannel,
     RuntimeEventType,
+    SpanStatus,
 )
 from core.runtime.retry import RetryExecutor
 
@@ -126,6 +128,39 @@ async def test_read_only_transient_retry_keeps_invocation_and_changes_attempt():
 
 
 @pytest.mark.asyncio
+async def test_trace_invocation_owns_retry_attempt_siblings():
+    failure = ToolAdapterInvocationError(
+        category=ToolErrorCategory.TRANSIENT,
+        safe_error_code="TRANSIENT",
+        safe_message="temporary",
+    )
+    adapter = ScriptedAdapter([failure, "ok"])
+    context = make_context(budget=RunBudget(max_tool_calls=2, max_retries=1))
+    recorder = InMemorySpanRecorder()
+    service = ToolExecutionService(
+        retry_executor=RetryExecutor(
+            RetryPolicy(max_attempts=2, base_delay_seconds=0, max_delay_seconds=0)
+        ),
+        span_recorder=recorder,
+    )
+    result = await service.execute(
+        invocation=adapter.build_invocation("x"),
+        adapter=adapter,
+        run_context=context,
+        step_id="step",
+    )
+    assert result.status is ToolExecutionStatus.SUCCEEDED
+    records = recorder.snapshot()
+    invocation = next(r for r in records if r.component == "tool_invocation")
+    attempts = [r for r in records if r.component == "tool_attempt"]
+    assert len(attempts) == 2
+    assert {r.parent_span_id for r in attempts} == {invocation.span_id}
+    assert len({r.span_id for r in attempts}) == 2
+    assert [r.status for r in attempts] == [SpanStatus.ERROR, SpanStatus.OK]
+    assert recorder.health_snapshot().active_span_count == 0
+
+
+@pytest.mark.asyncio
 async def test_non_idempotent_transient_failure_is_not_retried():
     failure = ToolAdapterInvocationError(
         category=ToolErrorCategory.TRANSIENT,
@@ -176,7 +211,8 @@ async def test_events_pair_only_after_resource_and_budget_and_hide_output():
         channel=channel,
     ).for_step("step")
     adapter = ScriptedAdapter(["secret-output"])
-    result = await ToolExecutionService().execute(
+    recorder = InMemorySpanRecorder()
+    result = await ToolExecutionService(span_recorder=recorder).execute(
         invocation=adapter.build_invocation("secret-argument"),
         adapter=adapter,
         run_context=context,
@@ -191,6 +227,11 @@ async def test_events_pair_only_after_resource_and_budget_and_hide_output():
         RuntimeEventType.TOOL_COMPLETED,
     ]
     assert events[-1].payload.duration_ms == result.duration_ms
+    attempt = next(
+        record for record in recorder.snapshot() if record.component == "tool_attempt"
+    )
+    assert {event.span_id for event in events} == {attempt.span_id}
+    assert {event.parent_span_id for event in events} == {attempt.parent_span_id}
     safe = str([event.to_safe_dict() for event in events])
     assert "secret-output" not in safe
     assert "secret-argument" not in safe
@@ -249,7 +290,8 @@ async def test_sync_timeout_keeps_resource_until_worker_finishes():
         tool_name="scripted", arguments={}, resource_key="shared"
     )
     context = make_context()
-    service = ToolExecutionService()
+    recorder = InMemorySpanRecorder()
+    service = ToolExecutionService(span_recorder=recorder)
     channel = RuntimeEventChannel(
         8,
         run_id=context.run_id,
@@ -280,6 +322,11 @@ async def test_sync_timeout_keeps_resource_until_worker_finishes():
     snapshot = service.concurrency_controller.worker_snapshot()
     assert snapshot["active_worker_count"] == 1
     assert snapshot["detached_worker_count"] == 1
+    assert recorder.health_snapshot().active_span_count == 0
+    attempt_span = next(
+        record for record in recorder.snapshot() if record.component == "tool_attempt"
+    )
+    assert attempt_span.status is SpanStatus.TIMED_OUT
     assert "late" not in str(snapshot)
     await asyncio.to_thread(finished.wait, 1)
     assert await asyncio.to_thread(

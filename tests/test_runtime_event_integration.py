@@ -12,6 +12,7 @@ from core.runtime import (
     BudgetLedger,
     CancellationReason,
     GeneratorModelAdapter,
+    InMemorySpanRecorder,
     ModelAdapterInvocationError,
     ModelAdapterResolver,
     ModelAdapterResponse,
@@ -340,6 +341,8 @@ class ModelStartedTimingTests(unittest.IsolatedAsyncioTestCase):
             channel=channel,
         )
         adapter = adapter_builder(channel) if adapter_builder is not None else None
+        recorder = InMemorySpanRecorder()
+        self.last_span_recorder = recorder
         resolver = resolver_override or ModelAdapterResolver(
             {profile.profile_id: adapter}
         )
@@ -347,7 +350,7 @@ class ModelStartedTimingTests(unittest.IsolatedAsyncioTestCase):
         result = None
         try:
             result = await asyncio.to_thread(
-                ModelInvocationRouter().invoke,
+                ModelInvocationRouter(span_recorder=recorder).invoke,
                 run_context=context,
                 budget_ledger=ledger,
                 routing_decision=decision,
@@ -419,6 +422,14 @@ class ModelStartedTimingTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(started.emitted_at, adapter.entered_at)
         self.assertGreaterEqual(completed.emitted_at, adapter.returned_at)
         self.assertLess(started.emitted_at, completed.emitted_at)
+        attempt = next(
+            record
+            for record in self.last_span_recorder.snapshot()
+            if record.component == "model_attempt"
+        )
+        self.assertEqual(started.span_id, attempt.span_id)
+        self.assertEqual(completed.span_id, attempt.span_id)
+        self.assertEqual(started.parent_span_id, attempt.parent_span_id)
 
     async def test_adapter_resolution_failure_has_no_started(self):
         profile, _decision = self.make_profile_and_decision()

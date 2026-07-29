@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -163,6 +165,7 @@ def test_read_arguments_and_record_strict_validation(journal):
         with pytest.raises(ValueError):
             journal.read_after("run-a", sequence, limit)
     good = JournalRecord.from_event(event(1))
+    assert good.journal_schema_version == 2
     with pytest.raises(ValueError):
         replace(good, journal_schema_version=True)
     with pytest.raises(ValueError):
@@ -211,5 +214,99 @@ def test_sqlite_corruption_fails_closed(tmp_path: Path):
         with pytest.raises(JournalError) as exc:
             journal.read_after("run-a", 0, 10)
         assert exc.value.error_code is JournalErrorCode.JOURNAL_CORRUPTED
+    finally:
+        journal.close()
+
+
+def test_real_v1_sqlite_fixture_keeps_legacy_digest_and_nullable_span(tmp_path: Path):
+    path = tmp_path / "day19.db"
+    value = event(1, event_id="legacy-event")
+    safe_payload = value.to_journal_dict()["safe_payload"]
+
+    def digest(payload):
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    payload_digest = digest(safe_payload)
+    legacy_source = {
+        "journal_schema_version": 1,
+        "event_schema_version": value.schema_version,
+        "event_id": value.event_id,
+        "run_id": value.run_id,
+        "trace_id": value.trace_id,
+        "sequence": value.sequence,
+        "emitted_at": value.emitted_at.isoformat(),
+        "event_type": value.event_type.value,
+        "component": value.component,
+        "step_id": value.step_id,
+        "step_sequence": value.step_sequence,
+        "safe_payload": safe_payload,
+        "payload_digest": payload_digest,
+    }
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE runtime_event_journal (
+                journal_schema_version INTEGER NOT NULL,
+                event_schema_version INTEGER NOT NULL,
+                event_id TEXT NOT NULL UNIQUE,
+                run_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                emitted_at TEXT NOT NULL,
+                journaled_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                component TEXT NOT NULL,
+                step_id TEXT,
+                step_sequence INTEGER,
+                safe_payload TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                event_digest TEXT NOT NULL,
+                PRIMARY KEY (run_id, sequence)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO runtime_event_journal VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            """,
+            (
+                1,
+                value.schema_version,
+                value.event_id,
+                value.run_id,
+                value.trace_id,
+                value.sequence,
+                value.emitted_at.isoformat(),
+                datetime.now(UTC).isoformat(),
+                value.event_type.value,
+                value.component,
+                value.step_id,
+                value.step_sequence,
+                json.dumps(safe_payload, ensure_ascii=False),
+                payload_digest,
+                digest(legacy_source),
+            ),
+        )
+
+    journal = SQLiteRunEventJournal(str(path))
+    try:
+        record = journal.get_by_event_id(value.event_id)
+        assert record is not None
+        assert record.journal_schema_version == 1
+        assert record.span_id is None
+        assert record.parent_span_id is None
+        assert journal.append(value) is JournalAppendStatus.DUPLICATE
+        with pytest.raises(JournalError) as exc:
+            journal.append(replace(value, span_id="new-span"))
+        assert exc.value.error_code is JournalErrorCode.EVENT_ID_CONFLICT
     finally:
         journal.close()

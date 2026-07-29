@@ -49,7 +49,8 @@ from core.runtime.events import (
     TimeoutPayload,
 )
 from core.runtime.tracing import (NoopSpanRecorder, activate_span,
-                                  install_trace_context, reset_trace_context,
+                                  install_span_recorder, install_trace_context,
+                                  reset_span_recorder, reset_trace_context,
                                   start_span_safely)
 
 
@@ -200,6 +201,7 @@ class RunCoordinator:
             component="runtime", operation="run"
         )
         trace_token = install_trace_context(run_span.context)
+        recorder_token = install_span_recorder(self.span_recorder)
 
         registered = False
         cleanup_error_codes: list[str] = []
@@ -287,6 +289,7 @@ class RunCoordinator:
         elif result.status is RunStatus.CANCELLED: run_span.end_cancelled(result.error_code or "CANCELLED")
         else: run_span.end_error(result.error_code or "RUN_FAILED")
         reset_trace_context(trace_token)
+        reset_span_recorder(recorder_token)
         return result
 
     async def _execute_batches(

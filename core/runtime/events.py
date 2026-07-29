@@ -12,7 +12,7 @@ from typing import ClassVar, TypeAlias
 from uuid import uuid4
 
 
-RUNTIME_EVENT_SCHEMA_VERSION = 1
+RUNTIME_EVENT_SCHEMA_VERSION = 2
 
 
 class RuntimeEventType(str, Enum):
@@ -556,7 +556,7 @@ class RuntimeEvent:
     CURRENT_SCHEMA_VERSION: ClassVar[int] = RUNTIME_EVENT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema_version != self.CURRENT_SCHEMA_VERSION:
+        if self.schema_version not in {1, self.CURRENT_SCHEMA_VERSION}:
             raise ValueError("不支持的 Runtime Event schema_version")
         _require_text(self.event_id, "event_id")
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence <= 0:

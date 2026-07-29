@@ -73,6 +73,7 @@ _GLOBAL_ALLOWED_LABELS = frozenset(
         "runtime_mode",
         "tool_name",
         "budget_dimension",
+        "reason",
     }
 )
 _SAFE_LABEL_VALUE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -194,6 +195,14 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
         _descriptor("runtime_journal_append_failures_total", MetricType.COUNTER, "Journal 追加失败数", "events"),
         _descriptor("runtime_event_duplicates_total", MetricType.COUNTER, "重复检测次数", "occurrences", "component"),
         _descriptor("runtime_observability_dropped_records_total", MetricType.COUNTER, "Observability 丢弃记录数", "records"),
+        _descriptor(
+            "runtime_trace_dropped_spans_total",
+            MetricType.COUNTER,
+            "Trace 丢弃 Span 数",
+            "spans",
+            "component",
+            "reason",
+        ),
         _descriptor("runtime_active_runs", MetricType.GAUGE, "当前活跃 Run", "runs"),
         _descriptor("runtime_active_steps", MetricType.GAUGE, "当前活跃 Step", "steps"),
         _descriptor("runtime_detached_tool_workers", MetricType.GAUGE, "Detached Tool Worker", "workers"),
