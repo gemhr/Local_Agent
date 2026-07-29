@@ -653,3 +653,46 @@ __all__ += [
     "SchedulerClaimGateState",
     "default_runtime_metadata",
 ]
+
+from core.runtime.journal_tail_reducer import (
+    IGNORED_EVENT_TYPES,
+    REDUCED_EVENT_TYPES,
+    JournalTailReduction,
+    JournalTailReductionError,
+    JournalTailValidation,
+    JournalTailValidationError,
+    JournalTailValidator,
+    LimitedJournalTailReducer,
+)
+from core.runtime.recovery_contract import (
+    RECOVERY_REASON_TEXT,
+    RECOVERY_STATUS_PRIORITY,
+    RecoveryAssessment,
+    RecoveryProjection,
+    RecoveryReason,
+    RecoveryStatus,
+    ToolRecoveryEvidence,
+    select_recovery_status,
+)
+from core.runtime.recovery_validation import RecoveryValidator, assess_recovery
+
+__all__ += [
+    "IGNORED_EVENT_TYPES",
+    "RECOVERY_REASON_TEXT",
+    "RECOVERY_STATUS_PRIORITY",
+    "REDUCED_EVENT_TYPES",
+    "JournalTailReduction",
+    "JournalTailReductionError",
+    "JournalTailValidation",
+    "JournalTailValidationError",
+    "JournalTailValidator",
+    "LimitedJournalTailReducer",
+    "RecoveryAssessment",
+    "RecoveryProjection",
+    "RecoveryReason",
+    "RecoveryStatus",
+    "RecoveryValidator",
+    "ToolRecoveryEvidence",
+    "assess_recovery",
+    "select_recovery_status",
+]

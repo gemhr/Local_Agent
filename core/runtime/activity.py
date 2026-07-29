@@ -20,6 +20,7 @@ _TRACKED_FIELDS = frozenset(
         "detached_tool_workers",
         "detached_retrieval_workers",
         "step_workers_active",
+        "state_event_transitions_in_flight",
     }
 )
 
@@ -34,6 +35,7 @@ class RuntimeActivityTracker:
         self._lock = threading.Lock()
         self._counts = {name: 0 for name in _TRACKED_FIELDS}
         self._unknown_sources: set[str] = set()
+        self._state_event_transition_epoch = 0
 
     @contextmanager
     def track(self, field_name: str) -> Iterator[None]:
@@ -54,6 +56,8 @@ class RuntimeActivityTracker:
             if self._counts[field_name] <= 0:
                 raise RuntimeError("runtime activity counter underflow")
             self._counts[field_name] -= 1
+            if field_name == "state_event_transitions_in_flight":
+                self._state_event_transition_epoch += 1
 
     def mark_unknown(self, source: str) -> None:
         if not isinstance(source, str) or not source.strip():
@@ -65,9 +69,13 @@ class RuntimeActivityTracker:
         with self._lock:
             self._unknown_sources.discard(source)
 
-    def counts(self) -> tuple[dict[str, int], bool]:
+    def counts(self) -> tuple[dict[str, int], bool, int]:
         with self._lock:
-            return dict(self._counts), bool(self._unknown_sources)
+            return (
+                dict(self._counts),
+                bool(self._unknown_sources),
+                self._state_event_transition_epoch,
+            )
 
     @staticmethod
     def _validate_field(field_name: str) -> None:
@@ -101,7 +109,7 @@ class RuntimeActivityProvider:
         state_copy = self.agent_state.snapshot_copy()
         budget = self.budget_ledger.snapshot()
         gate = self.claim_gate.snapshot()
-        counts, unknown = self.tracker.counts()
+        counts, unknown, transition_epoch = self.tracker.counts()
         publications = (
             self.event_channel.publications_in_flight
             if self.event_channel is not None
@@ -124,6 +132,11 @@ class RuntimeActivityProvider:
             step_workers_active=counts["step_workers_active"],
             activity_unknown=unknown,
             captured_at=datetime.now(UTC),
+            state_event_transitions_in_flight=counts[
+                "state_event_transitions_in_flight"
+            ],
+            state_event_transition_epoch=transition_epoch,
+            state_event_transition_observed=False,
         )
 
 

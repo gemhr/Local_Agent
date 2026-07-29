@@ -137,6 +137,15 @@ def _activity_snapshot_from_payload(
         captured_at=parse_utc(
             payload["captured_at"], "activity_snapshot.captured_at"
         ),
+        state_event_transitions_in_flight=payload[
+            "state_event_transitions_in_flight"
+        ],
+        state_event_transition_epoch=payload[
+            "state_event_transition_epoch"
+        ],
+        state_event_transition_observed=payload[
+            "state_event_transition_observed"
+        ],
     )
 
 

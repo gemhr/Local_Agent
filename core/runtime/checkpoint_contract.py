@@ -80,6 +80,9 @@ class RuntimeActivitySnapshot:
     step_workers_active: int
     activity_unknown: bool
     captured_at: datetime
+    state_event_transitions_in_flight: int = 0
+    state_event_transition_epoch: int = 0
+    state_event_transition_observed: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -93,15 +96,22 @@ class RuntimeActivitySnapshot:
             "detached_retrieval_workers",
             "event_publications_in_flight",
             "step_workers_active",
+            "state_event_transitions_in_flight",
+            "state_event_transition_epoch",
         ):
             _require_count(getattr(self, name), name)
         if type(self.activity_unknown) is not bool:
             raise TypeError("activity_unknown must be bool")
+        if type(self.state_event_transition_observed) is not bool:
+            raise TypeError("state_event_transition_observed must be bool")
         _require_utc(self.captured_at, "captured_at")
 
     @property
     def quiescent(self) -> bool:
-        return not self.activity_unknown and all(
+        return (
+            not self.activity_unknown
+            and not self.state_event_transition_observed
+            and all(
             getattr(self, name) == 0
             for name in (
                 "claim_in_progress",
@@ -114,6 +124,8 @@ class RuntimeActivitySnapshot:
                 "detached_retrieval_workers",
                 "event_publications_in_flight",
                 "step_workers_active",
+                "state_event_transitions_in_flight",
+            )
             )
         )
 

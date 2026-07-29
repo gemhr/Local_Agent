@@ -49,6 +49,7 @@ def test_each_tracked_attempt_and_detached_worker_blocks_quiescence():
         "detached_tool_workers",
         "detached_retrieval_workers",
         "step_workers_active",
+        "state_event_transitions_in_flight",
     ):
         tracker.increment(field)
         assert not provider.capture().quiescent

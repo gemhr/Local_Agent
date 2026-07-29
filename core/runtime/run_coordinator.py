@@ -290,10 +290,13 @@ class RunCoordinator:
                 ) from exc
             registered = True
 
-            self.state_machine.apply_run_event(
-                self.agent_state, RunStateEvent(RunEventType.STARTED)
-            )
-            await self._emit_run_started()
+            with self.activity_tracker.track(
+                "state_event_transitions_in_flight"
+            ):
+                self.state_machine.apply_run_event(
+                    self.agent_state, RunStateEvent(RunEventType.STARTED)
+                )
+                await self._emit_run_started()
             self._start_deadline_watcher()
             planner_span = start_span_safely(self.span_recorder,
                 trace_id=self.run_context.trace_id, run_id=self.run_context.run_id,
@@ -346,8 +349,11 @@ class RunCoordinator:
                     "COORDINATOR_FINALIZATION_REQUIRED"
                 )
             await self._settle_active_steps(decision, cleanup_error_codes)
-            decision = self._finalize_once(decision)
-            await self._emit_terminal_events(decision)
+            with self.activity_tracker.track(
+                "state_event_transitions_in_flight"
+            ):
+                decision = self._finalize_once(decision)
+                await self._emit_terminal_events(decision)
             self._stop_deadline_watcher(cleanup_error_codes)
             await self._run_cleanup_callbacks(cleanup_error_codes)
             budget_snapshot = self._snapshot_budget(cleanup_error_codes)
@@ -568,48 +574,51 @@ class RunCoordinator:
             return
         for step_id in tuple(sorted(self.agent_state.active_step_ids)):
             try:
-                self.state_machine.apply_step_event(
-                    self.agent_state,
-                    StepStateEvent(
-                        StepEventType.CANCELLED,
-                        step_id,
-                        occurred_at=self._event_time(),
-                        error_code="RUN_TERMINATING",
-                        error_message="运行终结前取消仍在执行的步骤",
-                    ),
-                )
-                if self.event_emitter is not None:
-                    step_emitter = self.event_emitter.for_step(step_id)
-                    if not step_emitter.is_closed:
-                        try:
-                            step = self.agent_state.steps[step_id]
-                            duration_ms = (
-                                max(
-                                    0,
-                                    int(
-                                        (
-                                            step.ended_at - step.started_at
-                                        ).total_seconds()
-                                        * 1000
-                                    ),
+                with self.activity_tracker.track(
+                    "state_event_transitions_in_flight"
+                ):
+                    self.state_machine.apply_step_event(
+                        self.agent_state,
+                        StepStateEvent(
+                            StepEventType.CANCELLED,
+                            step_id,
+                            occurred_at=self._event_time(),
+                            error_code="RUN_TERMINATING",
+                            error_message="运行终结前取消仍在执行的步骤",
+                        ),
+                    )
+                    if self.event_emitter is not None:
+                        step_emitter = self.event_emitter.for_step(step_id)
+                        if not step_emitter.is_closed:
+                            try:
+                                step = self.agent_state.steps[step_id]
+                                duration_ms = (
+                                    max(
+                                        0,
+                                        int(
+                                            (
+                                                step.ended_at - step.started_at
+                                            ).total_seconds()
+                                            * 1000
+                                        ),
+                                    )
+                                    if step.started_at is not None
+                                    and step.ended_at is not None
+                                    else 0
                                 )
-                                if step.started_at is not None
-                                and step.ended_at is not None
-                                else 0
-                            )
-                            await step_emitter.emit(
-                                RuntimeEventType.STEP_COMPLETED,
-                                StepCompletedPayload(
-                                    StepStatus.CANCELLED.value,
-                                    "RUN_TERMINATING",
-                                    duration_ms=duration_ms,
-                                ),
-                                component="run_coordinator",
-                                close=True,
-                                ignore_run_cancellation=True,
-                            )
-                        except (EventChannelClosedError, RuntimeError):
-                            pass
+                                await step_emitter.emit(
+                                    RuntimeEventType.STEP_COMPLETED,
+                                    StepCompletedPayload(
+                                        StepStatus.CANCELLED.value,
+                                        "RUN_TERMINATING",
+                                        duration_ms=duration_ms,
+                                    ),
+                                    component="run_coordinator",
+                                    close=True,
+                                    ignore_run_cancellation=True,
+                                )
+                            except (EventChannelClosedError, RuntimeError):
+                                pass
             except Exception:
                 cleanup_error_codes.append("ACTIVE_STEP_CLEANUP_FAILED")
         if self.agent_state.active_step_ids:
