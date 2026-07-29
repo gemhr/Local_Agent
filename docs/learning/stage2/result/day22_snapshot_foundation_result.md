@@ -70,8 +70,9 @@ span 或 event sequence。
 可能含正文的字段为 `final_output`、`AgentState.error_message`、
 `StepState.error_message` 和 Step 的 `name`。`StepState` 没有 result，也没有真实
 attempt counter。Snapshot builder 可由未来的真实 Owner 显式传入
-`attempt_counts/step_results`；未传入时，只能从 `started_at` 得到保守的 0/1
-启动计数，不能把它解释为 Retry 次数。
+`attempt_counts/step_results`；未传入权威 Attempt Count 时固定保存
+`attempt_count=null`。`execution_started` 只表达 `started_at` 是否存在，两者不得
+互相推导。
 
 `AgentState` 没有独立 cancellation reason 字段；本轮只在 `stop_reason` 属于三个
 真实取消原因时派生同值的 `cancellation_reason`。
@@ -239,8 +240,9 @@ Step name 正文均不保存。
 - safe error code；
 - result 的 present/length/digest。
 
-默认 attempt count 只表达 Step 是否曾由现有 `started_at` 启动，未来接入时应由
-真实 Attempt Owner 传入精确 count。Result 同理只能由真实 Owner传入后做摘要。
+默认 `attempt_count=null`，不从 `started_at` 推导 0/1；Step 是否启动只由
+`execution_started` 表达。未来接入时应由真实 Attempt Owner 传入精确 count。
+Result 同理只能由真实 Owner 传入后做摘要。
 错误码只允许大写安全 code 语法；不安全值降级为 `UNSAFE_ERROR_CODE`。
 
 `RUNNING` 才是 in-flight；`BLOCKED` 强制为非 in-flight。
@@ -479,8 +481,8 @@ Tool。
 
 - Plan 没有独立 static input/execution kind；本轮没有改 Plan，Snapshot 使用真实字段
   摘要和当前固定 `AGENT` 标记。
-- StepState 没有 result/attempt counter；当前默认 0/1 是保守启动计数，精确值必须
-  在后续由 Attempt Owner 注入。
+- StepState 没有 result/attempt counter；当前默认 `attempt_count=null`，精确值
+  必须在后续由 Attempt Owner 注入，且不得从 `started_at` 推导。
 - 不存在 `CLAIMED`；只有 `RUNNING` 是 in-flight，BLOCKED 是未启动终态。
 - `AgentState` 没有独立 cancellation reason；安全投影从真实取消 stop reason
   派生。

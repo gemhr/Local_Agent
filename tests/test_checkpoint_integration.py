@@ -135,6 +135,20 @@ async def test_step_boundary_checkpoint_is_saved_and_scheduler_resumes():
 
 
 @pytest.mark.asyncio
+async def test_inconsistent_checkpoint_kind_is_rejected_not_rewritten():
+    store = InMemorySnapshotStore()
+    coordinator, _, _ = _coordinator(store)
+    result = await coordinator.create_checkpoint(
+        mode=CheckpointMode.REQUIRE_QUIESCENT,
+        checkpoint_kind=CheckpointKind.PRE_RUN,
+        timeout=1,
+    )
+    assert result.status is CheckpointStatus.CORRUPTED
+    assert result.safe_error_code == "SNAPSHOT_CORRUPTED"
+    assert store.latest("run") is None
+
+
+@pytest.mark.asyncio
 async def test_terminal_checkpoint_remains_subject_to_detached_activity():
     store = InMemorySnapshotStore()
     coordinator, _, state = _coordinator(store)

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 import math
 import threading
@@ -37,6 +38,7 @@ from core.runtime.snapshot_contract import (
     RuntimeMetadata,
 )
 from core.runtime.snapshot_store import SnapshotStore, SnapshotStoreError
+from core.runtime.state import RunStatus, StepStatus
 
 
 class CheckpointBarrier:
@@ -174,6 +176,7 @@ class CheckpointCoordinator:
 
             self._raise_if_cancelled(active_token, shutdown_token)
             self.barrier.transition(CheckpointBarrierState.CAPTURING)
+            transition_epoch = activity.state_event_transition_epoch
             # Once REQUIRE reaches zero, claims remain paused and tracked work cannot
             # grow. Audit mode records any live work explicitly as non-quiescent.
             capture_remaining = _remaining(timeout, started)
@@ -190,6 +193,11 @@ class CheckpointCoordinator:
             runtime_budget = self.budget_ledger.snapshot()
             budget_snapshot = BudgetSnapshot.from_runtime_snapshot(runtime_budget)
             activity = self.activity_provider.capture()
+            if activity.state_event_transition_epoch != transition_epoch:
+                activity = replace(
+                    activity,
+                    state_event_transition_observed=True,
+                )
             quiescent = self._is_quiescent(
                 activity, state_snapshot, budget_snapshot
             )
@@ -207,6 +215,12 @@ class CheckpointCoordinator:
                 CheckpointKind.NON_QUIESCENT_AUDIT
                 if not quiescent
                 else checkpoint_kind
+            )
+            self._validate_checkpoint_kind(
+                effective_kind,
+                quiescent=quiescent,
+                state_snapshot=state_snapshot,
+                journal_sequence=sequence,
             )
             snapshot = RunSnapshot.create(
                 snapshot_id=uuid4().hex,
@@ -335,6 +349,48 @@ class CheckpointCoordinator:
             and budget_snapshot.reservation_count == 0
             and all(value == 0 for value in budget_snapshot.reserved.values())
         )
+
+    @staticmethod
+    def _validate_checkpoint_kind(
+        checkpoint_kind: CheckpointKind,
+        *,
+        quiescent: bool,
+        state_snapshot: AgentStateSnapshot,
+        journal_sequence: int,
+    ) -> None:
+        run_status = RunStatus(state_snapshot.run_status)
+        running = any(
+            step.status == StepStatus.RUNNING.value
+            for step in state_snapshot.step_states
+        )
+        terminal = run_status in {
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }
+        if checkpoint_kind is CheckpointKind.PRE_RUN:
+            if (
+                not quiescent
+                or run_status is not RunStatus.CREATED
+                or journal_sequence != 0
+                or running
+                or any(
+                    step.execution_started
+                    for step in state_snapshot.step_states
+                )
+            ):
+                raise ValueError("checkpoint kind is inconsistent")
+        elif checkpoint_kind is CheckpointKind.STEP_BOUNDARY:
+            if not quiescent or terminal or running:
+                raise ValueError("checkpoint kind is inconsistent")
+        elif checkpoint_kind is CheckpointKind.TERMINAL:
+            if not quiescent or not terminal or running:
+                raise ValueError("checkpoint kind is inconsistent")
+        elif checkpoint_kind is CheckpointKind.NON_QUIESCENT_AUDIT:
+            if quiescent:
+                raise ValueError("checkpoint kind is inconsistent")
+        else:
+            raise ValueError("checkpoint kind is unsupported")
 
     @staticmethod
     def _raise_if_cancelled(
