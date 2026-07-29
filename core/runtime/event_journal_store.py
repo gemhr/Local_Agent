@@ -246,6 +246,8 @@ class SQLiteRunEventJournal:
                     component TEXT NOT NULL,
                     step_id TEXT,
                     step_sequence INTEGER,
+                    span_id TEXT,
+                    parent_span_id TEXT,
                     safe_payload TEXT NOT NULL,
                     payload_digest TEXT NOT NULL,
                     event_digest TEXT NOT NULL,
@@ -253,6 +255,10 @@ class SQLiteRunEventJournal:
                 )
                 """
             )
+            columns = {row[1] for row in self._connection.execute("PRAGMA table_info(runtime_event_journal)")}
+            for column in ("span_id", "parent_span_id"):
+                if column not in columns:
+                    self._connection.execute(f"ALTER TABLE runtime_event_journal ADD COLUMN {column} TEXT")
             self._connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS
@@ -359,9 +365,9 @@ class SQLiteRunEventJournal:
                     INSERT INTO runtime_event_journal (
                         journal_schema_version, event_schema_version, event_id,
                         run_id, trace_id, sequence, emitted_at, journaled_at,
-                        event_type, component, step_id, step_sequence,
+                        event_type, component, step_id, step_sequence, span_id, parent_span_id,
                         safe_payload, payload_digest, event_digest
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record.journal_schema_version,
@@ -376,6 +382,8 @@ class SQLiteRunEventJournal:
                         record.component,
                         record.step_id,
                         record.step_sequence,
+                        record.span_id,
+                        record.parent_span_id,
                         canonical_json(record.safe_payload),
                         record.payload_digest,
                         record.event_digest,
@@ -499,6 +507,8 @@ class SQLiteRunEventJournal:
                     if row["step_sequence"] is not None
                     else None
                 ),
+                span_id=(str(row["span_id"]) if row["span_id"] is not None else None),
+                parent_span_id=(str(row["parent_span_id"]) if row["parent_span_id"] is not None else None),
                 safe_payload=json.loads(str(row["safe_payload"])),
                 payload_digest=str(row["payload_digest"]),
                 event_digest=str(row["event_digest"]),

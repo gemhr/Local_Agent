@@ -127,6 +127,8 @@ class JournalRecord:
     event_digest: str
     step_id: str | None = None
     step_sequence: int | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_positive_int(self.journal_schema_version, "journal_schema_version")
@@ -159,6 +161,9 @@ class JournalRecord:
         else:
             _require_text(self.step_id, "step_id")
             _require_positive_int(self.step_sequence, "step_sequence")  # type: ignore[arg-type]
+        for value, name in ((self.span_id, "span_id"), (self.parent_span_id, "parent_span_id")):
+            if value is not None:
+                _require_text(value, name)
 
     @classmethod
     def from_event(
@@ -180,6 +185,8 @@ class JournalRecord:
             "event_id": event.event_id,
             "run_id": event.run_id,
             "trace_id": event.trace_id,
+            "span_id": event.span_id,
+            "parent_span_id": event.parent_span_id,
             "sequence": event.sequence,
             "emitted_at": event.emitted_at.isoformat(),
             "event_type": event.event_type.value,
@@ -205,6 +212,8 @@ class JournalRecord:
             event_digest=_digest(digest_source),
             step_id=event.step_id,
             step_sequence=event.step_sequence,
+            span_id=event.span_id,
+            parent_span_id=event.parent_span_id,
         )
 
     def verify(self) -> None:
@@ -227,6 +236,8 @@ class JournalRecord:
             "event_id": self.event_id,
             "run_id": self.run_id,
             "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
             "sequence": self.sequence,
             "emitted_at": self.emitted_at.isoformat(),
             "event_type": self.event_type.value,
