@@ -520,6 +520,8 @@ class RuntimeEventDraft:
     payload: RuntimeEventPayload
     step_id: str | None = None
     step_sequence: int | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
 
     def __post_init__(self) -> None:
         _validate_common(
@@ -548,6 +550,8 @@ class RuntimeEvent:
     payload: RuntimeEventPayload
     step_id: str | None = None
     step_sequence: int | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
 
     CURRENT_SCHEMA_VERSION: ClassVar[int] = RUNTIME_EVENT_SCHEMA_VERSION
 
@@ -586,6 +590,8 @@ class RuntimeEvent:
             payload=draft.payload,
             step_id=draft.step_id,
             step_sequence=draft.step_sequence,
+            span_id=draft.span_id,
+            parent_span_id=draft.parent_span_id,
         )
 
     def to_safe_dict(self, *, include_output: bool = False) -> dict[str, object]:
@@ -603,6 +609,8 @@ class RuntimeEvent:
             "event_id": self.event_id,
             "run_id": self.run_id,
             "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
             "sequence": self.sequence,
             "event_type": self.event_type.value,
             "emitted_at": self.emitted_at.isoformat(),
@@ -646,6 +654,8 @@ class RuntimeEvent:
             "event_id": self.event_id,
             "run_id": self.run_id,
             "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
             "sequence": self.sequence,
             "event_type": self.event_type.value,
             "emitted_at": self.emitted_at.isoformat(),
