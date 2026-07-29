@@ -18,19 +18,28 @@ from core.chat_service import ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
 from core.runtime import (
+    ApplicationRuntimeServices,
+    ChatRuntimeSelector,
     CancellationReason,
+    CoordinatedRuntimeFactory,
+    InMemorySpanRecorder,
     ModelCircuitBreakerConfig,
     ModelCircuitBreakerRegistry,
     ModelCostProfile,
     ModelProfile,
     ModelProfileId,
     ModelResolver,
+    RecoveryValidator,
+    RuntimeInitializationStack,
+    RunRegistry,
     RunCancelledError,
     SQLiteEventConsumptionCheckpointStore,
     SQLiteRunEventJournal,
+    SQLiteSnapshotStore,
+    RuntimeLifecycleState,
     process_run_registry,
 )
-from core.runtime.blocking_executor import process_blocking_executor
+from core.runtime.blocking_executor import BoundedBlockingExecutor
 from core.runtime.metrics import (
     ApplicationRuntimeGaugeProvider,
     InMemoryMetricsRecorder,
@@ -57,6 +66,7 @@ except Exception as exc:  # pragma: no cover
 
 settings = Settings.load()
 chat_service: Optional[ChatService] = None
+application_runtime_services: Optional[ApplicationRuntimeServices] = None
 logger = logging.getLogger(__name__)
 SHUTDOWN_GRACE_SECONDS = 2.0
 
@@ -107,9 +117,24 @@ async def lifespan(app: FastAPI):
     Yields:
         None: 启动阶段创建服务，关闭阶段释放引用。
     """
-    global chat_service
+    global application_runtime_services, chat_service
 
-    memory_manager = MemoryManager(db_path=settings.memory_db_path)
+    app.state.runtime_lifecycle_state = RuntimeLifecycleState.STARTING
+    initialization_stack = RuntimeInitializationStack()
+
+    memory_manager = await initialization_stack.create(
+        "memory_manager",
+        lambda: MemoryManager(db_path=settings.memory_db_path),
+    )
+    blocking_executor = await initialization_stack.create(
+        "blocking_executor",
+        BoundedBlockingExecutor,
+        close_operation="shutdown",
+    )
+    span_recorder = await initialization_stack.create(
+        "span_recorder",
+        InMemorySpanRecorder,
+    )
     db_manager = None
     knowledge_base_error = None
     if VectorDBManager is not None:
@@ -162,11 +187,14 @@ async def lifespan(app: FastAPI):
     engines = {}
     profiles = []
     if settings.llm_backend in {"local", "hybrid"}:
-        local_engine = LocalLLMEngine(
-            model_path=settings.model_path,
-            n_ctx=settings.model_context,
-            n_threads=settings.model_threads,
-            n_gpu_layers=settings.model_gpu_layers,
+        local_engine = await initialization_stack.create(
+            "local_model_engine",
+            lambda: LocalLLMEngine(
+                model_path=settings.model_path,
+                n_ctx=settings.model_context,
+                n_threads=settings.model_threads,
+                n_gpu_layers=settings.model_gpu_layers,
+            ),
         )
         engines[ModelProfileId.LOCAL_FAST] = local_engine
         profiles.append(
@@ -194,17 +222,22 @@ async def lifespan(app: FastAPI):
         )
     if settings.llm_backend in {"remote", "hybrid"}:
         if not settings.remote_api_base_url:
-            raise RuntimeError(
-                "启用远程模型时必须配置 LOCAL_AGENT_REMOTE_API_BASE_URL"
+            await initialization_stack.fail(
+                RuntimeError(
+                    "启用远程模型时必须配置 LOCAL_AGENT_REMOTE_API_BASE_URL"
+                )
             )
-        remote_engine = RemoteLLMEngine(
-            api_base_url=settings.remote_api_base_url,
-            model_name=settings.remote_model_name,
-            api_key=settings.remote_api_key,
-            timeout_seconds=settings.remote_timeout_seconds,
-            verify_tls=settings.remote_verify_tls,
-            enable_thinking=settings.remote_enable_thinking,
-            provider_kind=settings.remote_provider_kind,
+        remote_engine = await initialization_stack.create(
+            "remote_model_engine",
+            lambda: RemoteLLMEngine(
+                api_base_url=settings.remote_api_base_url,
+                model_name=settings.remote_model_name,
+                api_key=settings.remote_api_key,
+                timeout_seconds=settings.remote_timeout_seconds,
+                verify_tls=settings.remote_verify_tls,
+                enable_thinking=settings.remote_enable_thinking,
+                provider_kind=settings.remote_provider_kind,
+            ),
         )
         engines[ModelProfileId.REMOTE_ADVANCED] = remote_engine
         profiles.append(
@@ -231,7 +264,9 @@ async def lifespan(app: FastAPI):
             )
         )
     if not engines:
-        raise RuntimeError("LOCAL_AGENT_LLM_BACKEND 必须是 local、remote 或 hybrid")
+        await initialization_stack.fail(
+            RuntimeError("LOCAL_AGENT_LLM_BACKEND 必须是 local、remote 或 hybrid")
+        )
     engine = engines.get(ModelProfileId.LOCAL_FAST) or engines[ModelProfileId.REMOTE_ADVANCED]
     breaker_registry = ModelCircuitBreakerRegistry(
         ModelCircuitBreakerConfig(
@@ -241,89 +276,202 @@ async def lifespan(app: FastAPI):
             count_rate_limited=settings.model_breaker_count_rate_limited,
         )
     )
-    router = AgentRouter(
-        llm_engine=engine,
-        memory_manager=memory_manager,
-        db_manager=db_manager,
-        history_window_size=settings.history_window_size,
-        summary_trigger_messages=settings.summary_trigger_messages,
-        summary_keep_recent=settings.summary_keep_recent,
-        summary_max_chars=settings.summary_max_chars,
-        rag_top_k=settings.rag_top_k,
-        rag_min_score=settings.rag_min_score,
-        rag_doc_max_chars=settings.rag_doc_max_chars,
-        rag_context_max_chars=settings.rag_context_max_chars,
-        max_tokens=settings.model_max_tokens,
-        model_context_window=settings.model_context,
-        orchestration_enabled=settings.orchestration_enabled,
-        orchestration_max_agents=settings.orchestration_max_agents,
-        knowledge_base_error=knowledge_base_error,
-        model_profiles=tuple(profiles),
-        model_resolver=ModelResolver(engines),
-        circuit_breaker_registry=breaker_registry,
+    router = await initialization_stack.create(
+        "agent_router",
+        lambda: AgentRouter(
+            llm_engine=engine,
+            memory_manager=memory_manager,
+            db_manager=db_manager,
+            history_window_size=settings.history_window_size,
+            summary_trigger_messages=settings.summary_trigger_messages,
+            summary_keep_recent=settings.summary_keep_recent,
+            summary_max_chars=settings.summary_max_chars,
+            rag_top_k=settings.rag_top_k,
+            rag_min_score=settings.rag_min_score,
+            rag_doc_max_chars=settings.rag_doc_max_chars,
+            rag_context_max_chars=settings.rag_context_max_chars,
+            max_tokens=settings.model_max_tokens,
+            model_context_window=settings.model_context,
+            orchestration_enabled=settings.orchestration_enabled,
+            orchestration_max_agents=settings.orchestration_max_agents,
+            knowledge_base_error=knowledge_base_error,
+            model_profiles=tuple(profiles),
+            model_resolver=ModelResolver(engines),
+            circuit_breaker_registry=breaker_registry,
+            span_recorder=span_recorder,
+            blocking_executor=blocking_executor,
+        ),
     )
-    register_all_tools(router)
+    await initialization_stack.run(
+        lambda: register_all_tools(router),
+        component="tool_registry",
+    )
     runtime_metrics = InMemoryMetricsRecorder(
         label_policy=MetricLabelPolicy(
             tool_name_allowlist=frozenset(settings.metrics_tool_name_allowlist)
         )
     )
     infrastructure_metrics = RecorderInfrastructureMetricsHook(runtime_metrics)
-    process_blocking_executor.set_metrics_hook(infrastructure_metrics)
+    blocking_executor.set_metrics_hook(infrastructure_metrics)
+    run_registry = RunRegistry()
     gauge_provider = ApplicationRuntimeGaugeProvider(
-        run_registry=process_run_registry,
-        blocking_executor=process_blocking_executor,
+        run_registry=run_registry,
+        blocking_executor=blocking_executor,
         tool_workers=router.tool_execution_service.concurrency_controller,
         circuit_registry=breaker_registry,
     )
-    logger_checkpoints = SQLiteEventConsumptionCheckpointStore(
-        settings.observability_checkpoint_db_path
-    )
-    metrics_checkpoints = SQLiteEventConsumptionCheckpointStore(
-        settings.observability_checkpoint_db_path
-    )
-    observability_dispatcher = RuntimeObservabilityDispatcher(
-        logger_projector=StructuredLogProjector(
-            JsonStructuredRuntimeLogger()
+    structured_logger = JsonStructuredRuntimeLogger()
+    logger_checkpoints = await initialization_stack.create(
+        "logger_checkpoint_store",
+        lambda: SQLiteEventConsumptionCheckpointStore(
+            settings.observability_checkpoint_db_path
         ),
-        metrics_projector=RuntimeMetricsProjector(runtime_metrics),
-        logger_checkpoint_store=logger_checkpoints,
-        metrics_checkpoint_store=metrics_checkpoints,
-        queue_capacity=settings.observability_queue_capacity,
-        infrastructure_hook=infrastructure_metrics,
-        gauge_provider=gauge_provider,
     )
-    event_journal = SQLiteRunEventJournal(
-        settings.event_journal_db_path,
-        metrics_hook=infrastructure_metrics,
+    metrics_checkpoints = await initialization_stack.create(
+        "metrics_checkpoint_store",
+        lambda: SQLiteEventConsumptionCheckpointStore(
+            settings.observability_checkpoint_db_path
+        ),
     )
-    chat_service = ChatService(
-        router,
-        event_journal=event_journal,
-        observability_dispatcher=observability_dispatcher,
-        gauge_provider=gauge_provider,
+    observability_dispatcher = await initialization_stack.create(
+        "observability_dispatcher",
+        lambda: RuntimeObservabilityDispatcher(
+            logger_projector=StructuredLogProjector(structured_logger),
+            metrics_projector=RuntimeMetricsProjector(runtime_metrics),
+            logger_checkpoint_store=logger_checkpoints,
+            metrics_checkpoint_store=metrics_checkpoints,
+            queue_capacity=settings.observability_queue_capacity,
+            infrastructure_hook=infrastructure_metrics,
+            gauge_provider=gauge_provider,
+        ),
     )
+    event_journal = await initialization_stack.create(
+        "event_journal",
+        lambda: SQLiteRunEventJournal(
+            settings.event_journal_db_path,
+            metrics_hook=infrastructure_metrics,
+        ),
+    )
+    snapshot_store = (
+        await initialization_stack.create(
+            "snapshot_store",
+            lambda: SQLiteSnapshotStore(settings.snapshot_store_db_path),
+        )
+        if settings.snapshot_store_enabled
+        else None
+    )
+    recovery_validator = RecoveryValidator(
+        snapshot_store=snapshot_store,
+        journal=event_journal,
+    )
+    application_runtime_services = await initialization_stack.run(
+        lambda: ApplicationRuntimeServices(
+            event_journal=event_journal,
+            observability_dispatcher=observability_dispatcher,
+            structured_logger=structured_logger,
+            runtime_metrics_recorder=runtime_metrics,
+            span_recorder=span_recorder,
+            snapshot_store=snapshot_store,
+            recovery_validator=recovery_validator,
+            model_invocation_router=router.model_invocation_router,
+            tool_execution_service=router.tool_execution_service,
+            retrieval_execution_service=router.retrieval_execution_service,
+            blocking_executors=(blocking_executor,),
+            worker_trackers=(
+                router.tool_execution_service.concurrency_controller,
+            ),
+            run_registry=run_registry,
+            snapshot_enabled=settings.snapshot_store_enabled,
+            extra_closeables=(
+                ("logger_checkpoint_store", logger_checkpoints),
+                ("metrics_checkpoint_store", metrics_checkpoints),
+                *tuple(
+                    (f"model_engine_{index}", engine)
+                    for index, engine in enumerate(engines.values())
+                ),
+            ),
+        ),
+        component="application_runtime_services",
+    )
+    initialization_stack.release()
+    initialization_stack = RuntimeInitializationStack()
+    initialization_stack.track(
+        "application_runtime_services",
+        application_runtime_services,
+    )
+    coordinated_runtime_factory = await initialization_stack.create(
+        "coordinated_runtime_factory",
+        lambda: CoordinatedRuntimeFactory(
+            router,
+            application_runtime_services,
+        ),
+    )
+    chat_service = await initialization_stack.create(
+        "chat_service",
+        lambda: ChatService(
+            router,
+            event_journal=event_journal,
+            observability_dispatcher=observability_dispatcher,
+            gauge_provider=gauge_provider,
+            runtime_selector=ChatRuntimeSelector(settings.chat_runtime_mode),
+            coordinated_runtime_factory=coordinated_runtime_factory,
+            run_registry=run_registry,
+        ),
+    )
+    app.state.runtime_services = application_runtime_services
+    app.state.coordinated_runtime_factory = coordinated_runtime_factory
     app.state.runtime_metrics = runtime_metrics
     app.state.runtime_metrics_collector = RuntimeMetricsCollector(
         runtime_metrics, gauge_provider
     )
     app.state.runtime_observability = observability_dispatcher
-    yield
-    cancelled = process_run_registry.cancel_all(CancellationReason.SYSTEM_SHUTDOWN)
-    remaining = await asyncio.to_thread(process_run_registry.wait_until_empty, SHUTDOWN_GRACE_SECONDS)
-    if remaining:
-        logger.warning("shutdown cleanup timed out for runs=%s", ",".join(remaining))
-    elif cancelled:
-        logger.info("shutdown cleanup completed for runs=%s", ",".join(cancelled))
-    # 先取消 Run 并等待 Grace Period，再关闭共享 Remote Session。
-    _close_model_engines(engines)
-    await observability_dispatcher.close(
-        settings.observability_shutdown_timeout_seconds
-    )
-    event_journal.close()
-    logger_checkpoints.close()
-    metrics_checkpoints.close()
-    chat_service = None
+    app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
+    initialization_stack.release()
+    try:
+        yield
+    finally:
+        app.state.runtime_lifecycle_state = RuntimeLifecycleState.SHUTTING_DOWN
+        cancelled = run_registry.cancel_all(CancellationReason.SYSTEM_SHUTDOWN)
+        remaining = await asyncio.to_thread(
+            run_registry.wait_until_empty, SHUTDOWN_GRACE_SECONDS
+        )
+        if remaining:
+            logger.warning(
+                "shutdown cleanup timed out",
+                extra={
+                    "component": "run_registry",
+                    "phase": "shutdown",
+                    "status": "TIMED_OUT",
+                    "active_run_count": len(remaining),
+                    "safe_error_code": "RUN_REGISTRY_DRAIN_TIMEOUT",
+                },
+            )
+        elif cancelled:
+            logger.info(
+                "shutdown cleanup completed",
+                extra={
+                    "component": "run_registry",
+                    "phase": "shutdown",
+                    "status": "COMPLETED",
+                    "cancelled_run_count": len(cancelled),
+                },
+            )
+        close_report = await application_runtime_services.close(
+            settings.observability_shutdown_timeout_seconds
+        )
+        if not close_report.completed:
+            logger.warning(
+                "Runtime services closed with safe lifecycle issues",
+                extra={
+                    "component": "application_runtime_services",
+                    "phase": "shutdown",
+                    "status": "PARTIAL",
+                    "safe_error_codes": close_report.error_codes,
+                },
+            )
+        chat_service = None
+        application_runtime_services = None
+        app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
 
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
@@ -359,6 +507,11 @@ def require_service() -> ChatService:
     return chat_service
 
 
+def _run_registry_for(service) -> object:
+    """Use the lifespan-owned registry, preserving test/legacy compatibility."""
+    return getattr(service, "run_registry", process_run_registry)
+
+
 @app.post("/api/chat")
 async def chat_endpoint(payload: ChatRequest, request: Request):
     """流式返回聊天结果。
@@ -370,6 +523,12 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         StreamingResponse: 纯文本增量响应流。
     """
     service = require_service()
+    selected_runtime_mode = getattr(service, "selected_runtime_mode", None)
+    if callable(selected_runtime_mode):
+        # Round one only captures the immutable contract. The route below remains
+        # deliberately pinned to stream_chat/Legacy until the migration round.
+        selected_runtime_mode()
+    run_registry = _run_registry_for(service)
 
     run_id = payload.run_id or uuid.uuid4().hex
     try:
@@ -384,7 +543,9 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         try:
             while True:
                 if await request.is_disconnected():
-                    process_run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
+                    run_registry.cancel(
+                        run_id, CancellationReason.CLIENT_DISCONNECTED
+                    )
                     return
                 try:
                     chunk = await asyncio.to_thread(_next_or_none, stream)
@@ -398,10 +559,10 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
             # 此处只负责阻止业务异常穿透 StreamingResponse/ASGI 边界。
             return
         except asyncio.CancelledError:
-            process_run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
+            run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
             raise
         except (BrokenPipeError, ConnectionResetError):
-            process_run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
+            run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
         finally:
             close = getattr(stream, "close", None)
             if close is not None:
@@ -417,7 +578,10 @@ async def cancel_run_endpoint(run_id: str):
         uuid.UUID(run_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
-    result = process_run_registry.cancel(run_id, CancellationReason.USER_CANCELLED)
+    service = require_service()
+    result = _run_registry_for(service).cancel(
+        run_id, CancellationReason.USER_CANCELLED
+    )
     if result is None:
         return {"status": "inactive", "run_id": run_id}
     return {"status": "cancelled" if result else "already_cancelled", "run_id": run_id}
