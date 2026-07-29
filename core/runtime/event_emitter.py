@@ -16,6 +16,7 @@ from core.runtime.events import (
     RuntimeEventPayload,
     RuntimeEventType,
 )
+from core.runtime.tracing import current_trace_context
 
 
 class EventEmitterSyncError(RuntimeError):
@@ -65,6 +66,7 @@ class RunEventEmitter:
         component: str,
         ignore_run_cancellation: bool = False,
     ) -> RuntimeEvent:
+        span = current_trace_context()
         return await self.channel.publish(
             RuntimeEventDraft(
                 run_id=self.run_id,
@@ -72,6 +74,8 @@ class RunEventEmitter:
                 event_type=event_type,
                 component=component,
                 payload=payload,
+                span_id=span.span_id if span else None,
+                parent_span_id=span.parent_span_id if span else None,
             ),
             ignore_run_cancellation=ignore_run_cancellation,
         )
@@ -161,6 +165,7 @@ class StepEventEmitter:
             if self._closed:
                 raise RuntimeError("StepEventEmitter 已关闭")
             step_sequence = self._sequence + 1
+            span = current_trace_context()
             event = await self.parent.channel.publish(
                 RuntimeEventDraft(
                     run_id=self.parent.run_id,
@@ -170,6 +175,8 @@ class StepEventEmitter:
                     payload=payload,
                     step_id=self.step_id,
                     step_sequence=step_sequence,
+                    span_id=span.span_id if span else None,
+                    parent_span_id=span.parent_span_id if span else None,
                 ),
                 ignore_run_cancellation=ignore_run_cancellation,
             )

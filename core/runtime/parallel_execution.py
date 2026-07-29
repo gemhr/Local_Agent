@@ -123,11 +123,14 @@ class ParallelExecutor:
         *,
         max_concurrency: int = 1,
         event_emitter: RunEventEmitter | None = None,
+        span_recorder=None,
     ) -> None:
         self._validate_positive(max_concurrency, "max_concurrency")
         self._state_machine = state_machine or AgentStateMachine()
         self._max_concurrency = max_concurrency
         self._event_emitter = event_emitter
+        from core.runtime.tracing import NoopSpanRecorder
+        self._span_recorder = span_recorder or NoopSpanRecorder()
 
     async def execute_ready(self, *, scheduler: SerialScheduler, plan: Plan, state: AgentState, occurred_at: datetime, run_context: RunContext, driver: StepExecutionDriver, policy: ParallelExecutionPolicy, execution_mode: StepExecutionMode = StepExecutionMode.ASYNC, concurrency_specs: Mapping[str, StepConcurrencySpec] | None = None) -> ParallelExecutionReport:
         """标准安全入口：同一 Policy 同时约束 Claim 和 Executor 容量。"""
@@ -174,33 +177,35 @@ class ParallelExecutor:
 
         async def worker(claim: StepClaim) -> None:
             nonlocal was_token_cancelled
+            from core.runtime.tracing import activate_span, current_trace_context, start_span_safely
+            parent_context = current_trace_context()
+            step_span = start_span_safely(self._span_recorder,
+                trace_id=run_context.trace_id, run_id=run_context.run_id,
+                component="step", operation="execute", step_id=claim.step_id,
+                parent_context=parent_context,
+            )
             try:  # 覆盖等待全局/资源许可、Driver、to_thread 等待及终态提交前的取消。
-                run_context.raise_if_inactive()
-                spec = specs.get(claim.step_id, StepConcurrencySpec())
-                async with global_semaphore, resource_semaphores[spec.resource_key]:
+                with activate_span(step_span):
                     run_context.raise_if_inactive()
-                    if fail_fast_triggered.is_set():
-                        raise asyncio.CancelledError()
-                    try:
-                        result = await self._invoke(driver, claim, run_context, execution_mode)
-                    except (
-                        asyncio.CancelledError,
-                        RunCancelledError,
-                        RunDeadlineExceededError,
-                        BudgetExceededError,
-                        ParallelExecutionInfrastructureError,
-                    ):
-                        raise
-                    except Exception:
-                        # 在释放许可前先记录失败并触发 TaskGroup 取消，避免等待者抢到许可。
-                        outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.FAILED, error_code="STEP_EXECUTION_FAILED", error_message="步骤业务执行失败")
-                        await self._emit_step_completed(
-                            claim, state, StepStatus.FAILED, "STEP_EXECUTION_FAILED"
-                        )
-                        if failure_mode == ParallelFailureMode.FAIL_FAST:
-                            fail_fast_triggered.set()
-                            raise _FailFastSignal() from None
-                        return
+                    spec = specs.get(claim.step_id, StepConcurrencySpec())
+                    async with global_semaphore, resource_semaphores[spec.resource_key]:
+                        run_context.raise_if_inactive()
+                        if fail_fast_triggered.is_set():
+                            raise asyncio.CancelledError()
+                        try:
+                            result = await self._invoke(driver, claim, run_context, execution_mode)
+                        except (
+                            asyncio.CancelledError, RunCancelledError,
+                            RunDeadlineExceededError, BudgetExceededError,
+                            ParallelExecutionInfrastructureError,
+                        ):
+                            raise
+                        except Exception:
+                            outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.FAILED, error_code="STEP_EXECUTION_FAILED", error_message="步骤业务执行失败")
+                            await self._emit_step_completed(claim, state, StepStatus.FAILED, "STEP_EXECUTION_FAILED")
+                            if failure_mode == ParallelFailureMode.FAIL_FAST:
+                                fail_fast_triggered.set(); raise _FailFastSignal() from None
+                            return
                     if (
                         self._event_emitter is not None
                         and getattr(driver, "emits_user_output", False)

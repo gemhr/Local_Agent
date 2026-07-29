@@ -302,6 +302,27 @@ __all__ += [
     "runtime_log_level",
 ]
 
+from core.runtime.tracing import (
+    DENIED_SPAN_ATTRIBUTES,
+    SAFE_SPAN_ATTRIBUTES,
+    InMemorySpanRecorder,
+    NoopSpanRecorder,
+    OpenTelemetryCompatibleSpanAdapter,
+    SpanHandle,
+    SpanRecord,
+    SpanRecorder,
+    SpanStatus,
+    TraceContext,
+    activate_span,
+    current_trace_context,
+)
+__all__ += [
+    "DENIED_SPAN_ATTRIBUTES", "SAFE_SPAN_ATTRIBUTES", "InMemorySpanRecorder",
+    "NoopSpanRecorder", "OpenTelemetryCompatibleSpanAdapter", "SpanHandle",
+    "SpanRecord", "SpanRecorder", "SpanStatus", "TraceContext",
+    "activate_span", "current_trace_context",
+]
+
 from core.runtime.parallel_execution import (
     ParallelExecutionInfrastructureError, ParallelExecutionReport, ParallelExecutor,
     ParallelFailureMode, ParallelExecutionPolicy, StepConcurrencySpec, StepExecutionDriver, StepExecutionMode,

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -196,7 +197,12 @@ class BoundedBlockingExecutor:
                 raise BlockingExecutorClosedError("执行器已关闭")
             self._records[task_id] = record
         try:
-            future = self._executor.submit(self._run, task_id, operation)
+            # ThreadPoolExecutor does not propagate ContextVar automatically.
+            # Capture at submission so worker logs/events retain the submitting span.
+            captured_context = contextvars.copy_context()
+            future = self._executor.submit(
+                self._run, task_id, lambda: captured_context.run(operation)
+            )
         except BaseException:
             with self._idle:
                 self._records.pop(task_id, None)
