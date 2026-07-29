@@ -5,6 +5,8 @@
 import os
 from dataclasses import dataclass
 
+from core.runtime.runtime_mode import ChatRuntimeMode
+
 
 def _env_int(name: str, default: int) -> int:
     """读取整数类型环境变量。"""
@@ -23,6 +25,19 @@ def _env_float_in_range(name: str, default: float, minimum: float, maximum: floa
     return min(maximum, max(minimum, value))
 
 
+def _env_bool_strict(name: str, default: bool) -> bool:
+    """Read an explicit boolean without silently accepting typos."""
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true"}:
+        return True
+    if normalized in {"0", "false"}:
+        return False
+    raise ValueError(f"{name} must be one of 1, 0, true, false")
+
+
 @dataclass(frozen=True)
 class Settings:
     """不可变运行时配置对象。"""
@@ -31,6 +46,7 @@ class Settings:
     api_host: str
     api_port: int
     api_base_url: str
+    chat_runtime_mode: ChatRuntimeMode
     model_profile: str
     llm_backend: str
     model_path: str
@@ -68,6 +84,8 @@ class Settings:
     embedding_batch_size: int
     memory_db_path: str
     event_journal_db_path: str
+    snapshot_store_enabled: bool
+    snapshot_store_db_path: str
     observability_checkpoint_db_path: str
     observability_queue_capacity: int
     observability_shutdown_timeout_seconds: int
@@ -90,6 +108,10 @@ class Settings:
         api_host = os.getenv("LOCAL_AGENT_API_HOST", "127.0.0.1")
         api_port = _env_int("LOCAL_AGENT_API_PORT", 8000)
         api_base_url = os.getenv("LOCAL_AGENT_API_BASE_URL", f"http://{api_host}:{api_port}")
+        chat_runtime_mode = ChatRuntimeMode.parse(
+            os.getenv("CHAT_RUNTIME_MODE"),
+            default=ChatRuntimeMode.LEGACY,
+        )
 
         # 预设参数已从 7B 本地 CPU 推理调优为更适配 27B 远端模型：
         # - 允许更长回复（model_max_tokens）
@@ -142,6 +164,7 @@ class Settings:
             api_host=api_host,
             api_port=api_port,
             api_base_url=api_base_url,
+            chat_runtime_mode=chat_runtime_mode,
             model_profile=profile_name if profile_name in presets else "balanced",
             llm_backend=os.getenv("LOCAL_AGENT_LLM_BACKEND", "remote").lower(),
             model_path=os.getenv(
@@ -228,6 +251,18 @@ class Settings:
                 "LOCAL_AGENT_EVENT_JOURNAL_DB_PATH",
                 os.path.join(
                     project_root, "data", "database", "runtime_event_journal.db"
+                ),
+            ),
+            snapshot_store_enabled=_env_bool_strict(
+                "LOCAL_AGENT_SNAPSHOT_ENABLED", True
+            ),
+            snapshot_store_db_path=os.getenv(
+                "LOCAL_AGENT_SNAPSHOT_DB_PATH",
+                os.path.join(
+                    project_root,
+                    "data",
+                    "database",
+                    "runtime_snapshots.db",
                 ),
             ),
             observability_checkpoint_db_path=os.getenv(

@@ -706,3 +706,34 @@ __all__ += [
     "assess_recovery",
     "select_recovery_status",
 ]
+
+from core.runtime.runtime_mode import ChatRuntimeMode, ChatRuntimeSelector
+from core.runtime.application_services import (
+    SAFE_RUNTIME_ASSEMBLY_VERSION,
+    ApplicationRuntimeServices,
+    RuntimeInitializationError,
+    RuntimeInitializationStack,
+    RuntimeLifecycleIssue,
+    RuntimeLifecycleReport,
+    RuntimeLifecycleState,
+)
+from core.runtime.runtime_factory import (
+    CoordinatedRunScope,
+    CoordinatedRuntimeFactory,
+    CoordinatedSingleAgentDriver,
+)
+
+__all__ += [
+    "ApplicationRuntimeServices",
+    "ChatRuntimeMode",
+    "ChatRuntimeSelector",
+    "CoordinatedRunScope",
+    "CoordinatedRuntimeFactory",
+    "CoordinatedSingleAgentDriver",
+    "RuntimeInitializationError",
+    "RuntimeInitializationStack",
+    "RuntimeLifecycleIssue",
+    "RuntimeLifecycleReport",
+    "RuntimeLifecycleState",
+    "SAFE_RUNTIME_ASSEMBLY_VERSION",
+]

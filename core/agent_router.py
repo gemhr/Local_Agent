@@ -90,6 +90,8 @@ class AgentRouter:
         circuit_breaker_registry: ModelCircuitBreakerRegistry | None = None,
         tool_execution_service: ToolExecutionService | None = None,
         retrieval_execution_service: RetrievalExecutionService | None = None,
+        span_recorder=None,
+        blocking_executor=None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -129,6 +131,8 @@ class AgentRouter:
                     max_document_reads=candidate_limit,
                 ),
                 minimum_score=self.rag_min_score,
+                blocking_executor=blocking_executor,
+                span_recorder=span_recorder,
             )
         else:
             self.retrieval_execution_service = None
@@ -167,7 +171,8 @@ class AgentRouter:
             }
         )
         self.model_invocation_router = model_invocation_router or ModelInvocationRouter(
-            self.model_routing_policy
+            self.model_routing_policy,
+            span_recorder=span_recorder,
         )
         # AgentRouter 为应用生命周期对象，因此默认 Registry 跨 Run 共享。
         self.circuit_breaker_registry = (
@@ -175,7 +180,9 @@ class AgentRouter:
         )
         # AgentRouter 是应用生命周期对象，因此 Tool 并发 Controller 跨 Run 共享。
         self.tool_execution_service = (
-            tool_execution_service or ToolExecutionService()
+            tool_execution_service or ToolExecutionService(
+                span_recorder=span_recorder
+            )
         )
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256

@@ -39,6 +39,9 @@ from core.runtime import (
     RunEventJournal,
     RuntimeEventTextAdapter,
     StepEventEmitter,
+    ChatRuntimeMode,
+    ChatRuntimeSelector,
+    CoordinatedRuntimeFactory,
 )
 
 
@@ -92,6 +95,9 @@ class ChatService:
         event_journal: RunEventJournal | None = None,
         observability_dispatcher: RuntimeObservabilityDispatcher | None = None,
         gauge_provider: ApplicationRuntimeGaugeProvider | None = None,
+        runtime_selector: ChatRuntimeSelector | None = None,
+        coordinated_runtime_factory: CoordinatedRuntimeFactory | None = None,
+        run_registry=None,
     ) -> None:
         """初始化应用服务。
 
@@ -111,6 +117,27 @@ class ChatService:
         self._event_journal = event_journal
         self._observability_dispatcher = observability_dispatcher
         self._gauge_provider = gauge_provider
+        self._runtime_selector = runtime_selector or ChatRuntimeSelector(
+            ChatRuntimeMode.LEGACY
+        )
+        if not isinstance(self._runtime_selector, ChatRuntimeSelector):
+            raise TypeError("runtime_selector must be ChatRuntimeSelector")
+        if coordinated_runtime_factory is not None and not isinstance(
+            coordinated_runtime_factory, CoordinatedRuntimeFactory
+        ):
+            raise TypeError(
+                "coordinated_runtime_factory must be CoordinatedRuntimeFactory"
+            )
+        self._coordinated_runtime_factory = coordinated_runtime_factory
+        self._run_registry = run_registry or process_run_registry
+
+    @property
+    def run_registry(self):
+        return self._run_registry
+
+    def selected_runtime_mode(self) -> ChatRuntimeMode:
+        """Capture the configured enum once; routing migration is not done here."""
+        return self._runtime_selector.selected_runtime_mode()
 
     def stream_chat(self, agent_id: str, query: str, file_path: str = "", run_id: str | None = None) -> Generator[str, None, None]:
         """流式执行一次对话。
@@ -136,7 +163,14 @@ class ChatService:
         # ChatService 是当前 Legacy 主链路的 Parent Runtime，单 Run 创建并持有账本。
         run_context.attach_budget_ledger(BudgetLedger(RunBudget(), deadline_remaining=run_context.remaining_seconds))
         agent_state = AgentState.for_run_context(run_context.run_id)
-        process_run_registry.register(RunHandle(run_context.run_id, cancellation_source, agent_state, "chat_service"))
+        self._run_registry.register(
+            RunHandle(
+                run_context.run_id,
+                cancellation_source,
+                agent_state,
+                "chat_service",
+            )
+        )
         driver = LegacyAgentRouterDriver(self.router, user_query=final_query, agent_id=agent_id)
         loop = AgentLoop()
         deadline_timer: threading.Timer | None = None
@@ -159,7 +193,7 @@ class ChatService:
         finally:
             if deadline_timer is not None:
                 deadline_timer.cancel()
-            process_run_registry.unregister(run_context.run_id)
+            self._run_registry.unregister(run_context.run_id)
             _ = _cancellation_source
 
     def _observe_state(self, agent_state: AgentState) -> None:
@@ -213,6 +247,18 @@ class ChatService:
         _result_out: list[RunCoordinatorResult] | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
+        if self._coordinated_runtime_factory is not None:
+            async for event in self._stream_factory_coordinated_events(
+                agent_id,
+                query,
+                run_id=run_id,
+                budget=budget,
+                persist=persist,
+                result_out=_result_out,
+            ):
+                yield event
+            return
+
         run_context, cancellation_source = create_run_context(
             entry_agent_id=agent_id,
             session_id=LEGACY_DEFAULT_SESSION_ID,
@@ -256,7 +302,7 @@ class ChatService:
             executor=ParallelExecutor(
                 machine, max_concurrency=1, event_emitter=emitter
             ),
-            run_registry=process_run_registry,
+            run_registry=self._run_registry,
             policy=policy,
             state_machine=machine,
             event_emitter=emitter,
@@ -311,6 +357,72 @@ class ChatService:
                 await asyncio.gather(producer_task, return_exceptions=True)
             if self._gauge_provider is not None:
                 self._gauge_provider.unregister_channel(channel)
+
+    async def _stream_factory_coordinated_events(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        run_id: str | None,
+        budget: RunBudget | None,
+        persist: bool,
+        result_out: list[RunCoordinatorResult] | None,
+    ) -> AsyncIterator[RuntimeEvent]:
+        """Run the assembled side path without changing the default chat route."""
+        factory = self._coordinated_runtime_factory
+        if factory is None:
+            raise RuntimeError("CoordinatedRuntimeFactory is not configured")
+        scope = await factory.create_run_scope(
+            agent_id,
+            query,
+            run_id=run_id,
+            budget=budget,
+            persist=persist,
+        )
+
+        async def produce() -> None:
+            try:
+                result = await scope.execute()
+                if result_out is not None:
+                    result_out.append(result)
+                self._observe_state(scope.agent_state)
+            finally:
+                await scope.event_channel.close()
+
+        producer_task = asyncio.create_task(produce())
+        completed = False
+        try:
+            async for event in scope.event_channel:
+                yield event
+            await producer_task
+            completed = True
+        except GeneratorExit:
+            scope.cancellation_source.cancel(
+                CancellationReason.CLIENT_DISCONNECTED
+            )
+            await scope.close(abort=True)
+            producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
+            raise
+        except asyncio.CancelledError:
+            scope.cancellation_source.cancel(
+                CancellationReason.CLIENT_DISCONNECTED
+            )
+            await scope.close(abort=True)
+            producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
+            raise
+        finally:
+            if completed:
+                await scope.close()
+            else:
+                scope.cancellation_source.cancel(
+                    CancellationReason.CLIENT_DISCONNECTED
+                )
+                await scope.close(abort=True)
+                if not producer_task.done():
+                    producer_task.cancel()
+                await asyncio.gather(producer_task, return_exceptions=True)
 
     async def stream_coordinated_agent_text(
         self,
