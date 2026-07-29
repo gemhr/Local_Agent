@@ -554,3 +554,59 @@ __all__ += [
     "VectorScoreSemantics",
     "normalize_vector_score",
 ]
+
+from core.runtime.plan_fingerprint import PlanFingerprinter
+from core.runtime.snapshot_contract import (
+    BUDGET_SNAPSHOT_SCHEMA_VERSION,
+    PLAN_SNAPSHOT_SCHEMA_VERSION,
+    SNAPSHOT_DIGEST_ALGORITHM,
+    SNAPSHOT_SCHEMA_VERSION,
+    STATE_SNAPSHOT_SCHEMA_VERSION,
+    AgentStateSnapshot,
+    BudgetSnapshot as SafeBudgetSnapshot,
+    PlanSnapshot,
+    PlanStepSnapshot,
+    RunSnapshot,
+    RuntimeMetadata,
+    StepStateSnapshot,
+    TextSummary,
+)
+from core.runtime.snapshot_serialization import (
+    canonical_json as snapshot_canonical_json,
+    snapshot_from_json,
+    snapshot_to_json,
+)
+from core.runtime.snapshot_store import (
+    InMemorySnapshotStore,
+    SQLiteSnapshotStore,
+    SnapshotErrorCode,
+    SnapshotSaveStatus,
+    SnapshotStore,
+    SnapshotStoreError,
+)
+
+__all__ += [
+    "AgentStateSnapshot",
+    "BUDGET_SNAPSHOT_SCHEMA_VERSION",
+    "InMemorySnapshotStore",
+    "PLAN_SNAPSHOT_SCHEMA_VERSION",
+    "PlanFingerprinter",
+    "PlanSnapshot",
+    "PlanStepSnapshot",
+    "RunSnapshot",
+    "RuntimeMetadata",
+    "SNAPSHOT_DIGEST_ALGORITHM",
+    "SNAPSHOT_SCHEMA_VERSION",
+    "STATE_SNAPSHOT_SCHEMA_VERSION",
+    "SQLiteSnapshotStore",
+    "SafeBudgetSnapshot",
+    "SnapshotErrorCode",
+    "SnapshotSaveStatus",
+    "SnapshotStore",
+    "SnapshotStoreError",
+    "StepStateSnapshot",
+    "TextSummary",
+    "snapshot_canonical_json",
+    "snapshot_from_json",
+    "snapshot_to_json",
+]
