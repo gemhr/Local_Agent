@@ -31,6 +31,7 @@ from core.runtime.event_emitter import StepEventEmitter
 from core.runtime.event_journal import JournalError
 from core.runtime.events import (
     RuntimeEventType,
+    TOOL_EVIDENCE_SCHEMA_VERSION,
     ToolCompletedPayload,
     ToolStartedPayload,
 )
@@ -346,10 +347,25 @@ class ToolAttemptExecutor:
                     RuntimeEventType.TOOL_STARTED,
                     ToolStartedPayload(
                         tool_name=spec.tool_name,
-                        invocation_id=invocation.invocation_id,
-                        attempt_id=attempt_id,
                         retry_index=retry_index,
-                        resource_key_digest=safe_key_digest(invocation.resource_key),
+                        tool_evidence_schema_version=TOOL_EVIDENCE_SCHEMA_VERSION,
+                        invocation_identity_digest=safe_key_digest(
+                            invocation.invocation_id
+                        ),
+                        attempt_identity_digest=safe_key_digest(attempt_id),
+                        side_effect_kind=spec.side_effect_kind.value,
+                        idempotency_kind=spec.idempotency.value,
+                        idempotency_key_digest=safe_key_digest(
+                            invocation.idempotency_key
+                        ),
+                        replay_supported=spec.supports_idempotency_replay,
+                        side_effect_state=tracker.state.value,
+                        compensation_state="NOT_ATTEMPTED",
+                        retry_disposition="PENDING",
+                        outcome_classification="PENDING",
+                        execution_detached=False,
+                        worker_terminated=False,
+                        provider_started=False,
                     ),
                     component="tool_attempt_executor",
                 )
@@ -399,7 +415,12 @@ class ToolAttemptExecutor:
                 ),
                 retry_index=retry_index,
             )
-            completed = await self._emit_completed(event_emitter, result=result)
+            completed = await self._emit_completed(
+                event_emitter,
+                spec=spec,
+                invocation=invocation,
+                result=result,
+            )
             if isinstance(completed, ToolExecutionError):
                 raise ToolAttemptFailed(completed)
             return result
@@ -439,7 +460,11 @@ class ToolAttemptExecutor:
             )
             if started_event_emitted:
                 error = await self._emit_completed(
-                    event_emitter, error=error, duration_ms=elapsed_ms()
+                    event_emitter,
+                    spec=spec,
+                    invocation=invocation,
+                    error=error,
+                    duration_ms=elapsed_ms(),
                 )
             raise ToolAttemptFailed(error) from None
         except ToolAdapterInvocationError as exc:
@@ -458,7 +483,11 @@ class ToolAttemptExecutor:
             )
             if started_event_emitted:
                 error = await self._emit_completed(
-                    event_emitter, error=error, duration_ms=elapsed_ms()
+                    event_emitter,
+                    spec=spec,
+                    invocation=invocation,
+                    error=error,
+                    duration_ms=elapsed_ms(),
                 )
             raise ToolAttemptFailed(error) from None
         except _ToolTimedOut as exc:
@@ -498,7 +527,11 @@ class ToolAttemptExecutor:
             )
             if started_event_emitted:
                 error = await self._emit_completed(
-                    event_emitter, error=error, duration_ms=elapsed_ms()
+                    event_emitter,
+                    spec=spec,
+                    invocation=invocation,
+                    error=error,
+                    duration_ms=elapsed_ms(),
                 )
             raise ToolAttemptFailed(error) from None
         except BudgetExceededError as exc:
@@ -548,6 +581,8 @@ class ToolAttemptExecutor:
             if started_event_emitted:
                 await self._emit_completed(
                     event_emitter,
+                    spec=spec,
+                    invocation=invocation,
                     duration_ms=elapsed_ms(),
                     error=ToolExecutionError(
                         invocation_id=invocation.invocation_id,
@@ -598,7 +633,11 @@ class ToolAttemptExecutor:
             )
             if started_event_emitted:
                 error = await self._emit_completed(
-                    event_emitter, error=error, duration_ms=elapsed_ms()
+                    event_emitter,
+                    spec=spec,
+                    invocation=invocation,
+                    error=error,
+                    duration_ms=elapsed_ms(),
                 )
             raise ToolAttemptFailed(error) from None
         except ToolAttemptFailed:
@@ -624,7 +663,11 @@ class ToolAttemptExecutor:
             )
             if started_event_emitted:
                 error = await self._emit_completed(
-                    event_emitter, error=error, duration_ms=elapsed_ms()
+                    event_emitter,
+                    spec=spec,
+                    invocation=invocation,
+                    error=error,
+                    duration_ms=elapsed_ms(),
                 )
             raise ToolAttemptFailed(error) from None
         finally:
@@ -813,6 +856,8 @@ class ToolAttemptExecutor:
     async def _emit_completed(
         event_emitter: StepEventEmitter | None,
         *,
+        spec: ToolExecutionSpec,
+        invocation: ToolInvocation,
         result: ToolExecutionResult | None = None,
         error: ToolExecutionError | None = None,
         duration_ms: int | None = None,
@@ -824,17 +869,28 @@ class ToolAttemptExecutor:
                 payload = ToolCompletedPayload(
                     tool_name=result.tool_name,
                     succeeded=True,
-                    invocation_id=result.invocation_id,
-                    attempt_id=result.attempt_id,
                     retry_index=result.retry_index,
                     side_effect_state=result.side_effect_state.value,
                     retry_disposition=result.retry_disposition.value,
-                    resource_key_digest=result.resource_key_digest,
                     worker_terminated=result.worker_terminated,
                     execution_detached=result.execution_detached,
                     resource_release_pending=result.resource_release_pending,
                     duration_ms=result.duration_ms,
                     status=result.status.value,
+                    tool_evidence_schema_version=TOOL_EVIDENCE_SCHEMA_VERSION,
+                    invocation_identity_digest=safe_key_digest(
+                        result.invocation_id
+                    ),
+                    attempt_identity_digest=safe_key_digest(result.attempt_id),
+                    side_effect_kind=spec.side_effect_kind.value,
+                    idempotency_kind=spec.idempotency.value,
+                    idempotency_key_digest=safe_key_digest(
+                        invocation.idempotency_key
+                    ),
+                    replay_supported=spec.supports_idempotency_replay,
+                    compensation_state="NOT_ATTEMPTED",
+                    outcome_classification=result.status.value,
+                    provider_started=True,
                 )
             else:
                 assert error is not None
@@ -844,8 +900,6 @@ class ToolAttemptExecutor:
                     tool_name=error.tool_name,
                     succeeded=False,
                     safe_error_code=error.safe_error_code,
-                    invocation_id=error.invocation_id,
-                    attempt_id=error.attempt_id,
                     retry_index=error.retry_index,
                     side_effect_state=error.side_effect_state.value,
                     retry_disposition=error.retry_disposition.value,
@@ -854,6 +908,29 @@ class ToolAttemptExecutor:
                     resource_release_pending=error.resource_release_pending,
                     duration_ms=duration_ms,
                     status=error.status.value,
+                    tool_evidence_schema_version=TOOL_EVIDENCE_SCHEMA_VERSION,
+                    invocation_identity_digest=safe_key_digest(
+                        error.invocation_id
+                    ),
+                    attempt_identity_digest=safe_key_digest(error.attempt_id),
+                    side_effect_kind=spec.side_effect_kind.value,
+                    idempotency_kind=spec.idempotency.value,
+                    idempotency_key_digest=safe_key_digest(
+                        invocation.idempotency_key
+                    ),
+                    replay_supported=spec.supports_idempotency_replay,
+                    compensation_state=(
+                        "SUCCEEDED"
+                        if error.compensation_attempted
+                        and error.compensation_succeeded
+                        else (
+                            "FAILED"
+                            if error.compensation_attempted
+                            else "NOT_ATTEMPTED"
+                        )
+                    ),
+                    outcome_classification=error.category.value,
+                    provider_started=error.provider_started,
                 )
             await event_emitter.emit(
                 RuntimeEventType.TOOL_COMPLETED,

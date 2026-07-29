@@ -227,6 +227,15 @@ async def test_events_pair_only_after_resource_and_budget_and_hide_output():
         RuntimeEventType.TOOL_COMPLETED,
     ]
     assert events[-1].payload.duration_ms == result.duration_ms
+    started_payload = events[0].to_journal_dict()["safe_payload"]
+    completed_payload = events[1].to_journal_dict()["safe_payload"]
+    assert started_payload["tool_evidence_schema_version"] == 1
+    assert completed_payload["side_effect_kind"] == "NONE"
+    assert completed_payload["idempotency_kind"] == "READ_ONLY"
+    assert completed_payload["provider_started"] is True
+    assert "invocation_id" not in completed_payload
+    assert "attempt_id" not in completed_payload
+    assert "resource_key_digest" not in completed_payload
     attempt = next(
         record for record in recorder.snapshot() if record.component == "tool_attempt"
     )

@@ -70,6 +70,7 @@ from core.runtime.run_coordinator import (
 )
 from core.runtime.events import (
     RUNTIME_EVENT_SCHEMA_VERSION,
+    TOOL_EVIDENCE_SCHEMA_VERSION,
     BudgetExhaustedPayload,
     CancellationPayload,
     ErrorPayload,
@@ -181,6 +182,7 @@ __all__ = [
     "StopReason",
     "UnsupportedStateVersionError",
     "RUNTIME_EVENT_SCHEMA_VERSION",
+    "TOOL_EVIDENCE_SCHEMA_VERSION",
     "BudgetExhaustedPayload",
     "CancellationPayload",
     "ErrorPayload",
@@ -671,10 +673,14 @@ from core.runtime.recovery_contract import (
     RecoveryProjection,
     RecoveryReason,
     RecoveryStatus,
+    ResumeDataAvailability,
+    ToolRecoveryDecision,
+    ToolRecoveryDecisionStatus,
     ToolRecoveryEvidence,
     select_recovery_status,
 )
 from core.runtime.recovery_validation import RecoveryValidator, assess_recovery
+from core.runtime.tool_recovery import ToolRecoveryDecisionEngine
 
 __all__ += [
     "IGNORED_EVENT_TYPES",
@@ -692,6 +698,10 @@ __all__ += [
     "RecoveryReason",
     "RecoveryStatus",
     "RecoveryValidator",
+    "ResumeDataAvailability",
+    "ToolRecoveryDecision",
+    "ToolRecoveryDecisionEngine",
+    "ToolRecoveryDecisionStatus",
     "ToolRecoveryEvidence",
     "assess_recovery",
     "select_recovery_status",
