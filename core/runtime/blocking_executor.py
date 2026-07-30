@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import contextvars
 import threading
@@ -24,6 +25,7 @@ T = TypeVar("T")
 
 class BlockingTaskKind(str, Enum):
     RUNTIME_STEP = "RUNTIME_STEP"
+    LEGACY_STREAM_STEP = "LEGACY_STREAM_STEP"
     QUERY_REWRITE = "QUERY_REWRITE"
     EMBEDDING = "EMBEDDING"
     VECTOR_QUERY = "VECTOR_QUERY"
@@ -98,6 +100,10 @@ class BlockingTaskHandle(Generic[T]):
 
     def result(self, timeout: float | None = None) -> T:
         return self._future.result(timeout=timeout)
+
+    async def result_async(self) -> T:
+        """Await the worker without occupying a second waiter thread."""
+        return await asyncio.wrap_future(self._future)
 
     def cancel_or_detach(self) -> BlockingTaskWaitState:
         if self._future.cancel():
@@ -186,7 +192,54 @@ class BoundedBlockingExecutor:
             )
         except Exception:
             pass
+        return self._submit_admitted(
+            operation,
+            kind=kind,
+            run_id=run_id,
+            operation_id=operation_id,
+        )
 
+    def submit_nowait(
+        self,
+        operation: Callable[[], T],
+        *,
+        kind: BlockingTaskKind,
+        run_id: str,
+        operation_id: str,
+        cancellation_check: Callable[[], None],
+    ) -> BlockingTaskHandle[T]:
+        """Admit immediately or fail without blocking an asyncio transport."""
+        if getattr(self._worker_state, "owner", None) is self:
+            raise BlockingExecutorNestedSubmissionError(
+                "BLOCKING_EXECUTOR_NESTED_SUBMISSION"
+            )
+        if not isinstance(kind, BlockingTaskKind):
+            raise TypeError("kind 必须是 BlockingTaskKind")
+        if not run_id.strip() or not operation_id.strip():
+            raise ValueError("run_id 和 operation_id 不能为空")
+        cancellation_check()
+        with self._lock:
+            if not self._accepting:
+                raise BlockingExecutorClosedError("执行器已关闭")
+        if not self._admission.acquire(blocking=False):
+            raise BlockingExecutorAdmissionTimeout(
+                "blocking executor admission unavailable"
+            )
+        return self._submit_admitted(
+            operation,
+            kind=kind,
+            run_id=run_id,
+            operation_id=operation_id,
+        )
+
+    def _submit_admitted(
+        self,
+        operation: Callable[[], T],
+        *,
+        kind: BlockingTaskKind,
+        run_id: str,
+        operation_id: str,
+    ) -> BlockingTaskHandle[T]:
         task_id = uuid4().hex
         record = BlockingTaskRecord(
             task_id=task_id,
@@ -307,6 +360,11 @@ process_blocking_executor = BoundedBlockingExecutor(
     max_workers=DEFAULT_BLOCKING_MAX_WORKERS,
     max_pending_tasks=DEFAULT_BLOCKING_MAX_PENDING_TASKS,
 )
+process_legacy_step_executor = BoundedBlockingExecutor(
+    max_workers=DEFAULT_BLOCKING_MAX_WORKERS,
+    max_pending_tasks=DEFAULT_BLOCKING_MAX_PENDING_TASKS,
+    thread_name_prefix="legacy-step",
+)
 
 
 __all__ = [
@@ -323,4 +381,5 @@ __all__ = [
     "DEFAULT_BLOCKING_MAX_PENDING_TASKS",
     "DEFAULT_BLOCKING_MAX_WORKERS",
     "process_blocking_executor",
+    "process_legacy_step_executor",
 ]

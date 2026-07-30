@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
+import threading
 from typing import AsyncIterator, Protocol
 
 from core.runtime.cancellation import CancellationToken
@@ -28,6 +29,15 @@ class EventChannelState(str, Enum):
     ABORTED = "ABORTED"
 
 
+class EventChannelConsumerOwner(str, Enum):
+    """The sole right to remove entries from one channel."""
+
+    TRANSPORT = "TRANSPORT"
+    DRAIN = "DRAIN"
+    RELEASED = "RELEASED"
+    ABORTED = "ABORTED"
+
+
 class EventChannelClosedError(RuntimeError):
     """Channel 不再接受事件时抛出。"""
 
@@ -39,6 +49,49 @@ class JournalWatermarkError(RuntimeError):
 
 
 _END = object()
+
+
+class _RuntimeEventTransportConsumer(AsyncIterator[RuntimeEvent]):
+    """Explicit lease so even pre-first-read aclose releases ownership."""
+
+    def __init__(self, channel: "RuntimeEventChannel") -> None:
+        self._channel = channel
+        self._active = True
+
+    def __aiter__(self) -> "_RuntimeEventTransportConsumer":
+        return self
+
+    async def __anext__(self) -> RuntimeEvent:
+        if not self._active:
+            raise StopAsyncIteration
+        try:
+            item = await self._channel._queue.get()
+        except BaseException:
+            self._release(completed=False)
+            raise
+        if item is _END:
+            self._release(
+                completed=(
+                    self._channel.state is not EventChannelState.ABORTED
+                )
+            )
+            raise StopAsyncIteration
+        if self._channel.state is EventChannelState.ABORTED:
+            self._release(completed=False)
+            raise StopAsyncIteration
+        if not isinstance(item, RuntimeEvent):  # pragma: no cover
+            self._release(completed=False)
+            raise RuntimeError("Event Channel 收到未知内部条目")
+        return item
+
+    async def aclose(self) -> None:
+        self._release(completed=False)
+
+    def _release(self, *, completed: bool) -> None:
+        if not self._active:
+            return
+        self._active = False
+        self._channel._release_transport(completed=completed)
 
 
 class RuntimeEventChannel:
@@ -73,7 +126,10 @@ class RuntimeEventChannel:
         )
         self._publications_in_flight = 0
         self._cancellation_token = cancellation_token
-        self._consumer_attached = False
+        self._consumer_owner = EventChannelConsumerOwner.RELEASED
+        self._consumer_lock = threading.Lock()
+        self._transport_completed = False
+        self._drain_completed = False
         self._end_enqueued = False
 
     @property
@@ -91,7 +147,15 @@ class RuntimeEventChannel:
 
     @property
     def consumer_attached(self) -> bool:
-        return self._consumer_attached
+        return (
+            self.consumer_owner
+            is not EventChannelConsumerOwner.RELEASED
+        )
+
+    @property
+    def consumer_owner(self) -> EventChannelConsumerOwner:
+        with self._consumer_lock:
+            return self._consumer_owner
 
     @property
     def publications_in_flight(self) -> int:
@@ -186,13 +250,15 @@ class RuntimeEventChannel:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        self._end_enqueued = False
+        # Wake a transport or drain consumer that is blocked on an empty queue.
+        self._queue.put_nowait(_END)
+        self._end_enqueued = True
+        with self._consumer_lock:
+            self._consumer_owner = EventChannelConsumerOwner.ABORTED
 
     def __aiter__(self) -> AsyncIterator[RuntimeEvent]:
-        if self._consumer_attached:
-            raise RuntimeError("RuntimeEventChannel 只支持一个 Consumer")
-        self._consumer_attached = True
-        return self._iterate()
+        self._claim_consumer(EventChannelConsumerOwner.TRANSPORT)
+        return _RuntimeEventTransportConsumer(self)
 
     async def drain_to_discard(self) -> None:
         """Consume queued events internally without adapting or publishing them.
@@ -200,27 +266,57 @@ class RuntimeEventChannel:
         This is used only after the transport consumer has stopped.  It keeps a
         bounded producer moving until the producer closes the channel.
         """
-        while True:
+        with self._consumer_lock:
             if self._state == EventChannelState.ABORTED:
+                self._consumer_owner = EventChannelConsumerOwner.ABORTED
                 return
-            item = await self._queue.get()
-            if item is _END:
+            if self._drain_completed:
                 return
-            if self._state == EventChannelState.ABORTED:
-                return
+            if self._transport_completed:
+                raise RuntimeError(
+                    "transport consumer already completed normally"
+                )
+            if self._consumer_owner is not EventChannelConsumerOwner.RELEASED:
+                raise RuntimeError(
+                    "RuntimeEventChannel consumer ownership is not released"
+                )
+            self._consumer_owner = EventChannelConsumerOwner.DRAIN
+        completed = False
+        try:
+            while True:
+                item = await self._queue.get()
+                if item is _END or self._state == EventChannelState.ABORTED:
+                    completed = True
+                    return
+        finally:
+            with self._consumer_lock:
+                if self._consumer_owner is EventChannelConsumerOwner.DRAIN:
+                    self._consumer_owner = EventChannelConsumerOwner.RELEASED
+                if completed:
+                    self._drain_completed = True
 
-    async def _iterate(self) -> AsyncIterator[RuntimeEvent]:
-        while True:
-            if self._state == EventChannelState.ABORTED and self._queue.empty():
-                return
-            item = await self._queue.get()
-            if item is _END:
-                return
+    def _claim_consumer(self, owner: EventChannelConsumerOwner) -> None:
+        with self._consumer_lock:
             if self._state == EventChannelState.ABORTED:
-                return
-            if not isinstance(item, RuntimeEvent):  # pragma: no cover - 内部不变量
-                raise RuntimeError("Event Channel 收到未知内部条目")
-            yield item
+                self._consumer_owner = EventChannelConsumerOwner.ABORTED
+                raise RuntimeError("RuntimeEventChannel is aborted")
+            if self._consumer_owner is not EventChannelConsumerOwner.RELEASED:
+                raise RuntimeError("RuntimeEventChannel 只支持一个 Consumer")
+            if self._transport_completed or self._drain_completed:
+                raise RuntimeError(
+                    "RuntimeEventChannel consumer lifecycle is complete"
+                )
+            self._consumer_owner = owner
+
+    def _release_transport(self, *, completed: bool) -> None:
+        with self._consumer_lock:
+            if (
+                self._consumer_owner
+                is EventChannelConsumerOwner.TRANSPORT
+            ):
+                self._consumer_owner = EventChannelConsumerOwner.RELEASED
+            if completed:
+                self._transport_completed = True
 
     def _ensure_open(self) -> None:
         if self._state != EventChannelState.OPEN:

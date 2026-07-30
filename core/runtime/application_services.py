@@ -158,6 +158,7 @@ class ApplicationRuntimeServices:
         default_factory=RuntimeAdmissionGate
     )
     coordinated_step_executor: object | None = None
+    legacy_step_executor: object | None = None
     snapshot_enabled: bool = False
     recovery_enabled: bool = False
     activity_tracker_factory: Callable[[str], RuntimeActivityTracker] = (
@@ -197,6 +198,7 @@ class ApplicationRuntimeServices:
             self.retrieval_execution_service,
             self.run_registry,
             self.coordinated_step_executor,
+            self.legacy_step_executor,
             *self.blocking_executors,
             *self.worker_trackers,
         ):
