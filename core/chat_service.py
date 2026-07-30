@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+import math
 import threading
 from typing import Any, Generator, Optional
 
@@ -20,6 +21,7 @@ from core.runtime import (
     BudgetLedger,
     RunBudget,
     CancellationReason,
+    ActiveRunControlHandle,
     RunHandle,
     process_run_registry,
     RunCoordinatorResult,
@@ -32,6 +34,8 @@ from core.runtime import (
     ChatRuntimeMode,
     ChatRuntimeSelector,
     CoordinatedRuntimeFactory,
+    RuntimeAdmissionGate,
+    RuntimeAdmissionRejectedError,
 )
 
 
@@ -57,6 +61,8 @@ class ChatService:
         runtime_selector: ChatRuntimeSelector | None = None,
         coordinated_runtime_factory: CoordinatedRuntimeFactory | None = None,
         run_registry=None,
+        admission_gate: RuntimeAdmissionGate | None = None,
+        disconnect_grace_seconds: float = 1.0,
     ) -> None:
         """初始化应用服务。
 
@@ -89,10 +95,32 @@ class ChatService:
             )
         self._coordinated_runtime_factory = coordinated_runtime_factory
         self._run_registry = run_registry or process_run_registry
+        factory_gate = (
+            coordinated_runtime_factory.services.admission_gate
+            if coordinated_runtime_factory is not None
+            else None
+        )
+        self._admission_gate = (
+            admission_gate or factory_gate or RuntimeAdmissionGate()
+        )
+        if (
+            isinstance(disconnect_grace_seconds, bool)
+            or not isinstance(disconnect_grace_seconds, (int, float))
+            or not math.isfinite(float(disconnect_grace_seconds))
+            or float(disconnect_grace_seconds) < 0
+        ):
+            raise ValueError(
+                "disconnect_grace_seconds must be finite and non-negative"
+            )
+        self._disconnect_grace_seconds = float(disconnect_grace_seconds)
 
     @property
     def run_registry(self):
         return self._run_registry
+
+    @property
+    def admission_gate(self) -> RuntimeAdmissionGate:
+        return self._admission_gate
 
     def selected_runtime_mode(self) -> ChatRuntimeMode:
         """Capture the configured enum once at the request boundary."""
@@ -109,6 +137,7 @@ class ChatService:
         Yields:
             str: 助手增量输出。
         """
+        self._admission_gate.acquire()
         final_query = query
         if file_path:
             final_query += f"\n\nPlease analyze this file path: '{file_path}'"
@@ -122,21 +151,28 @@ class ChatService:
         # ChatService 是当前 Legacy 主链路的 Parent Runtime，单 Run 创建并持有账本。
         run_context.attach_budget_ledger(BudgetLedger(RunBudget(), deadline_remaining=run_context.remaining_seconds))
         agent_state = AgentState.for_run_context(run_context.run_id)
-        self._run_registry.register(
-            RunHandle(
-                run_context.run_id,
-                cancellation_source,
-                agent_state,
-                "chat_service",
+        try:
+            self._run_registry.register(
+                ActiveRunControlHandle(
+                    run_id=run_context.run_id,
+                    runtime_mode="LEGACY",
+                    cancellation_source=cancellation_source,
+                    owner="chat_service",
+                    active_step_count=lambda: len(
+                        agent_state.active_step_ids
+                    ),
+                )
             )
-        )
+        except BaseException:
+            self._admission_gate.release()
+            raise
         driver = LegacyAgentRouterDriver(self.router, user_query=final_query, agent_id=agent_id)
         loop = AgentLoop()
         deadline_timer: threading.Timer | None = None
         remaining = run_context.remaining_seconds()
         if remaining is not None:
             # Timer 只属于本 Run，finally 一定取消；不创建永久后台任务。
-            deadline_timer = threading.Timer(remaining, cancellation_source.cancel, args=(CancellationReason.DEADLINE_EXCEEDED,))
+            deadline_timer = threading.Timer(remaining, cancellation_source.cancel, args=(CancellationReason.REQUEST_DEADLINE_EXCEEDED,))
             deadline_timer.daemon = True
             deadline_timer.start()
         try:
@@ -153,6 +189,7 @@ class ChatService:
             if deadline_timer is not None:
                 deadline_timer.cancel()
             self._run_registry.unregister(run_context.run_id)
+            self._admission_gate.release()
             _ = _cancellation_source
 
     def _observe_state(self, agent_state: AgentState) -> None:
@@ -204,6 +241,7 @@ class ChatService:
         budget: RunBudget | None = None,
         persist: bool = True,
         _result_out: list[RunCoordinatorResult] | None = None,
+        _cancellation_intent: list[CancellationReason] | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
         if self._coordinated_runtime_factory is None:
@@ -217,6 +255,7 @@ class ChatService:
             budget=budget,
             persist=persist,
             result_out=_result_out,
+            cancellation_intent=_cancellation_intent,
         )
         try:
             async for event in events:
@@ -233,6 +272,7 @@ class ChatService:
         budget: RunBudget | None,
         persist: bool,
         result_out: list[RunCoordinatorResult] | None,
+        cancellation_intent: list[CancellationReason] | None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Run the sole production coordinated event path through the factory."""
         factory = self._coordinated_runtime_factory
@@ -250,6 +290,10 @@ class ChatService:
             )
         except asyncio.CancelledError:
             raise
+        except RuntimeAdmissionRejectedError:
+            raise ChatRuntimeTransportError(
+                "RUNTIME_SHUTTING_DOWN"
+            ) from None
         except Exception:
             raise ChatRuntimeTransportError(
                 "RUNTIME_SCOPE_CREATION_FAILED"
@@ -265,39 +309,70 @@ class ChatService:
                 await scope.event_channel.close()
 
         producer_task = asyncio.create_task(produce())
+        scope.bind_producer_task(producer_task)
         completed = False
+        cancel_reason = (
+            cancellation_intent[0]
+            if cancellation_intent is not None
+            else CancellationReason.CLIENT_DISCONNECTED
+        )
         try:
             async for event in scope.event_channel:
                 yield event
             await producer_task
             completed = True
         except GeneratorExit:
-            scope.cancellation_source.cancel(
-                CancellationReason.CLIENT_DISCONNECTED
+            cancel_reason = (
+                cancellation_intent[0]
+                if cancellation_intent is not None
+                else CancellationReason.CLIENT_DISCONNECTED
             )
-            await scope.close(abort=True)
-            producer_task.cancel()
-            await asyncio.gather(producer_task, return_exceptions=True)
+            scope.request_cancel(cancel_reason)
+            await self._cancel_and_drain_scope(scope, cancel_reason)
             raise
         except asyncio.CancelledError:
-            scope.cancellation_source.cancel(
-                CancellationReason.CLIENT_DISCONNECTED
+            scope.request_cancel(CancellationReason.CLIENT_DISCONNECTED)
+            await self._cancel_and_drain_scope(
+                scope, CancellationReason.CLIENT_DISCONNECTED
             )
-            await scope.close(abort=True)
-            producer_task.cancel()
-            await asyncio.gather(producer_task, return_exceptions=True)
             raise
         finally:
             if completed:
                 await scope.close()
-            else:
-                scope.cancellation_source.cancel(
-                    CancellationReason.CLIENT_DISCONNECTED
-                )
-                await scope.close(abort=True)
-                if not producer_task.done():
-                    producer_task.cancel()
-                await asyncio.gather(producer_task, return_exceptions=True)
+            elif not scope.is_closed:
+                scope.request_cancel(cancel_reason)
+                await self._cancel_and_drain_scope(scope, cancel_reason)
+
+    async def _cancel_and_drain_scope(
+        self,
+        scope,
+        reason: CancellationReason,
+    ) -> None:
+        """Boundedly shield only the minimum request-owned cleanup."""
+
+        if reason is CancellationReason.STREAM_ENCODING_FAILED:
+            await scope.force_abort(reason)
+            return
+
+        async def cleanup() -> None:
+            drained = await scope.drain_and_close(
+                self._disconnect_grace_seconds
+            )
+            if not drained:
+                await scope.force_abort(reason)
+
+        cleanup_task = asyncio.create_task(cleanup())
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(cleanup_task),
+                timeout=self._disconnect_grace_seconds + 0.25,
+            )
+        except TimeoutError:
+            await scope.force_abort(reason)
+        finally:
+            if not cleanup_task.done():
+                cleanup_task.cancel()
+            await asyncio.gather(cleanup_task, return_exceptions=True)
 
     async def stream_coordinated_agent_text(
         self,
@@ -310,18 +385,23 @@ class ChatService:
     ) -> AsyncIterator[str]:
         """通过唯一 Transport Adapter 输出当前自定义纯文本分块协议。"""
         adapter = ChatStreamCompatibilityAdapter()
+        cancellation_intent = [CancellationReason.CLIENT_DISCONNECTED]
         events = self.stream_coordinated_agent_events(
             agent_id,
             query,
             run_id=run_id,
             budget=budget,
             persist=persist,
+            _cancellation_intent=cancellation_intent,
         )
         try:
             async for event in events:
                 try:
                     chunk = adapter.adapt(event)
                 except ChatStreamProtocolError as exc:
+                    cancellation_intent[0] = (
+                        CancellationReason.STREAM_ENCODING_FAILED
+                    )
                     yield safe_transport_error_chunk(exc.error_code).text
                     return
                 if chunk is not None:

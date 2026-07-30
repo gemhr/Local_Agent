@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import time
 
 from core.runtime.application_services import (
     ApplicationRuntimeServices,
     RuntimeLifecycleState,
 )
+from core.runtime.cancellation import CancellationReason
 from core.runtime.budget import BudgetLedger, RunBudget
 from core.runtime.context import LEGACY_DEFAULT_SESSION_ID, create_run_context
 from core.runtime.event_channel import RuntimeEventChannel
@@ -22,7 +24,8 @@ from core.runtime.parallel_execution import (
     StepExecutionMode,
 )
 from core.runtime.run_coordinator import RunCoordinator, RunCoordinatorResult
-from core.runtime.run_registry import RunHandle
+from core.runtime.run_registry import ActiveRunControlHandle
+from core.runtime.state import RunStatus
 from core.runtime.scheduler import SerialScheduler, StepClaim
 from core.runtime.state import AgentState
 from core.runtime.state_machine import AgentStateMachine
@@ -85,9 +88,12 @@ class CoordinatedRunScope:
     event_emitter: RunEventEmitter
     coordinator: RunCoordinator
     driver: CoordinatedSingleAgentDriver
+    run_registry: object
+    run_handle: ActiveRunControlHandle
     gauge_provider: object | None = field(default=None, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _executed: bool = field(default=False, init=False, repr=False)
+    _producer_task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _close_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock, init=False, repr=False
     )
@@ -119,24 +125,78 @@ class CoordinatedRunScope:
             execution_mode=StepExecutionMode.SYNC_BLOCKING,
         )
 
+    def bind_producer_task(self, task: asyncio.Task) -> None:
+        if self._producer_task is not None:
+            raise RuntimeError("coordinated producer task is already bound")
+        self._producer_task = task
+
+    def request_cancel(self, reason: CancellationReason) -> bool:
+        """Request cooperative cancellation without closing run resources."""
+        if self.agent_state.status in {
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }:
+            return False
+        return self.run_handle.request_cancel(reason)
+
+    async def drain_and_close(self, timeout: float) -> bool:
+        """Drain the bounded channel to discard and close normally."""
+        if self._closed:
+            return self.event_channel.state.value == "CLOSED"
+        deadline = time.monotonic() + float(timeout)
+        try:
+            await asyncio.wait_for(
+                self.event_channel.drain_to_discard(),
+                timeout=max(0.0, deadline - time.monotonic()),
+            )
+            producer = self._producer_task
+            if producer is not None:
+                await asyncio.wait_for(
+                    asyncio.shield(producer),
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
+            await self.close()
+            return True
+        except TimeoutError:
+            return False
+
+    async def force_abort(self, reason: CancellationReason) -> None:
+        """Abort request-owned tasks/channel; never close application services."""
+        self.request_cancel(reason)
+        producer = self._producer_task
+        if producer is not None and not producer.done():
+            producer.cancel()
+        await self.event_channel.abort()
+        if producer is not None:
+            await asyncio.gather(producer, return_exceptions=True)
+        if self.run_registry.get(self.run_id) is self.run_handle:
+            self.run_registry.unregister(self.run_id)
+        await self._finish_close()
+
     async def close(self, *, abort: bool = False) -> None:
         """Idempotently release only request-scoped transport registrations."""
         async with self._close_lock:
             if self._closed:
                 return
-            self._closed = True
             try:
                 if abort:
                     await self.event_channel.abort()
                 else:
                     await self.event_channel.close()
             finally:
-                if self.gauge_provider is not None:
-                    self.gauge_provider.unregister_channel(self.event_channel)
+                await self._finish_close()
+
+    async def _finish_close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self.gauge_provider is not None:
+            self.gauge_provider.unregister_channel(self.event_channel)
 
     async def abort(self) -> None:
         """Idempotently abort the request transport owned by this scope."""
-        await self.close(abort=True)
+        await self.force_abort(CancellationReason.REQUEST_CANCELLED)
 
     async def __aenter__(self) -> "CoordinatedRunScope":
         return self
@@ -201,6 +261,8 @@ class CoordinatedRuntimeFactory:
             self._services.observability_dispatcher, "gauge_provider", None
         )
         try:
+            self._services.admission_gate.acquire()
+            admission_acquired = True
             run_context, cancellation_source = create_run_context(
                 entry_agent_id=agent_id,
                 session_id=session_id,
@@ -241,18 +303,23 @@ class CoordinatedRuntimeFactory:
                 machine,
                 max_concurrency=1,
                 event_emitter=emitter,
+                blocking_executor=(
+                    self._services.coordinated_step_executor
+                ),
+            )
+            run_handle = ActiveRunControlHandle(
+                run_id=run_context.run_id,
+                runtime_mode="COORDINATED",
+                cancellation_source=cancellation_source,
+                owner="coordinated_runtime_factory",
+                active_step_count=lambda: len(agent_state.active_step_ids),
             )
             coordinator = RunCoordinator(
                 run_context=run_context,
                 plan=plan,
                 agent_state=agent_state,
                 budget_ledger=ledger,
-                run_handle=RunHandle(
-                    run_context.run_id,
-                    cancellation_source,
-                    agent_state,
-                    "coordinated_runtime_factory",
-                ),
+                run_handle=run_handle,
                 scheduler=scheduler,
                 executor=executor,
                 run_registry=self._services.run_registry,
@@ -273,7 +340,7 @@ class CoordinatedRuntimeFactory:
                 persist=persist,
                 event_emitter=emitter.for_step("answer"),
             )
-            return CoordinatedRunScope(
+            scope = CoordinatedRunScope(
                 run_context=run_context,
                 cancellation_source=cancellation_source,
                 agent_state=agent_state,
@@ -287,8 +354,13 @@ class CoordinatedRuntimeFactory:
                 event_emitter=emitter,
                 coordinator=coordinator,
                 driver=driver,
+                run_registry=self._services.run_registry,
+                run_handle=run_handle,
                 gauge_provider=gauge_provider if registered_channel else None,
             )
+            run_handle.bind_force_abort(scope.force_abort)
+            self._services.run_registry.register(run_handle)
+            return scope
         except BaseException:
             if registered_channel and channel is not None:
                 try:
@@ -301,6 +373,9 @@ class CoordinatedRuntimeFactory:
                 except Exception:
                     pass
             raise
+        finally:
+            if locals().get("admission_acquired", False):
+                self._services.admission_gate.release()
 
     async def create(self, *args, **kwargs) -> CoordinatedRunScope:
         return await self.create_run_scope(*args, **kwargs)

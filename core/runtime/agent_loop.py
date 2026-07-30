@@ -483,7 +483,15 @@ class AgentLoop:
 
 def _stop_reason_for_cancellation(reason: CancellationReason) -> StopReason:
     """将取消域原因映射到唯一允许修改终态的 StopReason。"""
-    return StopReason(reason.value)
+    canonical = {
+        CancellationReason.REQUEST_CANCELLED: StopReason.USER_CANCELLED,
+        CancellationReason.REQUEST_DEADLINE_EXCEEDED: (
+            StopReason.DEADLINE_EXCEEDED
+        ),
+        CancellationReason.SERVER_SHUTDOWN: StopReason.SYSTEM_SHUTDOWN,
+        CancellationReason.STREAM_ENCODING_FAILED: StopReason.USER_CANCELLED,
+    }.get(reason)
+    return canonical or StopReason(reason.value)
 
 
 def _cancellation_reason(value: CancellationReason | str | None, fallback: CancellationReason) -> CancellationReason:

@@ -825,7 +825,7 @@ provides-extras = ["server", "test", "dev", "all"]
 
 [[package]]
 name = "local-agent"
-version = "0.1.0"
+version = "1.23.3"
 source = { virtual = "." }
 dependencies = [
     { name = "apscheduler" },

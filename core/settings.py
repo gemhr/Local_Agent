@@ -3,6 +3,7 @@
 """项目统一配置模块。"""
 
 import os
+import math
 from dataclasses import dataclass
 
 from core.runtime.runtime_mode import ChatRuntimeMode
@@ -36,6 +37,14 @@ def _env_bool_strict(name: str, default: bool) -> bool:
     if normalized in {"0", "false"}:
         return False
     raise ValueError(f"{name} must be one of 1, 0, true, false")
+
+
+def _env_finite_non_negative(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    value = float(raw) if raw is not None else float(default)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return value
 
 
 @dataclass(frozen=True)
@@ -89,6 +98,9 @@ class Settings:
     observability_checkpoint_db_path: str
     observability_queue_capacity: int
     observability_shutdown_timeout_seconds: int
+    runtime_disconnect_grace_seconds: float
+    runtime_shutdown_grace_seconds: float
+    runtime_component_close_timeout_seconds: float
     metrics_tool_name_allowlist: tuple[str, ...]
     knowledge_collection_name: str
     rag_top_k: int
@@ -279,6 +291,15 @@ class Settings:
             ),
             observability_shutdown_timeout_seconds=_env_int_at_least(
                 "LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS", 5, 1
+            ),
+            runtime_disconnect_grace_seconds=_env_finite_non_negative(
+                "RUNTIME_DISCONNECT_GRACE_SECONDS", 0.75
+            ),
+            runtime_shutdown_grace_seconds=_env_finite_non_negative(
+                "RUNTIME_SHUTDOWN_GRACE_SECONDS", 5.0
+            ),
+            runtime_component_close_timeout_seconds=_env_finite_non_negative(
+                "RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS", 5.0
             ),
             metrics_tool_name_allowlist=tuple(
                 value.strip()

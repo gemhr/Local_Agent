@@ -13,8 +13,15 @@ from enum import Enum
 class CancellationReason(str, Enum):
     """运行级取消的固定、安全原因。"""
 
-    USER_CANCELLED = "USER_CANCELLED"
     CLIENT_DISCONNECTED = "CLIENT_DISCONNECTED"
+    SERVER_SHUTDOWN = "SERVER_SHUTDOWN"
+    REQUEST_CANCELLED = "REQUEST_CANCELLED"
+    REQUEST_DEADLINE_EXCEEDED = "REQUEST_DEADLINE_EXCEEDED"
+    STREAM_ENCODING_FAILED = "STREAM_ENCODING_FAILED"
+
+    # Compatibility-only values from the Day 12 contract. New production
+    # cancellation owners use the five canonical names above.
+    USER_CANCELLED = "USER_CANCELLED"
     SYSTEM_SHUTDOWN = "SYSTEM_SHUTDOWN"
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
 
@@ -22,7 +29,10 @@ class CancellationReason(str, Enum):
 class RunCancelledError(RuntimeError):
     """运行在合作式安全点发现取消请求时引发。"""
 
-    def __init__(self, reason: CancellationReason | str = CancellationReason.USER_CANCELLED) -> None:
+    def __init__(
+        self,
+        reason: CancellationReason | str = CancellationReason.REQUEST_CANCELLED,
+    ) -> None:
         self.reason = reason.value if isinstance(reason, CancellationReason) else str(reason)
         super().__init__(self.reason)
 
@@ -73,11 +83,14 @@ class CancellationSource:
 
     def cancel(
         self,
-        reason: CancellationReason | str = CancellationReason.USER_CANCELLED,
+        reason: CancellationReason | str = CancellationReason.REQUEST_CANCELLED,
         occurred_at: datetime | None = None,
     ) -> bool:
         """请求取消。仅第一次成功，后续调用不覆盖原因或时间。"""
         # 保留旧调用方传入安全短字符串的兼容性；新运行级路径仅使用 Enum。
+        # Compatibility-only callers may still attach a diagnostic short
+        # string. Production cancellation owners pass CancellationReason and
+        # never branch on free text.
         parsed = reason if isinstance(reason, CancellationReason) else str(reason)
         timestamp = occurred_at or datetime.now(UTC)
         if timestamp.tzinfo is None or timestamp.utcoffset() is None:

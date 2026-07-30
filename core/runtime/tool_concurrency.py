@@ -91,6 +91,7 @@ class ToolConcurrencyController:
         self._tool_semaphores: dict[str, tuple[int, threading.BoundedSemaphore]] = {}
         self._held_resources: set[str] = set()
         self._workers: dict[str, ToolWorkerRecord] = {}
+        self._accepting = True
 
     async def acquire(
         self,
@@ -101,6 +102,12 @@ class ToolConcurrencyController:
         cancellation_token: CancellationToken,
         remaining_seconds: Callable[[], float | None],
     ) -> ToolResourceLease:
+        with self._lock:
+            if not self._accepting:
+                raise ToolResourceAcquireError(
+                    "TOOL_ADMISSION_CLOSED",
+                    "Tool execution admission is closed.",
+                )
         tool_semaphore = self._tool_semaphore(tool_name, tool_max_concurrency)
         global_acquired = False
         tool_acquired = False
@@ -191,6 +198,13 @@ class ToolConcurrencyController:
                     self._held_resources.add(resource_key)
                     return
             await asyncio.sleep(self._wait_slice(remaining_seconds))
+
+    def close_admission(self) -> bool:
+        """Reject new tool leases while preserving active worker facts."""
+        with self._lock:
+            changed = self._accepting
+            self._accepting = False
+            return changed
 
     def _wait_slice(self, remaining_seconds: Callable[[], float | None]) -> float:
         remaining = remaining_seconds()

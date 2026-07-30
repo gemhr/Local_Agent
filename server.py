@@ -23,6 +23,7 @@ from core.runtime import (
     ChatRuntimeSelector,
     CancellationReason,
     CoordinatedRuntimeFactory,
+    GracefulShutdownCoordinator,
     InMemorySpanRecorder,
     ModelCircuitBreakerConfig,
     ModelCircuitBreakerRegistry,
@@ -38,6 +39,7 @@ from core.runtime import (
     SQLiteRunEventJournal,
     SQLiteSnapshotStore,
     RuntimeLifecycleState,
+    RuntimeAdmissionRejectedError,
     process_run_registry,
 )
 from core.runtime.blocking_executor import BoundedBlockingExecutor
@@ -69,9 +71,6 @@ settings = Settings.load()
 chat_service: Optional[ChatService] = None
 application_runtime_services: Optional[ApplicationRuntimeServices] = None
 logger = logging.getLogger(__name__)
-SHUTDOWN_GRACE_SECONDS = 2.0
-
-
 def _next_or_none(stream):
     """避免 StopIteration 穿透 Future 边界。"""
     try:
@@ -108,6 +107,44 @@ def _close_model_engines(engines: dict) -> tuple[str, ...]:
     return tuple(error_codes)
 
 
+async def _watch_request_disconnect(
+    request: Request,
+    *,
+    run_registry,
+    run_id: str,
+    disconnected: asyncio.Event,
+    stopped: asyncio.Event,
+) -> None:
+    """The sole logical disconnect owner for one HTTP request."""
+    while not stopped.is_set():
+        try:
+            if await request.is_disconnected():
+                disconnected.set()
+                run_registry.cancel(
+                    run_id, CancellationReason.CLIENT_DISCONNECTED
+                )
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # An uncertain watcher must not cancel an otherwise healthy run.
+            return
+        try:
+            await asyncio.wait_for(stopped.wait(), timeout=0.05)
+        except TimeoutError:
+            pass
+
+
+async def _stop_disconnect_watcher(
+    watcher: asyncio.Task,
+    stopped: asyncio.Event,
+) -> None:
+    stopped.set()
+    if not watcher.done():
+        watcher.cancel()
+    await asyncio.gather(watcher, return_exceptions=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """构建 FastAPI 生命周期内共享的服务对象。
@@ -130,6 +167,13 @@ async def lifespan(app: FastAPI):
     blocking_executor = await initialization_stack.create(
         "blocking_executor",
         BoundedBlockingExecutor,
+        close_operation="shutdown",
+    )
+    coordinated_step_executor = await initialization_stack.create(
+        "coordinated_step_executor",
+        lambda: BoundedBlockingExecutor(
+            thread_name_prefix="coordinated-step"
+        ),
         close_operation="shutdown",
     )
     span_recorder = await initialization_stack.create(
@@ -381,11 +425,15 @@ async def lifespan(app: FastAPI):
             model_invocation_router=router.model_invocation_router,
             tool_execution_service=router.tool_execution_service,
             retrieval_execution_service=router.retrieval_execution_service,
-            blocking_executors=(blocking_executor,),
+            blocking_executors=(
+                blocking_executor,
+                coordinated_step_executor,
+            ),
             worker_trackers=(
                 router.tool_execution_service.concurrency_controller,
             ),
             run_registry=run_registry,
+            coordinated_step_executor=coordinated_step_executor,
             snapshot_enabled=settings.snapshot_store_enabled,
             recovery_enabled=settings.snapshot_store_enabled,
             extra_closeables=(
@@ -422,6 +470,17 @@ async def lifespan(app: FastAPI):
             runtime_selector=ChatRuntimeSelector(settings.chat_runtime_mode),
             coordinated_runtime_factory=coordinated_runtime_factory,
             run_registry=run_registry,
+            admission_gate=application_runtime_services.admission_gate,
+            disconnect_grace_seconds=(
+                settings.runtime_disconnect_grace_seconds
+            ),
+        ),
+    )
+    shutdown_coordinator = GracefulShutdownCoordinator(
+        application_runtime_services,
+        shutdown_grace_seconds=settings.runtime_shutdown_grace_seconds,
+        component_timeout_seconds=(
+            settings.runtime_component_close_timeout_seconds
         ),
     )
     app.state.runtime_services = application_runtime_services
@@ -431,48 +490,35 @@ async def lifespan(app: FastAPI):
         runtime_metrics, gauge_provider
     )
     app.state.runtime_observability = observability_dispatcher
+    app.state.runtime_admission_gate = (
+        application_runtime_services.admission_gate
+    )
+    app.state.runtime_shutdown_coordinator = shutdown_coordinator
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
     initialization_stack.release()
     try:
         yield
     finally:
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.SHUTTING_DOWN
-        cancelled = run_registry.cancel_all(CancellationReason.SYSTEM_SHUTDOWN)
-        remaining = await asyncio.to_thread(
-            run_registry.wait_until_empty, SHUTDOWN_GRACE_SECONDS
-        )
-        if remaining:
-            logger.warning(
-                "shutdown cleanup timed out",
-                extra={
-                    "component": "run_registry",
-                    "phase": "shutdown",
-                    "status": "TIMED_OUT",
-                    "active_run_count": len(remaining),
-                    "safe_error_code": "RUN_REGISTRY_DRAIN_TIMEOUT",
-                },
-            )
-        elif cancelled:
-            logger.info(
-                "shutdown cleanup completed",
-                extra={
-                    "component": "run_registry",
-                    "phase": "shutdown",
-                    "status": "COMPLETED",
-                    "cancelled_run_count": len(cancelled),
-                },
-            )
-        close_report = await application_runtime_services.close(
-            settings.observability_shutdown_timeout_seconds
-        )
-        if not close_report.completed:
+        shutdown_report = await shutdown_coordinator.shutdown()
+        if shutdown_report.error_codes:
             logger.warning(
                 "Runtime services closed with safe lifecycle issues",
                 extra={
-                    "component": "application_runtime_services",
+                    "component": "graceful_shutdown_coordinator",
                     "phase": "shutdown",
                     "status": "PARTIAL",
-                    "safe_error_codes": close_report.error_codes,
+                    "safe_error_codes": shutdown_report.error_codes,
+                    "cancelled_run_count": (
+                        shutdown_report.cancelled_run_count
+                    ),
+                    "forced_run_count": shutdown_report.forced_run_count,
+                    "remaining_run_count": (
+                        shutdown_report.remaining_run_count
+                    ),
+                    "detached_worker_count": (
+                        shutdown_report.detached_worker_count
+                    ),
                 },
             )
         chat_service = None
@@ -531,6 +577,14 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     service = require_service()
     mode = service.selected_runtime_mode()
     run_registry = _run_registry_for(service)
+    admission_gate = getattr(service, "admission_gate", None)
+    if (
+        admission_gate is not None
+        and not admission_gate.accepts_new_runs
+    ):
+        raise HTTPException(
+            status_code=503, detail="RUNTIME_SHUTTING_DOWN"
+        )
 
     run_id = payload.run_id or uuid.uuid4().hex
     try:
@@ -548,17 +602,51 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
 
         async def generate():
             """Bridge the selected synchronous Legacy text stream."""
+            disconnected = asyncio.Event()
+            stopped = asyncio.Event()
+            watcher = asyncio.create_task(
+                _watch_request_disconnect(
+                    request,
+                    run_registry=run_registry,
+                    run_id=run_id,
+                    disconnected=disconnected,
+                    stopped=stopped,
+                )
+            )
             try:
                 while True:
-                    if await request.is_disconnected():
-                        run_registry.cancel(
-                            run_id, CancellationReason.CLIENT_DISCONNECTED
+                    if disconnected.is_set():
+                        return
+                    next_task = asyncio.create_task(
+                        asyncio.to_thread(_next_or_none, stream)
+                    )
+                    disconnect_task = asyncio.create_task(
+                        disconnected.wait()
+                    )
+                    done, _ = await asyncio.wait(
+                        {next_task, disconnect_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if disconnect_task in done and disconnected.is_set():
+                        if not next_task.done():
+                            next_task.cancel()
+                        await asyncio.gather(
+                            next_task, return_exceptions=True
                         )
                         return
-                    chunk = await asyncio.to_thread(_next_or_none, stream)
+                    disconnect_task.cancel()
+                    await asyncio.gather(
+                        disconnect_task, return_exceptions=True
+                    )
+                    chunk = await next_task
                     if chunk is None:
                         return
+                    if disconnected.is_set():
+                        return
                     yield chunk
+            except RuntimeAdmissionRejectedError:
+                if not disconnected.is_set():
+                    yield "[runtime-error] RUNTIME_SHUTTING_DOWN\n"
             except RunCancelledError:
                 return
             except asyncio.CancelledError:
@@ -571,11 +659,16 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                     run_id, CancellationReason.CLIENT_DISCONNECTED
                 )
             except Exception:
-                yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
+                if not disconnected.is_set():
+                    yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
             finally:
+                await _stop_disconnect_watcher(watcher, stopped)
                 close = getattr(stream, "close", None)
                 if close is not None:
-                    close()
+                    try:
+                        close()
+                    except (RuntimeError, ValueError):
+                        pass
 
     elif mode is ChatRuntimeMode.COORDINATED:
         coordinated_query = payload.query
@@ -591,12 +684,20 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
 
         async def generate():
             """Forward the selected custom coordinated text-chunk stream."""
+            disconnected = asyncio.Event()
+            stopped = asyncio.Event()
+            watcher = asyncio.create_task(
+                _watch_request_disconnect(
+                    request,
+                    run_registry=run_registry,
+                    run_id=run_id,
+                    disconnected=disconnected,
+                    stopped=stopped,
+                )
+            )
             try:
                 async for chunk in stream:
-                    if await request.is_disconnected():
-                        run_registry.cancel(
-                            run_id, CancellationReason.CLIENT_DISCONNECTED
-                        )
+                    if disconnected.is_set():
                         return
                     yield chunk
             except asyncio.CancelledError:
@@ -609,8 +710,10 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                     run_id, CancellationReason.CLIENT_DISCONNECTED
                 )
             except Exception:
-                yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
+                if not disconnected.is_set():
+                    yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
             finally:
+                await _stop_disconnect_watcher(watcher, stopped)
                 await stream.aclose()
 
     else:  # pragma: no cover - ChatRuntimeMode is a closed enum
@@ -628,7 +731,7 @@ async def cancel_run_endpoint(run_id: str):
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
     service = require_service()
     result = _run_registry_for(service).cancel(
-        run_id, CancellationReason.USER_CANCELLED
+        run_id, CancellationReason.REQUEST_CANCELLED
     )
     if result is None:
         return {"status": "inactive", "run_id": run_id}
