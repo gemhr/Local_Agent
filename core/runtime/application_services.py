@@ -8,11 +8,14 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 import inspect
+import math
 import re
 import threading
+import time
 from typing import Callable
 
 from core.runtime.activity import RuntimeActivityTracker
+from core.runtime.admission import RuntimeAdmissionGate
 from core.runtime.context import RunContext
 from core.runtime.event_channel import RuntimeEventChannel
 from core.runtime.state import AgentState
@@ -51,10 +54,19 @@ class RuntimeLifecycleIssue:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeComponentResult:
+    component: str
+    status: str
+    duration_seconds: float
+    error_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeLifecycleReport:
     action: str
     completed: bool
     issues: tuple[RuntimeLifecycleIssue, ...] = ()
+    components: tuple[RuntimeComponentResult, ...] = ()
 
     @property
     def error_codes(self) -> tuple[str, ...]:
@@ -73,6 +85,7 @@ def _validate_timeout(timeout: object) -> float:
     if (
         isinstance(timeout, bool)
         or not isinstance(timeout, (int, float))
+        or not math.isfinite(float(timeout))
         or float(timeout) < 0
     ):
         raise ValueError("timeout must be a non-negative number")
@@ -141,6 +154,10 @@ class ApplicationRuntimeServices:
     blocking_executors: tuple[object, ...]
     worker_trackers: tuple[object, ...]
     run_registry: object
+    admission_gate: RuntimeAdmissionGate = field(
+        default_factory=RuntimeAdmissionGate
+    )
+    coordinated_step_executor: object | None = None
     snapshot_enabled: bool = False
     recovery_enabled: bool = False
     activity_tracker_factory: Callable[[str], RuntimeActivityTracker] = (
@@ -165,6 +182,8 @@ class ApplicationRuntimeServices:
             raise ValueError("recovery requires snapshot capability")
         if not callable(self.activity_tracker_factory):
             raise TypeError("activity_tracker_factory must be callable")
+        if not isinstance(self.admission_gate, RuntimeAdmissionGate):
+            raise TypeError("admission_gate must be RuntimeAdmissionGate")
         for value in (
             self.event_journal,
             self.observability_dispatcher,
@@ -177,6 +196,7 @@ class ApplicationRuntimeServices:
             self.tool_execution_service,
             self.retrieval_execution_service,
             self.run_registry,
+            self.coordinated_step_executor,
             *self.blocking_executors,
             *self.worker_trackers,
         ):
@@ -198,7 +218,9 @@ class ApplicationRuntimeServices:
             raise TypeError("activity_tracker_factory returned an invalid tracker")
         return tracker
 
-    def _targets(self) -> tuple[tuple[str, object, str], ...]:
+    def _targets(
+        self, *, include_models: bool = True
+    ) -> tuple[tuple[str, object, str], ...]:
         candidates: list[tuple[str, object | None, str]] = [
             ("observability_dispatcher", self.observability_dispatcher, "close"),
             ("span_recorder", self.span_recorder, "close"),
@@ -206,16 +228,22 @@ class ApplicationRuntimeServices:
             ("event_journal", self.event_journal, "close"),
         ]
         candidates.extend(
+            (component, resource, "close")
+            for component, resource in self.extra_closeables
+            if include_models and component.startswith("model_")
+        )
+        candidates.extend(
+            (component, resource, "close")
+            for component, resource in self.extra_closeables
+            if not component.startswith("model_")
+        )
+        candidates.extend(
             (f"blocking_executor_{index}", value, "shutdown")
             for index, value in enumerate(self.blocking_executors)
         )
         candidates.extend(
             (f"worker_tracker_{index}", value, "close")
             for index, value in enumerate(self.worker_trackers)
-        )
-        candidates.extend(
-            (component, resource, "close")
-            for component, resource in self.extra_closeables
         )
         unique: list[tuple[str, object, str]] = []
         identities: set[int] = set()
@@ -229,29 +257,40 @@ class ApplicationRuntimeServices:
     async def flush(self, timeout: float) -> RuntimeLifecycleReport:
         active_timeout = _validate_timeout(timeout)
         issues: list[RuntimeLifecycleIssue] = []
+        components: list[RuntimeComponentResult] = []
         for component, target, _close_operation in self._targets():
             if not callable(getattr(target, "flush", None)):
                 continue
+            started = time.monotonic()
             try:
                 completed = await _invoke_bounded(target, "flush", active_timeout)
             except TimeoutError:
-                issues.append(
-                    RuntimeLifecycleIssue(component, "RUNTIME_COMPONENT_FLUSH_TIMEOUT")
-                )
+                error_code = "RUNTIME_COMPONENT_FLUSH_TIMEOUT"
+                issues.append(RuntimeLifecycleIssue(component, error_code))
             except Exception:
-                issues.append(
-                    RuntimeLifecycleIssue(component, "RUNTIME_COMPONENT_FLUSH_FAILED")
-                )
+                error_code = "RUNTIME_COMPONENT_FLUSH_FAILED"
+                issues.append(RuntimeLifecycleIssue(component, error_code))
             else:
                 if not completed:
-                    issues.append(
-                        RuntimeLifecycleIssue(
-                            component, "RUNTIME_COMPONENT_FLUSH_TIMEOUT"
-                        )
-                    )
-        return RuntimeLifecycleReport("flush", not issues, tuple(issues))
+                    error_code = "RUNTIME_COMPONENT_FLUSH_TIMEOUT"
+                    issues.append(RuntimeLifecycleIssue(component, error_code))
+                else:
+                    error_code = None
+            components.append(
+                RuntimeComponentResult(
+                    component=component,
+                    status="COMPLETED" if error_code is None else "FAILED",
+                    duration_seconds=max(0.0, time.monotonic() - started),
+                    error_code=error_code,
+                )
+            )
+        return RuntimeLifecycleReport(
+            "flush", not issues, tuple(issues), tuple(components)
+        )
 
-    async def close(self, timeout: float) -> RuntimeLifecycleReport:
+    async def close(
+        self, timeout: float, *, close_models: bool = True
+    ) -> RuntimeLifecycleReport:
         """Close every owned resource at most once and continue after failures."""
         active_timeout = _validate_timeout(timeout)
         async with self._lifecycle.close_lock:
@@ -260,35 +299,130 @@ class ApplicationRuntimeServices:
             with self._lifecycle.state_lock:
                 self._lifecycle.state = RuntimeLifecycleState.SHUTTING_DOWN
             issues: list[RuntimeLifecycleIssue] = []
-            for component, target, operation in self._targets():
+            components: list[RuntimeComponentResult] = []
+            for component, target, operation in self._targets(
+                include_models=close_models
+            ):
+                started = time.monotonic()
                 try:
                     completed = await _invoke_bounded(
                         target, operation, active_timeout
                     )
                 except TimeoutError:
-                    issues.append(
-                        RuntimeLifecycleIssue(
-                            component, "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
-                        )
-                    )
+                    error_code = "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
+                    issues.append(RuntimeLifecycleIssue(component, error_code))
                 except Exception:
-                    issues.append(
-                        RuntimeLifecycleIssue(
-                            component, "RUNTIME_COMPONENT_CLOSE_FAILED"
-                        )
-                    )
+                    error_code = "RUNTIME_COMPONENT_CLOSE_FAILED"
+                    issues.append(RuntimeLifecycleIssue(component, error_code))
                 else:
                     if not completed:
-                        issues.append(
-                            RuntimeLifecycleIssue(
-                                component, "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
-                            )
-                        )
-            report = RuntimeLifecycleReport("close", not issues, tuple(issues))
+                        error_code = "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
+                        issues.append(RuntimeLifecycleIssue(component, error_code))
+                    else:
+                        error_code = None
+                components.append(
+                    RuntimeComponentResult(
+                        component=component,
+                        status=(
+                            "COMPLETED" if error_code is None else "FAILED"
+                        ),
+                        duration_seconds=max(
+                            0.0, time.monotonic() - started
+                        ),
+                        error_code=error_code,
+                    )
+                )
+            report = RuntimeLifecycleReport(
+                "close", not issues, tuple(issues), tuple(components)
+            )
             with self._lifecycle.state_lock:
                 self._lifecycle.state = RuntimeLifecycleState.CLOSED
                 self._lifecycle.close_report = report
             return report
+
+    async def close_worker_admission(
+        self, timeout: float
+    ) -> RuntimeLifecycleReport:
+        active_timeout = _validate_timeout(timeout)
+        issues: list[RuntimeLifecycleIssue] = []
+        components: list[RuntimeComponentResult] = []
+        targets = (*self.blocking_executors, *self.worker_trackers)
+        identities: set[int] = set()
+        for index, target in enumerate(targets):
+            if id(target) in identities:
+                continue
+            identities.add(id(target))
+            method = getattr(target, "close_admission", None)
+            if not callable(method):
+                continue
+            component = f"worker_admission_{index}"
+            started = time.monotonic()
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(method), timeout=active_timeout
+                )
+                error_code = None
+            except TimeoutError:
+                error_code = "RUNTIME_WORKER_ADMISSION_TIMEOUT"
+                issues.append(RuntimeLifecycleIssue(component, error_code))
+            except Exception:
+                error_code = "RUNTIME_WORKER_ADMISSION_FAILED"
+                issues.append(RuntimeLifecycleIssue(component, error_code))
+            components.append(
+                RuntimeComponentResult(
+                    component,
+                    "COMPLETED" if error_code is None else "FAILED",
+                    max(0.0, time.monotonic() - started),
+                    error_code,
+                )
+            )
+        return RuntimeLifecycleReport(
+            "close_worker_admission",
+            not issues,
+            tuple(issues),
+            tuple(components),
+        )
+
+    async def wait_workers(self, timeout: float) -> RuntimeLifecycleReport:
+        active_timeout = _validate_timeout(timeout)
+        issues: list[RuntimeLifecycleIssue] = []
+        components: list[RuntimeComponentResult] = []
+        targets = (*self.worker_trackers, *self.blocking_executors)
+        identities: set[int] = set()
+        for index, target in enumerate(targets):
+            if id(target) in identities:
+                continue
+            identities.add(id(target))
+            method = getattr(target, "wait_until_idle", None)
+            if not callable(method):
+                continue
+            component = f"worker_tracker_{index}"
+            started = time.monotonic()
+            try:
+                completed = await asyncio.wait_for(
+                    asyncio.to_thread(method, active_timeout),
+                    timeout=active_timeout,
+                )
+                error_code = (
+                    None if completed else "RUNTIME_WORKER_DRAIN_TIMEOUT"
+                )
+            except TimeoutError:
+                error_code = "RUNTIME_WORKER_DRAIN_TIMEOUT"
+            except Exception:
+                error_code = "RUNTIME_WORKER_DRAIN_FAILED"
+            if error_code is not None:
+                issues.append(RuntimeLifecycleIssue(component, error_code))
+            components.append(
+                RuntimeComponentResult(
+                    component,
+                    "COMPLETED" if error_code is None else "DETACHED",
+                    max(0.0, time.monotonic() - started),
+                    error_code,
+                )
+            )
+        return RuntimeLifecycleReport(
+            "wait_workers", not issues, tuple(issues), tuple(components)
+        )
 
     def __repr__(self) -> str:
         component_count = 12 + len(self.blocking_executors) + len(
@@ -432,6 +566,7 @@ __all__ = [
     "RuntimeInitializationError",
     "RuntimeInitializationStack",
     "RuntimeLifecycleIssue",
+    "RuntimeComponentResult",
     "RuntimeLifecycleReport",
     "RuntimeLifecycleState",
     "SAFE_RUNTIME_ASSEMBLY_VERSION",

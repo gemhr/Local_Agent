@@ -3,7 +3,17 @@
 """LocalAgent 的最小运行时上下文基础组件。"""
 
 from core.runtime.cancellation import CancellationReason, CancellationSource, CancellationToken, RunCancelledError
-from core.runtime.run_registry import RunHandle, RunRegistry, process_run_registry
+from core.runtime.run_registry import (
+    ActiveRunControlHandle,
+    RunHandle,
+    RunRegistry,
+    process_run_registry,
+)
+from core.runtime.admission import (
+    RuntimeAdmissionGate,
+    RuntimeAdmissionRejectedError,
+    RuntimeAdmissionState,
+)
 from core.runtime.timeout import OperationTimeoutError, OperationType, effective_timeout_seconds
 
 from core.runtime.state import (
@@ -147,7 +157,9 @@ __all__ = [
     "AgentStateMachine",
     "AgentStateValidationError",
     "CancellationSource",
-    "CancellationReason", "RunHandle", "RunRegistry", "process_run_registry",
+    "CancellationReason", "ActiveRunControlHandle", "RunHandle", "RunRegistry",
+    "process_run_registry", "RuntimeAdmissionGate",
+    "RuntimeAdmissionRejectedError", "RuntimeAdmissionState",
     "OperationTimeoutError", "OperationType", "effective_timeout_seconds",
     "ContextBuilder", "ContextBuildRequest", "ContextBuildResult", "ContextBudgetExceededError",
     "ContextDropRecord", "ContextItem", "ContextSourceType", "ContextStats", "ContextTrustLevel",
@@ -728,7 +740,9 @@ from core.runtime.application_services import (
     RuntimeLifecycleIssue,
     RuntimeLifecycleReport,
     RuntimeLifecycleState,
+    RuntimeComponentResult,
 )
+from core.runtime.shutdown import GracefulShutdownCoordinator, ShutdownReport
 from core.runtime.runtime_factory import (
     CoordinatedRunScope,
     CoordinatedRuntimeFactory,
@@ -747,5 +761,8 @@ __all__ += [
     "RuntimeLifecycleIssue",
     "RuntimeLifecycleReport",
     "RuntimeLifecycleState",
+    "RuntimeComponentResult",
+    "GracefulShutdownCoordinator",
+    "ShutdownReport",
     "SAFE_RUNTIME_ASSEMBLY_VERSION",
 ]

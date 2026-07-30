@@ -194,6 +194,21 @@ class RuntimeEventChannel:
         self._consumer_attached = True
         return self._iterate()
 
+    async def drain_to_discard(self) -> None:
+        """Consume queued events internally without adapting or publishing them.
+
+        This is used only after the transport consumer has stopped.  It keeps a
+        bounded producer moving until the producer closes the channel.
+        """
+        while True:
+            if self._state == EventChannelState.ABORTED:
+                return
+            item = await self._queue.get()
+            if item is _END:
+                return
+            if self._state == EventChannelState.ABORTED:
+                return
+
     async def _iterate(self) -> AsyncIterator[RuntimeEvent]:
         while True:
             if self._state == EventChannelState.ABORTED and self._queue.empty():

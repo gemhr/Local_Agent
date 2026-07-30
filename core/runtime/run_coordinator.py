@@ -33,7 +33,7 @@ from core.runtime.parallel_execution import (
 )
 from core.runtime.plan_graph import PlanGraphValidationError, PlanGraphValidator
 from core.runtime.planning import Plan
-from core.runtime.run_registry import RunHandle, RunRegistry
+from core.runtime.run_registry import ActiveRunControlHandle, RunHandle, RunRegistry
 from core.runtime.scheduler import SchedulerError, SchedulerSnapshot, SerialScheduler
 from core.runtime.state import AgentState, RunStatus, StepStatus, StopReason
 from core.runtime.state_machine import (
@@ -147,7 +147,7 @@ class RunCoordinator:
         plan: Plan,
         agent_state: AgentState,
         budget_ledger: BudgetLedger,
-        run_handle: RunHandle,
+        run_handle: ActiveRunControlHandle,
         scheduler: SerialScheduler,
         executor: ParallelExecutor,
         run_registry: RunRegistry,
@@ -278,11 +278,16 @@ class RunCoordinator:
         recorder_token = install_span_recorder(self.span_recorder)
 
         registered = False
+        task_cancelled = False
         cleanup_error_codes: list[str] = []
         decision: RunFinalizationDecision | None = None
         try:
             try:
-                self.run_registry.register(self.run_handle)
+                existing_handle = self.run_registry.get(self.run_context.run_id)
+                if existing_handle is None:
+                    self.run_registry.register(self.run_handle)
+                elif existing_handle is not self.run_handle:
+                    raise ValueError("different active handle already registered")
             except Exception as exc:
                 raise RunCoordinatorError(
                     "COORDINATOR_REGISTRATION_FAILED",
@@ -321,6 +326,7 @@ class RunCoordinator:
         except RunCancelledError:
             decision = self._cancellation_decision()
         except asyncio.CancelledError:
+            task_cancelled = True
             decision = self._cancellation_decision(
                 fallback_code="COORDINATOR_TASK_CANCELLED"
             )
@@ -370,6 +376,8 @@ class RunCoordinator:
         else: run_span.end_error(result.error_code or "RUN_FAILED")
         reset_trace_context(trace_token)
         reset_span_recorder(recorder_token)
+        if task_cancelled:
+            raise asyncio.CancelledError()
         return result
 
     async def _execute_batches(
@@ -463,7 +471,8 @@ class RunCoordinator:
                 "COORDINATOR_RUN_ID_MISMATCH",
                 "Context、State 与 Handle 的 run_id 必须一致",
             )
-        if self.run_handle.agent_state is not self.agent_state:
+        handle_state = getattr(self.run_handle, "agent_state", self.agent_state)
+        if handle_state is not self.agent_state:
             raise RunCoordinatorError(
                 "COORDINATOR_STATE_OWNERSHIP_MISMATCH",
                 "RunHandle 必须引用 Coordinator 持有的 AgentState",
@@ -499,14 +508,22 @@ class RunCoordinator:
             )
         except ValueError:
             return self._infrastructure_decision("UNKNOWN_CANCELLATION_REASON")
-        if parsed == CancellationReason.DEADLINE_EXCEEDED:
+        if parsed in {
+            CancellationReason.DEADLINE_EXCEEDED,
+            CancellationReason.REQUEST_DEADLINE_EXCEEDED,
+        }:
             return RunFinalizationDecision(
                 RunStatus.FAILED,
                 StopReason.DEADLINE_EXCEEDED,
                 "DEADLINE_EXCEEDED",
                 _SAFE_MESSAGES[StopReason.DEADLINE_EXCEEDED],
             )
-        stop_reason = StopReason(parsed.value)
+        canonical_stop_reason = {
+            CancellationReason.REQUEST_CANCELLED: StopReason.USER_CANCELLED,
+            CancellationReason.SERVER_SHUTDOWN: StopReason.SYSTEM_SHUTDOWN,
+            CancellationReason.STREAM_ENCODING_FAILED: StopReason.USER_CANCELLED,
+        }.get(parsed)
+        stop_reason = canonical_stop_reason or StopReason(parsed.value)
         return RunFinalizationDecision(
             RunStatus.CANCELLED,
             stop_reason,
@@ -776,7 +793,7 @@ class RunCoordinator:
         self._deadline_watcher = threading.Timer(
             remaining,
             self.run_handle.cancellation_source.cancel,
-            args=(CancellationReason.DEADLINE_EXCEEDED,),
+            args=(CancellationReason.REQUEST_DEADLINE_EXCEEDED,),
         )
         self._deadline_watcher.daemon = True
         self._deadline_watcher.start()

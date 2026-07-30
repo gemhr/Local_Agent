@@ -23,6 +23,7 @@ T = TypeVar("T")
 
 
 class BlockingTaskKind(str, Enum):
+    RUNTIME_STEP = "RUNTIME_STEP"
     QUERY_REWRITE = "QUERY_REWRITE"
     EMBEDDING = "EMBEDDING"
     VECTOR_QUERY = "VECTOR_QUERY"
@@ -256,10 +257,16 @@ class BoundedBlockingExecutor:
                 self._idle.wait(remaining)
             return True
 
+    def close_admission(self) -> bool:
+        """Idempotently reject new work without waiting for existing workers."""
+        with self._lock:
+            changed = self._accepting
+            self._accepting = False
+            return changed
+
     def shutdown(self, *, wait: bool = True, timeout: float = 30.0) -> bool:
         """停止准入；可有界等待真实 Worker 结束并完成 Permit Cleanup。"""
-        with self._lock:
-            self._accepting = False
+        self.close_admission()
         idle = self.wait_until_idle(timeout) if wait else not self._records
         self._executor.shutdown(wait=idle and wait, cancel_futures=False)
         return idle

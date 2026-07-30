@@ -14,6 +14,10 @@ from core.runtime.budget import BudgetExceededError
 from core.runtime.context import RunContext
 from core.runtime.context import RunDeadlineExceededError
 from core.runtime.cancellation import RunCancelledError
+from core.runtime.blocking_executor import (
+    BlockingTaskKind,
+    BoundedBlockingExecutor,
+)
 from core.runtime.scheduler import SerialScheduler, StepClaim
 from core.runtime.planning import Plan
 from core.runtime.state import AgentState, StepStatus
@@ -124,12 +128,14 @@ class ParallelExecutor:
         max_concurrency: int = 1,
         event_emitter: RunEventEmitter | None = None,
         span_recorder=None,
+        blocking_executor: BoundedBlockingExecutor | None = None,
     ) -> None:
         self._validate_positive(max_concurrency, "max_concurrency")
         self._state_machine = state_machine or AgentStateMachine()
         self._max_concurrency = max_concurrency
         self._event_emitter = event_emitter
         self._span_recorder = span_recorder
+        self._blocking_executor = blocking_executor
 
     async def execute_ready(self, *, scheduler: SerialScheduler, plan: Plan, state: AgentState, occurred_at: datetime, run_context: RunContext, driver: StepExecutionDriver, policy: ParallelExecutionPolicy, execution_mode: StepExecutionMode = StepExecutionMode.ASYNC, concurrency_specs: Mapping[str, StepConcurrencySpec] | None = None) -> ParallelExecutionReport:
         """标准安全入口：同一 Policy 同时约束 Claim 和 Executor 容量。"""
@@ -352,6 +358,24 @@ class ParallelExecutor:
 
     async def _invoke(self, driver: StepExecutionDriver, claim: StepClaim, context: RunContext, mode: StepExecutionMode) -> Any:
         if mode == StepExecutionMode.SYNC_BLOCKING:
+            if self._blocking_executor is not None:
+                def remaining_seconds() -> float:
+                    remaining = context.remaining_seconds()
+                    return 86400.0 if remaining is None else remaining
+
+                handle = self._blocking_executor.submit(
+                    lambda: driver.execute(claim, context),
+                    kind=BlockingTaskKind.RUNTIME_STEP,
+                    run_id=context.run_id,
+                    operation_id=claim.step_id,
+                    cancellation_check=context.raise_if_inactive,
+                    remaining_seconds=remaining_seconds,
+                )
+                try:
+                    return await asyncio.to_thread(handle.result)
+                except asyncio.CancelledError:
+                    handle.cancel_or_detach()
+                    raise
             return await asyncio.to_thread(driver.execute, claim, context)
         return await driver.execute(claim, context)
 
