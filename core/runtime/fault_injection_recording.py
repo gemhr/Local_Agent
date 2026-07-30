@@ -62,6 +62,7 @@ class FaultRecorderSnapshot:
     overflow_policy: RecorderOverflowPolicy
     dropped_count: int
     rejected_count: int
+    overflowed: bool
     closed: bool
 
 
@@ -72,7 +73,7 @@ class FaultInjectionRecorder:
         self,
         *,
         capacity: int = 128,
-        overflow_policy: RecorderOverflowPolicy = RecorderOverflowPolicy.DROP_OLDEST,
+        overflow_policy: RecorderOverflowPolicy = RecorderOverflowPolicy.REJECT_NEW,
     ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("capacity must be a positive integer")
@@ -128,6 +129,7 @@ class FaultInjectionRecorder:
                 overflow_policy=self._overflow_policy,
                 dropped_count=self._dropped_count,
                 rejected_count=self._rejected_count,
+                overflowed=bool(self._dropped_count or self._rejected_count),
                 closed=self._closed,
             )
 

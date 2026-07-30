@@ -5,6 +5,7 @@ import pytest
 from core.runtime import (
     CoordinatedRuntimeFactory,
     EventChannelState,
+    FaultInjectionController,
 )
 from tests._runtime_assembly_fixtures import FakeRouter, make_services
 
@@ -46,6 +47,29 @@ async def test_factory_does_not_cache_request_scope_or_auto_checkpoint() -> None
     assert services.snapshot_store.list_for_run(scope.run_id, 10) == ()
 
     await scope.close()
+
+
+@pytest.mark.asyncio
+async def test_factory_transports_fault_controller_only_on_the_selected_run() -> None:
+    services = make_services()
+    factory = CoordinatedRuntimeFactory(FakeRouter(), services)
+    controller = FaultInjectionController.disabled()
+
+    selected = await factory.create_run_scope(
+        "agent-a",
+        "question",
+        fault_controller=controller,
+    )
+    ordinary = await factory.create_run_scope("agent-a", "question")
+
+    assert selected.fault_controller is controller
+    assert selected.driver._fault_controller is controller
+    assert ordinary.fault_controller is None
+    assert ordinary.driver._fault_controller is None
+    assert not hasattr(services, "fault_controller")
+
+    await selected.close()
+    await ordinary.close()
 
 
 @pytest.mark.asyncio

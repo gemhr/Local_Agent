@@ -89,7 +89,6 @@ def test_matching_is_content_free_and_fixed_rule_order_wins() -> None:
     ("trigger", "match_number", "outcomes"),
     [
         (FaultTrigger.ALWAYS, None, [True, True, False, False]),
-        (FaultTrigger.UNTIL_MAX_HITS, None, [True, True, False, False]),
         (FaultTrigger.FIRST_MATCH, None, [True, False, False, False]),
         (FaultTrigger.ON_NTH_MATCH, 3, [False, False, True, False]),
         (FaultTrigger.AFTER_N_MATCHES, 2, [False, False, True, True]),
@@ -104,7 +103,14 @@ def test_trigger_semantics_are_deterministic(
         make_rule(
             trigger=trigger,
             match_number=match_number,
-            max_hits=2,
+            max_hits=(
+                1
+                if trigger in {
+                    FaultTrigger.FIRST_MATCH,
+                    FaultTrigger.ON_NTH_MATCH,
+                }
+                else 2
+            ),
         )
     )
     decisions = [value.evaluate(context()) for _ in outcomes]
@@ -115,6 +121,31 @@ def test_trigger_semantics_are_deterministic(
     assert [item.hit_ordinal for item in decisions if item.matched] == list(
         range(1, sum(outcomes) + 1)
     )
+
+
+def test_priority_precedes_rule_id_and_equal_priority_uses_rule_id() -> None:
+    value = controller(
+        make_rule(rule_id="a-low", priority=100),
+        make_rule(
+            rule_id="z-high",
+            priority=1,
+            safe_fault_code=InjectedFaultCode.INJECTED_RATE_LIMIT,
+        ),
+    )
+    assert (
+        value.evaluate(context()).safe_fault_code
+        is InjectedFaultCode.INJECTED_RATE_LIMIT
+    )
+
+    tied = controller(
+        make_rule(rule_id="z-rule", priority=10),
+        make_rule(
+            rule_id="a-rule",
+            priority=10,
+            safe_fault_code=InjectedFaultCode.INJECTED_TIMEOUT,
+        ),
+    )
+    assert tied.evaluate(context()).rule_id == "a-rule"
 
 
 def test_rule_match_conditions_and_rule_counters_are_independent() -> None:

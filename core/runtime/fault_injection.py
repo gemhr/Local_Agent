@@ -8,9 +8,10 @@ import asyncio
 import inspect
 import math
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Awaitable, Callable, Mapping, Protocol
+from typing import Awaitable, Callable, Collection, Mapping, Protocol
 
 from core.runtime.fault_injection_contract import (
     FaultAction,
@@ -238,6 +239,12 @@ class FaultInjectionController:
             )
         return decision
 
+    @property
+    def enabled(self) -> bool:
+        """Cheap parity guard for explicit request-level seam adapters."""
+        with self._lock:
+            return self._enabled and not self._closed and self._plan is not None
+
     @staticmethod
     def _should_trigger(
         rule: FaultRule,
@@ -246,7 +253,7 @@ class FaultInjectionController:
     ) -> bool:
         if hit_count >= rule.max_hits:
             return False
-        if rule.trigger in {FaultTrigger.ALWAYS, FaultTrigger.UNTIL_MAX_HITS}:
+        if rule.trigger is FaultTrigger.ALWAYS:
             return True
         if rule.trigger is FaultTrigger.FIRST_MATCH:
             return match_ordinal == 1
@@ -255,6 +262,75 @@ class FaultInjectionController:
         if rule.trigger is FaultTrigger.AFTER_N_MATCHES:
             return match_ordinal > rule.match_number
         return False
+
+    def execute_blocking_if_matched(
+        self,
+        context: FaultMatchContext,
+        *,
+        raise_if_cancelled: Callable[[], None] | None = None,
+        poll_interval_seconds: float = 0.01,
+        allowed_actions: Collection[FaultAction] | None = None,
+    ) -> FaultDecision | InjectedFailureResult:
+        """Execute pre-call actions from an existing synchronous Runtime owner.
+
+        Model and Retrieval are currently synchronous contracts.  Their owner
+        supplies the cancellation check; this method never creates Retry,
+        Fallback, Event, Journal, Trace, or domain state.
+        """
+        if (
+            isinstance(poll_interval_seconds, bool)
+            or not isinstance(poll_interval_seconds, (int, float))
+            or not math.isfinite(float(poll_interval_seconds))
+            or poll_interval_seconds <= 0
+        ):
+            raise ValueError("poll_interval_seconds must be a positive number")
+        decision = self.evaluate(context)
+        if not decision.matched:
+            return decision
+        rule = self._rule(decision.rule_id)
+        if allowed_actions is not None and rule.action not in allowed_actions:
+            raise FaultExecutionConfigurationError(
+                FaultConfigurationCode.UNSUPPORTED_ACTION
+            )
+
+        def check_cancelled() -> None:
+            if raise_if_cancelled is not None:
+                raise_if_cancelled()
+
+        if rule.action is FaultAction.RAISE_TYPED_ERROR:
+            raise InjectedFaultError(rule.safe_fault_code)
+        if rule.action is FaultAction.DELAY:
+            deadline = time.monotonic() + float(rule.delay_seconds)
+            while True:
+                check_cancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return decision
+                time.sleep(min(float(poll_interval_seconds), remaining))
+        if rule.action is FaultAction.BLOCK_UNTIL_RELEASED:
+            blocker = self._blockers.get(rule.rule_id)
+            if blocker is None:
+                raise FaultExecutionConfigurationError(
+                    FaultConfigurationCode.BLOCKER_REQUIRED
+                )
+            deadline = time.monotonic() + blocker.timeout
+            blocker.entered.set()
+            while not blocker.release.is_set():
+                check_cancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InjectedFaultError(InjectedFaultCode.INJECTED_TIMEOUT)
+                time.sleep(min(float(poll_interval_seconds), remaining))
+            return decision
+        if rule.action is FaultAction.RETURN_TYPED_FAILURE:
+            return InjectedFailureResult(rule.safe_fault_code)
+        if rule.action is FaultAction.CORRUPT_TEST_FIXTURE:
+            # Fixture mutation remains async-test-only and is deliberately not
+            # connected to synchronous Model/Retrieval Runtime seams.
+            raise FaultExecutionConfigurationError(
+                FaultConfigurationCode.UNSUPPORTED_ACTION
+            )
+        return decision
 
     async def execute_if_matched(
         self,

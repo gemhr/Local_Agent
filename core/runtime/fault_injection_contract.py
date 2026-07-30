@@ -15,6 +15,8 @@ from typing import Final
 
 FAULT_PLAN_SCHEMA_VERSION: Final[int] = 1
 MAX_SAFE_TOKEN_LENGTH: Final[int] = 128
+DEFAULT_FAULT_RULE_PRIORITY: Final[int] = 1000
+MAX_FAULT_RULE_PRIORITY: Final[int] = 1_000_000
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -83,7 +85,6 @@ class FaultTrigger(str, Enum):
     FIRST_MATCH = "FIRST_MATCH"
     ON_NTH_MATCH = "ON_NTH_MATCH"
     AFTER_N_MATCHES = "AFTER_N_MATCHES"
-    UNTIL_MAX_HITS = "UNTIL_MAX_HITS"
 
 
 class FaultScope(str, Enum):
@@ -109,6 +110,7 @@ class InjectedFaultCode(str, Enum):
 class FaultConfigurationCode(str, Enum):
     BLOCKER_REQUIRED = "FAULT_BLOCKER_REQUIRED"
     FIXTURE_MUTATOR_REQUIRED = "FAULT_FIXTURE_MUTATOR_REQUIRED"
+    UNSUPPORTED_ACTION = "FAULT_ACTION_UNSUPPORTED"
 
 
 class InjectedFaultError(RuntimeError):
@@ -237,8 +239,18 @@ _MATCH_FIELDS: Final[tuple[str, ...]] = (
     "shutdown_component",
 )
 
-_DANGEROUS_FAULT_POINTS: Final[frozenset[FaultPoint]] = frozenset(
-    {FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT}
+DANGEROUS_FAULT_POINTS: Final[frozenset[FaultPoint]] = frozenset(
+    {
+        FaultPoint.MODEL_AFTER_PROVIDER_SUCCESS,
+        FaultPoint.MODEL_AFTER_USAGE_COMMIT,
+        FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
+        FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
+        FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,
+        FaultPoint.EVENT_AFTER_JOURNAL_APPEND,
+        FaultPoint.EVENT_BEFORE_CHANNEL_ENQUEUE,
+        FaultPoint.SNAPSHOT_AFTER_SAVE,
+        FaultPoint.EXECUTOR_AFTER_SUBMIT,
+    }
 )
 
 
@@ -250,6 +262,7 @@ class FaultRule:
     trigger: FaultTrigger
     scope: FaultScope
     max_hits: int
+    priority: int = DEFAULT_FAULT_RULE_PRIORITY
     match_number: int | None = None
     run_id_digest: str | None = None
     step_id: str | None = None
@@ -277,6 +290,14 @@ class FaultRule:
             if not isinstance(value, kind):
                 raise TypeError(f"{name} has an invalid enum value")
         _require_positive_int(self.max_hits, "max_hits")
+        if (
+            isinstance(self.priority, bool)
+            or not isinstance(self.priority, int)
+            or not 0 <= self.priority <= MAX_FAULT_RULE_PRIORITY
+        ):
+            raise ValueError(
+                f"priority must be an integer in 0..{MAX_FAULT_RULE_PRIORITY}"
+            )
         if self.match_number is not None:
             _require_positive_int(self.match_number, "match_number")
         if (
@@ -288,6 +309,10 @@ class FaultRule:
             and self.match_number is None
         ):
             raise ValueError(f"{self.trigger.value} requires match_number")
+        if self.trigger is FaultTrigger.FIRST_MATCH and self.max_hits != 1:
+            raise ValueError("FIRST_MATCH requires max_hits=1")
+        if self.trigger is FaultTrigger.ON_NTH_MATCH and self.max_hits != 1:
+            raise ValueError("ON_NTH_MATCH requires max_hits=1")
         _require_digest(self.run_id_digest, "run_id_digest")
         _require_digest(self.invocation_id_digest, "invocation_id_digest")
         for value, name in (
@@ -305,7 +330,7 @@ class FaultRule:
             raise TypeError("enabled must be bool")
         if not isinstance(self.dangerous_window, bool):
             raise TypeError("dangerous_window must be bool")
-        if self.fault_point in _DANGEROUS_FAULT_POINTS and not self.dangerous_window:
+        if self.fault_point in DANGEROUS_FAULT_POINTS and not self.dangerous_window:
             raise ValueError("dangerous fault point requires dangerous_window=true")
         self._validate_action_parameters()
 
@@ -359,6 +384,7 @@ class FaultRule:
             "trigger": self.trigger.value,
             "scope": self.scope.value,
             "max_hits": self.max_hits,
+            "priority": self.priority,
             "match_number": self.match_number,
             "matches": {
                 name: getattr(self, name)
@@ -383,6 +409,7 @@ class FaultRule:
             f"trigger={self.trigger.value}, "
             f"scope={self.scope.value}, "
             f"max_hits={self.max_hits}, "
+            f"priority={self.priority}, "
             f"enabled={self.enabled}, "
             f"dangerous_window={self.dangerous_window}"
             ")"
@@ -404,7 +431,9 @@ class FaultPlan:
             object.__setattr__(self, "rules", tuple(self.rules))
         if any(not isinstance(rule, FaultRule) for rule in self.rules):
             raise TypeError("rules must contain only FaultRule")
-        normalized = tuple(sorted(self.rules, key=lambda rule: rule.rule_id))
+        normalized = tuple(
+            sorted(self.rules, key=lambda rule: (rule.priority, rule.rule_id))
+        )
         identifiers = tuple(rule.rule_id for rule in normalized)
         if len(identifiers) != len(set(identifiers)):
             raise ValueError("rule_id values must be unique")
@@ -426,9 +455,23 @@ class FaultPlan:
             separators=(",", ":"),
         )
 
+    def digest_source(self) -> dict[str, object]:
+        """Return the canonical semantic plan payload used only for digesting."""
+        return {
+            "schema_version": self.schema_version,
+            "plan_id": self.plan_id,
+            "rules": [rule.to_safe_dict() for rule in self.rules],
+        }
+
     @property
     def digest(self) -> str:
-        return hashlib.sha256(self.to_safe_json().encode("utf-8")).hexdigest()
+        canonical = json.dumps(
+            self.digest_source(),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def __repr__(self) -> str:
         return (
@@ -487,6 +530,8 @@ NO_FAULT_DECISION: Final[FaultDecision] = FaultDecision(matched=False)
 
 
 __all__ = [
+    "DEFAULT_FAULT_RULE_PRIORITY",
+    "DANGEROUS_FAULT_POINTS",
     "FAULT_PLAN_SCHEMA_VERSION",
     "FaultAction",
     "FaultConfigurationCode",
@@ -501,6 +546,7 @@ __all__ = [
     "InjectedFailureResult",
     "InjectedFaultCode",
     "InjectedFaultError",
+    "MAX_FAULT_RULE_PRIORITY",
     "MAX_SAFE_TOKEN_LENGTH",
     "NO_FAULT_DECISION",
 ]

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import math
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Protocol, Sequence
@@ -17,6 +18,7 @@ from core.runtime.budget import BudgetExceededError
 from core.runtime.cancellation import RunCancelledError
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.event_emitter import StepEventEmitter
+from core.runtime.fault_injection import FaultInjectionController
 from core.runtime.retrieval_contract import (
     MaterializedDocument,
     QueryRewriteStrategy,
@@ -101,6 +103,7 @@ class RetrievalAdapter(Protocol):
         *,
         run_context: RunContext,
         event_emitter: StepEventEmitter | None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> str: ...
 
     def embed_query(self, query: str) -> QueryEmbedding: ...
@@ -146,7 +149,7 @@ class RuntimeKnowledgeRetrievalAdapter:
         db_manager: object,
         *,
         query_rewriter: Callable[
-            [str, RunContext, StepEventEmitter | None], str
+            ..., str
         ]
         | None,
         query_term_extractor: Callable[[str, str], list[str]] | None,
@@ -181,11 +184,34 @@ class RuntimeKnowledgeRetrievalAdapter:
         *,
         run_context: RunContext,
         event_emitter: StepEventEmitter | None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> str:
         if self._query_rewriter is None:
             return query
         try:
-            rewritten = self._query_rewriter(query, run_context, event_emitter)
+            parameters = inspect.signature(self._query_rewriter).parameters
+            if (
+                fault_controller is not None
+                and (
+                    "fault_controller" in parameters
+                    or any(
+                        item.kind is inspect.Parameter.VAR_KEYWORD
+                        for item in parameters.values()
+                    )
+                )
+            ):
+                rewritten = self._query_rewriter(
+                    query,
+                    run_context,
+                    event_emitter,
+                    fault_controller=fault_controller,
+                )
+            else:
+                rewritten = self._query_rewriter(
+                    query,
+                    run_context,
+                    event_emitter,
+                )
         except (
             BudgetExceededError,
             RunCancelledError,

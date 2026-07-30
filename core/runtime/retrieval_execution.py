@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
+import inspect
 import threading
 import time
 from dataclasses import replace
@@ -31,6 +33,15 @@ from core.runtime.cancellation import RunCancelledError
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.event_emitter import StepEventEmitter
 from core.runtime.event_journal import JournalError
+from core.runtime.fault_injection import FaultInjectionController
+from core.runtime.fault_injection_contract import (
+    FaultAction,
+    FaultMatchContext,
+    FaultPoint,
+    InjectedFailureResult,
+    InjectedFaultCode,
+    InjectedFaultError,
+)
 from core.runtime.retrieval_adapters import (
     QueryEmbedding,
     RetrievalAdapter,
@@ -163,6 +174,7 @@ class RetrievalExecutionService:
         step_id: str = "retrieval",
         event_emitter: StepEventEmitter | None = None,
         defer_completed_event: bool = False,
+        fault_controller: FaultInjectionController | None = None,
     ) -> RetrievalExecutionResult:
         recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
         handle = start_span_safely(
@@ -185,6 +197,7 @@ class RetrievalExecutionService:
                 step_id=step_id,
                 event_emitter=event_emitter,
                 defer_completed_event=defer_completed_event,
+                fault_controller=fault_controller,
             )
             if handle.context is not None:
                 handle.set_safe_attribute("output_count", len(result.final_chunks))
@@ -219,6 +232,7 @@ class RetrievalExecutionService:
         step_id: str = "retrieval",
         event_emitter: StepEventEmitter | None = None,
         defer_completed_event: bool = False,
+        fault_controller: FaultInjectionController | None = None,
     ) -> RetrievalExecutionResult:
         """返回类型化 Result；业务失败不会伪装成合法 EMPTY。"""
         if not isinstance(defer_completed_event, bool):
@@ -257,6 +271,7 @@ class RetrievalExecutionService:
             event_emitter=event_emitter,
             spec=self.spec,
             requested_timeout_seconds=invocation.requested_timeout_seconds,
+            fault_controller=fault_controller,
         )
 
         try:
@@ -288,10 +303,9 @@ class RetrievalExecutionService:
                         budget_usage=RetrievalBudgetUsage(),
                         operation=lambda timeout: self._invoke_unbudgeted(
                             context,
-                            lambda: self.adapter.rewrite_query(
+                            lambda: self._rewrite_query(
+                                context,
                                 invocation.original_query,
-                                run_context=context.run_context,
-                                event_emitter=context.event_emitter,
                             ),
                             timeout,
                             BlockingTaskKind.QUERY_REWRITE,
@@ -889,6 +903,22 @@ class RetrievalExecutionService:
 
         try:
             timeout = context.before_stage(stage)
+            if stage is RetrievalStage.QUERY_REWRITE:
+                self._execute_fault_point(
+                    context,
+                    FaultPoint.RETRIEVAL_BEFORE_REWRITE,
+                )
+            elif (
+                stage is RetrievalStage.EMBEDDING
+                or (
+                    stage is RetrievalStage.RETRIEVE
+                    and not self.adapter.has_explicit_embedding
+                )
+            ):
+                self._execute_fault_point(
+                    context,
+                    FaultPoint.RETRIEVAL_BEFORE_SEARCH,
+                )
             value = operation(timeout)
             context.raise_if_cancelled()
             output_count = (
@@ -1002,6 +1032,100 @@ class RetrievalExecutionService:
             if emit_event:
                 self._emit_stage(context, record, ignore_failure=True)
             raise
+
+    @staticmethod
+    def _execute_fault_point(
+        context: RetrievalExecutionContext,
+        point: FaultPoint,
+    ) -> None:
+        controller = context.fault_controller
+        if controller is None or not controller.enabled:
+            return
+        match_context = FaultMatchContext(
+            fault_point=point,
+            component="retrieval",
+            run_id_digest=hashlib.sha256(
+                context.run_context.run_id.encode("utf-8")
+            ).hexdigest(),
+        )
+        try:
+            result = controller.execute_blocking_if_matched(
+                match_context,
+                raise_if_cancelled=context.raise_if_cancelled,
+                allowed_actions={
+                    FaultAction.RAISE_TYPED_ERROR,
+                    FaultAction.DELAY,
+                    FaultAction.BLOCK_UNTIL_RELEASED,
+                },
+            )
+        except InjectedFaultError as exc:
+            if exc.code is InjectedFaultCode.INJECTED_TIMEOUT:
+                raise _StageTimedOut() from None
+            if point is FaultPoint.RETRIEVAL_BEFORE_REWRITE:
+                raise RetrievalAdapterError(
+                    RetrievalErrorCategory.QUERY_REWRITE_FAILED,
+                    (
+                        "RETRIEVAL_INJECTED_TRANSIENT_FAILURE"
+                        if exc.code
+                        is InjectedFaultCode.INJECTED_TRANSIENT_FAILURE
+                        else "RETRIEVAL_INJECTED_PERMANENT_FAILURE"
+                    ),
+                    "查询改写未完成。",
+                ) from None
+            if exc.code in {
+                InjectedFaultCode.INJECTED_TRANSIENT_FAILURE,
+                InjectedFaultCode.INJECTED_PERMANENT_FAILURE,
+            }:
+                raise RetrievalAdapterError(
+                    RetrievalErrorCategory.VECTOR_STORE_FAILED,
+                    (
+                        "RETRIEVAL_INJECTED_TRANSIENT_FAILURE"
+                        if exc.code
+                        is InjectedFaultCode.INJECTED_TRANSIENT_FAILURE
+                        else "RETRIEVAL_INJECTED_PERMANENT_FAILURE"
+                    ),
+                    "Retrieval 搜索未完成。",
+                ) from None
+            raise RetrievalAdapterError(
+                RetrievalErrorCategory.INTERNAL,
+                "RETRIEVAL_INJECTED_UNSUPPORTED_FAILURE",
+                "Retrieval 注入类别不受当前 Adapter 支持。",
+            ) from None
+        if isinstance(result, InjectedFailureResult):
+            raise RetrievalAdapterError(
+                RetrievalErrorCategory.INTERNAL,
+                "RETRIEVAL_INJECTED_ACTION_UNSUPPORTED",
+                "Retrieval 注入动作不受当前接口支持。",
+            )
+
+    def _rewrite_query(
+        self,
+        context: RetrievalExecutionContext,
+        query: str,
+    ) -> str:
+        method = self.adapter.rewrite_query
+        parameters = inspect.signature(method).parameters
+        if (
+            context.fault_controller is not None
+            and (
+                "fault_controller" in parameters
+                or any(
+                    item.kind is inspect.Parameter.VAR_KEYWORD
+                    for item in parameters.values()
+                )
+            )
+        ):
+            return method(
+                query,
+                run_context=context.run_context,
+                event_emitter=context.event_emitter,
+                fault_controller=context.fault_controller,
+            )
+        return method(
+            query,
+            run_context=context.run_context,
+            event_emitter=context.event_emitter,
+        )
 
     def _invoke_budgeted(
         self,
