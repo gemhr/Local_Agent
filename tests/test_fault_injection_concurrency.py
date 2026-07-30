@@ -217,11 +217,11 @@ def test_recorder_capacity_drop_oldest_and_reject_new_are_deterministic() -> Non
     for _ in range(3):
         decisions.append(controller.evaluate(context()))
 
-    drop = FaultInjectionRecorder(capacity=2)
-    reject = FaultInjectionRecorder(
+    drop = FaultInjectionRecorder(
         capacity=2,
-        overflow_policy=RecorderOverflowPolicy.REJECT_NEW,
+        overflow_policy=RecorderOverflowPolicy.DROP_OLDEST,
     )
+    reject = FaultInjectionRecorder(capacity=2)
     for decision in decisions:
         assert decision.matched
         drop.record(plan_id="plan", component="executor", decision=decision)
@@ -231,8 +231,10 @@ def test_recorder_capacity_drop_oldest_and_reject_new_are_deterministic() -> Non
     rejected = reject.snapshot()
     assert [item.hit_ordinal for item in dropped.records] == [2, 3]
     assert dropped.dropped_count == 1
+    assert dropped.overflowed is True
     assert [item.hit_ordinal for item in rejected.records] == [1, 2]
     assert rejected.rejected_count == 1
+    assert rejected.overflowed is True
     drop.close()
     assert (
         drop.record(

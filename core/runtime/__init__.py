@@ -772,6 +772,8 @@ __all__ += [
 ]
 
 from core.runtime.fault_injection_contract import (
+    DANGEROUS_FAULT_POINTS,
+    DEFAULT_FAULT_RULE_PRIORITY,
     FAULT_PLAN_SCHEMA_VERSION,
     FaultAction,
     FaultConfigurationCode,
@@ -786,6 +788,7 @@ from core.runtime.fault_injection_contract import (
     InjectedFailureResult,
     InjectedFaultCode,
     InjectedFaultError,
+    MAX_FAULT_RULE_PRIORITY,
     NO_FAULT_DECISION,
 )
 from core.runtime.fault_injection_recording import (
@@ -808,6 +811,8 @@ from core.runtime.fault_injection import (
 __all__ += [
     "AsyncioFaultSleeper",
     "ControllableFaultSleeper",
+    "DANGEROUS_FAULT_POINTS",
+    "DEFAULT_FAULT_RULE_PRIORITY",
     "FAULT_PLAN_SCHEMA_VERSION",
     "FaultAction",
     "FaultBlocker",
@@ -830,6 +835,7 @@ __all__ += [
     "InjectedFailureResult",
     "InjectedFaultCode",
     "InjectedFaultError",
+    "MAX_FAULT_RULE_PRIORITY",
     "NO_FAULT_DECISION",
     "RecorderOverflowPolicy",
     "SystemFaultClock",

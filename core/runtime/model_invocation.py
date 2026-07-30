@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+import hashlib
 import time
 from typing import Callable, Mapping, Protocol, Sequence
 
@@ -32,6 +33,15 @@ from core.runtime.model_selection import ModelProfileId
 from core.runtime.retry import RetryExecutor, RetryPolicy
 from core.runtime.event_emitter import StepEventEmitter
 from core.runtime.event_journal import JournalError
+from core.runtime.fault_injection import FaultInjectionController
+from core.runtime.fault_injection_contract import (
+    FaultAction,
+    FaultMatchContext,
+    FaultPoint,
+    InjectedFailureResult,
+    InjectedFaultCode,
+    InjectedFaultError,
+)
 from core.runtime.events import (
     ModelCompletedPayload,
     ModelStartedPayload,
@@ -290,6 +300,42 @@ _BREAKER_FAILURES = frozenset(
     }
 )
 
+_MODEL_INJECTED_FAILURES = {
+    InjectedFaultCode.INJECTED_TRANSIENT_FAILURE: (
+        ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE,
+        "MODEL_INJECTED_TRANSIENT_FAILURE",
+    ),
+    InjectedFaultCode.INJECTED_RATE_LIMIT: (
+        ModelFailureCategory.RATE_LIMITED,
+        "MODEL_INJECTED_RATE_LIMIT",
+    ),
+    InjectedFaultCode.INJECTED_TIMEOUT: (
+        ModelFailureCategory.PROVIDER_TIMEOUT,
+        "MODEL_INJECTED_TIMEOUT",
+    ),
+    InjectedFaultCode.INJECTED_PERMANENT_FAILURE: (
+        ModelFailureCategory.BUSINESS_FAILURE,
+        "MODEL_INJECTED_PERMANENT_FAILURE",
+    ),
+}
+
+
+def _model_injected_error(error: InjectedFaultError) -> ModelAdapterInvocationError:
+    category, safe_error_code = _MODEL_INJECTED_FAILURES.get(
+        error.code,
+        (
+            ModelFailureCategory.BUSINESS_FAILURE,
+            "MODEL_INJECTED_UNSUPPORTED_FAILURE",
+        ),
+    )
+    return ModelAdapterInvocationError(
+        category,
+        safe_error_code=safe_error_code,
+        provider_started=False,
+        provider_responded=False,
+        output_started=False,
+    )
+
 
 class ModelInvocationRouter:
     """统一协调候选、Circuit、预算、取消、截止时间与一次 Adapter 调用。"""
@@ -322,6 +368,7 @@ class ModelInvocationRouter:
         output_started: bool = False,
         event_emitter: StepEventEmitter | None = None,
         generation_options: Mapping[str, object] | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> ModelInvocationResult:
         recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
         handle = start_span_safely(
@@ -342,6 +389,24 @@ class ModelInvocationRouter:
         if activity_tracker is not None:
             activity_tracker.increment("model_attempts_active")
         try:
+            try:
+                self._execute_fault_point(
+                    fault_controller,
+                    FaultPoint.MODEL_BEFORE_INVOCATION,
+                    run_context=run_context,
+                )
+            except ModelAdapterInvocationError as exc:
+                category = classify_model_failure(exc)
+                raise ModelInvocationChainError(
+                    ModelInvocationFailure(
+                        routing_decision.capability_preferred_profile_id,
+                        routing_decision.initial_selected_profile_id,
+                        None,
+                        (),
+                    ),
+                    category,
+                    exc.safe_error_code,
+                ) from None
             result = self._invoke_impl(
                 run_context=run_context,
                 budget_ledger=budget_ledger,
@@ -354,6 +419,7 @@ class ModelInvocationRouter:
                 output_started=output_started,
                 event_emitter=event_emitter,
                 generation_options=generation_options,
+                fault_controller=fault_controller,
             )
         except RunCancelledError:
             handle.end_cancelled("RUN_CANCELLED")
@@ -393,6 +459,7 @@ class ModelInvocationRouter:
         output_started: bool = False,
         event_emitter: StepEventEmitter | None = None,
         generation_options: Mapping[str, object] | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> ModelInvocationResult:
         if routing_decision.confirmation_required:
             raise ModelInvocationConfirmationRequired()
@@ -527,6 +594,12 @@ class ModelInvocationRouter:
             try:
                 started_event_emitted = False
                 adapter = adapter_resolver.resolve(candidate.profile_id)
+                self._execute_fault_point(
+                    fault_controller,
+                    FaultPoint.MODEL_BEFORE_PROVIDER_CALL,
+                    run_context=run_context,
+                    attempt_number=len(attempts) + 1,
+                )
                 attempt_started_monotonic = time.monotonic()
                 # Candidate、Context、Circuit、Budget、Cancellation/Deadline 与
                 # Adapter resolution 均已成功；进入 invoke 前由 Router 发布唯一
@@ -819,6 +892,52 @@ class ModelInvocationRouter:
             last_category,
             terminal_error_code,
         )
+
+    @staticmethod
+    def _execute_fault_point(
+        controller: FaultInjectionController | None,
+        point: FaultPoint,
+        *,
+        run_context: RunContext,
+        attempt_number: int | None = None,
+    ) -> None:
+        if controller is None or not controller.enabled:
+            return
+        context = FaultMatchContext(
+            fault_point=point,
+            component="model",
+            run_id_digest=hashlib.sha256(
+                run_context.run_id.encode("utf-8")
+            ).hexdigest(),
+            attempt_number=attempt_number,
+        )
+        try:
+            result = controller.execute_blocking_if_matched(
+                context,
+                raise_if_cancelled=run_context.raise_if_inactive,
+                allowed_actions={
+                    FaultAction.RAISE_TYPED_ERROR,
+                    FaultAction.DELAY,
+                    FaultAction.BLOCK_UNTIL_RELEASED,
+                },
+            )
+        except (RunCancelledError, RunDeadlineExceededError) as exc:
+            # The request stopped while the pre-call seam was waiting.  Preserve
+            # the existing typed cancellation/deadline path without charging a
+            # Provider call that never began.
+            exc.provider_started = False
+            exc.provider_responded = False
+            exc.output_started = False
+            raise
+        except InjectedFaultError as exc:
+            raise _model_injected_error(exc) from None
+        if isinstance(result, InjectedFailureResult):
+            raise ModelAdapterInvocationError(
+                ModelFailureCategory.BUSINESS_FAILURE,
+                safe_error_code="MODEL_INJECTED_ACTION_UNSUPPORTED",
+                provider_started=False,
+                provider_responded=False,
+            )
 
     def _start_model_attempt_span(
         self,

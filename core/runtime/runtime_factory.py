@@ -17,6 +17,7 @@ from core.runtime.budget import BudgetLedger, RunBudget
 from core.runtime.context import LEGACY_DEFAULT_SESSION_ID, create_run_context
 from core.runtime.event_channel import RuntimeEventChannel
 from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
+from core.runtime.fault_injection import FaultInjectionController
 from core.runtime.model_invocation import ModelInvocationResult
 from core.runtime.parallel_execution import (
     ParallelExecutionPolicy,
@@ -42,12 +43,14 @@ class CoordinatedSingleAgentDriver:
         agent_id: str,
         persist: bool,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> None:
         self._router = router
         self._user_query = user_query
         self._agent_id = agent_id
         self._persist = persist
         self._event_emitter = event_emitter
+        self._fault_controller = fault_controller
         self.emits_user_output = True
         self.output: str | None = None
         self.invocation_result: ModelInvocationResult | None = None
@@ -64,6 +67,7 @@ class CoordinatedSingleAgentDriver:
             persist=self._persist,
             invocation_result_out=invocation_results,
             event_emitter=self._event_emitter,
+            fault_controller=self._fault_controller,
         )
         self.invocation_result = (
             invocation_results[0] if invocation_results else None
@@ -90,6 +94,10 @@ class CoordinatedRunScope:
     driver: CoordinatedSingleAgentDriver
     run_registry: object
     run_handle: ActiveRunControlHandle
+    fault_controller: FaultInjectionController | None = field(
+        default=None,
+        repr=False,
+    )
     gauge_provider: object | None = field(default=None, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _executed: bool = field(default=False, init=False, repr=False)
@@ -251,10 +259,16 @@ class CoordinatedRuntimeFactory:
         timeout_seconds: float | None = None,
         budget: RunBudget | None = None,
         persist: bool = True,
+        fault_controller: FaultInjectionController | None = None,
     ) -> CoordinatedRunScope:
         """Create one identity set and clean up any partially built transport."""
         if self._services.lifecycle_state is not RuntimeLifecycleState.READY:
             raise RuntimeError("application runtime services are not ready")
+        if fault_controller is not None and not isinstance(
+            fault_controller,
+            FaultInjectionController,
+        ):
+            raise TypeError("fault_controller must be FaultInjectionController or None")
         channel: RuntimeEventChannel | None = None
         registered_channel = False
         gauge_provider = getattr(
@@ -339,6 +353,7 @@ class CoordinatedRuntimeFactory:
                 agent_id=agent_id,
                 persist=persist,
                 event_emitter=emitter.for_step("answer"),
+                fault_controller=fault_controller,
             )
             scope = CoordinatedRunScope(
                 run_context=run_context,
@@ -356,6 +371,7 @@ class CoordinatedRuntimeFactory:
                 driver=driver,
                 run_registry=self._services.run_registry,
                 run_handle=run_handle,
+                fault_controller=fault_controller,
                 gauge_provider=gauge_provider if registered_channel else None,
             )
             run_handle.bind_force_abort(scope.force_abort)

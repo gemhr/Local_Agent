@@ -29,7 +29,7 @@ from core.runtime import (
     RetrievalExecutionService, RetrievalExecutionSpec, RetrievalExecutionStatus,
     RetrievalAdapterError, RetrievalInvocation, RetrievalStage,
     RetrievalStageStatus, RuntimeKnowledgeRetrievalAdapter,
-    RunCancelledError,
+    RunCancelledError, FaultInjectionController,
 )
 
 if TYPE_CHECKING:
@@ -458,6 +458,7 @@ class AgentRouter:
         user_query: str,
         run_context: RunContext,
         event_emitter: StepEventEmitter | None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> str:
         """通过唯一 Model Invocation Contract 提纯知识库检索词。"""
         rewrite_messages = [
@@ -502,6 +503,7 @@ class AgentRouter:
                     "temperature": 0.1,
                     "enable_thinking": False,
                 },
+                fault_controller=fault_controller,
             )
         except ModelInvocationChainError as exc:
             if exc.failure_category in {
@@ -619,6 +621,7 @@ class AgentRouter:
         run_context: RunContext | None = None,
         event_emitter: StepEventEmitter | None = None,
         defer_completed_event: bool = False,
+        fault_controller: FaultInjectionController | None = None,
     ) -> RetrievalExecutionResult:
         """通过唯一 Runtime Service 执行 Knowledge Expert 的真实检索。"""
         if self.retrieval_execution_service is None or self.db_manager is None:
@@ -651,6 +654,7 @@ class AgentRouter:
             step_id=event_emitter.step_id if event_emitter is not None else "knowledge-retrieval",
             event_emitter=event_emitter,
             defer_completed_event=defer_completed_event,
+            fault_controller=fault_controller,
         )
 
     def _emit_deferred_retrieval_events(
@@ -682,12 +686,14 @@ class AgentRouter:
         *,
         run_context: RunContext | None = None,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> str:
         """兼容旧测试/调用方的字符串视图；真实执行已迁入 Runtime Service。"""
         result = self._execute_knowledge_retrieval(
             user_query,
             run_context=run_context,
             event_emitter=event_emitter,
+            fault_controller=fault_controller,
         )
         if result.status == RetrievalExecutionStatus.EMPTY:
             return ""
@@ -756,6 +762,7 @@ class AgentRouter:
         context_requirements_out: list[ModelContextRequirements] | None = None,
         run_context: RunContext | None = None,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> list[dict[str, str]]:
         """构建一次推理所需的完整消息序列。"""
         summary_text = ""
@@ -786,6 +793,7 @@ class AgentRouter:
                 run_context=run_context,
                 event_emitter=event_emitter,
                 defer_completed_event=True,
+                fault_controller=fault_controller,
             )
             if retrieval_result.status == RetrievalExecutionStatus.EMPTY:
                 self._emit_deferred_retrieval_events(
@@ -1108,6 +1116,7 @@ class AgentRouter:
         run_context: RunContext | None = None,
         context_requirements_out: list[ModelContextRequirements] | None = None,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> list[dict[str, str]]:
         """构建回答消息，并在需要时注入工具观察结果。"""
         if run_context is not None:
@@ -1120,6 +1129,7 @@ class AgentRouter:
             context_requirements_out=context_requirements_out,
             run_context=run_context,
             event_emitter=event_emitter,
+            fault_controller=fault_controller,
         )
         tool_call = self._plan_tool_call(messages, agent_id)
         if not tool_call:
@@ -1234,6 +1244,7 @@ class AgentRouter:
         unified_invocation: bool = False,
         invocation_result_out: list[ModelInvocationResult] | None = None,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
@@ -1244,6 +1255,7 @@ class AgentRouter:
             run_context=run_context,
             context_requirements_out=context_requirements_out,
             event_emitter=event_emitter,
+            fault_controller=fault_controller,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -1274,6 +1286,7 @@ class AgentRouter:
                 capability_requirements=capability_requirements,
                 max_tokens=self.max_tokens,
                 event_emitter=event_emitter,
+                fault_controller=fault_controller,
             )
             if invocation_result_out is not None:
                 invocation_result_out.append(invocation_result)
@@ -1317,6 +1330,7 @@ class AgentRouter:
         max_tokens: int,
         event_emitter: StepEventEmitter | None,
         generation_options: dict[str, object] | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> ModelInvocationResult:
         """Model Adapter 的唯一同步入口；复用既有 Budget/Circuit/Retry/Event。"""
         if run_context.budget_ledger is None:
@@ -1356,6 +1370,7 @@ class AgentRouter:
             output_started=False,
             event_emitter=event_emitter,
             generation_options=generation_options,
+            fault_controller=fault_controller,
         )
 
     def _parse_delegate_plan(self, response_text: str) -> list[dict[str, str]]:
@@ -1464,6 +1479,7 @@ class AgentRouter:
         unified_invocation: bool = False,
         invocation_result_out: list[ModelInvocationResult] | None = None,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> str:
         """执行一次非流式智能体调用。"""
         if run_context is not None:
@@ -1484,6 +1500,7 @@ class AgentRouter:
             unified_invocation=unified_invocation,
             invocation_result_out=invocation_result_out,
             event_emitter=event_emitter,
+            fault_controller=fault_controller,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -1506,6 +1523,7 @@ class AgentRouter:
         persist: bool = True,
         invocation_result_out: list[ModelInvocationResult] | None = None,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> str:
         """供 RunCoordinator Driver 使用的真实单 Agent 非流式业务入口。"""
         return self._run_agent_once(
@@ -1517,6 +1535,7 @@ class AgentRouter:
             unified_invocation=True,
             invocation_result_out=invocation_result_out,
             event_emitter=event_emitter,
+            fault_controller=fault_controller,
         )
 
     def _build_orchestration_event(self, event_type: str, **payload: object) -> str:

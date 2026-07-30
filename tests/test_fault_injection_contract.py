@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import pytest
 
 from core.runtime import (
+    DANGEROUS_FAULT_POINTS,
     FAULT_PLAN_SCHEMA_VERSION,
     FaultAction,
     FaultMatchContext,
@@ -90,7 +91,6 @@ def test_fault_point_catalog_is_fixed_and_complete_for_foundation() -> None:
         "FIRST_MATCH",
         "ON_NTH_MATCH",
         "AFTER_N_MATCHES",
-        "UNTIL_MAX_HITS",
     }
     assert {scope.value for scope in FaultScope} == {
         "GLOBAL_TEST_SCOPE",
@@ -144,6 +144,20 @@ def test_trigger_contract_requires_bounded_positive_counts() -> None:
         rule(trigger=FaultTrigger.AFTER_N_MATCHES)
     with pytest.raises(ValueError, match="positive integer"):
         rule(max_hits=0)
+    with pytest.raises(ValueError, match="FIRST_MATCH requires max_hits=1"):
+        rule(trigger=FaultTrigger.FIRST_MATCH, max_hits=2)
+    with pytest.raises(ValueError, match="ON_NTH_MATCH requires max_hits=1"):
+        rule(
+            trigger=FaultTrigger.ON_NTH_MATCH,
+            match_number=2,
+            max_hits=2,
+        )
+
+
+@pytest.mark.parametrize("priority", [True, -1, 1_000_001])
+def test_priority_is_a_bounded_non_bool_integer(priority) -> None:
+    with pytest.raises(ValueError, match="priority must be an integer"):
+        rule(priority=priority)
 
 
 @pytest.mark.parametrize("delay", [True, -1, float("inf"), float("nan")])
@@ -186,6 +200,20 @@ def test_post_commit_tool_fault_requires_explicit_dangerous_window() -> None:
     assert value.dangerous_window is True
 
 
+def test_fixed_dangerous_fault_point_set_is_explicit() -> None:
+    assert DANGEROUS_FAULT_POINTS == {
+        FaultPoint.MODEL_AFTER_PROVIDER_SUCCESS,
+        FaultPoint.MODEL_AFTER_USAGE_COMMIT,
+        FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
+        FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
+        FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,
+        FaultPoint.EVENT_AFTER_JOURNAL_APPEND,
+        FaultPoint.EVENT_BEFORE_CHANNEL_ENQUEUE,
+        FaultPoint.SNAPSHOT_AFTER_SAVE,
+        FaultPoint.EXECUTOR_AFTER_SUBMIT,
+    }
+
+
 def test_plan_is_immutable_normalized_unique_and_has_stable_safe_digest() -> None:
     first = rule(rule_id="rule-z")
     second = rule(
@@ -206,6 +234,21 @@ def test_plan_is_immutable_normalized_unique_and_has_stable_safe_digest() -> Non
         plan.plan_id = "changed"
     with pytest.raises(ValueError, match="unique"):
         FaultPlan("plan-a", (first, first), created_at=NOW)
+
+
+def test_plan_digest_excludes_created_at_but_includes_priority_and_rules() -> None:
+    later = datetime(2026, 8, 1, tzinfo=UTC)
+    base = FaultPlan("plan-a", (rule(),), created_at=NOW)
+    same_semantics = FaultPlan("plan-a", (rule(),), created_at=later)
+    changed_priority = FaultPlan(
+        "plan-a",
+        (rule(priority=999),),
+        created_at=NOW,
+    )
+    assert base.digest == same_semantics.digest
+    assert base.to_safe_dict()["created_at"] != same_semantics.to_safe_dict()["created_at"]
+    assert "created_at" not in base.digest_source()
+    assert base.digest != changed_priority.digest
 
 
 def test_rule_has_no_mutable_runtime_state_slots() -> None:

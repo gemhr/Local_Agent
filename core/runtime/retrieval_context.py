@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from core.runtime.budget import BudgetLedger
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.event_emitter import StepEventEmitter
+from core.runtime.fault_injection import FaultInjectionController
 from core.runtime.retrieval_contract import RetrievalExecutionSpec, RetrievalStage
 
 
@@ -28,6 +29,7 @@ class RetrievalExecutionContext:
     event_emitter: StepEventEmitter | None
     retrieval_deadline_monotonic: float
     spec: RetrievalExecutionSpec
+    fault_controller: FaultInjectionController | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.step_id, str) or not self.step_id.strip():
@@ -49,6 +51,7 @@ class RetrievalExecutionContext:
         event_emitter: StepEventEmitter | None,
         spec: RetrievalExecutionSpec,
         requested_timeout_seconds: float,
+        fault_controller: FaultInjectionController | None = None,
     ) -> "RetrievalExecutionContext":
         timeout = min(spec.total_timeout_seconds, requested_timeout_seconds)
         run_remaining = run_context.remaining_seconds()
@@ -61,6 +64,7 @@ class RetrievalExecutionContext:
             event_emitter=event_emitter,
             retrieval_deadline_monotonic=time.monotonic() + max(0.0, timeout),
             spec=spec,
+            fault_controller=fault_controller,
         )
 
     def raise_if_cancelled(self) -> None:

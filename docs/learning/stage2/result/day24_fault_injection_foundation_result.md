@@ -68,8 +68,10 @@ Retrieval、Event/Journal、Snapshot/Recovery、Executor/Channel、
 Observability/Trace 和 Shutdown 接入窗口。本轮只定义分类，不调用任何现有
 组件。
 
-高风险集合当前只包含 `TOOL_AFTER_SIDE_EFFECT_COMMIT`；在未来真实接入前，
-仍需逐点审查其他 post-commit 窗口。
+第二轮 A 已把高风险集合固定扩充为 Provider/Usage 成功后、Tool return/commit/
+completion event、Journal append 后/Channel enqueue 前、Snapshot save 后与
+Executor submit 后等九个点；这些点都要求 `dangerous_window=true`，本轮没有
+实际接入。
 
 ## 5. FaultAction
 
@@ -88,11 +90,12 @@ Action 执行器没有修改 Store、AgentState、Budget、Retry 或 Tool side e
 
 ## 6. FaultTrigger
 
-固定支持 `ALWAYS`、`FIRST_MATCH`、`ON_NTH_MATCH`、`AFTER_N_MATCHES`、
-`UNTIL_MAX_HITS`。每条 Rule 都必须有正整数 `max_hits`，所以第一版没有无限
-触发；所有 count 拒绝 bool、零和负数。
+固定支持 `ALWAYS`、`FIRST_MATCH`、`ON_NTH_MATCH`、`AFTER_N_MATCHES`。
+每条 Rule 都必须有正整数 `max_hits`，所以没有无限触发；所有 count 拒绝
+bool、零和负数。
 
-`ON_NTH_MATCH` 与 `AFTER_N_MATCHES` 必须显式提供正整数 `match_number`。
+`ON_NTH_MATCH` 与 `AFTER_N_MATCHES` 必须显式提供正整数 `match_number`；
+`FIRST_MATCH` 与 `ON_NTH_MATCH` 强制 `max_hits=1`。
 没有概率、随机、jitter 或隐式时间条件。
 
 ## 7. FaultScope
@@ -122,18 +125,20 @@ event/operation/side-effect/shutdown 等内容无关标识。
 Action 描述，不保存 counter、Lock、Event、Task、Blocker 或 mutator。
 
 显式测试 Plan 中 Rule 默认 `enabled=true`。`dangerous_window=false` 是默认值；
-`TOOL_AFTER_SIDE_EFFECT_COMMIT` 在没有 `dangerous_window=true` 时拒绝构造。
-Foundation 只验证危险窗口，不执行真实 Tool commit 后动作。
+固定 dangerous point 在没有 `dangerous_window=true` 时拒绝构造。Foundation
+与第二轮 A 都只验证危险窗口，不执行这些 post-call/post-commit 动作。
 
 ## 10. FaultPlan
 
 `FaultPlan` 不可变，字段为 `plan_id`、`schema_version=1`、`rules` 和 UTC
-`created_at`。创建时将 Rule 按 `rule_id` 规范排序并拒绝重复 ID。
+`created_at`。创建时将 Rule 按 `(priority ASC, rule_id ASC)` 规范排序并拒绝
+重复 ID；priority 默认为 1000、拒绝 bool，范围为 `0..1_000_000`。
 
-`to_safe_json()` 使用 sorted-key canonical JSON；`digest` 是该安全 JSON 的
-lowercase SHA-256。Plan 不包含 Blocker、Lock、Event、Task、mutator 或 Runtime
-对象。普通 `repr` 只显示 plan ID、schema、rule count 和 digest，不展开匹配
-条件。
+`to_safe_json()` 是包含 `created_at` 的完整安全 JSON；`digest_source()` 只包含
+schema version、plan ID 与 canonical rules，`digest` 是该语义载荷的 lowercase
+SHA-256，因此创建时间变化不改变 Digest。Plan 不包含 Blocker、Lock、Event、
+Task、mutator 或 Runtime 对象。普通 `repr` 只显示 plan ID、schema、rule count
+和 digest，不展开匹配条件。
 
 没有 `from_request`/`from_json`/环境变量装配路径。
 
@@ -144,7 +149,7 @@ Controller 是唯一 match/hit 计数 Owner。每个 Controller 有私有
 
 `evaluate(context)` 在同一临界区完成 closed/enabled 检查、match ordinal、
 trigger 判断、`max_hits` 校验和 hit ordinal 提交。多个规则同时可执行时，按
-Plan 的规范化 `rule_id` 顺序选择第一条，只执行一个 Action。
+Plan 的 `(priority ASC, rule_id ASC)` 顺序选择第一条，只执行一个 Action。
 
 `snapshot()` 返回不可变安全计数快照；`close()` 幂等，关闭后固定
 NO_FAULT。Controller 不持有 Runtime state，不发布 Event，不调用 Retry/Fallback，
@@ -166,8 +171,9 @@ match/hit ordinal、固定 fault code 和 timestamp。手工调用 Recorder 也�
 
 Recorder 使用私有锁和有界 deque。容量策略显式为：
 
-- 默认 `DROP_OLDEST`，并累计 `dropped_count`；
-- 可选 `REJECT_NEW`，并累计 `rejected_count`。
+- 默认 `REJECT_NEW`，并累计 `rejected_count`；
+- 显式 `DROP_OLDEST`，并累计 `dropped_count`；
+- Snapshot 通过 `overflowed` 明确报告任一溢出事实。
 
 关闭后不接受新记录。Recorder 没有 Journal、RuntimeEvent、AgentState、wire、
 metrics 或日志依赖；普通 `repr` 只显示容量、数量、策略和计数。
@@ -293,14 +299,11 @@ Foundation 源码没有 Settings、FastAPI、HTTP、随机数、环境变量或 
 
 ## 23. 需要带回 ChatGPT 审查的信息
 
--请审查 Plan canonical order 采用 `rule_id` 排序、第一条可执行规则获胜是否满足
-  后续编排需要；
--请审查 `ALWAYS` 与 `UNTIL_MAX_HITS` 在“所有 Rule 必须有 max_hits”的第一版中
-  执行语义相同是否应保留为面向未来的不同意图；
--请审查当前 dangerous 集合只含 `TOOL_AFTER_SIDE_EFFECT_COMMIT`，第二轮开始前
-  应为哪些 Event/Journal/Snapshot/usage commit 后窗口增加 dangerous 要求；
+-第二轮 A 已将 Plan canonical order 固定为 `(priority ASC, rule_id ASC)`；
+-第二轮 A 已删除与 `ALWAYS + max_hits` 重复的 `UNTIL_MAX_HITS`；
+-第二轮 A 已固定九个 dangerous point，但尚未接入；
 -请确认第二轮只接 pre-call 点，并继续禁止生产 Settings/API；
--请确认 Recorder 默认溢出策略 `DROP_OLDEST` 是否符合后续测试诊断偏好；
+-第二轮 A 已将 Recorder 默认溢出策略改为 `REJECT_NEW`，保留最早因果链；
 -请确认 Scope close 对 Blocker 采用 release、对默认 Sleeper 的内部等待 Task
   采用 cancel-and-drain、对 Controllable Sleeper 采用 release，是否符合下一轮
   生命周期所有权。
