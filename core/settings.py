@@ -110,7 +110,7 @@ class Settings:
         api_base_url = os.getenv("LOCAL_AGENT_API_BASE_URL", f"http://{api_host}:{api_port}")
         chat_runtime_mode = ChatRuntimeMode.parse(
             os.getenv("CHAT_RUNTIME_MODE"),
-            default=ChatRuntimeMode.LEGACY,
+            default=ChatRuntimeMode.COORDINATED,
         )
 
         # 预设参数已从 7B 本地 CPU 推理调优为更适配 27B 远端模型：
@@ -254,7 +254,7 @@ class Settings:
                 ),
             ),
             snapshot_store_enabled=_env_bool_strict(
-                "LOCAL_AGENT_SNAPSHOT_ENABLED", True
+                "LOCAL_AGENT_SNAPSHOT_ENABLED", False
             ),
             snapshot_store_db_path=os.getenv(
                 "LOCAL_AGENT_SNAPSHOT_DB_PATH",

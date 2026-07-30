@@ -14,25 +14,31 @@ class ConnectedRequest:
         return False
 
 
-class LegacyOnlyService:
-    def __init__(self) -> None:
+class RoutingService:
+    def __init__(self, mode: ChatRuntimeMode) -> None:
+        self.mode = mode
         self.mode_reads = 0
         self.legacy_calls = 0
+        self.coordinated_calls = 0
 
     def selected_runtime_mode(self) -> ChatRuntimeMode:
         self.mode_reads += 1
-        return ChatRuntimeMode.COORDINATED
+        return self.mode
 
     def stream_chat(self, **kwargs):
         self.legacy_calls += 1
         yield "legacy"
 
+    async def stream_coordinated_agent_text(self, **kwargs):
+        self.coordinated_calls += 1
+        yield "coordinated"
+
 
 @pytest.mark.asyncio
-async def test_default_chat_endpoint_captures_mode_once_but_stays_legacy(
+async def test_default_chat_endpoint_captures_mode_once_and_routes_coordinated(
     monkeypatch,
 ) -> None:
-    service = LegacyOnlyService()
+    service = RoutingService(ChatRuntimeMode.COORDINATED)
     monkeypatch.setattr(server, "chat_service", service)
 
     response = await server.chat_endpoint(
@@ -45,9 +51,10 @@ async def test_default_chat_endpoint_captures_mode_once_but_stays_legacy(
     )
     chunks = [chunk async for chunk in response.body_iterator]
 
-    assert chunks == ["legacy"]
+    assert chunks == ["coordinated"]
     assert service.mode_reads == 1
-    assert service.legacy_calls == 1
+    assert service.coordinated_calls == 1
+    assert service.legacy_calls == 0
 
 
 def test_lifecycle_states_and_legacy_source_boundary_are_explicit() -> None:
@@ -59,7 +66,7 @@ def test_lifecycle_states_and_legacy_source_boundary_are_explicit() -> None:
     }
     source = inspect.getsource(server.chat_endpoint)
     assert "service.stream_chat(" in source
-    assert "stream_coordinated_agent" not in source
+    assert "service.stream_coordinated_agent_text(" in source
 
 
 def test_snapshot_production_assembly_is_fail_fast_and_independently_configured(
@@ -70,7 +77,7 @@ def test_snapshot_production_assembly_is_fail_fast_and_independently_configured(
     loaded = server.Settings.load()
     source = inspect.getsource(server.lifespan)
 
-    assert loaded.snapshot_store_enabled is True
+    assert loaded.snapshot_store_enabled is False
     assert Path(loaded.snapshot_store_db_path).name == "runtime_snapshots.db"
     assert "SQLiteSnapshotStore(settings.snapshot_store_db_path)" in source
     assert "InMemorySnapshotStore" not in source

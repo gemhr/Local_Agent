@@ -100,6 +100,14 @@ class CoordinatedRunScope:
     def checkpoint_coordinator(self):
         return self.coordinator.checkpoint_coordinator
 
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    @property
+    def is_executed(self) -> bool:
+        return self._executed
+
     async def execute(self) -> RunCoordinatorResult:
         if self._closed:
             raise RuntimeError("coordinated run scope is closed")
@@ -125,6 +133,10 @@ class CoordinatedRunScope:
             finally:
                 if self.gauge_provider is not None:
                     self.gauge_provider.unregister_channel(self.event_channel)
+
+    async def abort(self) -> None:
+        """Idempotently abort the request transport owned by this scope."""
+        await self.close(abort=True)
 
     async def __aenter__(self) -> "CoordinatedRunScope":
         return self

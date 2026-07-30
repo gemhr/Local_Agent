@@ -22,66 +22,25 @@ from core.runtime import (
     CancellationReason,
     RunHandle,
     process_run_registry,
-    AgentStateMachine,
-    ParallelExecutionPolicy,
-    ParallelExecutor,
-    RunCoordinator,
     RunCoordinatorResult,
-    RunBudget,
-    SerialScheduler,
-    StepClaim,
-    StepExecutionMode,
-    ModelInvocationResult,
     OutputDeltaPayload,
-    RunEventEmitter,
     RuntimeEvent,
-    RuntimeEventChannel,
     RunEventJournal,
-    RuntimeEventTextAdapter,
-    StepEventEmitter,
+    ChatStreamCompatibilityAdapter,
+    ChatStreamProtocolError,
+    safe_transport_error_chunk,
     ChatRuntimeMode,
     ChatRuntimeSelector,
     CoordinatedRuntimeFactory,
 )
 
 
-class _CoordinatedSingleAgentDriver:
-    """只执行业务 Adapter，不写 Run/Step 状态或 Registry。"""
+class ChatRuntimeTransportError(RuntimeError):
+    """A path-free failure raised by the coordinated transport boundary."""
 
-    def __init__(
-        self,
-        router: AgentRouter,
-        *,
-        user_query: str,
-        agent_id: str,
-        persist: bool,
-        event_emitter: StepEventEmitter | None = None,
-    ) -> None:
-        self._router = router
-        self._user_query = user_query
-        self._agent_id = agent_id
-        self._persist = persist
-        self._event_emitter = event_emitter
-        self.emits_user_output = True
-        self.output: str | None = None
-        self.invocation_result: ModelInvocationResult | None = None
-
-    def execute(self, claim: StepClaim, run_context) -> str:
-        """执行由 Scheduler 已 Claim 的真实单 Agent 步骤。"""
-        if claim.step_id != "answer" or claim.preferred_agent != self._agent_id:
-            raise RuntimeError("Coordinated 单 Agent Claim 与 Driver 不匹配")
-        invocation_results: list[ModelInvocationResult] = []
-        self.output = self._router.complete_single_agent(
-            self._agent_id,
-            self._user_query,
-            run_context=run_context,
-            capability_requirements=claim.capability_requirements,
-            persist=self._persist,
-            invocation_result_out=invocation_results,
-            event_emitter=self._event_emitter,
-        )
-        self.invocation_result = invocation_results[0] if invocation_results else None
-        return self.output
+    def __init__(self, error_code: str) -> None:
+        self.error_code = error_code
+        super().__init__(error_code)
 
 
 class ChatService:
@@ -118,7 +77,7 @@ class ChatService:
         self._observability_dispatcher = observability_dispatcher
         self._gauge_provider = gauge_provider
         self._runtime_selector = runtime_selector or ChatRuntimeSelector(
-            ChatRuntimeMode.LEGACY
+            ChatRuntimeMode.COORDINATED
         )
         if not isinstance(self._runtime_selector, ChatRuntimeSelector):
             raise TypeError("runtime_selector must be ChatRuntimeSelector")
@@ -136,7 +95,7 @@ class ChatService:
         return self._run_registry
 
     def selected_runtime_mode(self) -> ChatRuntimeMode:
-        """Capture the configured enum once; routing migration is not done here."""
+        """Capture the configured enum once at the request boundary."""
         return self._runtime_selector.selected_runtime_mode()
 
     def stream_chat(self, agent_id: str, query: str, file_path: str = "", run_id: str | None = None) -> Generator[str, None, None]:
@@ -247,116 +206,23 @@ class ChatService:
         _result_out: list[RunCoordinatorResult] | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
-        if self._coordinated_runtime_factory is not None:
-            async for event in self._stream_factory_coordinated_events(
-                agent_id,
-                query,
-                run_id=run_id,
-                budget=budget,
-                persist=persist,
-                result_out=_result_out,
-            ):
-                yield event
-            return
-
-        run_context, cancellation_source = create_run_context(
-            entry_agent_id=agent_id,
-            session_id=LEGACY_DEFAULT_SESSION_ID,
+        if self._coordinated_runtime_factory is None:
+            raise ChatRuntimeTransportError(
+                "RUNTIME_CONFIGURATION_ERROR"
+            ) from None
+        events = self._stream_factory_coordinated_events(
+            agent_id,
+            query,
             run_id=run_id,
-        )
-        ledger = BudgetLedger(
-            budget or RunBudget(),
-            deadline_remaining=run_context.remaining_seconds,
-        )
-        run_context.attach_budget_ledger(ledger)
-        agent_state = AgentState.for_run_context(run_context.run_id)
-        plan = self.router.build_single_agent_plan(agent_id, query)
-        machine = AgentStateMachine()
-        policy = ParallelExecutionPolicy(max_concurrency=1)
-        channel = RuntimeEventChannel(
-            self._event_channel_capacity,
-            run_id=run_context.run_id,
-            cancellation_token=run_context.cancellation_token,
-            journal=self._event_journal,
-            observability_dispatcher=self._observability_dispatcher,
-        )
-        if self._gauge_provider is not None:
-            self._gauge_provider.register_channel(channel)
-        emitter = RunEventEmitter(
-            run_id=run_context.run_id,
-            trace_id=run_context.trace_id,
-            channel=channel,
-        )
-        coordinator = RunCoordinator(
-            run_context=run_context,
-            plan=plan,
-            agent_state=agent_state,
-            budget_ledger=ledger,
-            run_handle=RunHandle(
-                run_context.run_id,
-                cancellation_source,
-                agent_state,
-                "run_coordinator",
-            ),
-            scheduler=SerialScheduler(machine),
-            executor=ParallelExecutor(
-                machine, max_concurrency=1, event_emitter=emitter
-            ),
-            run_registry=self._run_registry,
-            policy=policy,
-            state_machine=machine,
-            event_emitter=emitter,
-        )
-        driver = _CoordinatedSingleAgentDriver(
-            self.router,
-            user_query=query,
-            agent_id=agent_id,
+            budget=budget,
             persist=persist,
-            event_emitter=emitter.for_step("answer"),
+            result_out=_result_out,
         )
-
-        async def produce() -> None:
-            try:
-                result = await coordinator.execute(
-                    driver=driver,
-                    execution_mode=StepExecutionMode.SYNC_BLOCKING,
-                )
-                if _result_out is not None:
-                    _result_out.append(result)
-                self._observe_state(agent_state)
-            finally:
-                await channel.close()
-
-        producer_task = asyncio.create_task(produce())
-        completed = False
         try:
-            async for event in channel:
+            async for event in events:
                 yield event
-            await producer_task
-            completed = True
-        except GeneratorExit:
-            cancellation_source.cancel(CancellationReason.CLIENT_DISCONNECTED)
-            await channel.abort()
-            producer_task.cancel()
-            await asyncio.gather(producer_task, return_exceptions=True)
-            raise
-        except asyncio.CancelledError:
-            cancellation_source.cancel(CancellationReason.CLIENT_DISCONNECTED)
-            await channel.abort()
-            producer_task.cancel()
-            await asyncio.gather(producer_task, return_exceptions=True)
-            raise
         finally:
-            if not completed:
-                cancellation_source.cancel(
-                    CancellationReason.CLIENT_DISCONNECTED
-                )
-                await channel.abort()
-                if not producer_task.done():
-                    producer_task.cancel()
-                await asyncio.gather(producer_task, return_exceptions=True)
-            if self._gauge_provider is not None:
-                self._gauge_provider.unregister_channel(channel)
+            await events.aclose()
 
     async def _stream_factory_coordinated_events(
         self,
@@ -368,17 +234,26 @@ class ChatService:
         persist: bool,
         result_out: list[RunCoordinatorResult] | None,
     ) -> AsyncIterator[RuntimeEvent]:
-        """Run the assembled side path without changing the default chat route."""
+        """Run the sole production coordinated event path through the factory."""
         factory = self._coordinated_runtime_factory
         if factory is None:
-            raise RuntimeError("CoordinatedRuntimeFactory is not configured")
-        scope = await factory.create_run_scope(
-            agent_id,
-            query,
-            run_id=run_id,
-            budget=budget,
-            persist=persist,
-        )
+            raise ChatRuntimeTransportError(
+                "RUNTIME_CONFIGURATION_ERROR"
+            ) from None
+        try:
+            scope = await factory.create_run_scope(
+                agent_id,
+                query,
+                run_id=run_id,
+                budget=budget,
+                persist=persist,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ChatRuntimeTransportError(
+                "RUNTIME_SCOPE_CREATION_FAILED"
+            ) from None
 
         async def produce() -> None:
             try:
@@ -434,7 +309,7 @@ class ChatService:
         persist: bool = True,
     ) -> AsyncIterator[str]:
         """通过唯一 Transport Adapter 输出当前自定义纯文本分块协议。"""
-        adapter = RuntimeEventTextAdapter()
+        adapter = ChatStreamCompatibilityAdapter()
         events = self.stream_coordinated_agent_events(
             agent_id,
             query,
@@ -444,7 +319,27 @@ class ChatService:
         )
         try:
             async for event in events:
-                yield adapter.encode(event)
+                try:
+                    chunk = adapter.adapt(event)
+                except ChatStreamProtocolError as exc:
+                    yield safe_transport_error_chunk(exc.error_code).text
+                    return
+                if chunk is not None:
+                    yield chunk.text
+        except ChatRuntimeTransportError as exc:
+            yield safe_transport_error_chunk(exc.error_code).text
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            yield safe_transport_error_chunk(
+                "RUNTIME_EXECUTION_FAILED"
+            ).text
+            return
+        else:
+            final_chunk = adapter.finish()
+            if final_chunk is not None:
+                yield final_chunk.text
         finally:
             await events.aclose()
 

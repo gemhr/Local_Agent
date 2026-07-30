@@ -134,14 +134,15 @@ class ApplicationRuntimeServices:
     runtime_metrics_recorder: object
     span_recorder: object
     snapshot_store: object | None
-    recovery_validator: object
+    recovery_validator: object | None
     model_invocation_router: object
     tool_execution_service: object
     retrieval_execution_service: object | None
     blocking_executors: tuple[object, ...]
     worker_trackers: tuple[object, ...]
     run_registry: object
-    snapshot_enabled: bool = True
+    snapshot_enabled: bool = False
+    recovery_enabled: bool = False
     activity_tracker_factory: Callable[[str], RuntimeActivityTracker] = (
         RuntimeActivityTracker
     )
@@ -156,6 +157,12 @@ class ApplicationRuntimeServices:
     def __post_init__(self) -> None:
         if self.snapshot_enabled != (self.snapshot_store is not None):
             raise ValueError("snapshot_enabled must match snapshot_store availability")
+        if self.recovery_enabled != (self.recovery_validator is not None):
+            raise ValueError(
+                "recovery_enabled must match recovery_validator availability"
+            )
+        if self.recovery_enabled and not self.snapshot_enabled:
+            raise ValueError("recovery requires snapshot capability")
         if not callable(self.activity_tracker_factory):
             raise TypeError("activity_tracker_factory must be callable")
         for value in (
@@ -292,6 +299,7 @@ class ApplicationRuntimeServices:
             "component='application_runtime_services', "
             f"lifecycle_state={self.lifecycle_state.value!r}, "
             f"snapshot_enabled={self.snapshot_enabled!r}, "
+            f"recovery_enabled={self.recovery_enabled!r}, "
             f"safe_version={SAFE_RUNTIME_ASSEMBLY_VERSION!r}, "
             f"component_count={component_count})"
         )

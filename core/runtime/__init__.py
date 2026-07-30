@@ -126,7 +126,14 @@ from core.runtime.event_consumer import (
     InMemoryEventConsumptionCheckpointStore,
     SQLiteEventConsumptionCheckpointStore,
 )
-from core.runtime.stream_adapter import RuntimeEventTextAdapter
+from core.runtime.stream_adapter import (
+    ChatStreamChunk,
+    ChatStreamChunkKind,
+    ChatStreamCompatibilityAdapter,
+    ChatStreamProtocolError,
+    RuntimeEventTextAdapter,
+    safe_transport_error_chunk,
+)
 
 __all__ = [
     "AGENT_STATE_SCHEMA_VERSION",
@@ -217,7 +224,12 @@ __all__ = [
     "RuntimeEventChannel",
     "RuntimeEventDraft",
     "RuntimeEventPayload",
+    "ChatStreamChunk",
+    "ChatStreamChunkKind",
+    "ChatStreamCompatibilityAdapter",
+    "ChatStreamProtocolError",
     "RuntimeEventTextAdapter",
+    "safe_transport_error_chunk",
     "RuntimeEventType",
     "RunEventJournal",
     "SQLiteEventConsumptionCheckpointStore",

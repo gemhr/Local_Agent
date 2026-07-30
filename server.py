@@ -19,6 +19,7 @@ from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
 from core.runtime import (
     ApplicationRuntimeServices,
+    ChatRuntimeMode,
     ChatRuntimeSelector,
     CancellationReason,
     CoordinatedRuntimeFactory,
@@ -360,9 +361,13 @@ async def lifespan(app: FastAPI):
         if settings.snapshot_store_enabled
         else None
     )
-    recovery_validator = RecoveryValidator(
-        snapshot_store=snapshot_store,
-        journal=event_journal,
+    recovery_validator = (
+        RecoveryValidator(
+            snapshot_store=snapshot_store,
+            journal=event_journal,
+        )
+        if snapshot_store is not None
+        else None
     )
     application_runtime_services = await initialization_stack.run(
         lambda: ApplicationRuntimeServices(
@@ -382,6 +387,7 @@ async def lifespan(app: FastAPI):
             ),
             run_registry=run_registry,
             snapshot_enabled=settings.snapshot_store_enabled,
+            recovery_enabled=settings.snapshot_store_enabled,
             extra_closeables=(
                 ("logger_checkpoint_store", logger_checkpoints),
                 ("metrics_checkpoint_store", metrics_checkpoints),
@@ -523,11 +529,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         StreamingResponse: 纯文本增量响应流。
     """
     service = require_service()
-    selected_runtime_mode = getattr(service, "selected_runtime_mode", None)
-    if callable(selected_runtime_mode):
-        # Round one only captures the immutable contract. The route below remains
-        # deliberately pinned to stream_chat/Legacy until the migration round.
-        selected_runtime_mode()
+    mode = service.selected_runtime_mode()
     run_registry = _run_registry_for(service)
 
     run_id = payload.run_id or uuid.uuid4().hex
@@ -536,37 +538,83 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
 
-    async def generate():
-        """桥接同步文本生成器；这是自定义分块 HTTP 流，不是 SSE。"""
+    if mode is ChatRuntimeMode.LEGACY:
         stream = service.stream_chat(
-            agent_id=payload.agent_id, query=payload.query, file_path=payload.file_path, run_id=run_id)
-        try:
-            while True:
-                if await request.is_disconnected():
-                    run_registry.cancel(
-                        run_id, CancellationReason.CLIENT_DISCONNECTED
-                    )
-                    return
-                try:
+            agent_id=payload.agent_id,
+            query=payload.query,
+            file_path=payload.file_path,
+            run_id=run_id,
+        )
+
+        async def generate():
+            """Bridge the selected synchronous Legacy text stream."""
+            try:
+                while True:
+                    if await request.is_disconnected():
+                        run_registry.cancel(
+                            run_id, CancellationReason.CLIENT_DISCONNECTED
+                        )
+                        return
                     chunk = await asyncio.to_thread(_next_or_none, stream)
-                except StopIteration:
-                    return
-                if chunk is None:
-                    return
-                yield chunk
-        except RunCancelledError:
-            # 受控取消是流的正常终态；AgentLoop 已记录 CANCELLED 状态，
-            # 此处只负责阻止业务异常穿透 StreamingResponse/ASGI 边界。
-            return
-        except asyncio.CancelledError:
-            run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
-            raise
-        except (BrokenPipeError, ConnectionResetError):
-            run_registry.cancel(run_id, CancellationReason.CLIENT_DISCONNECTED)
-        finally:
-            close = getattr(stream, "close", None)
-            if close is not None:
-                close()
+                    if chunk is None:
+                        return
+                    yield chunk
+            except RunCancelledError:
+                return
+            except asyncio.CancelledError:
+                run_registry.cancel(
+                    run_id, CancellationReason.CLIENT_DISCONNECTED
+                )
+                raise
+            except (BrokenPipeError, ConnectionResetError):
+                run_registry.cancel(
+                    run_id, CancellationReason.CLIENT_DISCONNECTED
+                )
+            except Exception:
+                yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
+            finally:
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    close()
+
+    elif mode is ChatRuntimeMode.COORDINATED:
+        coordinated_query = payload.query
+        if payload.file_path:
+            coordinated_query += (
+                f"\n\nPlease analyze this file path: '{payload.file_path}'"
+            )
+        stream = service.stream_coordinated_agent_text(
+            agent_id=payload.agent_id,
+            query=coordinated_query,
+            run_id=run_id,
+        )
+
+        async def generate():
+            """Forward the selected custom coordinated text-chunk stream."""
+            try:
+                async for chunk in stream:
+                    if await request.is_disconnected():
+                        run_registry.cancel(
+                            run_id, CancellationReason.CLIENT_DISCONNECTED
+                        )
+                        return
+                    yield chunk
+            except asyncio.CancelledError:
+                run_registry.cancel(
+                    run_id, CancellationReason.CLIENT_DISCONNECTED
+                )
+                raise
+            except (BrokenPipeError, ConnectionResetError):
+                run_registry.cancel(
+                    run_id, CancellationReason.CLIENT_DISCONNECTED
+                )
+            except Exception:
+                yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
+            finally:
+                await stream.aclose()
+
+    else:  # pragma: no cover - ChatRuntimeMode is a closed enum
+        raise RuntimeError("unreachable chat runtime mode")
 
     return StreamingResponse(generate(), media_type="text/plain", headers={"X-Run-Id": run_id})
 

@@ -13,7 +13,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from core.agent_router import AgentRouter
-from core.chat_service import ChatService, _CoordinatedSingleAgentDriver
+from core.chat_service import ChatService
+from core.runtime.runtime_factory import CoordinatedSingleAgentDriver
+from tests._runtime_assembly_fixtures import make_coordinated_chat_service
 from core.memory_manager import MemoryManager
 from core.runtime import (
     AgentState,
@@ -631,7 +633,10 @@ class RunCoordinatorRealEntryTests(unittest.IsolatedAsyncioTestCase):
 
             router.build_single_agent_plan = count_plan
             states = []
-            service = ChatService(router, state_observer=states.append)
+            service = make_coordinated_chat_service(
+                router,
+                state_observer=states.append,
+            )
             output, result = await service.run_coordinated_agent(
                 "core_router", "检查运行时所有权", persist=False
             )
@@ -642,7 +647,7 @@ class RunCoordinatorRealEntryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(states[-1].status, RunStatus.SUCCEEDED)
 
     def test_new_driver_has_no_lifecycle_or_registry_writes(self) -> None:
-        source = inspect.getsource(_CoordinatedSingleAgentDriver.execute)
+        source = inspect.getsource(CoordinatedSingleAgentDriver.execute)
         for forbidden in (
             "RunEventType.STARTED",
             "apply_run_event",
