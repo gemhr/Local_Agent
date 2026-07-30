@@ -123,9 +123,9 @@ class ApiWorker(QThread):
                         self.chunk_signal.emit(self.protocol_buffer)
                         self.protocol_buffer = ""
                 self.finished_signal.emit()
-        except Exception as exc:
+        except Exception:
             if not self.isInterruptionRequested():
-                self.error_signal.emit(f"API request failed: {exc}")
+                self.error_signal.emit("API request failed")
         finally:
             self._response = None
             self._session = None

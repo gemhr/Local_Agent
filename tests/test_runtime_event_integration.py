@@ -39,6 +39,7 @@ from core.runtime import (
     process_run_registry,
     create_run_context,
 )
+from tests._runtime_assembly_fixtures import make_coordinated_chat_service
 
 
 class FakeModel:
@@ -62,7 +63,10 @@ class RuntimeEventIntegrationTests(unittest.IsolatedAsyncioTestCase):
             memory_manager=memory,
             orchestration_enabled=False,
         )
-        return ChatService(router, event_channel_capacity=capacity)
+        return make_coordinated_chat_service(
+            router,
+            event_channel_capacity=capacity,
+        )
 
     async def test_real_coordinated_path_has_complete_order_and_output_delta(self):
         with tempfile.TemporaryDirectory() as directory:

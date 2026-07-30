@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core.agent_router import AgentRouter
 from core.chat_service import ChatService
+from tests._runtime_assembly_fixtures import make_coordinated_chat_service
 from core.llm_engine import RemoteLLMEngine
 from core.memory_manager import MemoryManager
 from core.runtime import (
@@ -806,7 +807,9 @@ class CoordinatedInvocationIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ),
             )
-            output, result = await ChatService(router).run_coordinated_agent(
+            output, result = await make_coordinated_chat_service(
+                router
+            ).run_coordinated_agent(
                 "core_router", "简单问题", persist=False
             )
         self.assertEqual(output, "fallback answer")
@@ -850,7 +853,9 @@ class CoordinatedInvocationIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ),
             )
-            output, result = await ChatService(router).run_coordinated_agent(
+            output, result = await make_coordinated_chat_service(
+                router
+            ).run_coordinated_agent(
                 "core_router", "简单问题", persist=False
             )
         self.assertIsNone(output)

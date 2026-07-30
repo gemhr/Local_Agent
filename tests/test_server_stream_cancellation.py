@@ -5,7 +5,7 @@ from typing import Iterator
 import pytest
 
 import server
-from core.runtime import CancellationReason, RunCancelledError
+from core.runtime import CancellationReason, ChatRuntimeMode, RunCancelledError
 
 
 class _ConnectedRequest:
@@ -35,6 +35,9 @@ class _ScriptedStream(Iterator[str]):
 class _FakeChatService:
     def __init__(self, stream: _ScriptedStream) -> None:
         self.stream = stream
+
+    def selected_runtime_mode(self) -> ChatRuntimeMode:
+        return ChatRuntimeMode.LEGACY
 
     def stream_chat(
         self,
@@ -69,7 +72,7 @@ async def test_chat_stream_treats_run_cancellation_as_normal_completion(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_does_not_hide_unexpected_errors(monkeypatch) -> None:
+async def test_chat_stream_projects_unexpected_errors_safely(monkeypatch) -> None:
     stream = _ScriptedStream(RuntimeError("unexpected"))
     monkeypatch.setattr(server, "chat_service", _FakeChatService(stream))
 
@@ -82,6 +85,8 @@ async def test_chat_stream_does_not_hide_unexpected_errors(monkeypatch) -> None:
         _ConnectedRequest(),
     )
 
-    with pytest.raises(RuntimeError, match="unexpected"):
-        await _response_chunks(response)
+    assert await _response_chunks(response) == [
+        "partial",
+        "[runtime-error] RUNTIME_EXECUTION_FAILED\n",
+    ]
     assert stream.closed is True

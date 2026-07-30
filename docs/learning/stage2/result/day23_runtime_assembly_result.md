@@ -95,24 +95,24 @@ Channel 是唯一 Event Sequence Owner。构造中途失败时，Factory 注销 
 | RecoveryValidator | Application | Server lifespan | ApplicationRuntimeServices | 是 |
 | RunRegistry | Application | Server lifespan | ApplicationRuntimeServices | 是 |
 | RuntimeEventChannel | Request | CoordinatedRuntimeFactory | CoordinatedRunScope | 否 |
-| RunContext | Request | CoordinatedRuntimeFactory | CoordinatedRunScope/GC | 否 |
-| CancellationSource | Request | CoordinatedRuntimeFactory | CoordinatedRunScope/GC | 否 |
-| RunCoordinator | Request | CoordinatedRuntimeFactory | CoordinatedRunScope/GC | 否 |
-| AgentState | Request | CoordinatedRuntimeFactory | CoordinatedRunScope/GC | 否 |
-| Scheduler / Executor | Request | CoordinatedRuntimeFactory | CoordinatedRunScope/GC | 否 |
+| RunContext | Request | CoordinatedRuntimeFactory | CoordinatedRunScope | 否 |
+| CancellationSource | Request | CoordinatedRuntimeFactory | CoordinatedRunScope | 否 |
+| RunCoordinator | Request | CoordinatedRuntimeFactory | CoordinatedRunScope | 否 |
+| AgentState | Request | CoordinatedRuntimeFactory | CoordinatedRunScope | 否 |
+| Scheduler / Executor | Request | CoordinatedRuntimeFactory | CoordinatedRunScope | 否 |
 | BlockingExecutor | Application | Server lifespan | ApplicationRuntimeServices | 是 |
 | WorkerTracker | Application | Tool/Blocking assembly | ApplicationRuntimeServices | 是 |
-| RuntimeActivityTracker | Request | CoordinatedRuntimeFactory | CoordinatedRunScope/GC | 否 |
+| RuntimeActivityTracker | Request | CoordinatedRuntimeFactory | CoordinatedRunScope | 否 |
 
 ## 9. Snapshot Store 生产装配
 
-生产 owner 是 Server lifespan。默认 `LOCAL_AGENT_SNAPSHOT_ENABLED=true`，路径来自独立配置 `LOCAL_AGENT_SNAPSHOT_DB_PATH`，默认位于安全数据目录的 `runtime_snapshots.db`。
+生产 owner 是 Server lifespan。默认 `LOCAL_AGENT_SNAPSHOT_ENABLED=false`；只有显式启用时才使用 `LOCAL_AGENT_SNAPSHOT_DB_PATH` 创建 `SQLiteSnapshotStore`。
 
 启用时直接构造单例 `SQLiteSnapshotStore`；构造失败即 fail fast，不回退 InMemory。显式关闭配置时注入受控的 disabled capability（`snapshot_store=None`、`snapshot_enabled=False`）。测试使用 `InMemorySnapshotStore`。本轮没有自动 checkpoint，也没有把 Store 放入普通聊天热路径。
 
 ## 10. RecoveryValidator 装配
 
-RecoveryValidator 由 Server lifespan 创建并放入 ApplicationRuntimeServices，引用同一个 SnapshotStore 和 EventJournal。它不自动执行、不读取当前活跃 Run、不调用 Model/Tool/RAG Adapter、不 Resume，也不进入默认聊天热路径。
+只有显式启用 Snapshot 时，Server lifespan 才创建 RecoveryValidator 并放入 ApplicationRuntimeServices；disabled 时 `snapshot_store=None`、`recovery_validator=None`、`snapshot_enabled=false`、`recovery_enabled=false`。它不自动执行、不读取当前活跃 Run、不调用 Model/Tool/RAG Adapter、不 Resume，也不进入默认聊天热路径。
 
 ## 11. Server Lifespan
 
@@ -364,7 +364,7 @@ COORDINATED → ChatService.stream_coordinated_agent_text()
 ## 20. 需要带回 ChatGPT 审查的信息
 
 - 确认第二轮是否允许在 `/api/chat` 按 Enum 正式分流。
-- 确认 Snapshot 默认启用且失败即启动失败是否符合部署预期。
+- Snapshot 默认关闭；需要 Snapshot 的部署必须显式启用，且初始化失败会安全地 fail fast。
 - 审查完整 Shutdown 是否应先停止准入、等待 Run，再关闭 Worker/Dispatcher/Store。
 - 审查 Knowledge Base 的既有受控降级是否需要在后续统一为能力状态。
 - 审查 Coordinated 路径迁移前是否需要新增协议兼容层，而不是直接复用纯文本 Adapter。

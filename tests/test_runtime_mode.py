@@ -12,9 +12,9 @@ from core.settings import Settings
         ("legacy", ChatRuntimeMode.LEGACY),
         (" LEGACY ", ChatRuntimeMode.LEGACY),
         ("CoOrDiNaTeD", ChatRuntimeMode.COORDINATED),
-        ("", ChatRuntimeMode.LEGACY),
-        ("   ", ChatRuntimeMode.LEGACY),
-        (None, ChatRuntimeMode.LEGACY),
+        ("", ChatRuntimeMode.COORDINATED),
+        ("   ", ChatRuntimeMode.COORDINATED),
+        (None, ChatRuntimeMode.COORDINATED),
     ],
 )
 def test_runtime_mode_normalizes_only_known_values(raw, expected) -> None:

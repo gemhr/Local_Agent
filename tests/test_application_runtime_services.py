@@ -44,6 +44,8 @@ async def test_close_is_idempotent_and_continues_after_component_failure() -> No
         blocking_executors=(),
         worker_trackers=(),
         run_registry=base.run_registry,
+        snapshot_enabled=True,
+        recovery_enabled=True,
         extra_closeables=(("first_resource", first), ("second_resource", second)),
     )
 
@@ -83,8 +85,53 @@ def test_repr_is_safe_and_container_rejects_per_run_state() -> None:
             "run_registry",
         )
     }
+    values["snapshot_enabled"] = services.snapshot_enabled
+    values["recovery_enabled"] = services.recovery_enabled
     values["model_invocation_router"] = state
     with pytest.raises(ValueError, match="per-run"):
+        ApplicationRuntimeServices(**values)
+
+
+def test_snapshot_and_recovery_disabled_capabilities_are_truly_unavailable() -> None:
+    services = make_services(snapshot_enabled=False)
+
+    assert services.snapshot_store is None
+    assert services.recovery_validator is None
+    assert services.snapshot_enabled is False
+    assert services.recovery_enabled is False
+
+
+def test_snapshot_enabled_constructs_matching_recovery_capability() -> None:
+    services = make_services(snapshot_enabled=True)
+
+    assert services.snapshot_store is not None
+    assert services.recovery_validator is not None
+    assert services.snapshot_enabled is True
+    assert services.recovery_enabled is True
+
+
+def test_recovery_cannot_appear_enabled_without_snapshot() -> None:
+    disabled = make_services(snapshot_enabled=False)
+    values = {
+        field: getattr(disabled, field)
+        for field in (
+            "event_journal",
+            "observability_dispatcher",
+            "structured_logger",
+            "runtime_metrics_recorder",
+            "span_recorder",
+            "snapshot_store",
+            "model_invocation_router",
+            "tool_execution_service",
+            "retrieval_execution_service",
+            "blocking_executors",
+            "worker_trackers",
+            "run_registry",
+        )
+    }
+    values["recovery_validator"] = object()
+    values["recovery_enabled"] = True
+    with pytest.raises(ValueError, match="recovery requires snapshot"):
         ApplicationRuntimeServices(**values)
 
 

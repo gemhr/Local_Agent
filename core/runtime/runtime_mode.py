@@ -21,7 +21,7 @@ class ChatRuntimeMode(str, Enum):
         default: "ChatRuntimeMode | None" = None,
     ) -> "ChatRuntimeMode":
         """Normalize case and whitespace, while rejecting every unknown value."""
-        active_default = default or cls.LEGACY
+        active_default = default or cls.COORDINATED
         if not isinstance(active_default, cls):
             raise TypeError("default must be a ChatRuntimeMode")
         if value is None:
