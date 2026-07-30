@@ -5,6 +5,7 @@ from core.runtime import (
     CancellationReason,
     CancellationSource,
     EventChannelClosedError,
+    EventChannelConsumerOwner,
     EventChannelState,
     RunCompletedPayload,
     RunStartedPayload,
@@ -206,3 +207,83 @@ class RuntimeEventChannelTests(unittest.IsolatedAsyncioTestCase):
         await channel.close()
         await channel.abort()
         self.assertEqual(channel.state, EventChannelState.CLOSED)
+
+    async def test_transport_must_release_before_drain_can_take_ownership(self):
+        channel = RuntimeEventChannel(1, run_id="run-a")
+        iterator = channel.__aiter__()
+        waiting = asyncio.create_task(anext(iterator))
+        await asyncio.sleep(0)
+        self.assertEqual(
+            channel.consumer_owner, EventChannelConsumerOwner.TRANSPORT
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "ownership"):
+            await channel.drain_to_discard()
+
+        waiting.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiting
+        await iterator.aclose()
+        self.assertEqual(
+            channel.consumer_owner, EventChannelConsumerOwner.RELEASED
+        )
+
+        drain = asyncio.create_task(channel.drain_to_discard())
+        await asyncio.sleep(0)
+        self.assertEqual(
+            channel.consumer_owner, EventChannelConsumerOwner.DRAIN
+        )
+        await channel.close()
+        await asyncio.wait_for(drain, 0.2)
+        self.assertEqual(
+            channel.consumer_owner, EventChannelConsumerOwner.RELEASED
+        )
+
+    async def test_abort_wakes_empty_transport_consumer(self):
+        channel = RuntimeEventChannel(1, run_id="run-a")
+        iterator = channel.__aiter__()
+        waiting = asyncio.create_task(anext(iterator))
+        await asyncio.sleep(0)
+
+        await channel.abort()
+
+        with self.assertRaises(StopAsyncIteration):
+            await asyncio.wait_for(waiting, 0.2)
+        self.assertEqual(
+            channel.consumer_owner, EventChannelConsumerOwner.ABORTED
+        )
+        self.assertEqual(channel.buffered_count, 0)
+
+    async def test_normal_transport_completion_prohibits_late_drain(self):
+        channel = RuntimeEventChannel(1, run_id="run-a")
+        await channel.close()
+        self.assertEqual([event async for event in channel], [])
+
+        with self.assertRaisesRegex(RuntimeError, "completed normally"):
+            await channel.drain_to_discard()
+
+    async def test_completed_drain_is_idempotent(self):
+        channel = RuntimeEventChannel(1, run_id="run-a")
+        drain = asyncio.create_task(channel.drain_to_discard())
+        await asyncio.sleep(0)
+        await channel.close()
+        await drain
+
+        await asyncio.wait_for(channel.drain_to_discard(), 0.2)
+
+    async def test_transport_lease_can_release_before_first_receive(self):
+        channel = RuntimeEventChannel(1, run_id="run-a")
+        iterator = channel.__aiter__()
+        self.assertEqual(
+            channel.consumer_owner, EventChannelConsumerOwner.TRANSPORT
+        )
+
+        await iterator.aclose()
+
+        self.assertEqual(
+            channel.consumer_owner, EventChannelConsumerOwner.RELEASED
+        )
+        drain = asyncio.create_task(channel.drain_to_discard())
+        await asyncio.sleep(0)
+        await channel.close()
+        await asyncio.wait_for(drain, 0.2)

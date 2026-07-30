@@ -40,6 +40,10 @@ from core.runtime import (
     SQLiteSnapshotStore,
     RuntimeLifecycleState,
     RuntimeAdmissionRejectedError,
+    BlockingExecutorAdmissionTimeout,
+    BlockingExecutorClosedError,
+    BlockingTaskKind,
+    process_legacy_step_executor,
     process_run_registry,
 )
 from core.runtime.blocking_executor import BoundedBlockingExecutor
@@ -58,6 +62,42 @@ from core.runtime.structured_logging import (
 )
 from core.settings import Settings
 from tools.registry import register_all_tools
+
+
+class _RequestOwnedStreamingResponse(StreamingResponse):
+    """Always close the request-owned body iterator after transport exit."""
+
+    async def stream_response(self, send) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": self.status_code,
+                "headers": self.raw_headers,
+            }
+        )
+        try:
+            async for chunk in self.body_iterator:
+                if not isinstance(chunk, (bytes, memoryview)):
+                    chunk = chunk.encode(self.charset)
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": chunk,
+                        "more_body": True,
+                    }
+                )
+        finally:
+            close = getattr(self.body_iterator, "aclose", None)
+            if callable(close):
+                await close()
+        await send(
+            {
+                "type": "http.response.body",
+                "body": b"",
+                "more_body": False,
+            }
+        )
+
 
 try:
     from core.knowledge_base.vector_db_manager import VectorDBManager
@@ -173,6 +213,13 @@ async def lifespan(app: FastAPI):
         "coordinated_step_executor",
         lambda: BoundedBlockingExecutor(
             thread_name_prefix="coordinated-step"
+        ),
+        close_operation="shutdown",
+    )
+    legacy_step_executor = await initialization_stack.create(
+        "legacy_step_executor",
+        lambda: BoundedBlockingExecutor(
+            thread_name_prefix="legacy-step"
         ),
         close_operation="shutdown",
     )
@@ -428,12 +475,14 @@ async def lifespan(app: FastAPI):
             blocking_executors=(
                 blocking_executor,
                 coordinated_step_executor,
+                legacy_step_executor,
             ),
             worker_trackers=(
                 router.tool_execution_service.concurrency_controller,
             ),
             run_registry=run_registry,
             coordinated_step_executor=coordinated_step_executor,
+            legacy_step_executor=legacy_step_executor,
             snapshot_enabled=settings.snapshot_store_enabled,
             recovery_enabled=settings.snapshot_store_enabled,
             extra_closeables=(
@@ -471,6 +520,7 @@ async def lifespan(app: FastAPI):
             coordinated_runtime_factory=coordinated_runtime_factory,
             run_registry=run_registry,
             admission_gate=application_runtime_services.admission_gate,
+            legacy_step_executor=legacy_step_executor,
             disconnect_grace_seconds=(
                 settings.runtime_disconnect_grace_seconds
             ),
@@ -564,6 +614,31 @@ def _run_registry_for(service) -> object:
     return getattr(service, "run_registry", process_run_registry)
 
 
+def _close_legacy_stream(stream) -> None:
+    """Best-effort close after the worker has stopped touching the generator."""
+    close = getattr(stream, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except (RuntimeError, ValueError):
+        # A running generator is closed by the worker completion callback.
+        pass
+
+
+def _submit_legacy_stream_step(service, stream, run_id: str):
+    submit = getattr(service, "submit_legacy_stream_step", None)
+    if callable(submit):
+        return submit(lambda: _next_or_none(stream), run_id=run_id)
+    return process_legacy_step_executor.submit_nowait(
+        lambda: _next_or_none(stream),
+        kind=BlockingTaskKind.LEGACY_STREAM_STEP,
+        run_id=run_id,
+        operation_id="legacy_stream_next",
+        cancellation_check=lambda: None,
+    )
+
+
 @app.post("/api/chat")
 async def chat_endpoint(payload: ChatRequest, request: Request):
     """流式返回聊天结果。
@@ -613,12 +688,16 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                     stopped=stopped,
                 )
             )
+            active_worker = None
             try:
                 while True:
                     if disconnected.is_set():
                         return
+                    active_worker = _submit_legacy_stream_step(
+                        service, stream, run_id
+                    )
                     next_task = asyncio.create_task(
-                        asyncio.to_thread(_next_or_none, stream)
+                        active_worker.result_async()
                     )
                     disconnect_task = asyncio.create_task(
                         disconnected.wait()
@@ -639,6 +718,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                         disconnect_task, return_exceptions=True
                     )
                     chunk = await next_task
+                    active_worker = None
                     if chunk is None:
                         return
                     if disconnected.is_set():
@@ -647,6 +727,15 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
             except RuntimeAdmissionRejectedError:
                 if not disconnected.is_set():
                     yield "[runtime-error] RUNTIME_SHUTTING_DOWN\n"
+            except BlockingExecutorClosedError:
+                if not disconnected.is_set():
+                    yield "[runtime-error] RUNTIME_SHUTTING_DOWN\n"
+            except BlockingExecutorAdmissionTimeout:
+                if not disconnected.is_set():
+                    yield (
+                        "[runtime-error] "
+                        "LEGACY_WORKER_ADMISSION_REJECTED\n"
+                    )
             except RunCancelledError:
                 return
             except asyncio.CancelledError:
@@ -662,13 +751,14 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
                 if not disconnected.is_set():
                     yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
             finally:
+                if active_worker is not None:
+                    wait_state = active_worker.cancel_or_detach()
+                    if wait_state.background_work_pending:
+                        active_worker.add_done_callback(
+                            lambda: _close_legacy_stream(stream)
+                        )
                 await _stop_disconnect_watcher(watcher, stopped)
-                close = getattr(stream, "close", None)
-                if close is not None:
-                    try:
-                        close()
-                    except (RuntimeError, ValueError):
-                        pass
+                _close_legacy_stream(stream)
 
     elif mode is ChatRuntimeMode.COORDINATED:
         coordinated_query = payload.query
@@ -719,7 +809,11 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     else:  # pragma: no cover - ChatRuntimeMode is a closed enum
         raise RuntimeError("unreachable chat runtime mode")
 
-    return StreamingResponse(generate(), media_type="text/plain", headers={"X-Run-Id": run_id})
+    return _RequestOwnedStreamingResponse(
+        generate(),
+        media_type="text/plain",
+        headers={"X-Run-Id": run_id},
+    )
 
 
 @app.post("/api/runtime/runs/{run_id}/cancel")

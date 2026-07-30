@@ -36,6 +36,10 @@ from core.runtime import (
     CoordinatedRuntimeFactory,
     RuntimeAdmissionGate,
     RuntimeAdmissionRejectedError,
+    BlockingTaskHandle,
+    BlockingTaskKind,
+    BoundedBlockingExecutor,
+    process_legacy_step_executor,
 )
 
 
@@ -62,6 +66,7 @@ class ChatService:
         coordinated_runtime_factory: CoordinatedRuntimeFactory | None = None,
         run_registry=None,
         admission_gate: RuntimeAdmissionGate | None = None,
+        legacy_step_executor: BoundedBlockingExecutor | None = None,
         disconnect_grace_seconds: float = 1.0,
     ) -> None:
         """初始化应用服务。
@@ -103,6 +108,9 @@ class ChatService:
         self._admission_gate = (
             admission_gate or factory_gate or RuntimeAdmissionGate()
         )
+        self._legacy_step_executor = (
+            legacy_step_executor or process_legacy_step_executor
+        )
         if (
             isinstance(disconnect_grace_seconds, bool)
             or not isinstance(disconnect_grace_seconds, (int, float))
@@ -125,6 +133,32 @@ class ChatService:
     def selected_runtime_mode(self) -> ChatRuntimeMode:
         """Capture the configured enum once at the request boundary."""
         return self._runtime_selector.selected_runtime_mode()
+
+    def submit_legacy_stream_step(
+        self,
+        operation: Callable[[], str | None],
+        *,
+        run_id: str,
+    ) -> BlockingTaskHandle[str | None]:
+        """Submit one generator advance to the dedicated Legacy worker owner."""
+        executor = self._legacy_step_executor
+        if executor is None:
+            raise ChatRuntimeTransportError(
+                "LEGACY_WORKER_NOT_CONFIGURED"
+            )
+
+        def cancellation_check() -> None:
+            handle = self._run_registry.get(run_id)
+            if handle is not None:
+                handle.cancellation_source.token.raise_if_cancelled()
+
+        return executor.submit_nowait(
+            operation,
+            kind=BlockingTaskKind.LEGACY_STREAM_STEP,
+            run_id=run_id,
+            operation_id="legacy_stream_next",
+            cancellation_check=cancellation_check,
+        )
 
     def stream_chat(self, agent_id: str, query: str, file_path: str = "", run_id: str | None = None) -> Generator[str, None, None]:
         """流式执行一次对话。
@@ -311,14 +345,17 @@ class ChatService:
         producer_task = asyncio.create_task(produce())
         scope.bind_producer_task(producer_task)
         completed = False
+        transport_completed = False
+        transport_consumer = scope.event_channel.__aiter__()
         cancel_reason = (
             cancellation_intent[0]
             if cancellation_intent is not None
             else CancellationReason.CLIENT_DISCONNECTED
         )
         try:
-            async for event in scope.event_channel:
+            async for event in transport_consumer:
                 yield event
+            transport_completed = True
             await producer_task
             completed = True
         except GeneratorExit:
@@ -328,16 +365,16 @@ class ChatService:
                 else CancellationReason.CLIENT_DISCONNECTED
             )
             scope.request_cancel(cancel_reason)
-            await self._cancel_and_drain_scope(scope, cancel_reason)
             raise
         except asyncio.CancelledError:
-            scope.request_cancel(CancellationReason.CLIENT_DISCONNECTED)
-            await self._cancel_and_drain_scope(
-                scope, CancellationReason.CLIENT_DISCONNECTED
-            )
+            cancel_reason = CancellationReason.CLIENT_DISCONNECTED
+            scope.request_cancel(cancel_reason)
             raise
         finally:
-            if completed:
+            close_consumer = getattr(transport_consumer, "aclose", None)
+            if callable(close_consumer):
+                await close_consumer()
+            if completed or transport_completed:
                 await scope.close()
             elif not scope.is_closed:
                 scope.request_cancel(cancel_reason)

@@ -279,6 +279,7 @@ class RunCoordinator:
 
         registered = False
         task_cancelled = False
+        terminal_publication_failed = False
         cleanup_error_codes: list[str] = []
         decision: RunFinalizationDecision | None = None
         try:
@@ -359,7 +360,13 @@ class RunCoordinator:
                 "state_event_transitions_in_flight"
             ):
                 decision = self._finalize_once(decision)
-                await self._emit_terminal_events(decision)
+                try:
+                    await self._emit_terminal_events(decision)
+                except Exception:
+                    terminal_publication_failed = True
+                    cleanup_error_codes.append(
+                        "RUNTIME_TERMINAL_PUBLICATION_FAILED"
+                    )
             self._stop_deadline_watcher(cleanup_error_codes)
             await self._run_cleanup_callbacks(cleanup_error_codes)
             budget_snapshot = self._snapshot_budget(cleanup_error_codes)
@@ -371,13 +378,20 @@ class RunCoordinator:
             budget_snapshot=budget_snapshot,
             cleanup_error_codes=cleanup_error_codes,
         )
-        if result.status is RunStatus.SUCCEEDED: run_span.end_ok()
+        if terminal_publication_failed:
+            run_span.end_error("RUNTIME_TERMINAL_PUBLICATION_FAILED")
+        elif result.status is RunStatus.SUCCEEDED: run_span.end_ok()
         elif result.status is RunStatus.CANCELLED: run_span.end_cancelled(result.error_code or "CANCELLED")
         else: run_span.end_error(result.error_code or "RUN_FAILED")
         reset_trace_context(trace_token)
         reset_span_recorder(recorder_token)
         if task_cancelled:
             raise asyncio.CancelledError()
+        if terminal_publication_failed:
+            raise RunCoordinatorError(
+                "RUNTIME_TERMINAL_PUBLICATION_FAILED",
+                "Runtime terminal publication failed",
+            ) from None
         return result
 
     async def _execute_batches(

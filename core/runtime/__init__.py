@@ -105,6 +105,7 @@ from core.runtime.events import (
 )
 from core.runtime.event_channel import (
     EventChannelClosedError,
+    EventChannelConsumerOwner,
     EventChannelState,
     JournalWatermarkError,
     RuntimeEventChannel,
@@ -206,6 +207,7 @@ __all__ = [
     "CancellationPayload",
     "ErrorPayload",
     "EventChannelClosedError",
+    "EventChannelConsumerOwner",
     "EventChannelState",
     "JournalWatermarkError",
     "EventConsumptionCheckpoint",
@@ -379,6 +381,7 @@ from core.runtime.blocking_executor import (
     DEFAULT_BLOCKING_MAX_PENDING_TASKS,
     DEFAULT_BLOCKING_MAX_WORKERS,
     process_blocking_executor,
+    process_legacy_step_executor,
 )
 
 __all__ += [
@@ -405,6 +408,7 @@ __all__ += [
     "DEFAULT_BLOCKING_MAX_PENDING_TASKS",
     "DEFAULT_BLOCKING_MAX_WORKERS",
     "process_blocking_executor",
+    "process_legacy_step_executor",
 ]
 
 from core.runtime.circuit_breaker import (
