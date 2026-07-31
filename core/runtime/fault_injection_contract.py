@@ -243,6 +243,7 @@ DANGEROUS_FAULT_POINTS: Final[frozenset[FaultPoint]] = frozenset(
     {
         FaultPoint.MODEL_AFTER_PROVIDER_SUCCESS,
         FaultPoint.MODEL_AFTER_USAGE_COMMIT,
+        FaultPoint.TOOL_BEFORE_SIDE_EFFECT_COMMIT,
         FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
         FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
         FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,

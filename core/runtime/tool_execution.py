@@ -147,6 +147,7 @@ class ToolExecutionContext:
     effective_deadline_monotonic: float
     attempt_cancellation_token: CancellationToken
     side_effect_tracker: AttemptSideEffectTracker
+    before_side_effect_fault: Callable[[], None] | None = None
 
     def raise_if_cancelled(self) -> None:
         self.run_context.raise_if_inactive()
@@ -165,6 +166,9 @@ class ToolExecutionContext:
 
     def before_side_effect(self) -> None:
         """提交副作用前重新检查取消和 Deadline，再执行唯一合法状态转换。"""
+        self.raise_if_cancelled()
+        if self.before_side_effect_fault is not None:
+            self.before_side_effect_fault()
         self.raise_if_cancelled()
         self.side_effect_tracker.before_side_effect()
 
@@ -313,6 +317,19 @@ class ToolAttemptExecutor:
         tracker = AttemptSideEffectTracker()
         attempt_source = CancellationSource()
         effective_timeout = _effective_timeout(invocation, spec, run_context)
+        effective_deadline = time.monotonic() + effective_timeout
+        before_side_effect_fault = _tool_blocking_fault_callback(
+            fault_controller,
+            FaultPoint.TOOL_BEFORE_SIDE_EFFECT_COMMIT,
+            run_context=run_context,
+            invocation=invocation,
+            attempt_number=retry_index + 1,
+            raise_if_cancelled=lambda: _raise_if_tool_attempt_inactive(
+                run_context,
+                attempt_source.token,
+                effective_deadline,
+            ),
+        )
         context = ToolExecutionContext(
             run_context=run_context,
             step_id=step_id,
@@ -321,9 +338,10 @@ class ToolAttemptExecutor:
             budget_ledger=budget_ledger,
             event_emitter=event_emitter,
             concurrency_controller=concurrency_controller,
-            effective_deadline_monotonic=time.monotonic() + effective_timeout,
+            effective_deadline_monotonic=effective_deadline,
             attempt_cancellation_token=attempt_source.token,
             side_effect_tracker=tracker,
+            before_side_effect_fault=before_side_effect_fault,
         )
         lease: ToolResourceLease | None = None
         release_deferred = {"value": False}
@@ -389,6 +407,8 @@ class ToolAttemptExecutor:
                 run_context=run_context,
                 invocation=invocation,
                 attempt_number=retry_index + 1,
+                raise_if_cancelled=context.raise_if_cancelled,
+                remaining_seconds=context.remaining_seconds,
             )
             context.raise_if_cancelled()
             provider_started = True
@@ -412,6 +432,15 @@ class ToolAttemptExecutor:
                 tracker.resolve_authoritative(response.side_effect_state)
             else:
                 tracker.observe(response.side_effect_state)
+            await _execute_tool_fault_point(
+                fault_controller,
+                FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
+                run_context=run_context,
+                invocation=invocation,
+                attempt_number=retry_index + 1,
+                raise_if_cancelled=context.raise_if_cancelled,
+                remaining_seconds=context.remaining_seconds,
+            )
             context.raise_if_cancelled()
             output = build_tool_output(
                 response.content, response.content_type, spec.max_output_bytes
@@ -593,12 +622,23 @@ class ToolAttemptExecutor:
                 )
             ) from None
         except InjectedFaultError as exc:
+            state = tracker.mark_unknown_if_started()
             error = _tool_injected_error(
                 exc,
                 invocation=invocation,
                 spec=spec,
                 attempt_id=attempt_id,
                 retry_index=retry_index,
+                provider_started=provider_started,
+                side_effect_state=state,
+                post_provider=(
+                    provider_started
+                    and state
+                    in {
+                        ToolSideEffectState.COMMITTED,
+                        ToolSideEffectState.UNKNOWN,
+                    }
+                ),
             )
             if started_event_emitted:
                 error = await self._emit_completed(
@@ -1268,6 +1308,8 @@ async def _execute_tool_fault_point(
     run_context: RunContext,
     invocation: ToolInvocation,
     attempt_number: int | None = None,
+    raise_if_cancelled: Callable[[], None] | None = None,
+    remaining_seconds: Callable[[], float | None] | None = None,
 ) -> None:
     """Run one request-scoped pre-call seam without owning retry or tool state."""
     if controller is None or not controller.enabled:
@@ -1289,14 +1331,16 @@ async def _execute_tool_fault_point(
             },
         )
     )
+    check_inactive = raise_if_cancelled or run_context.raise_if_inactive
+    get_remaining = remaining_seconds or run_context.remaining_seconds
     try:
         while not task.done():
-            run_context.raise_if_inactive()
-            remaining = run_context.remaining_seconds()
+            check_inactive()
+            remaining = get_remaining()
             if remaining is not None and remaining <= 0:
-                run_context.raise_if_inactive()
+                check_inactive()
                 raise RunDeadlineExceededError(
-                    "Tool fault seam deadline expired before provider call"
+                    "Tool fault seam deadline expired"
                 )
             poll_seconds = 0.01 if remaining is None else min(0.01, remaining)
             done, _ = await asyncio.wait((task,), timeout=poll_seconds)
@@ -1312,6 +1356,42 @@ async def _execute_tool_fault_point(
         raise RuntimeError("TOOL_INJECTED_ACTION_UNSUPPORTED")
 
 
+def _tool_blocking_fault_callback(
+    controller: FaultInjectionController | None,
+    point: FaultPoint,
+    *,
+    run_context: RunContext,
+    invocation: ToolInvocation,
+    attempt_number: int,
+    raise_if_cancelled: Callable[[], None],
+) -> Callable[[], None] | None:
+    """Build the synchronous Adapter-owned seam without owning tool state."""
+    if controller is None or not controller.enabled:
+        return None
+
+    def execute() -> None:
+        result = controller.execute_blocking_if_matched(
+            FaultMatchContext(
+                fault_point=point,
+                component="tool",
+                run_id_digest=safe_key_digest(run_context.run_id),
+                invocation_id_digest=safe_key_digest(invocation.invocation_id),
+                attempt_number=attempt_number,
+                side_effect_phase="BEFORE_COMMIT",
+            ),
+            raise_if_cancelled=raise_if_cancelled,
+            allowed_actions={
+                FaultAction.RAISE_TYPED_ERROR,
+                FaultAction.DELAY,
+                FaultAction.BLOCK_UNTIL_RELEASED,
+            },
+        )
+        if isinstance(result, InjectedFailureResult):
+            raise RuntimeError("TOOL_INJECTED_ACTION_UNSUPPORTED")
+
+    return execute
+
+
 def _tool_injected_error(
     exc: InjectedFaultError,
     *,
@@ -1319,6 +1399,9 @@ def _tool_injected_error(
     spec: ToolExecutionSpec,
     attempt_id: str | None,
     retry_index: int,
+    provider_started: bool = False,
+    side_effect_state: ToolSideEffectState = ToolSideEffectState.NOT_STARTED,
+    post_provider: bool = False,
 ) -> ToolExecutionError:
     """Map controller codes at the Tool seam; never expose rule or input data."""
     if exc.code is InjectedFaultCode.INJECTED_TRANSIENT_FAILURE:
@@ -1341,11 +1424,18 @@ def _tool_injected_error(
         safe_error_code = "TOOL_INJECTED_FAULT_UNSUPPORTED"
         safe_message = "Tool pre-call injected fault is unsupported."
         status = ToolExecutionStatus.FAILED
+    if post_provider:
+        category = ToolErrorCategory.POST_COMMIT_RESPONSE_FAILURE
+        safe_error_code = "TOOL_POST_PROVIDER_FAILURE"
+        safe_message = "Tool provider returned but Runtime completion failed."
+        status = ToolExecutionStatus.FAILED
+    elif provider_started:
+        safe_message = safe_message.replace("pre-call", "provider boundary")
     disposition = retry_disposition_for(
         category=category,
         idempotency=spec.idempotency,
         idempotency_key=invocation.idempotency_key,
-        side_effect_state=ToolSideEffectState.NOT_STARTED,
+        side_effect_state=side_effect_state,
         supports_idempotency_replay=spec.supports_idempotency_replay,
     )
     return ToolExecutionError(
@@ -1356,8 +1446,8 @@ def _tool_injected_error(
         safe_error_code=safe_error_code,
         safe_message=safe_message,
         phase=ToolExecutionPhase.INVOCATION,
-        provider_started=False,
-        side_effect_state=ToolSideEffectState.NOT_STARTED,
+        provider_started=provider_started,
+        side_effect_state=side_effect_state,
         retry_disposition=disposition,
         retry_index=retry_index,
         status=status,
@@ -1391,6 +1481,17 @@ def _effective_timeout(
     if timeout <= 0:
         raise RunDeadlineExceededError("Tool 调用前 Deadline 已到期")
     return timeout
+
+
+def _raise_if_tool_attempt_inactive(
+    run_context: RunContext,
+    attempt_token: CancellationToken,
+    effective_deadline_monotonic: float,
+) -> None:
+    run_context.raise_if_inactive()
+    attempt_token.raise_if_cancelled()
+    if time.monotonic() >= effective_deadline_monotonic:
+        raise RunDeadlineExceededError("Tool Attempt 截止时间已到期")
 
 
 async def _wrapped_result_or_none(

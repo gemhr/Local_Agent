@@ -190,20 +190,26 @@ def test_action_parameters_are_typed_and_action_specific() -> None:
         )
 
 
-def test_post_commit_tool_fault_requires_explicit_dangerous_window() -> None:
+@pytest.mark.parametrize(
+    "point",
+    [
+        FaultPoint.TOOL_BEFORE_SIDE_EFFECT_COMMIT,
+        FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
+        FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
+        FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,
+    ],
+)
+def test_tool_dangerous_windows_require_explicit_opt_in(point) -> None:
     with pytest.raises(ValueError, match="dangerous_window=true"):
-        rule(fault_point=FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT)
-    value = rule(
-        fault_point=FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
-        dangerous_window=True,
-    )
-    assert value.dangerous_window is True
+        rule(fault_point=point)
+    assert rule(fault_point=point, dangerous_window=True).dangerous_window is True
 
 
 def test_fixed_dangerous_fault_point_set_is_explicit() -> None:
     assert DANGEROUS_FAULT_POINTS == {
         FaultPoint.MODEL_AFTER_PROVIDER_SUCCESS,
         FaultPoint.MODEL_AFTER_USAGE_COMMIT,
+        FaultPoint.TOOL_BEFORE_SIDE_EFFECT_COMMIT,
         FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
         FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
         FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,

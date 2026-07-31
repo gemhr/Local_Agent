@@ -182,13 +182,11 @@ async def test_blocking_pre_call_fault_honors_run_cancellation_without_provider(
 @pytest.mark.parametrize(
     "point",
     [
-        FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
-        FaultPoint.TOOL_BEFORE_SIDE_EFFECT_COMMIT,
         FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
         FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,
     ],
 )
-async def test_dangerous_tool_points_are_not_invoked(point):
+async def test_b2b_dangerous_tool_points_are_not_invoked(point):
     rule = FaultRule(
         rule_id="dangerous", fault_point=point,
         action=FaultAction.RAISE_TYPED_ERROR, trigger=FaultTrigger.ALWAYS,
