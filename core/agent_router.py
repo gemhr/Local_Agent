@@ -1170,6 +1170,7 @@ class AgentRouter:
                 run_context=active_context,
                 step_id=event_emitter.step_id if event_emitter is not None else "legacy-tool",
                 event_emitter=event_emitter,
+                fault_controller=fault_controller,
             )
             if isinstance(outcome, ToolExecutionError):
                 raise ToolExecutionFailed(outcome)
