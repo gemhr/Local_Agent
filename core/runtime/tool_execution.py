@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import inspect
 import threading
@@ -432,6 +432,17 @@ class ToolAttemptExecutor:
                 tracker.resolve_authoritative(response.side_effect_state)
             else:
                 tracker.observe(response.side_effect_state)
+            if tracker.state is ToolSideEffectState.COMMITTED:
+                await _execute_tool_fault_point(
+                    fault_controller,
+                    FaultPoint.TOOL_AFTER_AUTHORITATIVE_SIDE_EFFECT_RESOLUTION,
+                    run_context=run_context,
+                    invocation=invocation,
+                    attempt_number=retry_index + 1,
+                    raise_if_cancelled=context.raise_if_cancelled,
+                    remaining_seconds=context.remaining_seconds,
+                    side_effect_phase="AUTHORITATIVE_COMMITTED",
+                )
             await _execute_tool_fault_point(
                 fault_controller,
                 FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
@@ -469,10 +480,12 @@ class ToolAttemptExecutor:
                 spec=spec,
                 invocation=invocation,
                 result=result,
+                run_context=run_context,
+                fault_controller=fault_controller,
             )
             if isinstance(completed, ToolExecutionError):
                 raise ToolAttemptFailed(completed)
-            return result
+            return completed
         except JournalError as exc:
             # Started 写入失败时 Tool 尚未调用；Completed 写入失败时也禁止重试，
             # 避免重复业务副作用。统一返回安全、不可重试的 Journal 错误。
@@ -514,6 +527,8 @@ class ToolAttemptExecutor:
                     invocation=invocation,
                     error=error,
                     duration_ms=elapsed_ms(),
+                    run_context=run_context,
+                    fault_controller=fault_controller,
                 )
             raise ToolAttemptFailed(error) from None
         except ToolAdapterInvocationError as exc:
@@ -537,6 +552,8 @@ class ToolAttemptExecutor:
                     invocation=invocation,
                     error=error,
                     duration_ms=elapsed_ms(),
+                    run_context=run_context,
+                    fault_controller=fault_controller,
                 )
             raise ToolAttemptFailed(error) from None
         except _ToolTimedOut as exc:
@@ -581,6 +598,8 @@ class ToolAttemptExecutor:
                     invocation=invocation,
                     error=error,
                     duration_ms=elapsed_ms(),
+                    run_context=run_context,
+                    fault_controller=fault_controller,
                 )
             raise ToolAttemptFailed(error) from None
         except BudgetExceededError as exc:
@@ -647,6 +666,8 @@ class ToolAttemptExecutor:
                     invocation=invocation,
                     error=error,
                     duration_ms=elapsed_ms(),
+                    run_context=run_context,
+                    fault_controller=fault_controller,
                 )
             raise ToolAttemptFailed(error) from None
         except RunCancelledError:
@@ -656,7 +677,7 @@ class ToolAttemptExecutor:
                 tracker.resolve_authoritative(ToolSideEffectState.UNKNOWN)
                 state = ToolSideEffectState.UNKNOWN
             if started_event_emitted:
-                await self._emit_completed(
+                completed = await self._emit_completed(
                     event_emitter,
                     spec=spec,
                     invocation=invocation,
@@ -682,7 +703,15 @@ class ToolAttemptExecutor:
                         execution_detached=detached,
                         resource_release_pending=detached,
                     ),
+                    run_context=run_context,
+                    fault_controller=fault_controller,
                 )
+                if (
+                    isinstance(completed, ToolExecutionError)
+                    and completed.safe_error_code
+                    == "TOOL_COMPLETION_PUBLICATION_FAILED"
+                ):
+                    raise ToolAttemptFailed(completed)
             raise
         except RunDeadlineExceededError:
             state = tracker.mark_unknown_if_started()
@@ -715,6 +744,8 @@ class ToolAttemptExecutor:
                     invocation=invocation,
                     error=error,
                     duration_ms=elapsed_ms(),
+                    run_context=run_context,
+                    fault_controller=fault_controller,
                 )
             raise ToolAttemptFailed(error) from None
         except ToolAttemptFailed:
@@ -745,6 +776,8 @@ class ToolAttemptExecutor:
                     invocation=invocation,
                     error=error,
                     duration_ms=elapsed_ms(),
+                    run_context=run_context,
+                    fault_controller=fault_controller,
                 )
             raise ToolAttemptFailed(error) from None
         finally:
@@ -938,105 +971,123 @@ class ToolAttemptExecutor:
         result: ToolExecutionResult | None = None,
         error: ToolExecutionError | None = None,
         duration_ms: int | None = None,
+        run_context: RunContext,
+        fault_controller: FaultInjectionController | None,
     ):
+        if result is not None:
+            payload = ToolCompletedPayload(
+                tool_name=result.tool_name,
+                succeeded=True,
+                retry_index=result.retry_index,
+                side_effect_state=result.side_effect_state.value,
+                retry_disposition=result.retry_disposition.value,
+                worker_terminated=result.worker_terminated,
+                execution_detached=result.execution_detached,
+                resource_release_pending=result.resource_release_pending,
+                duration_ms=result.duration_ms,
+                status=result.status.value,
+                tool_evidence_schema_version=TOOL_EVIDENCE_SCHEMA_VERSION,
+                invocation_identity_digest=safe_key_digest(result.invocation_id),
+                attempt_identity_digest=safe_key_digest(result.attempt_id),
+                side_effect_kind=spec.side_effect_kind.value,
+                idempotency_kind=spec.idempotency.value,
+                idempotency_key_digest=safe_key_digest(invocation.idempotency_key),
+                replay_supported=spec.supports_idempotency_replay,
+                compensation_state="NOT_ATTEMPTED",
+                outcome_classification=result.status.value,
+                provider_started=True,
+                result_present=True,
+                result_digest=result.output.digest,
+            )
+            source: ToolExecutionResult | ToolExecutionError = replace(
+                result, completion_evidence=payload
+            )
+        else:
+            assert error is not None
+            if duration_ms is None:
+                raise ValueError("Tool error Completed 必须携带 duration_ms")
+            payload = ToolCompletedPayload(
+                tool_name=error.tool_name,
+                succeeded=False,
+                safe_error_code=error.safe_error_code,
+                retry_index=error.retry_index,
+                side_effect_state=error.side_effect_state.value,
+                retry_disposition=error.retry_disposition.value,
+                worker_terminated=error.worker_terminated,
+                execution_detached=error.execution_detached,
+                resource_release_pending=error.resource_release_pending,
+                duration_ms=duration_ms,
+                status=error.status.value,
+                tool_evidence_schema_version=TOOL_EVIDENCE_SCHEMA_VERSION,
+                invocation_identity_digest=safe_key_digest(error.invocation_id),
+                attempt_identity_digest=safe_key_digest(error.attempt_id),
+                side_effect_kind=spec.side_effect_kind.value,
+                idempotency_kind=spec.idempotency.value,
+                idempotency_key_digest=safe_key_digest(invocation.idempotency_key),
+                replay_supported=spec.supports_idempotency_replay,
+                compensation_state=(
+                    "SUCCEEDED"
+                    if error.compensation_attempted and error.compensation_succeeded
+                    else "FAILED" if error.compensation_attempted else "NOT_ATTEMPTED"
+                ),
+                outcome_classification=error.category.value,
+                provider_started=error.provider_started,
+                result_present=False,
+                result_digest=None,
+            )
+            source = replace(error, completion_evidence=payload)
         if event_emitter is None:
-            return result if result is not None else error
+            return source
         try:
-            if result is not None:
-                payload = ToolCompletedPayload(
-                    tool_name=result.tool_name,
-                    succeeded=True,
-                    retry_index=result.retry_index,
-                    side_effect_state=result.side_effect_state.value,
-                    retry_disposition=result.retry_disposition.value,
-                    worker_terminated=result.worker_terminated,
-                    execution_detached=result.execution_detached,
-                    resource_release_pending=result.resource_release_pending,
-                    duration_ms=result.duration_ms,
-                    status=result.status.value,
-                    tool_evidence_schema_version=TOOL_EVIDENCE_SCHEMA_VERSION,
-                    invocation_identity_digest=safe_key_digest(
-                        result.invocation_id
-                    ),
-                    attempt_identity_digest=safe_key_digest(result.attempt_id),
-                    side_effect_kind=spec.side_effect_kind.value,
-                    idempotency_kind=spec.idempotency.value,
-                    idempotency_key_digest=safe_key_digest(
-                        invocation.idempotency_key
-                    ),
-                    replay_supported=spec.supports_idempotency_replay,
-                    compensation_state="NOT_ATTEMPTED",
-                    outcome_classification=result.status.value,
-                    provider_started=True,
-                )
-            else:
-                assert error is not None
-                if duration_ms is None:
-                    raise ValueError("Tool error Completed 必须携带 duration_ms")
-                payload = ToolCompletedPayload(
-                    tool_name=error.tool_name,
-                    succeeded=False,
-                    safe_error_code=error.safe_error_code,
-                    retry_index=error.retry_index,
-                    side_effect_state=error.side_effect_state.value,
-                    retry_disposition=error.retry_disposition.value,
-                    worker_terminated=error.worker_terminated,
-                    execution_detached=error.execution_detached,
-                    resource_release_pending=error.resource_release_pending,
-                    duration_ms=duration_ms,
-                    status=error.status.value,
-                    tool_evidence_schema_version=TOOL_EVIDENCE_SCHEMA_VERSION,
-                    invocation_identity_digest=safe_key_digest(
-                        error.invocation_id
-                    ),
-                    attempt_identity_digest=safe_key_digest(error.attempt_id),
-                    side_effect_kind=spec.side_effect_kind.value,
-                    idempotency_kind=spec.idempotency.value,
-                    idempotency_key_digest=safe_key_digest(
-                        invocation.idempotency_key
-                    ),
-                    replay_supported=spec.supports_idempotency_replay,
-                    compensation_state=(
-                        "SUCCEEDED"
-                        if error.compensation_attempted
-                        and error.compensation_succeeded
-                        else (
-                            "FAILED"
-                            if error.compensation_attempted
-                            else "NOT_ATTEMPTED"
-                        )
-                    ),
-                    outcome_classification=error.category.value,
-                    provider_started=error.provider_started,
-                )
+            await _execute_tool_fault_point(
+                fault_controller,
+                FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,
+                run_context=run_context,
+                invocation=invocation,
+                attempt_number=source.retry_index + 1,
+                remaining_seconds=run_context.remaining_seconds,
+                side_effect_phase="COMPLETION_EVIDENCE_FROZEN",
+            )
             await event_emitter.emit(
                 RuntimeEventType.TOOL_COMPLETED,
                 payload,
                 component="tool_attempt_executor",
                 ignore_run_cancellation=True,
             )
-            return result if result is not None else error
-        except JournalError:
-            raise
+            return source
         except BaseException:
-            # Completed 发布失败发生在 Tool 已执行之后，必须保守停止，绝不透明重试。
-            source = result if result is not None else error
-            assert source is not None
+            # Evidence 已冻结且 Tool 事实已确定；禁止补事件、重跑、Retry 或补偿。
+            provider_started = (
+                True
+                if isinstance(source, ToolExecutionResult)
+                else source.provider_started
+            )
             return ToolExecutionError(
                 invocation_id=source.invocation_id,
                 attempt_id=source.attempt_id,
                 tool_name=source.tool_name,
                 category=ToolErrorCategory.INTERNAL,
-                safe_error_code="TOOL_COMPLETED_EVENT_FAILED",
+                safe_error_code="TOOL_COMPLETION_PUBLICATION_FAILED",
                 safe_message="Tool 完成事件发布失败。",
                 phase=ToolExecutionPhase.EVENT,
-                provider_started=True,
+                provider_started=provider_started,
                 side_effect_state=source.side_effect_state,
                 retry_disposition=RetryDisposition.UNSAFE,
                 retry_index=source.retry_index,
                 worker_terminated=source.worker_terminated,
                 execution_detached=source.execution_detached,
                 resource_release_pending=source.resource_release_pending,
+                compensation_attempted=(
+                    source.compensation_attempted
+                    if isinstance(source, ToolExecutionError)
+                    else False
+                ),
+                compensation_succeeded=(
+                    source.compensation_succeeded
+                    if isinstance(source, ToolExecutionError)
+                    else False
+                ),
+                completion_evidence=payload,
             )
 
 
@@ -1310,6 +1361,7 @@ async def _execute_tool_fault_point(
     attempt_number: int | None = None,
     raise_if_cancelled: Callable[[], None] | None = None,
     remaining_seconds: Callable[[], float | None] | None = None,
+    side_effect_phase: str | None = None,
 ) -> None:
     """Run one request-scoped pre-call seam without owning retry or tool state."""
     if controller is None or not controller.enabled:
@@ -1320,6 +1372,7 @@ async def _execute_tool_fault_point(
         run_id_digest=safe_key_digest(run_context.run_id),
         invocation_id_digest=safe_key_digest(invocation.invocation_id),
         attempt_number=attempt_number,
+        side_effect_phase=side_effect_phase,
     )
     task = asyncio.create_task(
         controller.execute_if_matched(
@@ -1334,6 +1387,10 @@ async def _execute_tool_fault_point(
     check_inactive = raise_if_cancelled or run_context.raise_if_inactive
     get_remaining = remaining_seconds or run_context.remaining_seconds
     try:
+        # Give a non-matching decision one scheduling turn before polling
+        # cancellation. This preserves controller parity for terminal events
+        # that intentionally ignore an already-observed run cancellation.
+        await asyncio.sleep(0)
         while not task.done():
             check_inactive()
             remaining = get_remaining()

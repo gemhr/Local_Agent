@@ -216,6 +216,7 @@ def make_controller(
             FaultPoint.TOOL_BEFORE_SIDE_EFFECT_COMMIT,
             FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
             FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
+            FaultPoint.TOOL_AFTER_AUTHORITATIVE_SIDE_EFFECT_RESOLUTION,
             FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,
         },
     )

@@ -11,10 +11,13 @@ import hashlib
 import json
 from math import isfinite
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 from uuid import uuid4
 
 from core.runtime.retry import OperationIdempotency
+
+if TYPE_CHECKING:
+    from core.runtime.events import ToolCompletedPayload
 
 
 class ToolSideEffectKind(str, Enum):
@@ -287,6 +290,7 @@ class ToolExecutionResult:
     worker_terminated: bool = True
     execution_detached: bool = False
     resource_release_pending: bool = False
+    completion_evidence: ToolCompletedPayload | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.invocation_id, "invocation_id")
@@ -353,6 +357,7 @@ class ToolExecutionError:
     worker_terminated: bool = True
     execution_detached: bool = False
     resource_release_pending: bool = False
+    completion_evidence: ToolCompletedPayload | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.invocation_id, "invocation_id")
