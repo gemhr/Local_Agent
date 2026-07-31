@@ -35,6 +35,15 @@ from core.runtime.events import (
     ToolCompletedPayload,
     ToolStartedPayload,
 )
+from core.runtime.fault_injection import FaultInjectionController
+from core.runtime.fault_injection_contract import (
+    FaultAction,
+    FaultMatchContext,
+    FaultPoint,
+    InjectedFailureResult,
+    InjectedFaultCode,
+    InjectedFaultError,
+)
 from core.runtime.model_routing import ModelFailureCategory
 from core.runtime.retry import RetryDecision, RetryExecutor, RetryPolicy
 from core.runtime.tool_adapters import (
@@ -217,6 +226,7 @@ class ToolAttemptExecutor:
         step_id: str,
         retry_index: int,
         event_emitter: StepEventEmitter | None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> ToolExecutionResult:
         recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
         handle = start_span_safely(
@@ -246,6 +256,7 @@ class ToolAttemptExecutor:
                 step_id=step_id,
                 retry_index=retry_index,
                 event_emitter=event_emitter,
+                fault_controller=fault_controller,
             )
         except ToolAttemptFailed as failed:
             error = failed.error
@@ -296,6 +307,7 @@ class ToolAttemptExecutor:
         step_id: str,
         retry_index: int,
         event_emitter: StepEventEmitter | None,
+        fault_controller: FaultInjectionController | None,
     ) -> ToolExecutionResult:
         attempt_id = uuid4().hex
         tracker = AttemptSideEffectTracker()
@@ -370,6 +382,14 @@ class ToolAttemptExecutor:
                     component="tool_attempt_executor",
                 )
             started_event_emitted = True
+            context.raise_if_cancelled()
+            await _execute_tool_fault_point(
+                fault_controller,
+                FaultPoint.TOOL_BEFORE_PROVIDER_CALL,
+                run_context=run_context,
+                invocation=invocation,
+                attempt_number=retry_index + 1,
+            )
             context.raise_if_cancelled()
             provider_started = True
             try:
@@ -572,6 +592,23 @@ class ToolAttemptExecutor:
                     retry_index=retry_index,
                 )
             ) from None
+        except InjectedFaultError as exc:
+            error = _tool_injected_error(
+                exc,
+                invocation=invocation,
+                spec=spec,
+                attempt_id=attempt_id,
+                retry_index=retry_index,
+            )
+            if started_event_emitted:
+                error = await self._emit_completed(
+                    event_emitter,
+                    spec=spec,
+                    invocation=invocation,
+                    error=error,
+                    duration_ms=elapsed_ms(),
+                )
+            raise ToolAttemptFailed(error) from None
         except RunCancelledError:
             state = tracker.mark_unknown_if_started()
             detached = release_deferred["value"]
@@ -991,6 +1028,7 @@ class ToolExecutionService:
         run_context: RunContext,
         step_id: str,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> ToolExecutionResult | ToolExecutionError:
         recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
         handle = start_span_safely(
@@ -1012,6 +1050,7 @@ class ToolExecutionService:
                 run_context=run_context,
                 step_id=step_id,
                 event_emitter=event_emitter,
+                fault_controller=fault_controller,
             )
             if isinstance(result, ToolExecutionError):
                 if result.status is ToolExecutionStatus.TIMED_OUT:
@@ -1044,6 +1083,7 @@ class ToolExecutionService:
         run_context: RunContext,
         step_id: str,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> ToolExecutionResult | ToolExecutionError:
         ledger = run_context.budget_ledger
         if not isinstance(ledger, BudgetLedger):
@@ -1078,11 +1118,34 @@ class ToolExecutionService:
                 retry_disposition=RetryDisposition.UNSAFE,
             )
 
+        try:
+            await _execute_tool_fault_point(
+                fault_controller,
+                FaultPoint.TOOL_BEFORE_INVOCATION,
+                run_context=run_context,
+                invocation=invocation,
+            )
+        except InjectedFaultError as exc:
+            return _tool_injected_error(
+                exc,
+                invocation=invocation,
+                spec=spec,
+                attempt_id=None,
+                retry_index=0,
+            )
+
         last_error: ToolExecutionError | None = None
 
         async def attempt(retry_index: int) -> ToolExecutionResult:
             nonlocal last_error
             try:
+                await _execute_tool_fault_point(
+                    fault_controller,
+                    FaultPoint.TOOL_BEFORE_ATTEMPT,
+                    run_context=run_context,
+                    invocation=invocation,
+                    attempt_number=retry_index + 1,
+                )
                 return await self.attempt_executor.execute(
                     invocation=invocation,
                     adapter=adapter,
@@ -1093,7 +1156,17 @@ class ToolExecutionService:
                     step_id=step_id,
                     retry_index=retry_index,
                     event_emitter=event_emitter,
+                    fault_controller=fault_controller,
                 )
+            except InjectedFaultError as exc:
+                last_error = _tool_injected_error(
+                    exc,
+                    invocation=invocation,
+                    spec=spec,
+                    attempt_id=None,
+                    retry_index=retry_index,
+                )
+                raise ToolAttemptFailed(last_error) from None
             except ToolAttemptFailed as failed:
                 last_error = failed.error
                 raise
@@ -1147,6 +1220,7 @@ class ToolExecutionService:
         run_context: RunContext,
         step_id: str,
         event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> ToolExecutionResult | ToolExecutionError:
         coroutine = self.execute(
             invocation=invocation,
@@ -1154,6 +1228,7 @@ class ToolExecutionService:
             run_context=run_context,
             step_id=step_id,
             event_emitter=event_emitter,
+            fault_controller=fault_controller,
         )
         if event_emitter is not None:
             loop = event_emitter.parent._loop
@@ -1184,6 +1259,109 @@ class ToolExecutionService:
         if failure:
             raise failure[0]
         return result[0]
+
+
+async def _execute_tool_fault_point(
+    controller: FaultInjectionController | None,
+    point: FaultPoint,
+    *,
+    run_context: RunContext,
+    invocation: ToolInvocation,
+    attempt_number: int | None = None,
+) -> None:
+    """Run one request-scoped pre-call seam without owning retry or tool state."""
+    if controller is None or not controller.enabled:
+        return
+    context = FaultMatchContext(
+        fault_point=point,
+        component="tool",
+        run_id_digest=safe_key_digest(run_context.run_id),
+        invocation_id_digest=safe_key_digest(invocation.invocation_id),
+        attempt_number=attempt_number,
+    )
+    task = asyncio.create_task(
+        controller.execute_if_matched(
+            context,
+            allowed_actions={
+                FaultAction.RAISE_TYPED_ERROR,
+                FaultAction.DELAY,
+                FaultAction.BLOCK_UNTIL_RELEASED,
+            },
+        )
+    )
+    try:
+        while not task.done():
+            run_context.raise_if_inactive()
+            remaining = run_context.remaining_seconds()
+            if remaining is not None and remaining <= 0:
+                run_context.raise_if_inactive()
+                raise RunDeadlineExceededError(
+                    "Tool fault seam deadline expired before provider call"
+                )
+            poll_seconds = 0.01 if remaining is None else min(0.01, remaining)
+            done, _ = await asyncio.wait((task,), timeout=poll_seconds)
+            if done:
+                break
+        result = await task
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    if isinstance(result, InjectedFailureResult):
+        raise RuntimeError("TOOL_INJECTED_ACTION_UNSUPPORTED")
+
+
+def _tool_injected_error(
+    exc: InjectedFaultError,
+    *,
+    invocation: ToolInvocation,
+    spec: ToolExecutionSpec,
+    attempt_id: str | None,
+    retry_index: int,
+) -> ToolExecutionError:
+    """Map controller codes at the Tool seam; never expose rule or input data."""
+    if exc.code is InjectedFaultCode.INJECTED_TRANSIENT_FAILURE:
+        category = ToolErrorCategory.TRANSIENT
+        safe_error_code = "TOOL_INJECTED_TRANSIENT_FAILURE"
+        safe_message = "Tool pre-call transient failure."
+        status = ToolExecutionStatus.FAILED
+    elif exc.code is InjectedFaultCode.INJECTED_TIMEOUT:
+        category = ToolErrorCategory.TIMEOUT
+        safe_error_code = "TOOL_INJECTED_TIMEOUT"
+        safe_message = "Tool pre-call timed out."
+        status = ToolExecutionStatus.TIMED_OUT
+    elif exc.code is InjectedFaultCode.INJECTED_PERMANENT_FAILURE:
+        category = ToolErrorCategory.INTERNAL
+        safe_error_code = "TOOL_INJECTED_PERMANENT_FAILURE"
+        safe_message = "Tool pre-call permanent failure."
+        status = ToolExecutionStatus.FAILED
+    else:
+        category = ToolErrorCategory.INTERNAL
+        safe_error_code = "TOOL_INJECTED_FAULT_UNSUPPORTED"
+        safe_message = "Tool pre-call injected fault is unsupported."
+        status = ToolExecutionStatus.FAILED
+    disposition = retry_disposition_for(
+        category=category,
+        idempotency=spec.idempotency,
+        idempotency_key=invocation.idempotency_key,
+        side_effect_state=ToolSideEffectState.NOT_STARTED,
+        supports_idempotency_replay=spec.supports_idempotency_replay,
+    )
+    return ToolExecutionError(
+        invocation_id=invocation.invocation_id,
+        attempt_id=attempt_id,
+        tool_name=spec.tool_name,
+        category=category,
+        safe_error_code=safe_error_code,
+        safe_message=safe_message,
+        phase=ToolExecutionPhase.INVOCATION,
+        provider_started=False,
+        side_effect_state=ToolSideEffectState.NOT_STARTED,
+        retry_disposition=disposition,
+        retry_index=retry_index,
+        status=status,
+    )
 
 
 def _validate_invocation_against_spec(

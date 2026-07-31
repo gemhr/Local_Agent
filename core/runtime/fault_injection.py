@@ -335,11 +335,17 @@ class FaultInjectionController:
     async def execute_if_matched(
         self,
         context: FaultMatchContext,
+        *,
+        allowed_actions: Collection[FaultAction] | None = None,
     ) -> FaultDecision | InjectedFailureResult:
         decision = self.evaluate(context)
         if not decision.matched:
             return decision
         rule = self._rule(decision.rule_id)
+        if allowed_actions is not None and rule.action not in allowed_actions:
+            raise FaultExecutionConfigurationError(
+                FaultConfigurationCode.UNSUPPORTED_ACTION
+            )
         if rule.action is FaultAction.RAISE_TYPED_ERROR:
             raise InjectedFaultError(rule.safe_fault_code)
         if rule.action is FaultAction.DELAY:
