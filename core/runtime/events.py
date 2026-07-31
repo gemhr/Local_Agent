@@ -166,6 +166,8 @@ class ToolCompletedPayload:
     compensation_state: str | None = None
     outcome_classification: str | None = None
     provider_started: bool | None = None
+    result_present: bool | None = None
+    result_digest: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.tool_name, "tool_name")
@@ -563,6 +565,8 @@ _TOOL_COMPLETED_EVIDENCE_JOURNAL_FIELDS = (
     "duration_ms",
     "status",
     *_TOOL_EVIDENCE_FIELDS,
+    "result_present",
+    "result_digest",
 )
 
 
@@ -906,6 +910,18 @@ def _validate_tool_evidence_fields(payload: object) -> None:
     ):
         if type(getattr(payload, name)) is not bool:
             raise TypeError(f"{name} must be bool")
+    result_present = getattr(payload, "result_present", None)
+    if result_present is not None and type(result_present) is not bool:
+        raise TypeError("result_present must be bool")
+    result_digest = getattr(payload, "result_digest", None)
+    if result_digest is not None and (
+        not isinstance(result_digest, str)
+        or len(result_digest) != 64
+        or any(char not in "0123456789abcdef" for char in result_digest)
+    ):
+        raise ValueError("result_digest must be a lowercase SHA-256 digest")
+    if result_present is False and result_digest is not None:
+        raise ValueError("result_digest requires result_present=true")
     safe_error_code = getattr(payload, "safe_error_code")
     if safe_error_code is not None:
         _require_text(safe_error_code, "safe_error_code")
@@ -937,6 +953,18 @@ def _validate_persisted_tool_evidence(
         raise ValueError(
             "idempotency_key_digest must be a lowercase SHA-256 digest"
         )
+    result_present = safe_payload.get("result_present")
+    if result_present is not None and type(result_present) is not bool:
+        raise TypeError("result_present must be bool")
+    result_digest = safe_payload.get("result_digest")
+    if result_digest is not None and (
+        not isinstance(result_digest, str)
+        or len(result_digest) != 64
+        or any(char not in "0123456789abcdef" for char in result_digest)
+    ):
+        raise ValueError("result_digest must be a lowercase SHA-256 digest")
+    if result_present is False and result_digest is not None:
+        raise ValueError("result_digest requires result_present=true")
     for name in (
         "side_effect_kind",
         "idempotency_kind",

@@ -47,6 +47,7 @@ def test_fault_point_catalog_is_fixed_and_complete_for_foundation() -> None:
         "TOOL_AFTER_PROVIDER_RETURN",
         "TOOL_BEFORE_SIDE_EFFECT_COMMIT",
         "TOOL_AFTER_SIDE_EFFECT_COMMIT",
+        "TOOL_AFTER_AUTHORITATIVE_SIDE_EFFECT_RESOLUTION",
         "TOOL_BEFORE_COMPLETION_EVENT",
         "RETRIEVAL_BEFORE_REWRITE",
         "RETRIEVAL_AFTER_REWRITE",
@@ -196,6 +197,7 @@ def test_action_parameters_are_typed_and_action_specific() -> None:
         FaultPoint.TOOL_BEFORE_SIDE_EFFECT_COMMIT,
         FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
         FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
+        FaultPoint.TOOL_AFTER_AUTHORITATIVE_SIDE_EFFECT_RESOLUTION,
         FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,
     ],
 )
@@ -212,6 +214,7 @@ def test_fixed_dangerous_fault_point_set_is_explicit() -> None:
         FaultPoint.TOOL_BEFORE_SIDE_EFFECT_COMMIT,
         FaultPoint.TOOL_AFTER_PROVIDER_RETURN,
         FaultPoint.TOOL_AFTER_SIDE_EFFECT_COMMIT,
+        FaultPoint.TOOL_AFTER_AUTHORITATIVE_SIDE_EFFECT_RESOLUTION,
         FaultPoint.TOOL_BEFORE_COMPLETION_EVENT,
         FaultPoint.EVENT_AFTER_JOURNAL_APPEND,
         FaultPoint.EVENT_BEFORE_CHANNEL_ENQUEUE,
