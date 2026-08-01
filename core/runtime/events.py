@@ -807,7 +807,10 @@ def validate_journal_payload(
         and evidence_schema is not None
     ):
         expected_fields = _TOOL_COMPLETED_EVIDENCE_JOURNAL_FIELDS
-        optional_fields = frozenset()
+        # Day 24 added result evidence without changing RuntimeEvent v1/v2.
+        # Historical v1/v2 records must retain their original field set and
+        # digest, so readers accept absence as explicit compatibility Unknown.
+        optional_fields = frozenset({"result_present", "result_digest"})
         _validate_persisted_tool_evidence(safe_payload)
     else:
         payload_type = _PAYLOAD_TYPES[event_type]
