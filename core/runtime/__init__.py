@@ -301,6 +301,7 @@ from core.runtime.metrics import (
 from core.runtime.observability_dispatcher import (
     LOGGER_CONSUMER_ID,
     METRICS_CONSUMER_ID,
+    ObservabilityOperationError,
     RuntimeObservabilityDispatcher,
 )
 
@@ -321,6 +322,7 @@ __all__ += [
     "NoopStructuredRuntimeLogger",
     "ObservabilityHealth",
     "ObservabilityHealthSnapshot",
+    "ObservabilityOperationError",
     "RecorderInfrastructureMetricsHook",
     "RUNTIME_METRIC_DESCRIPTORS",
     "RuntimeGaugeProvider",
@@ -343,12 +345,14 @@ from core.runtime.tracing import (
     SAFE_SPAN_ATTRIBUTES,
     InMemorySpanRecorder,
     NoopSpanRecorder,
+    OperationScopedSpanRecorder,
     OpenTelemetryCompatibleSpanAdapter,
     SpanHandle,
     SpanRecord,
     SpanRecorder,
     SpanRecorderHealth,
     SpanStatus,
+    TraceOperationError,
     TraceContext,
     activate_span,
     current_trace_context,
@@ -356,9 +360,9 @@ from core.runtime.tracing import (
 )
 __all__ += [
     "DENIED_SPAN_ATTRIBUTES", "SAFE_SPAN_ATTRIBUTES", "InMemorySpanRecorder",
-    "NoopSpanRecorder", "OpenTelemetryCompatibleSpanAdapter", "SpanHandle",
+    "NoopSpanRecorder", "OpenTelemetryCompatibleSpanAdapter", "OperationScopedSpanRecorder", "SpanHandle",
     "SpanRecord", "SpanRecorder", "SpanRecorderHealth", "SpanStatus", "TraceContext",
-    "activate_span", "current_trace_context", "current_span_recorder",
+    "TraceOperationError", "activate_span", "current_trace_context", "current_span_recorder",
 ]
 
 from core.runtime.parallel_execution import (

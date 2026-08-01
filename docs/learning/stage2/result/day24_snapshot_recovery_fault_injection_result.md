@@ -85,7 +85,7 @@ RecoveryValidator.validate/assess/assess_snapshot(
 - 不重 Capture、不推进虚构 version、不 Retry save、不写 Journal；
 - 当前活跃 Run/AgentState 不修改；
 - 返回 `CheckpointStatus.STORE_FAILED` 与固定 `SNAPSHOT_SAVE_INJECTED_FAILURE`；
-- `SnapshotPublicationEvidence.partially_persisted=false`，对外不返回 snapshot_id。
+- `SnapshotPublicationEvidence` 机器可读地返回 `persisted=false`、`partially_persisted=false`、`retry_allowed=false`，对外不返回 snapshot_id。
 
 InMemory、共享 SQLite、已有旧 Snapshot、取消和 Run 隔离均使用真实 Store 验证。
 
@@ -97,13 +97,14 @@ InMemory、共享 SQLite、已有旧 Snapshot、取消和 Run 隔离均使用真
 snapshot persisted = true
 caller observed failure = true
 partially_persisted = true
+retry_allowed = false
 ```
 
 返回固定 `SNAPSHOT_SAVE_PARTIALLY_PERSISTED`、已提交 snapshot_id 与安全 `SnapshotPublicationEvidence`。错误路径不删除、不覆盖、不保存第二份、不重 Capture、不自动 Recovery。SQLite close/reopen 后记录仍可读；同一 Snapshot 再 save 服从原 Store duplicate 合同。
 
 ## 8. SNAPSHOT_BEFORE_READ
 
-位置在显式 Recovery read 已开始、`SnapshotStore.get` 尚未执行。命中后 Store get count、Journal last/read count 均为零，返回 fail-closed `UNSUPPORTED + SNAPSHOT_READ_FAILED`，不使用缓存旧 Snapshot、不降级到其他 Store、不 Retry read。
+位置在显式 Recovery read 已开始、`SnapshotStore.get` 尚未执行。命中后 Store get count、Journal last/read count 均为零，返回真实运行期失败状态 `FAILED + SNAPSHOT_READ_FAILED`，不使用缓存旧 Snapshot、不降级到其他 Store、不 Retry read。`UNSUPPORTED` 只保留给 schema、version 或 capability 不支持。
 
 该 fault 只适用于按 snapshot_id 读取的 `validate/assess`；调用者已经持有 `RunSnapshot` 并直接调用 `assess_snapshot` 时没有第二次 Snapshot read，因此不会虚构此 seam。
 
@@ -113,13 +114,13 @@ partially_persisted = true
 
 - Snapshot identity 已安全保留；
 - Journal 调用计数为零；
-- 返回 `UNSUPPORTED + JOURNAL_TAIL_READ_NOT_EXECUTED`；
+- 返回 `FAILED + JOURNAL_TAIL_READ_NOT_EXECUTED`；
 - reduced projection、Tool decisions、Replay/Resume action 均不存在；
 - 不修改 `AgentState`，不调用任何业务 Adapter。
 
 ## 10. RECOVERY_AFTER_TAIL_READ
 
-位置在 `_read_tail` 已完整读取并再次确认 last sequence 之后、`JournalTailValidator` 与最终 Decision 之前。命中后不会把已读 Tail 当成空 Tail，也不会重新读取；返回 `UNSUPPORTED + RECOVERY_VALIDATION_FAILED`，仅保留安全 snapshot/journal sequence 事实，不返回 reduced projection 或 Tool decisions。
+位置在 `_read_tail` 已完整读取并再次确认 last sequence 之后、`JournalTailValidator` 与最终 Decision 之前。命中后不会把已读 Tail 当成空 Tail，也不会重新读取；返回 `FAILED + RECOVERY_VALIDATION_FAILED`，仅保留安全 snapshot/journal sequence 事实，不返回 reduced projection 或 Tool decisions。
 
 该点不是持久化危险窗口，但 Raise/Delay/Block 同样可取消、有固定结果、无 Replay。
 
@@ -177,9 +178,9 @@ Journal Event v1/v2 均保持可读。历史 Tool evidence 缺少新 result 字�
 
 ## 16. Partial Persistence
 
-`SnapshotPublicationEvidence` 是冻结且 payload-free 的结构，只包含 run_id_digest、snapshot_version、schema_version、snapshot_digest、partially_persisted。当前没有 Snapshot version owner，因此 version 为 `None`。
+`SnapshotPublicationEvidence` 是冻结且 payload-free 的结构，只包含 run_id_digest、snapshot_version、schema_version、snapshot_digest，以及机器可读的 `persisted`、`partially_persisted`、`retry_allowed`。当前没有 Snapshot version owner，因此 version 为 `None`。
 
-before-save 为未持久化；after-save 为已持久化但调用者见失败。取消或超时发生在 after-save wait 时仍返回已提交 snapshot_id/evidence，不删除 commit；before-save 取消则 Store 为空。
+before-save 为 `false/false/false`；正常成功为 `true/false/false`；after-save 失败为 `true/true/false`。取消或超时发生在 after-save wait 时仍返回已提交 snapshot_id/evidence，不删除 commit；before-save 取消则 Store 为空。
 
 ## 17. Cancellation
 
@@ -492,7 +493,7 @@ git diff --check: passed（仅 Git 的 CRLF 转换提示，无 whitespace error�
 | Snapshot version owner | schema version 属于 RunSnapshot；无每 Run version owner，evidence 为 None |
 | Snapshot digest owner | `RunSnapshot.create` 的 canonical versioned payload |
 | Before-save fault | 无新记录、无 recapture/retry/state mutation |
-| After-save fault | commit 保留、caller 见失败、partially persisted true |
+| After-save fault | commit 保留、caller 见失败、`persisted=true`、`partially_persisted=true`、`retry_allowed=false` |
 | Snapshot persisted after failure | 是；SQLite reopen 可读 |
 | Before-read fault | Store/Journal read count 均 0 |
 | Before-tail fault | Snapshot 已验证，Journal read 未执行 |
@@ -511,7 +512,8 @@ git diff --check: passed（仅 Git 的 CRLF 转换提示，无 whitespace error�
 | Unknown snapshot version | fail closed |
 | Old snapshot compatibility | 当前历史边界为 v1；按 v1 digest 读取，不补字段/写回 |
 | Old event compatibility | v1/v2 可读，新字段缺失保持 Unknown |
-| Partial persistence | `SnapshotPublicationEvidence` 明确表示 |
+| Partial persistence | `SnapshotPublicationEvidence` 以三个布尔字段明确区分未写入、成功和写后失败 |
+| Runtime recovery fault status | `FAILED`；`UNSUPPORTED` 仅用于 schema/version/capability |
 | Disabled parity | bytes/digest/assessment 一致，counter 0/0 |
 | Run isolation | A fault 不影响共享 SQLite 上的 B |
 | Operation isolation | Validator/Store 不缓存 Controller |

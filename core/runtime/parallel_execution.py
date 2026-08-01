@@ -188,7 +188,7 @@ class ParallelExecutor:
                 start_span_safely,
             )
             parent_context = current_trace_context()
-            recorder = self._span_recorder or current_span_recorder() or NoopSpanRecorder()
+            recorder = current_span_recorder() or self._span_recorder or NoopSpanRecorder()
             step_span = start_span_safely(recorder,
                 trace_id=run_context.trace_id, run_id=run_context.run_id,
                 component="step", operation="execute", step_id=claim.step_id,

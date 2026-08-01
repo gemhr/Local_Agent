@@ -232,7 +232,7 @@ class ToolAttemptExecutor:
         event_emitter: StepEventEmitter | None,
         fault_controller: FaultInjectionController | None = None,
     ) -> ToolExecutionResult:
-        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
             recorder,
             trace_id=run_context.trace_id,
@@ -1121,7 +1121,7 @@ class ToolExecutionService:
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
     ) -> ToolExecutionResult | ToolExecutionError:
-        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
             recorder,
             trace_id=run_context.trace_id,

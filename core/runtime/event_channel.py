@@ -31,6 +31,14 @@ from core.runtime.fault_injection_contract import (
 class ObservabilityRecordSubmitter(Protocol):
     def try_submit(self, record: JournalRecord) -> bool: ...
 
+    async def submit(
+        self,
+        record: JournalRecord,
+        *,
+        fault_controller: FaultInjectionController | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> bool: ...
+
 
 class EventChannelState(str, Enum):
     OPEN = "OPEN"
@@ -317,9 +325,20 @@ class RuntimeEventChannel:
                         and self._observability_dispatcher is not None
                     ):
                         try:
-                            self._observability_dispatcher.try_submit(
-                                JournalRecord.from_event(event)
+                            record = JournalRecord.from_event(event)
+                            submit = getattr(
+                                self._observability_dispatcher,
+                                "submit",
+                                None,
                             )
+                            if callable(submit):
+                                await submit(
+                                    record,
+                                    fault_controller=self._fault_controller,
+                                    cancellation_token=self._cancellation_token,
+                                )
+                            else:
+                                self._observability_dispatcher.try_submit(record)
                         except Exception:
                             # Observability 永远不能改变 Journal 或 Runtime Transport。
                             pass

@@ -254,6 +254,7 @@ DANGEROUS_FAULT_POINTS: Final[frozenset[FaultPoint]] = frozenset(
         FaultPoint.EVENT_AFTER_JOURNAL_APPEND,
         FaultPoint.EVENT_BEFORE_CHANNEL_ENQUEUE,
         FaultPoint.SNAPSHOT_AFTER_SAVE,
+        FaultPoint.TRACE_BEFORE_SPAN_END,
         FaultPoint.EXECUTOR_AFTER_SUBMIT,
     }
 )

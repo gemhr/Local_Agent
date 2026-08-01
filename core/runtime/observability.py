@@ -66,6 +66,10 @@ class ObservabilityHealthSnapshot:
     metrics_failures: int
     worker_failures: int
     duplicate_records: int
+    record_failures: int
+    flush_failures: int
+    status: str
+    last_safe_error_code: str | None
 
 
 class ObservabilityHealth:
@@ -77,11 +81,14 @@ class ObservabilityHealth:
         "metrics_failures",
         "worker_failures",
         "duplicate_records",
+        "record_failures",
+        "flush_failures",
     }
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._values = {name: 0 for name in self._KNOWN}
+        self._last_safe_error_code: str | None = None
 
     def increment(self, name: str) -> None:
         if name not in self._KNOWN:
@@ -89,6 +96,32 @@ class ObservabilityHealth:
         with self._lock:
             self._values[name] += 1
 
+    def record_failure(self, name: str, safe_error_code: str) -> None:
+        if name not in self._KNOWN:
+            raise ValueError("unknown Observability health counter")
+        if (
+            not isinstance(safe_error_code, str)
+            or not safe_error_code
+            or len(safe_error_code) > 64
+            or any(
+                char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+                for char in safe_error_code
+            )
+        ):
+            raise ValueError("safe_error_code must be a fixed safe token")
+        with self._lock:
+            self._values[name] += 1
+            self._last_safe_error_code = safe_error_code
+
     def snapshot(self) -> ObservabilityHealthSnapshot:
         with self._lock:
-            return ObservabilityHealthSnapshot(**self._values)
+            degraded = any(
+                value
+                for name, value in self._values.items()
+                if name != "duplicate_records"
+            )
+            return ObservabilityHealthSnapshot(
+                **self._values,
+                status="DEGRADED" if degraded else "HEALTHY",
+                last_safe_error_code=self._last_safe_error_code,
+            )

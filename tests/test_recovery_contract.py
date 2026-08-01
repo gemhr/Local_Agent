@@ -14,6 +14,7 @@ from core.runtime.recovery_contract import (
 
 def test_recovery_statuses_and_priority_are_fixed_and_explicit():
     assert {item.value for item in RecoveryStatus} == {
+        "FAILED",
         "TERMINAL",
         "RESUMABLE",
         "REQUIRES_RECONCILIATION",
@@ -25,6 +26,7 @@ def test_recovery_statuses_and_priority_are_fixed_and_explicit():
     }
     assert RECOVERY_STATUS_PRIORITY == (
         RecoveryStatus.CORRUPTED,
+        RecoveryStatus.FAILED,
         RecoveryStatus.INCOMPATIBLE_SCHEMA,
         RecoveryStatus.PLAN_MISMATCH,
         RecoveryStatus.JOURNAL_GAP_OR_CONFLICT,

@@ -59,7 +59,9 @@ class SnapshotPublicationEvidence:
     snapshot_version: int | None
     schema_version: int
     snapshot_digest: str
+    persisted: bool
     partially_persisted: bool
+    retry_allowed: bool
 
     def __post_init__(self) -> None:
         for name in ("run_id_digest", "snapshot_digest"):
@@ -78,8 +80,13 @@ class SnapshotPublicationEvidence:
             or self.schema_version <= 0
         ):
             raise ValueError("schema_version must be a positive integer")
-        if type(self.partially_persisted) is not bool:
-            raise TypeError("partially_persisted must be bool")
+        for name in ("persisted", "partially_persisted", "retry_allowed"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be bool")
+        if self.partially_persisted and not self.persisted:
+            raise ValueError("partial persistence requires persisted=true")
+        if self.partially_persisted and self.retry_allowed:
+            raise ValueError("partial persistence can never be retryable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +198,21 @@ class CheckpointResult:
             raise TypeError(
                 "snapshot_publication_evidence must be SnapshotPublicationEvidence"
             )
+
+    @property
+    def persisted(self) -> bool:
+        evidence = self.snapshot_publication_evidence
+        return evidence.persisted if evidence is not None else False
+
+    @property
+    def partially_persisted(self) -> bool:
+        evidence = self.snapshot_publication_evidence
+        return evidence.partially_persisted if evidence is not None else False
+
+    @property
+    def retry_allowed(self) -> bool:
+        evidence = self.snapshot_publication_evidence
+        return evidence.retry_allowed if evidence is not None else False
 
 
 def _require_count(value: object, field_name: str) -> None:

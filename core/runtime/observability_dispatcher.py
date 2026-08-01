@@ -5,6 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
+
+from core.runtime.cancellation import CancellationToken, RunCancelledError
 
 from core.runtime.event_consumer import (
     EventConsumptionCheckpointStore,
@@ -25,11 +28,29 @@ from core.runtime.observability import (
     RuntimeInfrastructureMetricsHook,
 )
 from core.runtime.structured_logging import StructuredLogProjector
+from core.runtime.fault_injection import FaultInjectionController
+from core.runtime.fault_injection_contract import (
+    FaultAction,
+    FaultMatchContext,
+    FaultPoint,
+    InjectedFaultError,
+)
 
 
 LOGGER_CONSUMER_ID = "runtime_structured_logger_v1"
 METRICS_CONSUMER_ID = "runtime_metrics_projector_v1"
 _STOP = object()
+
+
+class ObservabilityOperationError(RuntimeError):
+    """Fixed-code diagnostic failure with no record or sink payload."""
+
+    def __init__(self, error_code: str) -> None:
+        self.error_code = error_code
+        super().__init__(error_code)
+
+    def __repr__(self) -> str:
+        return f"ObservabilityOperationError(error_code={self.error_code!r})"
 
 
 class RuntimeObservabilityDispatcher:
@@ -85,6 +106,40 @@ class RuntimeObservabilityDispatcher:
     def try_submit(self, record: JournalRecord) -> bool:
         if not isinstance(record, JournalRecord):
             raise TypeError("Dispatcher 只接受 JournalRecord")
+        return self._enqueue(record)
+
+    async def submit(
+        self,
+        record: JournalRecord,
+        *,
+        fault_controller: FaultInjectionController | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> bool:
+        """Best-effort operation entry used by the Journal-first publisher."""
+        if not isinstance(record, JournalRecord):
+            raise TypeError("Dispatcher only accepts JournalRecord")
+        _validate_fault_controller(fault_controller)
+        try:
+            await _execute_observability_fault(
+                fault_controller,
+                FaultPoint.OBSERVABILITY_BEFORE_RECORD,
+                cancellation_token=cancellation_token,
+                timeout=None,
+                event_type=record.event_type.value,
+            )
+        except RunCancelledError:
+            self.health.record_failure(
+                "record_failures", "OBSERVABILITY_RECORD_CANCELLED"
+            )
+            return False
+        except InjectedFaultError:
+            self.health.record_failure(
+                "record_failures", "OBSERVABILITY_RECORD_FAILED"
+            )
+            return False
+        return self._enqueue(record)
+
+    def _enqueue(self, record: JournalRecord) -> bool:
         if self._closed:
             self._drop()
             return False
@@ -117,17 +172,23 @@ class RuntimeObservabilityDispatcher:
             if status is EventConsumptionStatus.DUPLICATE:
                 self._duplicate("structured_logger")
         except Exception:
-            self.health.increment("logger_failures")
+            self.health.record_failure(
+                "logger_failures", "OBSERVABILITY_LOGGER_FAILED"
+            )
         try:
             status = await self._metrics_consumer.consume(record)
             if status is EventConsumptionStatus.DUPLICATE:
                 self._duplicate("metrics_projector")
         except Exception:
-            self.health.increment("metrics_failures")
+            self.health.record_failure(
+                "metrics_failures", "OBSERVABILITY_METRICS_FAILED"
+            )
         try:
             record_gauge_snapshot(self._metrics_recorder, self.gauge_provider)
         except Exception:
-            self.health.increment("metrics_failures")
+            self.health.record_failure(
+                "metrics_failures", "OBSERVABILITY_METRICS_FAILED"
+            )
 
     async def _run(self) -> None:
         while True:
@@ -136,24 +197,61 @@ class RuntimeObservabilityDispatcher:
                 if item is _STOP:
                     return
                 if not isinstance(item, JournalRecord):
-                    self.health.increment("worker_failures")
+                    self.health.record_failure(
+                        "worker_failures", "OBSERVABILITY_WORKER_FAILED"
+                    )
                     continue
                 try:
                     await self._consume_one(item)
                 except Exception:
-                    self.health.increment("worker_failures")
+                    self.health.record_failure(
+                        "worker_failures", "OBSERVABILITY_WORKER_FAILED"
+                    )
             finally:
                 self._queue.task_done()
 
-    async def flush(self, timeout: float = 5.0) -> bool:
+    async def flush(
+        self,
+        timeout: float = 5.0,
+        *,
+        fault_controller: FaultInjectionController | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> bool:
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise TypeError("timeout 必须是数字")
         if timeout < 0:
             raise ValueError("timeout 不能为负")
+        _validate_fault_controller(fault_controller)
+        started = time.monotonic()
         try:
-            await asyncio.wait_for(self._queue.join(), timeout=float(timeout))
+            await _execute_observability_fault(
+                fault_controller,
+                FaultPoint.OBSERVABILITY_BEFORE_FLUSH,
+                cancellation_token=cancellation_token,
+                timeout=float(timeout),
+                event_type=None,
+            )
+            remaining = max(0.0, float(timeout) - (time.monotonic() - started))
+            await asyncio.wait_for(self._queue.join(), timeout=remaining)
             return True
+        except RunCancelledError:
+            self.health.record_failure(
+                "flush_failures", "OBSERVABILITY_FLUSH_CANCELLED"
+            )
+            raise ObservabilityOperationError(
+                "OBSERVABILITY_FLUSH_CANCELLED"
+            ) from None
+        except InjectedFaultError:
+            self.health.record_failure(
+                "flush_failures", "OBSERVABILITY_FLUSH_FAILED"
+            )
+            raise ObservabilityOperationError(
+                "OBSERVABILITY_FLUSH_FAILED"
+            ) from None
         except TimeoutError:
+            self.health.record_failure(
+                "flush_failures", "OBSERVABILITY_FLUSH_TIMEOUT"
+            )
             return False
 
     async def close(self, timeout: float = 5.0) -> bool:
@@ -170,7 +268,9 @@ class RuntimeObservabilityDispatcher:
                     self._metrics_recorder, self.gauge_provider
                 )
             except Exception:
-                self.health.increment("metrics_failures")
+                self.health.record_failure(
+                    "metrics_failures", "OBSERVABILITY_METRICS_FAILED"
+                )
             try:
                 if not self._stop_enqueued:
                     self._queue.put_nowait(_STOP)
@@ -181,3 +281,75 @@ class RuntimeObservabilityDispatcher:
             except (asyncio.QueueFull, TimeoutError):
                 return False
             return True
+
+
+def _validate_fault_controller(
+    controller: FaultInjectionController | None,
+) -> None:
+    if controller is not None and not isinstance(
+        controller, FaultInjectionController
+    ):
+        raise TypeError("fault_controller must be FaultInjectionController or None")
+
+
+async def _execute_observability_fault(
+    controller: FaultInjectionController | None,
+    point: FaultPoint,
+    *,
+    cancellation_token: CancellationToken | None,
+    timeout: float | None,
+    event_type: str | None,
+) -> None:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
+    if controller is None:
+        return
+    task = asyncio.create_task(
+        controller.execute_if_matched(
+            FaultMatchContext(
+                fault_point=point,
+                component="observability_dispatcher",
+                operation_kind=(
+                    "OBSERVABILITY_RECORD"
+                    if point is FaultPoint.OBSERVABILITY_BEFORE_RECORD
+                    else "OBSERVABILITY_FLUSH"
+                ),
+                event_type=event_type,
+            ),
+            allowed_actions={
+                FaultAction.RAISE_TYPED_ERROR,
+                FaultAction.DELAY,
+                FaultAction.BLOCK_UNTIL_RELEASED,
+            },
+        )
+    )
+    started = time.monotonic()
+    try:
+        while not task.done():
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
+            if timeout is not None and time.monotonic() - started >= timeout:
+                raise TimeoutError
+            remaining = (
+                None
+                if timeout is None
+                else max(0.0, timeout - (time.monotonic() - started))
+            )
+            await asyncio.wait(
+                {task},
+                timeout=0.01 if remaining is None else min(0.01, remaining),
+            )
+        await task
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
+__all__ = [
+    "LOGGER_CONSUMER_ID",
+    "METRICS_CONSUMER_ID",
+    "ObservabilityOperationError",
+    "RuntimeObservabilityDispatcher",
+]
