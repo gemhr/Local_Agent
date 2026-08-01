@@ -514,7 +514,7 @@ __all__ += [
     "RateLimitRecoveryMode", "RetryDecision", "RetryExecutor", "RetryPolicy",
     "RetryableOperationKind", "Sleeper", "retry_allowed_by_idempotency",
     "RetryDisposition", "ToolErrorCategory", "ToolExecutionError", "ToolExecutionPhase",
-    "ToolCompletionGapFixture", "ToolExecutionResult", "ToolExecutionSpec", "ToolExecutionStatus", "ToolInvocation",
+    "ToolExecutionResult", "ToolExecutionSpec", "ToolExecutionStatus", "ToolInvocation",
     "ToolOutput", "ToolOutputValidationError", "ToolSideEffectKind", "ToolSideEffectState", "build_tool_output",
     "canonical_json_digest", "retry_disposition_for", "safe_key_digest", "thaw_json",
     "ToolConcurrencyController", "ToolResourceAcquireError", "ToolResourceLease",
@@ -758,7 +758,6 @@ from core.runtime.application_services import (
     RuntimeLifecycleState,
     RuntimeComponentResult,
 )
-from core.runtime.tool_completion_gap import ToolCompletionGapFixture
 from core.runtime.shutdown import GracefulShutdownCoordinator, ShutdownReport
 from core.runtime.runtime_factory import (
     CoordinatedRunScope,

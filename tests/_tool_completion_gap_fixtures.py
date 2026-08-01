@@ -1,6 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""Safe facts retained for Day 24B tool-completion recovery decisions."""
+"""Test-only oracle for tool-completion gap scenarios."""
 
 from __future__ import annotations
 
@@ -44,7 +42,7 @@ _OUTCOME_CLASSIFICATIONS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ToolCompletionGapFixture:
-    """Text-free evidence input; it never validates recovery or reruns work."""
+    """Text-free test oracle; never accepted by production recovery code."""
 
     started_event_present: bool
     completed_event_present: bool
@@ -66,10 +64,7 @@ class ToolCompletionGapFixture:
         ):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be bool")
-        if (
-            self.provider_started is not None
-            and type(self.provider_started) is not bool
-        ):
+        if self.provider_started is not None and type(self.provider_started) is not bool:
             raise TypeError("provider_started must be bool or None")
         if self.side_effect_state not in _SIDE_EFFECT_STATES:
             raise ValueError("unsupported side_effect_state")

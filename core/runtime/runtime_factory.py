@@ -200,6 +200,8 @@ class CoordinatedRunScope:
         if self._closed:
             return
         self._closed = True
+        if self.run_registry.get(self.run_id) is self.run_handle:
+            self.run_registry.unregister(self.run_id)
         if self.gauge_provider is not None:
             self.gauge_provider.unregister_channel(self.event_channel)
 
