@@ -18,7 +18,14 @@ from core.runtime.activity import RuntimeActivityTracker
 from core.runtime.admission import RuntimeAdmissionGate
 from core.runtime.context import RunContext
 from core.runtime.event_channel import RuntimeEventChannel
+from core.runtime.fault_injection import FaultInjectionController
+from core.runtime.fault_injection_contract import FaultPoint, InjectedFaultError
+from core.runtime.shutdown_faults import (
+    ShutdownFaultTimeoutError,
+    execute_shutdown_fault,
+)
 from core.runtime.state import AgentState
+from core.runtime.tracing import OperationScopedSpanRecorder
 
 
 SAFE_RUNTIME_ASSEMBLY_VERSION = "1"
@@ -95,6 +102,20 @@ def _validate_timeout(timeout: object) -> float:
 def _validate_component_name(component: str) -> None:
     if not isinstance(component, str) or _COMPONENT_NAME.fullmatch(component) is None:
         raise ValueError("component must be a safe lowercase identifier")
+
+
+def _close_fault_code(component: str, *, timeout: bool) -> str:
+    if component == "event_journal":
+        prefix = "RUNTIME_JOURNAL_CLOSE"
+    elif component.startswith("model_"):
+        prefix = "RUNTIME_MODEL_CLOSE"
+    else:
+        prefix = "RUNTIME_COMPONENT_CLOSE"
+    return f"{prefix}_INJECTED_{'TIMEOUT' if timeout else 'FAILURE'}"
+
+
+def _remaining_timeout(started: float, timeout: float) -> float:
+    return max(0.0, timeout - (time.monotonic() - started))
 
 
 def _invoke_arguments(method, timeout: float, operation: str) -> tuple[tuple, dict]:
@@ -214,15 +235,52 @@ class ApplicationRuntimeServices:
         with self._lifecycle.state_lock:
             return self._lifecycle.state
 
+    def begin_shutdown(self) -> bool:
+        """Move lifecycle to SHUTTING_DOWN without retaining operation state."""
+        with self._lifecycle.state_lock:
+            if self._lifecycle.state is not RuntimeLifecycleState.READY:
+                return False
+            self._lifecycle.state = RuntimeLifecycleState.SHUTTING_DOWN
+            return True
+
     def new_activity_tracker(self, run_id: str):
         tracker = self.activity_tracker_factory(run_id)
         if getattr(tracker, "run_id", None) != run_id:
             raise TypeError("activity_tracker_factory returned an invalid tracker")
         return tracker
 
+    def has_worker_drain_targets(self) -> bool:
+        identities: set[int] = set()
+        for target in (*self.worker_trackers, *self.blocking_executors):
+            if id(target) in identities:
+                continue
+            identities.add(id(target))
+            if callable(getattr(target, "wait_until_idle", None)):
+                return True
+        return False
+
+    def model_close_components(self) -> tuple[str, ...]:
+        components: list[str] = []
+        identities: set[int] = set()
+        for component, target in self.extra_closeables:
+            if (
+                not component.startswith("model_")
+                or id(target) in identities
+                or not callable(getattr(target, "close", None))
+            ):
+                continue
+            identities.add(id(target))
+            components.append(component)
+        return tuple(components)
+
     def _targets(
         self, *, include_models: bool = True
     ) -> tuple[tuple[str, object, str], ...]:
+        model_identities = {
+            id(resource)
+            for component, resource in self.extra_closeables
+            if component.startswith("model_")
+        }
         candidates: list[tuple[str, object | None, str]] = [
             ("observability_dispatcher", self.observability_dispatcher, "close"),
             ("span_recorder", self.span_recorder, "close"),
@@ -250,13 +308,22 @@ class ApplicationRuntimeServices:
         unique: list[tuple[str, object, str]] = []
         identities: set[int] = set()
         for component, resource, operation in candidates:
-            if resource is None or id(resource) in identities:
+            if (
+                resource is None
+                or id(resource) in identities
+                or (not include_models and id(resource) in model_identities)
+            ):
                 continue
             identities.add(id(resource))
             unique.append((component, resource, operation))
         return tuple(unique)
 
-    async def flush(self, timeout: float) -> RuntimeLifecycleReport:
+    async def flush(
+        self,
+        timeout: float,
+        *,
+        fault_controller: FaultInjectionController | None = None,
+    ) -> RuntimeLifecycleReport:
         active_timeout = _validate_timeout(timeout)
         issues: list[RuntimeLifecycleIssue] = []
         components: list[RuntimeComponentResult] = []
@@ -265,12 +332,48 @@ class ApplicationRuntimeServices:
                 continue
             started = time.monotonic()
             try:
-                completed = await _invoke_bounded(target, "flush", active_timeout)
+                flush_target = target
+                if component == "span_recorder" and fault_controller is not None:
+                    flush_target = OperationScopedSpanRecorder(
+                        target,
+                        fault_controller=fault_controller,
+                    )
+                if component == "observability_dispatcher":
+                    method = getattr(target, "flush")
+                    parameters = inspect.signature(method).parameters
+                    if "fault_controller" in parameters:
+                        completed = await asyncio.wait_for(
+                            method(
+                                active_timeout,
+                                fault_controller=fault_controller,
+                            ),
+                            timeout=active_timeout,
+                        )
+                    else:
+                        completed = await _invoke_bounded(
+                            target, "flush", active_timeout
+                        )
+                else:
+                    completed = await _invoke_bounded(
+                        flush_target, "flush", active_timeout
+                    )
             except TimeoutError:
-                error_code = "RUNTIME_COMPONENT_FLUSH_TIMEOUT"
+                error_code = (
+                    "RUNTIME_OBSERVABILITY_FLUSH_TIMEOUT"
+                    if component == "observability_dispatcher"
+                    else "RUNTIME_TRACE_FLUSH_TIMEOUT"
+                    if component == "span_recorder"
+                    else "RUNTIME_COMPONENT_FLUSH_TIMEOUT"
+                )
                 issues.append(RuntimeLifecycleIssue(component, error_code))
             except Exception:
-                error_code = "RUNTIME_COMPONENT_FLUSH_FAILED"
+                error_code = (
+                    "RUNTIME_OBSERVABILITY_FLUSH_FAILED"
+                    if component == "observability_dispatcher"
+                    else "RUNTIME_TRACE_FLUSH_FAILED"
+                    if component == "span_recorder"
+                    else "RUNTIME_COMPONENT_FLUSH_FAILED"
+                )
                 issues.append(RuntimeLifecycleIssue(component, error_code))
             else:
                 if not completed:
@@ -291,7 +394,11 @@ class ApplicationRuntimeServices:
         )
 
     async def close(
-        self, timeout: float, *, close_models: bool = True
+        self,
+        timeout: float,
+        *,
+        close_models: bool = True,
+        fault_controller: FaultInjectionController | None = None,
     ) -> RuntimeLifecycleReport:
         """Close every owned resource at most once and continue after failures."""
         active_timeout = _validate_timeout(timeout)
@@ -305,11 +412,35 @@ class ApplicationRuntimeServices:
             for component, target, operation in self._targets(
                 include_models=close_models
             ):
+                if not callable(getattr(target, operation, None)):
+                    continue
                 started = time.monotonic()
                 try:
-                    completed = await _invoke_bounded(
-                        target, operation, active_timeout
+                    if component == "event_journal":
+                        point = FaultPoint.SHUTDOWN_BEFORE_JOURNAL_CLOSE
+                    elif component.startswith("model_"):
+                        point = FaultPoint.SHUTDOWN_BEFORE_MODEL_CLOSE
+                    else:
+                        point = FaultPoint.SHUTDOWN_COMPONENT_CLOSE
+                    await execute_shutdown_fault(
+                        fault_controller,
+                        point,
+                        timeout=_remaining_timeout(started, active_timeout),
+                        component="graceful_shutdown",
+                        operation_kind="COMPONENT_CLOSE",
+                        shutdown_component=component,
                     )
+                    completed = await _invoke_bounded(
+                        target,
+                        operation,
+                        _remaining_timeout(started, active_timeout),
+                    )
+                except ShutdownFaultTimeoutError:
+                    error_code = _close_fault_code(component, timeout=True)
+                    issues.append(RuntimeLifecycleIssue(component, error_code))
+                except InjectedFaultError:
+                    error_code = _close_fault_code(component, timeout=False)
+                    issues.append(RuntimeLifecycleIssue(component, error_code))
                 except TimeoutError:
                     error_code = "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
                     issues.append(RuntimeLifecycleIssue(component, error_code))
