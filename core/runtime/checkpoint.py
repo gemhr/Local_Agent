@@ -21,6 +21,7 @@ from core.runtime.checkpoint_contract import (
     CheckpointResult,
     CheckpointStatus,
     RuntimeActivitySnapshot,
+    SnapshotPublicationEvidence,
 )
 from core.runtime.claim_gate import (
     SchedulerClaimGate,
@@ -28,6 +29,13 @@ from core.runtime.claim_gate import (
     SchedulerClaimGateClosedError,
 )
 from core.runtime.event_channel import JournalWatermarkError, RuntimeEventChannel
+from core.runtime.fault_injection import FaultInjectionController
+from core.runtime.fault_injection_contract import (
+    FaultAction,
+    FaultMatchContext,
+    FaultPoint,
+    InjectedFaultError,
+)
 from core.runtime.plan_fingerprint import PlanFingerprinter
 from core.runtime.planning import Plan
 from core.runtime.snapshot_contract import (
@@ -38,6 +46,7 @@ from core.runtime.snapshot_contract import (
     RuntimeMetadata,
 )
 from core.runtime.snapshot_store import SnapshotStore, SnapshotStoreError
+from core.runtime.snapshot_serialization import text_digest
 from core.runtime.state import RunStatus, StepStatus
 
 
@@ -121,12 +130,19 @@ class CheckpointCoordinator:
         timeout: float | None,
         cancellation_token: CancellationToken | None = None,
         shutdown_token: CancellationToken | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> CheckpointResult:
         if not isinstance(mode, CheckpointMode):
             raise TypeError("mode must be CheckpointMode")
         if not isinstance(checkpoint_kind, CheckpointKind):
             raise TypeError("checkpoint_kind must be CheckpointKind")
         _validate_timeout(timeout)
+        if fault_controller is not None and not isinstance(
+            fault_controller, FaultInjectionController
+        ):
+            raise TypeError(
+                "fault_controller must be FaultInjectionController or None"
+            )
         if not self._checkpoint_lock.acquire(blocking=False):
             return self._result(
                 CheckpointStatus.ALREADY_IN_PROGRESS,
@@ -137,6 +153,8 @@ class CheckpointCoordinator:
         started = time.monotonic()
         activity: RuntimeActivitySnapshot | None = None
         sequence: int | None = None
+        snapshot_id: str | None = None
+        publication_evidence: SnapshotPublicationEvidence | None = None
         try:
             active_token = _CombinedCancellationToken(
                 self.run_context.cancellation_token,
@@ -238,9 +256,38 @@ class CheckpointCoordinator:
                 created_at=datetime.now(UTC),
             )
             snapshot.verify_digest()
+            snapshot_id = snapshot.snapshot_id
+            publication_evidence = SnapshotPublicationEvidence(
+                run_id_digest=text_digest(snapshot.run_id),
+                snapshot_version=None,
+                schema_version=snapshot.snapshot_schema_version,
+                snapshot_digest=snapshot.payload_digest,
+                partially_persisted=False,
+            )
             self._raise_if_cancelled(active_token, shutdown_token)
             self.barrier.transition(CheckpointBarrierState.SAVING)
+            await self._execute_fault_point(
+                fault_controller,
+                FaultPoint.SNAPSHOT_BEFORE_SAVE,
+                checkpoint_kind=effective_kind,
+                cancellation_token=active_token,
+                shutdown_token=shutdown_token,
+                timeout=timeout,
+                started=started,
+            )
             self.snapshot_store.save(snapshot)
+            publication_evidence = replace(
+                publication_evidence, partially_persisted=True
+            )
+            await self._execute_fault_point(
+                fault_controller,
+                FaultPoint.SNAPSHOT_AFTER_SAVE,
+                checkpoint_kind=effective_kind,
+                cancellation_token=active_token,
+                shutdown_token=shutdown_token,
+                timeout=timeout,
+                started=started,
+            )
             return CheckpointResult(
                 status=(
                     CheckpointStatus.SAVED
@@ -253,6 +300,7 @@ class CheckpointCoordinator:
                 journal_sequence=sequence,
                 activity_summary=activity,
                 safe_error_code=None,
+                snapshot_publication_evidence=publication_evidence,
             )
         except RunCancelledError:
             return self._result(
@@ -261,6 +309,13 @@ class CheckpointCoordinator:
                 "CHECKPOINT_CANCELLED",
                 activity=activity,
                 sequence=sequence,
+                snapshot_id=(
+                    snapshot_id
+                    if publication_evidence is not None
+                    and publication_evidence.partially_persisted
+                    else None
+                ),
+                publication_evidence=publication_evidence,
             )
         except TimeoutError:
             return self._result(
@@ -269,6 +324,31 @@ class CheckpointCoordinator:
                 "CHECKPOINT_TIMED_OUT",
                 activity=activity,
                 sequence=sequence,
+                snapshot_id=(
+                    snapshot_id
+                    if publication_evidence is not None
+                    and publication_evidence.partially_persisted
+                    else None
+                ),
+                publication_evidence=publication_evidence,
+            )
+        except InjectedFaultError:
+            partially_persisted = (
+                publication_evidence is not None
+                and publication_evidence.partially_persisted
+            )
+            return self._result(
+                CheckpointStatus.STORE_FAILED,
+                checkpoint_kind,
+                (
+                    "SNAPSHOT_SAVE_PARTIALLY_PERSISTED"
+                    if partially_persisted
+                    else "SNAPSHOT_SAVE_INJECTED_FAILURE"
+                ),
+                activity=activity,
+                sequence=sequence,
+                snapshot_id=snapshot_id if partially_persisted else None,
+                publication_evidence=publication_evidence,
             )
         except (SchedulerClaimGateBusyError,):
             return self._result(
@@ -410,16 +490,67 @@ class CheckpointCoordinator:
         *,
         activity: RuntimeActivitySnapshot | None = None,
         sequence: int | None = None,
+        snapshot_id: str | None = None,
+        publication_evidence: SnapshotPublicationEvidence | None = None,
     ) -> CheckpointResult:
         return CheckpointResult(
             status=status,
-            snapshot_id=None,
+            snapshot_id=snapshot_id,
             quiescent=False,
             checkpoint_kind=checkpoint_kind,
             journal_sequence=sequence,
             activity_summary=activity,
             safe_error_code=safe_error_code,
+            snapshot_publication_evidence=publication_evidence,
         )
+
+    async def _execute_fault_point(
+        self,
+        controller: FaultInjectionController | None,
+        point: FaultPoint,
+        *,
+        checkpoint_kind: CheckpointKind,
+        cancellation_token: CancellationToken | None,
+        shutdown_token: CancellationToken | None,
+        timeout: float | None,
+        started: float,
+    ) -> None:
+        if controller is None:
+            return
+        task = asyncio.create_task(
+            controller.execute_if_matched(
+                FaultMatchContext(
+                    fault_point=point,
+                    component="checkpoint_coordinator",
+                    run_id_digest=text_digest(self.run_context.run_id),
+                    operation_kind="SNAPSHOT_SAVE",
+                    checkpoint_kind=checkpoint_kind.value,
+                ),
+                allowed_actions={
+                    FaultAction.RAISE_TYPED_ERROR,
+                    FaultAction.DELAY,
+                    FaultAction.BLOCK_UNTIL_RELEASED,
+                },
+            )
+        )
+        try:
+            while not task.done():
+                self._raise_if_cancelled(cancellation_token, shutdown_token)
+                remaining = _remaining(timeout, started)
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError("checkpoint fault wait timed out")
+                await asyncio.wait(
+                    {task},
+                    timeout=(
+                        0.01 if remaining is None else min(0.01, remaining)
+                    ),
+                )
+            await task
+        except BaseException:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
 
 
 def default_runtime_metadata() -> RuntimeMetadata:

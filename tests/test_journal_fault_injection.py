@@ -44,7 +44,7 @@ async def test_sqlite_after_append_fault_occurs_after_commit_and_survives_reopen
     )
     with pytest.raises(EventPublicationError) as captured:
         await channel.publish(run_started_draft())
-    event = captured.value.event
+    evidence = captured.value.evidence
     assert captured.value.partially_persisted is True
     assert channel.buffered_count == 0
     journal.close()
@@ -52,7 +52,7 @@ async def test_sqlite_after_append_fault_occurs_after_commit_and_survives_reopen
     reopened = SQLiteRunEventJournal(str(path))
     records = reopened.read_after("run-a", 0, 10)
     assert [(item.event_id, item.sequence) for item in records] == [
-        (event.event_id, 1)
+        (evidence.event_id, 1)
     ]
     reopened.close()
 

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import threading
@@ -51,40 +52,75 @@ class EventChannelClosedError(RuntimeError):
     """Channel 不再接受事件时抛出。"""
 
 
+class EventPublicationStage(str, Enum):
+    BEFORE_JOURNAL_APPEND = "BEFORE_JOURNAL_APPEND"
+    AFTER_JOURNAL_APPEND = "AFTER_JOURNAL_APPEND"
+    BEFORE_CHANNEL_ENQUEUE = "BEFORE_CHANNEL_ENQUEUE"
+
+
+@dataclass(frozen=True, slots=True)
+class EventPublicationEvidence:
+    """Payload-free identity facts for one failed publication attempt."""
+
+    event_id: str
+    sequence: int
+    event_type: str
+    publication_stage: EventPublicationStage
+    partially_persisted: bool
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.event_id, "event_id"),
+            (self.event_type, "event_type"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        if (
+            isinstance(self.sequence, bool)
+            or not isinstance(self.sequence, int)
+            or self.sequence <= 0
+        ):
+            raise ValueError("sequence must be a positive integer")
+        if not isinstance(self.publication_stage, EventPublicationStage):
+            raise TypeError("publication_stage must be EventPublicationStage")
+        if type(self.partially_persisted) is not bool:
+            raise TypeError("partially_persisted must be bool")
+
+
 class EventPublicationError(Exception):
-    """Safe publication failure preserving the already-created event fact."""
+    """Safe publication failure retaining no RuntimeEvent or payload."""
 
     def __init__(
         self,
         *,
-        event: RuntimeEvent,
+        evidence: EventPublicationEvidence,
         fault_point: FaultPoint,
         fault_code: InjectedFaultCode,
-        partially_persisted: bool,
     ) -> None:
         self.error_code = (
             "EVENT_PUBLICATION_PARTIALLY_PERSISTED"
-            if partially_persisted
+            if evidence.partially_persisted
             else "EVENT_PUBLICATION_FAILED"
         )
         self.safe_message = (
             "Runtime Event publication partially persisted"
-            if partially_persisted
+            if evidence.partially_persisted
             else "Runtime Event publication failed"
         )
-        self.event = event
+        self.evidence = evidence
         self.fault_point = fault_point
         self.fault_code = fault_code
-        self.partially_persisted = partially_persisted
         super().__init__(self.safe_message)
+
+    @property
+    def partially_persisted(self) -> bool:
+        return self.evidence.partially_persisted
 
     def __repr__(self) -> str:
         return (
             "EventPublicationError("
             f"error_code={self.error_code!r}, "
-            f"event_id={self.event.event_id!r}, "
-            f"sequence={self.event.sequence!r}, "
-            f"event_type={self.event.event_type.value!r}, "
+            f"evidence={self.evidence!r}, "
             f"fault_point={self.fault_point.value!r}, "
             f"fault_code={self.fault_code.value!r}, "
             f"partially_persisted={self.partially_persisted!r})"
@@ -257,14 +293,15 @@ class RuntimeEventChannel:
                 sequence = self._sequence + 1
                 event = RuntimeEvent.from_draft(draft, sequence)
                 if self._journal is not None:
-                    await self._execute_publication_fault(
-                        FaultPoint.EVENT_BEFORE_JOURNAL_APPEND,
-                        event,
-                        partially_persisted=False,
-                    )
                     if event.event_type.value == "RUN_COMPLETED":
                         await self._execute_publication_fault(
                             FaultPoint.JOURNAL_BEFORE_TERMINAL_APPEND,
+                            event,
+                            partially_persisted=False,
+                        )
+                    else:
+                        await self._execute_publication_fault(
+                            FaultPoint.EVENT_BEFORE_JOURNAL_APPEND,
                             event,
                             partially_persisted=False,
                         )
@@ -465,11 +502,24 @@ class RuntimeEventChannel:
                 },
             )
         except InjectedFaultError as exc:
+            stage = {
+                FaultPoint.EVENT_AFTER_JOURNAL_APPEND: (
+                    EventPublicationStage.AFTER_JOURNAL_APPEND
+                ),
+                FaultPoint.EVENT_BEFORE_CHANNEL_ENQUEUE: (
+                    EventPublicationStage.BEFORE_CHANNEL_ENQUEUE
+                ),
+            }.get(point, EventPublicationStage.BEFORE_JOURNAL_APPEND)
             raise EventPublicationError(
-                event=event,
+                evidence=EventPublicationEvidence(
+                    event_id=event.event_id,
+                    sequence=event.sequence,
+                    event_type=event.event_type.value,
+                    publication_stage=stage,
+                    partially_persisted=partially_persisted,
+                ),
                 fault_point=point,
                 fault_code=exc.code,
-                partially_persisted=partially_persisted,
             ) from None
 
     async def _before_receive(self) -> None:

@@ -105,7 +105,9 @@ from core.runtime.events import (
 )
 from core.runtime.event_channel import (
     EventChannelClosedError,
+    EventPublicationEvidence,
     EventPublicationError,
+    EventPublicationStage,
     EventChannelConsumerOwner,
     EventChannelState,
     JournalWatermarkError,
@@ -208,7 +210,9 @@ __all__ = [
     "CancellationPayload",
     "ErrorPayload",
     "EventChannelClosedError",
+    "EventPublicationEvidence",
     "EventPublicationError",
+    "EventPublicationStage",
     "EventChannelConsumerOwner",
     "EventChannelState",
     "JournalWatermarkError",
@@ -658,6 +662,7 @@ from core.runtime.checkpoint_contract import (
     CheckpointResult,
     CheckpointStatus,
     RuntimeActivitySnapshot,
+    SnapshotPublicationEvidence,
     SchedulerClaimGateSnapshot,
     SchedulerClaimGateState,
 )
@@ -677,6 +682,7 @@ __all__ += [
     "CheckpointStatus",
     "RuntimeActivityProvider",
     "RuntimeActivitySnapshot",
+    "SnapshotPublicationEvidence",
     "RuntimeActivityTracker",
     "SchedulerClaimGate",
     "SchedulerClaimGateBusyError",

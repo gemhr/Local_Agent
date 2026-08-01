@@ -37,9 +37,9 @@ CoordinatedRuntimeFactory.create_run_scope(fault_controller=...)
 
 ## 5. EVENT_BEFORE_JOURNAL_APPEND
 
-接入点位于 Event identity/sequence 已构造、Journal 尚未调用的位置，仅在存在 Journal 时执行。命中后抛出固定安全的 `EventPublicationError(error_code="EVENT_PUBLICATION_FAILED", partially_persisted=False)`；异常保留内部不可变 Event 供事实审计，但 Journal 与 Channel 均无该 Event，业务不会由发布层重跑。
+接入点位于普通 Event identity/sequence 已构造、Journal 尚未调用的位置，仅在存在 Journal 且 Event 不是 `RUN_COMPLETED` 时执行。命中后抛出固定安全的 `EventPublicationError(error_code="EVENT_PUBLICATION_FAILED", partially_persisted=False)`；异常只保留 payload-free 的 `EventPublicationEvidence`，Journal 与 Channel 均无该 Event，业务不会由发布层重跑。
 
-真实 Event 家族回归覆盖普通 Run/Step、Model、`TOOL_COMPLETED`、Retrieval 和 `RUN_COMPLETED`。
+真实 Event 家族回归覆盖普通 Run/Step、Model、`TOOL_COMPLETED` 和 Retrieval。`RUN_COMPLETED` 只经过 terminal-specific seam，不再经过 generic seam。
 
 ## 6. EVENT_AFTER_JOURNAL_APPEND
 
@@ -61,7 +61,7 @@ SQLite 回归通过关闭并重新打开数据库证明记录已经 commit，进
 
 ## 8. JOURNAL_BEFORE_TERMINAL_APPEND
 
-只在 `event_type == RUN_COMPLETED` 时执行，位置是最终 `AgentState` 已由 `RunCoordinator` 提交、Terminal Event 已构造、Journal 尚未 append。命中后：
+只在 `event_type == RUN_COMPLETED` 时执行，位置是最终 `AgentState` 已由 `RunCoordinator` 提交、Terminal Event 已构造、Journal 尚未 append。同一 Terminal 不执行 `EVENT_BEFORE_JOURNAL_APPEND`；两个规则同时存在时也只有一个物理 seam 被评估。命中后：
 
 - `AgentState` 权威终态不回退；
 - Journal/Channel 均无 Terminal；
@@ -92,7 +92,7 @@ Transport 的 `__anext__()` 和 Drain loop 都在 `queue.get()` 前执行该点�
 
 ## 12. Partial Publication
 
-`EventPublicationError` 使用固定 `error_code/safe_message`，并明确携带 `partially_persisted`。内部 `event` 允许调用者确认 event_id、sequence 和 event_type；`repr` 不渲染 payload。部分持久化后不删除 Record、不 Replay、不用新 sequence 重发同一事实。Observability live dispatcher 在 AFTER_APPEND 故障时尚未收到投影，但 Journal 保留权威记录。
+`EventPublicationError` 使用固定 `error_code/safe_message`，并通过不可变 `EventPublicationEvidence` 明确携带 event_id、sequence、event_type、publication_stage 与 partially_persisted。错误对象不再保存完整 `RuntimeEvent`，没有 `.event` 或 payload 属性，`repr` 也不渲染 payload。部分持久化后不删除 Record、不 Replay、不用新 sequence 重发同一事实。Observability live dispatcher 在 AFTER_APPEND 故障时尚未收到投影，但 Journal 保留权威记录。
 
 ## 13. Tool Completion Gap Fixture
 
@@ -147,7 +147,7 @@ Run A 的 RUN_STARTED append fault 只使 Run A 进入既有安全失败合同�
 
 ## 20. Security
 
-FaultMatchContext 只使用 run_id SHA-256、event_type、component 和固定 operation_kind。Event publication error 的 `repr` 不含 payload；Completion Gap Fixture 的字段集合封闭且冻结。安全测试确认 Tool Argument、Tool Output、raw idempotency/resource key、provider 原始错误以及题目列出的敏感标记不会进入新增 Event、Journal、Wire 或 fixture。
+FaultMatchContext 只使用 run_id SHA-256、event_type、component 和固定 operation_kind。Event publication error 只保存安全 Evidence，无法通过属性访问取得 RuntimeEvent/payload，`repr` 不含 payload；Completion Gap Fixture 的字段集合封闭且冻结。安全测试确认 Tool Argument、Tool Output、raw idempotency/resource key、provider 原始错误以及题目列出的敏感标记不会进入新增 Event、Journal、Wire 或 fixture。
 
 ## 21. Runtime 真实接入
 
@@ -371,7 +371,7 @@ git diff --check: passed（仅 Git 的 CRLF 提示，无 whitespace error）
 
 ## 26. 第三轮 B 接入点
 
-第三轮 B 可直接消费 `ToolCompletionGapFixture` 与权威 Journal tail，区分 Started presence/validity、Completion absence、本地 Evidence presence、provider started、side effect state 和 retry disposition。B 必须继续以 Journal/Snapshot 的版本化事实判断，不得从当前 Registry 回填历史，也不得默认 Replay。
+第三轮 B 只能把 `ToolCompletionGapFixture` 作为测试 Oracle；生产 `RecoveryValidator` 的权威输入仍只能是 Snapshot 与 Journal tail。B 必须继续以版本化持久事实判断，不得把本地 Evidence 注入 Validator，不得从当前 Registry 回填历史，也不得默认 Replay。
 
 ## 27. 需要带回 ChatGPT 审查的信息
 
@@ -390,7 +390,7 @@ git diff --check: passed（仅 Git 的 CRLF 提示，无 whitespace error）
 | Receive fault | dequeue 前；Transport/Drain 均覆盖；支持 Raise/Delay/Block |
 | Drain handoff fault | RELEASED 与 DRAIN 原子 claim 之间；无双 Consumer |
 | Journal-first result | 各故障窗口均保持事实保真，不 Replay |
-| Partial publication representation | `EventPublicationError.partially_persisted` |
+| Partial publication representation | `EventPublicationError.evidence`（无 RuntimeEvent/payload） |
 | Business rerun count | 0；真实 Tool provider/business 总调用仍为 1 |
 | Terminal journal/channel count | 各自均 <= 1；窗口结果为 0/0 或 1/0 |
 | Completion gap fixtures | 5 类安全 fixture + 真实 Tool gap 输入 |

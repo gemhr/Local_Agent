@@ -52,6 +52,37 @@ class CheckpointStatus(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotPublicationEvidence:
+    """Safe identity/integrity facts; snapshot payload is never retained."""
+
+    run_id_digest: str
+    snapshot_version: int | None
+    schema_version: int
+    snapshot_digest: str
+    partially_persisted: bool
+
+    def __post_init__(self) -> None:
+        for name in ("run_id_digest", "snapshot_digest"):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)
+            ):
+                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+        if self.snapshot_version is not None:
+            _require_count(self.snapshot_version, "snapshot_version")
+        if (
+            isinstance(self.schema_version, bool)
+            or not isinstance(self.schema_version, int)
+            or self.schema_version <= 0
+        ):
+            raise ValueError("schema_version must be a positive integer")
+        if type(self.partially_persisted) is not bool:
+            raise TypeError("partially_persisted must be bool")
+
+
+@dataclass(frozen=True, slots=True)
 class SchedulerClaimGateSnapshot:
     state: SchedulerClaimGateState
     claim_in_progress: int
@@ -139,6 +170,7 @@ class CheckpointResult:
     journal_sequence: int | None
     activity_summary: RuntimeActivitySnapshot | None
     safe_error_code: str | None
+    snapshot_publication_evidence: SnapshotPublicationEvidence | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, CheckpointStatus):
@@ -153,6 +185,12 @@ class CheckpointResult:
             self.activity_summary, RuntimeActivitySnapshot
         ):
             raise TypeError("activity_summary must be RuntimeActivitySnapshot")
+        if self.snapshot_publication_evidence is not None and not isinstance(
+            self.snapshot_publication_evidence, SnapshotPublicationEvidence
+        ):
+            raise TypeError(
+                "snapshot_publication_evidence must be SnapshotPublicationEvidence"
+            )
 
 
 def _require_count(value: object, field_name: str) -> None:
@@ -176,6 +214,7 @@ __all__ = [
     "CheckpointResult",
     "CheckpointStatus",
     "RuntimeActivitySnapshot",
+    "SnapshotPublicationEvidence",
     "SchedulerClaimGateSnapshot",
     "SchedulerClaimGateState",
 ]

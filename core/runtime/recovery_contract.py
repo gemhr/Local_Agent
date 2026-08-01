@@ -78,6 +78,10 @@ class RecoveryReason(str, Enum):
     )
     TOOL_EVENT_PAIRING_INVALID = "TOOL_EVENT_PAIRING_INVALID"
     TOOL_EVIDENCE_INSUFFICIENT = "TOOL_EVIDENCE_INSUFFICIENT"
+    SNAPSHOT_READ_FAILED = "SNAPSHOT_READ_FAILED"
+    JOURNAL_TAIL_READ_NOT_EXECUTED = "JOURNAL_TAIL_READ_NOT_EXECUTED"
+    RECOVERY_VALIDATION_FAILED = "RECOVERY_VALIDATION_FAILED"
+    RECOVERY_VALIDATION_CANCELLED = "RECOVERY_VALIDATION_CANCELLED"
 
 
 # These are the only human-readable recovery explanations. They deliberately
@@ -119,6 +123,10 @@ RECOVERY_REASON_TEXT: Mapping[RecoveryReason, str] = MappingProxyType(
         RecoveryReason.FINAL_OUTPUT_RECONSTRUCTION_UNSUPPORTED: "The final output cannot be reconstructed.",
         RecoveryReason.TOOL_EVENT_PAIRING_INVALID: "Tool attempt event pairing is invalid.",
         RecoveryReason.TOOL_EVIDENCE_INSUFFICIENT: "Historical tool evidence is insufficient.",
+        RecoveryReason.SNAPSHOT_READ_FAILED: "Snapshot read did not complete.",
+        RecoveryReason.JOURNAL_TAIL_READ_NOT_EXECUTED: "Journal tail read did not execute.",
+        RecoveryReason.RECOVERY_VALIDATION_FAILED: "Recovery validation did not complete.",
+        RecoveryReason.RECOVERY_VALIDATION_CANCELLED: "Recovery validation was cancelled.",
     }
 )
 
