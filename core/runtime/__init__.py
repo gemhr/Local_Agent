@@ -105,6 +105,7 @@ from core.runtime.events import (
 )
 from core.runtime.event_channel import (
     EventChannelClosedError,
+    EventPublicationError,
     EventChannelConsumerOwner,
     EventChannelState,
     JournalWatermarkError,
@@ -207,6 +208,7 @@ __all__ = [
     "CancellationPayload",
     "ErrorPayload",
     "EventChannelClosedError",
+    "EventPublicationError",
     "EventChannelConsumerOwner",
     "EventChannelState",
     "JournalWatermarkError",
@@ -504,7 +506,7 @@ __all__ += [
     "RateLimitRecoveryMode", "RetryDecision", "RetryExecutor", "RetryPolicy",
     "RetryableOperationKind", "Sleeper", "retry_allowed_by_idempotency",
     "RetryDisposition", "ToolErrorCategory", "ToolExecutionError", "ToolExecutionPhase",
-    "ToolExecutionResult", "ToolExecutionSpec", "ToolExecutionStatus", "ToolInvocation",
+    "ToolCompletionGapFixture", "ToolExecutionResult", "ToolExecutionSpec", "ToolExecutionStatus", "ToolInvocation",
     "ToolOutput", "ToolOutputValidationError", "ToolSideEffectKind", "ToolSideEffectState", "build_tool_output",
     "canonical_json_digest", "retry_disposition_for", "safe_key_digest", "thaw_json",
     "ToolConcurrencyController", "ToolResourceAcquireError", "ToolResourceLease",
@@ -746,6 +748,7 @@ from core.runtime.application_services import (
     RuntimeLifecycleState,
     RuntimeComponentResult,
 )
+from core.runtime.tool_completion_gap import ToolCompletionGapFixture
 from core.runtime.shutdown import GracefulShutdownCoordinator, ShutdownReport
 from core.runtime.runtime_factory import (
     CoordinatedRunScope,

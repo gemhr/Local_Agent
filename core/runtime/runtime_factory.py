@@ -301,6 +301,7 @@ class CoordinatedRuntimeFactory:
                 cancellation_token=run_context.cancellation_token,
                 journal=self._services.event_journal,
                 observability_dispatcher=self._services.observability_dispatcher,
+                fault_controller=fault_controller,
             )
             if gauge_provider is not None and callable(
                 getattr(gauge_provider, "register_channel", None)

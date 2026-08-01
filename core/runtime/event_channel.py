@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
+import hashlib
 import threading
 from typing import AsyncIterator, Protocol
 
@@ -16,6 +17,14 @@ from core.runtime.event_journal import (
     RunEventJournal,
 )
 from core.runtime.events import RuntimeEvent, RuntimeEventDraft
+from core.runtime.fault_injection import FaultInjectionController
+from core.runtime.fault_injection_contract import (
+    FaultAction,
+    FaultMatchContext,
+    FaultPoint,
+    InjectedFaultCode,
+    InjectedFaultError,
+)
 
 
 class ObservabilityRecordSubmitter(Protocol):
@@ -42,6 +51,46 @@ class EventChannelClosedError(RuntimeError):
     """Channel 不再接受事件时抛出。"""
 
 
+class EventPublicationError(Exception):
+    """Safe publication failure preserving the already-created event fact."""
+
+    def __init__(
+        self,
+        *,
+        event: RuntimeEvent,
+        fault_point: FaultPoint,
+        fault_code: InjectedFaultCode,
+        partially_persisted: bool,
+    ) -> None:
+        self.error_code = (
+            "EVENT_PUBLICATION_PARTIALLY_PERSISTED"
+            if partially_persisted
+            else "EVENT_PUBLICATION_FAILED"
+        )
+        self.safe_message = (
+            "Runtime Event publication partially persisted"
+            if partially_persisted
+            else "Runtime Event publication failed"
+        )
+        self.event = event
+        self.fault_point = fault_point
+        self.fault_code = fault_code
+        self.partially_persisted = partially_persisted
+        super().__init__(self.safe_message)
+
+    def __repr__(self) -> str:
+        return (
+            "EventPublicationError("
+            f"error_code={self.error_code!r}, "
+            f"event_id={self.event.event_id!r}, "
+            f"sequence={self.event.sequence!r}, "
+            f"event_type={self.event.event_type.value!r}, "
+            f"fault_point={self.fault_point.value!r}, "
+            f"fault_code={self.fault_code.value!r}, "
+            f"partially_persisted={self.partially_persisted!r})"
+        )
+
+
 class JournalWatermarkError(RuntimeError):
     """Safe fail-closed marker for Channel/Journal sequence disagreement."""
 
@@ -65,6 +114,7 @@ class _RuntimeEventTransportConsumer(AsyncIterator[RuntimeEvent]):
         if not self._active:
             raise StopAsyncIteration
         try:
+            await self._channel._before_receive()
             item = await self._channel._queue.get()
         except BaseException:
             self._release(completed=False)
@@ -105,11 +155,18 @@ class RuntimeEventChannel:
         cancellation_token: CancellationToken | None = None,
         journal: RunEventJournal | None = None,
         observability_dispatcher: ObservabilityRecordSubmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("capacity 必须是正整数且不能是 bool")
         if not isinstance(run_id, str) or not run_id.strip():
             raise ValueError("run_id 必须是非空字符串")
+        if fault_controller is not None and not isinstance(
+            fault_controller, FaultInjectionController
+        ):
+            raise TypeError(
+                "fault_controller must be FaultInjectionController or None"
+            )
         self.capacity = capacity
         self.run_id = run_id
         self._queue: asyncio.Queue[RuntimeEvent | object] = asyncio.Queue(
@@ -121,6 +178,7 @@ class RuntimeEventChannel:
         self._abort_event = asyncio.Event()
         self._journal = journal
         self._observability_dispatcher = observability_dispatcher
+        self._fault_controller = fault_controller
         self._sequence = (
             journal.last_sequence(run_id) or 0 if journal is not None else 0
         )
@@ -130,6 +188,7 @@ class RuntimeEventChannel:
         self._consumer_lock = threading.Lock()
         self._transport_completed = False
         self._drain_completed = False
+        self._drain_handoff_pending = False
         self._end_enqueued = False
 
     @property
@@ -198,8 +257,24 @@ class RuntimeEventChannel:
                 sequence = self._sequence + 1
                 event = RuntimeEvent.from_draft(draft, sequence)
                 if self._journal is not None:
+                    await self._execute_publication_fault(
+                        FaultPoint.EVENT_BEFORE_JOURNAL_APPEND,
+                        event,
+                        partially_persisted=False,
+                    )
+                    if event.event_type.value == "RUN_COMPLETED":
+                        await self._execute_publication_fault(
+                            FaultPoint.JOURNAL_BEFORE_TERMINAL_APPEND,
+                            event,
+                            partially_persisted=False,
+                        )
                     append_status = self._journal.append(event)
                     self._sequence = sequence
+                    await self._execute_publication_fault(
+                        FaultPoint.EVENT_AFTER_JOURNAL_APPEND,
+                        event,
+                        partially_persisted=True,
+                    )
                     if (
                         append_status is JournalAppendStatus.APPENDED
                         and self._observability_dispatcher is not None
@@ -211,6 +286,11 @@ class RuntimeEventChannel:
                         except Exception:
                             # Observability 永远不能改变 Journal 或 Runtime Transport。
                             pass
+                await self._execute_publication_fault(
+                    FaultPoint.EVENT_BEFORE_CHANNEL_ENQUEUE,
+                    event,
+                    partially_persisted=self._journal is not None,
+                )
                 await self._put_interruptibly(
                     event, ignore_run_cancellation=ignore_run_cancellation
                 )
@@ -280,10 +360,37 @@ class RuntimeEventChannel:
                 raise RuntimeError(
                     "RuntimeEventChannel consumer ownership is not released"
                 )
-            self._consumer_owner = EventChannelConsumerOwner.DRAIN
+            if self._drain_handoff_pending:
+                raise RuntimeError(
+                    "RuntimeEventChannel drain handoff is already pending"
+                )
+            # Reserve the handoff while keeping the visible owner RELEASED.
+            # A late transport cannot reacquire during a fault delay/block.
+            self._drain_handoff_pending = True
+        try:
+            await self._execute_channel_fault(
+                FaultPoint.CHANNEL_BEFORE_DRAIN_HANDOFF,
+                operation_kind="DRAIN_HANDOFF",
+            )
+            with self._consumer_lock:
+                if self._state == EventChannelState.ABORTED:
+                    self._consumer_owner = EventChannelConsumerOwner.ABORTED
+                    self._drain_handoff_pending = False
+                    return
+                if self._consumer_owner is not EventChannelConsumerOwner.RELEASED:
+                    raise RuntimeError(
+                        "RuntimeEventChannel consumer ownership changed during handoff"
+                    )
+                self._consumer_owner = EventChannelConsumerOwner.DRAIN
+                self._drain_handoff_pending = False
+        except BaseException:
+            with self._consumer_lock:
+                self._drain_handoff_pending = False
+            raise
         completed = False
         try:
             while True:
+                await self._before_receive()
                 item = await self._queue.get()
                 if item is _END or self._state == EventChannelState.ABORTED:
                     completed = True
@@ -300,6 +407,10 @@ class RuntimeEventChannel:
             if self._state == EventChannelState.ABORTED:
                 self._consumer_owner = EventChannelConsumerOwner.ABORTED
                 raise RuntimeError("RuntimeEventChannel is aborted")
+            if self._drain_handoff_pending:
+                raise RuntimeError(
+                    "RuntimeEventChannel drain handoff is pending"
+                )
             if self._consumer_owner is not EventChannelConsumerOwner.RELEASED:
                 raise RuntimeError("RuntimeEventChannel 只支持一个 Consumer")
             if self._transport_completed or self._drain_completed:
@@ -323,6 +434,101 @@ class RuntimeEventChannel:
             raise EventChannelClosedError(
                 f"Event Channel 已处于 {self._state.value}，不能继续 publish"
             )
+
+    async def _execute_publication_fault(
+        self,
+        point: FaultPoint,
+        event: RuntimeEvent,
+        *,
+        partially_persisted: bool,
+    ) -> None:
+        controller = self._fault_controller
+        if controller is None:
+            return
+        try:
+            await controller.execute_if_matched(
+                FaultMatchContext(
+                    fault_point=point,
+                    component="event_channel",
+                    run_id_digest=_safe_digest(self.run_id),
+                    event_type=event.event_type.value,
+                    operation_kind=(
+                        "CHANNEL_ENQUEUE"
+                        if point is FaultPoint.EVENT_BEFORE_CHANNEL_ENQUEUE
+                        else "JOURNAL_APPEND"
+                    ),
+                ),
+                allowed_actions={
+                    FaultAction.RAISE_TYPED_ERROR,
+                    FaultAction.DELAY,
+                    FaultAction.BLOCK_UNTIL_RELEASED,
+                },
+            )
+        except InjectedFaultError as exc:
+            raise EventPublicationError(
+                event=event,
+                fault_point=point,
+                fault_code=exc.code,
+                partially_persisted=partially_persisted,
+            ) from None
+
+    async def _before_receive(self) -> None:
+        await self._execute_channel_fault(
+            FaultPoint.CHANNEL_BEFORE_RECEIVE,
+            operation_kind="CHANNEL_RECEIVE",
+        )
+
+    async def _execute_channel_fault(
+        self,
+        point: FaultPoint,
+        *,
+        operation_kind: str,
+    ) -> None:
+        controller = self._fault_controller
+        if controller is None or not controller.enabled:
+            return
+        fault_task = asyncio.create_task(
+            controller.execute_if_matched(
+                FaultMatchContext(
+                    fault_point=point,
+                    component="event_channel",
+                    run_id_digest=_safe_digest(self.run_id),
+                    operation_kind=operation_kind,
+                ),
+                allowed_actions={
+                    FaultAction.RAISE_TYPED_ERROR,
+                    FaultAction.DELAY,
+                    FaultAction.BLOCK_UNTIL_RELEASED,
+                },
+            )
+        )
+        abort_task = asyncio.create_task(self._abort_event.wait())
+        cancellation_task: asyncio.Task[None] | None = None
+        if self._cancellation_token is not None:
+            cancellation_task = asyncio.create_task(
+                self._cancellation_token.wait_cancelled()
+            )
+        waiters = {fault_task, abort_task}
+        if cancellation_task is not None:
+            waiters.add(cancellation_task)
+        try:
+            done, _ = await asyncio.wait(
+                waiters, return_when=asyncio.FIRST_COMPLETED
+            )
+            if fault_task in done:
+                await fault_task
+                return
+            fault_task.cancel()
+            await asyncio.gather(fault_task, return_exceptions=True)
+            if abort_task in done:
+                raise EventChannelClosedError("Event Channel 已 abort")
+            assert self._cancellation_token is not None
+            self._cancellation_token.raise_if_cancelled()
+        finally:
+            for task in waiters:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
 
     async def _put_interruptibly(
         self,
@@ -386,3 +592,7 @@ class RuntimeEventChannel:
             await asyncio.gather(
                 put_task, abort_task, return_exceptions=True
             )
+
+
+def _safe_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
