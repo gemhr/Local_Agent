@@ -125,3 +125,85 @@ async def test_shutdown_report_and_errors_contain_no_sensitive_runtime_data():
     assert all(marker not in rendered for marker in markers)
     assert all("run_id" not in item.component for item in report.components)
     assert all("thread" not in item.component for item in report.components)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_top_level_semantics_distinguish_orchestration_and_closure():
+    success = await GracefulShutdownCoordinator(
+        make_services(snapshot_enabled=False),
+        shutdown_grace_seconds=0,
+        component_timeout_seconds=0.1,
+    ).shutdown()
+    assert success.completed is success.orchestration_completed is True
+    assert success.fully_closed is True
+    assert success.has_failures is False
+    assert success.has_deferred_resources is False
+
+    journal_fault = shutdown_controller(
+        shutdown_rule(
+            FaultPoint.SHUTDOWN_BEFORE_JOURNAL_CLOSE,
+            shutdown_component="event_journal",
+        )
+    )
+    journal_report = await GracefulShutdownCoordinator(
+        make_services(snapshot_enabled=False),
+        shutdown_grace_seconds=0,
+        component_timeout_seconds=0.1,
+    ).shutdown(journal_fault)
+    assert journal_report.orchestration_completed is True
+    assert journal_report.has_failures is True
+    assert journal_report.fully_closed is False
+
+    trace_flush_fault = shutdown_controller(
+        shutdown_rule(FaultPoint.TRACE_BEFORE_FLUSH)
+    )
+    flush_report = await GracefulShutdownCoordinator(
+        make_services(snapshot_enabled=False),
+        shutdown_grace_seconds=0,
+        component_timeout_seconds=0.1,
+    ).shutdown(trace_flush_fault)
+    assert flush_report.has_failures is True
+    assert flush_report.fully_closed is True
+
+    remaining_report = replace(success, remaining_run_count=1)
+    assert remaining_report.orchestration_completed is True
+    assert remaining_report.fully_closed is False
+
+
+@pytest.mark.asyncio
+async def test_model_fault_and_worker_deferred_are_not_fully_closed():
+    calls: list[str] = []
+    model = RecordingResource("model", calls)
+    model_services = replace(
+        make_services(snapshot_enabled=False),
+        extra_closeables=(("model_engine_0", model),),
+    )
+    model_controller = shutdown_controller(
+        shutdown_rule(
+            FaultPoint.SHUTDOWN_BEFORE_MODEL_CLOSE,
+            shutdown_component="model_engine_0",
+        )
+    )
+    model_report = await GracefulShutdownCoordinator(
+        model_services,
+        shutdown_grace_seconds=0,
+        component_timeout_seconds=0.1,
+    ).shutdown(model_controller)
+    assert model_report.has_failures is True
+    assert model_report.has_deferred_resources is False
+    assert model_report.fully_closed is False
+
+    worker = RecordingWorker(calls, active=1, idle_result=False)
+    deferred_model = RecordingResource("deferred_model", calls)
+    worker_services = replace(
+        make_services(snapshot_enabled=False),
+        blocking_executors=(worker,),
+        extra_closeables=(("model_engine_0", deferred_model),),
+    )
+    worker_report = await GracefulShutdownCoordinator(
+        worker_services,
+        shutdown_grace_seconds=0,
+        component_timeout_seconds=0.1,
+    ).shutdown()
+    assert worker_report.has_deferred_resources is True
+    assert worker_report.fully_closed is False
