@@ -432,6 +432,8 @@ class FaultPlan:
     def __post_init__(self) -> None:
         _require_safe_token(self.plan_id, "plan_id", required=True)
         _require_positive_int(self.schema_version, "schema_version")
+        if self.schema_version != FAULT_PLAN_SCHEMA_VERSION:
+            raise ValueError("unsupported FaultPlan schema_version")
         _require_utc(self.created_at, "created_at")
         if not isinstance(self.rules, tuple):
             object.__setattr__(self, "rules", tuple(self.rules))

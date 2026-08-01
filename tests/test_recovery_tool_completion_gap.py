@@ -10,11 +10,11 @@ from core.runtime import (
     RecoveryValidator,
     RuntimeEventType,
     ToolCompletedPayload,
-    ToolCompletionGapFixture,
     ToolRecoveryDecisionStatus,
     ToolStartedPayload,
     safe_key_digest,
 )
+from tests._tool_completion_gap_fixtures import ToolCompletionGapFixture
 from tests._recovery_fixtures import (
     recovery_plan,
     recovery_snapshot,

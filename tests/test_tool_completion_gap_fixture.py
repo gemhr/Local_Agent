@@ -4,7 +4,6 @@ from dataclasses import FrozenInstanceError, asdict
 
 import pytest
 
-from core.runtime import ToolCompletionGapFixture
 from core.runtime import (
     FaultPoint,
     InMemoryRunEventJournal,
@@ -15,6 +14,7 @@ from core.runtime import (
     ToolExecutionError,
     ToolExecutionService,
 )
+from tests._tool_completion_gap_fixtures import ToolCompletionGapFixture
 from tests.tool_fault_test_support import (
     PhaseAwareToolAdapter,
     make_context,
