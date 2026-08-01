@@ -34,7 +34,10 @@ async def test_before_save_fault_does_not_write_or_recapture_state():
     assert result.safe_error_code == "SNAPSHOT_SAVE_INJECTED_FAILURE"
     assert result.snapshot_id is None
     assert result.snapshot_publication_evidence is not None
+    assert result.persisted is False
     assert result.snapshot_publication_evidence.partially_persisted is False
+    assert result.partially_persisted is False
+    assert result.retry_allowed is False
     assert result.snapshot_publication_evidence.snapshot_version is None
     assert store.list_for_run("run", 10) == ()
     assert state.snapshot_copy() == before
@@ -82,7 +85,9 @@ async def test_before_save_delay_responds_to_run_cancellation_without_write():
     result = await asyncio.wait_for(task, 1)
     assert result.status is CheckpointStatus.CANCELLED
     assert result.snapshot_publication_evidence is not None
+    assert result.persisted is False
     assert result.snapshot_publication_evidence.partially_persisted is False
+    assert result.retry_allowed is False
     assert store.list_for_run("run", 10) == ()
 
 

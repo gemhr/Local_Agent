@@ -13,6 +13,7 @@ from core.runtime.snapshot_contract import BudgetSnapshot, StepStateSnapshot
 
 
 class RecoveryStatus(str, Enum):
+    FAILED = "FAILED"
     TERMINAL = "TERMINAL"
     RESUMABLE = "RESUMABLE"
     REQUIRES_RECONCILIATION = "REQUIRES_RECONCILIATION"
@@ -26,6 +27,7 @@ class RecoveryStatus(str, Enum):
 # Never infer priority from Enum declaration order or values.
 RECOVERY_STATUS_PRIORITY: tuple[RecoveryStatus, ...] = (
     RecoveryStatus.CORRUPTED,
+    RecoveryStatus.FAILED,
     RecoveryStatus.INCOMPATIBLE_SCHEMA,
     RecoveryStatus.PLAN_MISMATCH,
     RecoveryStatus.JOURNAL_GAP_OR_CONFLICT,

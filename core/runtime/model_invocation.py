@@ -370,7 +370,7 @@ class ModelInvocationRouter:
         generation_options: Mapping[str, object] | None = None,
         fault_controller: FaultInjectionController | None = None,
     ) -> ModelInvocationResult:
-        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
             recorder,
             trace_id=run_context.trace_id,
@@ -947,7 +947,7 @@ class ModelInvocationRouter:
         candidate_index: int,
         retry_index: int,
     ):
-        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
             recorder,
             trace_id=run_context.trace_id,

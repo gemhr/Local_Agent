@@ -262,7 +262,9 @@ class CheckpointCoordinator:
                 snapshot_version=None,
                 schema_version=snapshot.snapshot_schema_version,
                 snapshot_digest=snapshot.payload_digest,
+                persisted=False,
                 partially_persisted=False,
+                retry_allowed=False,
             )
             self._raise_if_cancelled(active_token, shutdown_token)
             self.barrier.transition(CheckpointBarrierState.SAVING)
@@ -277,7 +279,7 @@ class CheckpointCoordinator:
             )
             self.snapshot_store.save(snapshot)
             publication_evidence = replace(
-                publication_evidence, partially_persisted=True
+                publication_evidence, persisted=True
             )
             await self._execute_fault_point(
                 fault_controller,
@@ -303,6 +305,9 @@ class CheckpointCoordinator:
                 snapshot_publication_evidence=publication_evidence,
             )
         except RunCancelledError:
+            publication_evidence = _failed_publication_evidence(
+                publication_evidence
+            )
             return self._result(
                 CheckpointStatus.CANCELLED,
                 checkpoint_kind,
@@ -312,12 +317,15 @@ class CheckpointCoordinator:
                 snapshot_id=(
                     snapshot_id
                     if publication_evidence is not None
-                    and publication_evidence.partially_persisted
+                    and publication_evidence.persisted
                     else None
                 ),
                 publication_evidence=publication_evidence,
             )
         except TimeoutError:
+            publication_evidence = _failed_publication_evidence(
+                publication_evidence
+            )
             return self._result(
                 CheckpointStatus.TIMED_OUT,
                 checkpoint_kind,
@@ -327,27 +335,30 @@ class CheckpointCoordinator:
                 snapshot_id=(
                     snapshot_id
                     if publication_evidence is not None
-                    and publication_evidence.partially_persisted
+                    and publication_evidence.persisted
                     else None
                 ),
                 publication_evidence=publication_evidence,
             )
         except InjectedFaultError:
-            partially_persisted = (
+            publication_evidence = _failed_publication_evidence(
+                publication_evidence
+            )
+            persisted = (
                 publication_evidence is not None
-                and publication_evidence.partially_persisted
+                and publication_evidence.persisted
             )
             return self._result(
                 CheckpointStatus.STORE_FAILED,
                 checkpoint_kind,
                 (
                     "SNAPSHOT_SAVE_PARTIALLY_PERSISTED"
-                    if partially_persisted
+                    if persisted
                     else "SNAPSHOT_SAVE_INJECTED_FAILURE"
                 ),
                 activity=activity,
                 sequence=sequence,
-                snapshot_id=snapshot_id if partially_persisted else None,
+                snapshot_id=snapshot_id if persisted else None,
                 publication_evidence=publication_evidence,
             )
         except (SchedulerClaimGateBusyError,):
@@ -551,6 +562,18 @@ class CheckpointCoordinator:
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             raise
+
+
+def _failed_publication_evidence(
+    evidence: SnapshotPublicationEvidence | None,
+) -> SnapshotPublicationEvidence | None:
+    if evidence is None or not evidence.persisted:
+        return evidence
+    return replace(
+        evidence,
+        partially_persisted=True,
+        retry_allowed=False,
+    )
 
 
 def default_runtime_metadata() -> RuntimeMetadata:

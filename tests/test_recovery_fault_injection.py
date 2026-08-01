@@ -75,7 +75,7 @@ def test_snapshot_before_read_fault_never_reads_store_or_journal():
         current_plan=recovery_plan(),
         fault_controller=operation_controller(FaultPoint.SNAPSHOT_BEFORE_READ),
     )
-    assert assessment.status is RecoveryStatus.UNSUPPORTED
+    assert assessment.status is RecoveryStatus.FAILED
     assert assessment.reasons == (RecoveryReason.SNAPSHOT_READ_FAILED,)
     assert assessment.run_id is None
     assert (store.get_count, journal.last_count, journal.read_count) == (0, 0, 0)
@@ -90,7 +90,7 @@ def test_before_tail_fault_preserves_snapshot_identity_and_skips_journal():
             FaultPoint.RECOVERY_BEFORE_TAIL_READ
         ),
     )
-    assert assessment.status is RecoveryStatus.UNSUPPORTED
+    assert assessment.status is RecoveryStatus.FAILED
     assert assessment.reasons == (
         RecoveryReason.JOURNAL_TAIL_READ_NOT_EXECUTED,
     )
@@ -108,7 +108,7 @@ def test_after_tail_fault_keeps_read_count_but_returns_no_recovery_decision():
             FaultPoint.RECOVERY_AFTER_TAIL_READ
         ),
     )
-    assert assessment.status is RecoveryStatus.UNSUPPORTED
+    assert assessment.status is RecoveryStatus.FAILED
     assert assessment.reasons == (RecoveryReason.RECOVERY_VALIDATION_FAILED,)
     assert assessment.journal_last_sequence == 1
     assert journal.read_count == 1
@@ -148,7 +148,7 @@ def test_recovery_operation_fault_is_not_cached_by_shared_validator():
         snapshot_id=snapshot.snapshot_id,
         current_plan=recovery_plan(),
     )
-    assert failed.status is RecoveryStatus.UNSUPPORTED
+    assert failed.status is RecoveryStatus.FAILED
     assert normal.status is RecoveryStatus.RESUMABLE
 
 
@@ -189,7 +189,7 @@ async def test_recovery_block_responds_to_cancellation_without_replay_or_mutatio
     source.cancel()
     assessment = await asyncio.wait_for(task, 1)
     blocker.close()
-    assert assessment.status is RecoveryStatus.UNSUPPORTED
+    assert assessment.status is RecoveryStatus.FAILED
     assert assessment.reasons == (
         RecoveryReason.RECOVERY_VALIDATION_CANCELLED,
     )

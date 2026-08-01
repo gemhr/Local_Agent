@@ -558,7 +558,7 @@ def _execute_recovery_fault(
         return None
     except RunCancelledError:
         return _failure(
-            status=RecoveryStatus.UNSUPPORTED,
+            status=RecoveryStatus.FAILED,
             reason=RecoveryReason.RECOVERY_VALIDATION_CANCELLED,
             **identity,
         )
@@ -570,7 +570,7 @@ def _execute_recovery_fault(
         else:
             reason = RecoveryReason.RECOVERY_VALIDATION_FAILED
         return _failure(
-            status=RecoveryStatus.UNSUPPORTED,
+            status=RecoveryStatus.FAILED,
             reason=reason,
             **identity,
         )

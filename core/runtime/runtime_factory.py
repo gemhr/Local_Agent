@@ -30,6 +30,7 @@ from core.runtime.state import RunStatus
 from core.runtime.scheduler import SerialScheduler, StepClaim
 from core.runtime.state import AgentState
 from core.runtime.state_machine import AgentStateMachine
+from core.runtime.tracing import OperationScopedSpanRecorder
 
 
 class CoordinatedSingleAgentDriver:
@@ -291,6 +292,13 @@ class CoordinatedRuntimeFactory:
             run_context.attach_budget_ledger(ledger)
             tracker = self._services.new_activity_tracker(run_context.run_id)
             run_context.attach_activity_tracker(tracker)
+            span_recorder = self._services.span_recorder
+            if fault_controller is not None:
+                span_recorder = OperationScopedSpanRecorder(
+                    span_recorder,
+                    fault_controller=fault_controller,
+                    cancellation_token=run_context.cancellation_token,
+                )
             agent_state = AgentState.for_run_context(run_context.run_id)
             plan = self._router.build_single_agent_plan(agent_id, query)
             machine = AgentStateMachine()
@@ -318,6 +326,7 @@ class CoordinatedRuntimeFactory:
                 machine,
                 max_concurrency=1,
                 event_emitter=emitter,
+                span_recorder=span_recorder,
                 blocking_executor=(
                     self._services.coordinated_step_executor
                 ),
@@ -341,7 +350,7 @@ class CoordinatedRuntimeFactory:
                 policy=policy,
                 state_machine=machine,
                 event_emitter=emitter,
-                span_recorder=self._services.span_recorder,
+                span_recorder=span_recorder,
                 snapshot_store=(
                     self._services.snapshot_store
                     if self._services.snapshot_enabled

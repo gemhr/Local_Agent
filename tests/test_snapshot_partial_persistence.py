@@ -19,6 +19,37 @@ from tests.test_checkpoint_integration import _coordinator
 
 
 @pytest.mark.asyncio
+async def test_success_and_partial_failure_are_machine_distinguishable():
+    normal_store = InMemorySnapshotStore()
+    normal_coordinator, _, _ = _coordinator(normal_store)
+    normal = await normal_coordinator.create_checkpoint(
+        mode=CheckpointMode.REQUIRE_QUIESCENT,
+        checkpoint_kind=CheckpointKind.STEP_BOUNDARY,
+        timeout=1,
+    )
+    failed_store = InMemorySnapshotStore()
+    failed_coordinator, _, _ = _coordinator(failed_store)
+    partial = await failed_coordinator.create_checkpoint(
+        mode=CheckpointMode.REQUIRE_QUIESCENT,
+        checkpoint_kind=CheckpointKind.STEP_BOUNDARY,
+        timeout=1,
+        fault_controller=operation_controller(FaultPoint.SNAPSHOT_AFTER_SAVE),
+    )
+
+    assert (normal.persisted, normal.partially_persisted, normal.retry_allowed) == (
+        True,
+        False,
+        False,
+    )
+    assert (
+        partial.persisted,
+        partial.partially_persisted,
+        partial.retry_allowed,
+    ) == (True, True, False)
+    assert "raw-snapshot-payload" not in repr(partial)
+
+
+@pytest.mark.asyncio
 async def test_after_save_fault_reports_partial_persistence_without_second_save():
     store = InMemorySnapshotStore()
     coordinator, _, _ = _coordinator(store)
@@ -31,6 +62,9 @@ async def test_after_save_fault_reports_partial_persistence_without_second_save(
     assert result.status is CheckpointStatus.STORE_FAILED
     assert result.safe_error_code == "SNAPSHOT_SAVE_PARTIALLY_PERSISTED"
     assert result.snapshot_id is not None
+    assert result.persisted is True
+    assert result.partially_persisted is True
+    assert result.retry_allowed is False
     evidence = result.snapshot_publication_evidence
     assert evidence is not None and evidence.partially_persisted is True
     stored = store.get(result.snapshot_id)
@@ -82,5 +116,7 @@ async def test_after_save_delay_cancellation_never_deletes_committed_snapshot():
     result = await asyncio.wait_for(task, 1)
     assert result.status is CheckpointStatus.CANCELLED
     assert result.snapshot_id is not None
+    assert result.persisted is True
+    assert result.retry_allowed is False
     assert result.snapshot_publication_evidence.partially_persisted is True
     assert store.get(result.snapshot_id) is not None

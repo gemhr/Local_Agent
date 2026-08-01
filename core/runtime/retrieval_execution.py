@@ -176,7 +176,7 @@ class RetrievalExecutionService:
         defer_completed_event: bool = False,
         fault_controller: FaultInjectionController | None = None,
     ) -> RetrievalExecutionResult:
-        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
             recorder,
             trace_id=run_context.trace_id,
@@ -831,7 +831,7 @@ class RetrievalExecutionService:
         stage: RetrievalStage,
         **kwargs,
     ) -> T:
-        recorder = self.span_recorder or current_span_recorder() or NoopSpanRecorder()
+        recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
             recorder,
             trace_id=context.run_context.trace_id,
