@@ -853,3 +853,25 @@ __all__ += [
     "RecorderOverflowPolicy",
     "SystemFaultClock",
 ]
+
+from core.runtime.fault_reports import (
+    FaultCoverageReport,
+    FaultPointSupport,
+    FaultPointSupportReport,
+    FaultPointSupportStatus,
+    FaultRuntimeInvariantReport,
+    build_fault_runtime_invariant_report,
+    build_fault_coverage_report,
+    build_fault_point_support_report,
+)
+
+__all__ += [
+    "FaultCoverageReport",
+    "FaultPointSupport",
+    "FaultPointSupportReport",
+    "FaultPointSupportStatus",
+    "FaultRuntimeInvariantReport",
+    "build_fault_runtime_invariant_report",
+    "build_fault_coverage_report",
+    "build_fault_point_support_report",
+]

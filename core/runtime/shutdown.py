@@ -55,10 +55,55 @@ class ShutdownReport:
     components: tuple[RuntimeComponentResult, ...]
 
     @property
-    def completed(self) -> bool:
+    def orchestration_completed(self) -> bool:
         return (
             self.state is RuntimeAdmissionState.CLOSED
             and self.lifecycle_state is RuntimeLifecycleState.CLOSED
+        )
+
+    @property
+    def completed(self) -> bool:
+        """Compatibility alias for orchestration completion, not full closure."""
+        return self.orchestration_completed
+
+    @property
+    def has_failures(self) -> bool:
+        return any(
+            item.error_code is not None
+            or item.status in {"FAILED", "UNKNOWN"}
+            for item in self.components
+        )
+
+    @property
+    def has_deferred_resources(self) -> bool:
+        return any(item.status == "DEFERRED" for item in self.components)
+
+    @property
+    def fully_closed(self) -> bool:
+        required_operations = {
+            "ADMISSION",
+            "WORKER_ADMISSION",
+            "WORKER_DRAIN",
+            "FORCE_ABORT",
+            "CLOSE",
+        }
+        required_failure = any(
+            item.operation in required_operations
+            and (
+                item.error_code is not None
+                or item.status not in {"COMPLETED"}
+            )
+            for item in self.components
+        )
+        return (
+            self.orchestration_completed
+            and self.remaining_run_count == 0
+            and self.active_worker_count == 0
+            and self.detached_worker_count == 0
+            and self.unknown_worker_count == 0
+            and self.worker_drain_status == "IDLE"
+            and not self.has_deferred_resources
+            and not required_failure
         )
 
     @property
@@ -114,6 +159,7 @@ class GracefulShutdownCoordinator:
                 ),
                 timeout=self._component_timeout_seconds,
                 false_error="RUNTIME_ADMISSION_SETTLE_TIMEOUT",
+                operation_kind="ADMISSION",
             )
 
             handles = self._services.run_registry.active_handles()
@@ -159,6 +205,7 @@ class GracefulShutdownCoordinator:
                             0.0, time.monotonic() - cancel_started
                         ),
                         error_code=error_code,
+                        operation="RUN_CANCEL",
                     )
                 )
 
@@ -172,6 +219,7 @@ class GracefulShutdownCoordinator:
                 timeout=self._shutdown_grace_seconds + 0.05,
                 result_ok=lambda remaining: not remaining,
                 false_error="RUNTIME_RUN_DRAIN_TIMEOUT",
+                operation_kind="RUN_DRAIN",
             )
 
             remaining_handles = self._services.run_registry.active_handles()
@@ -210,6 +258,7 @@ class GracefulShutdownCoordinator:
                             0.0, time.monotonic() - force_started
                         ),
                         error_code=force_error,
+                        operation="FORCE_ABORT",
                     )
                 )
 
@@ -239,6 +288,7 @@ class GracefulShutdownCoordinator:
                             "FAILED",
                             max(0.0, time.monotonic() - worker_started),
                             "RUNTIME_WORKER_DRAIN_INJECTED_TIMEOUT",
+                            "WORKER_DRAIN",
                         )
                     )
                 except InjectedFaultError:
@@ -250,6 +300,7 @@ class GracefulShutdownCoordinator:
                             "FAILED",
                             max(0.0, time.monotonic() - worker_started),
                             "RUNTIME_WORKER_DRAIN_INJECTED_FAILURE",
+                            "WORKER_DRAIN",
                         )
                     )
                 else:
@@ -292,6 +343,7 @@ class GracefulShutdownCoordinator:
                         error_code=(
                             "RUNTIME_MODEL_CLOSE_DEFERRED_ACTIVE_WORKER"
                         ),
+                        operation="CLOSE",
                     )
                     for component in self._services.model_close_components()
                 )
@@ -347,6 +399,7 @@ class GracefulShutdownCoordinator:
         *,
         timeout: float,
         false_error: str,
+        operation_kind: str,
         result_ok=lambda result: bool(result),
     ) -> None:
         started = time.monotonic()
@@ -363,6 +416,7 @@ class GracefulShutdownCoordinator:
                 status="COMPLETED" if error_code is None else "FAILED",
                 duration_seconds=max(0.0, time.monotonic() - started),
                 error_code=error_code,
+                operation=operation_kind,
             )
         )
 

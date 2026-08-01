@@ -66,6 +66,7 @@ class RuntimeComponentResult:
     status: str
     duration_seconds: float
     error_code: str | None = None
+    operation: str = "UNKNOWN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +87,7 @@ class _LifecycleControl:
     close_report: RuntimeLifecycleReport | None = None
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     state_lock: threading.Lock = field(default_factory=threading.Lock)
+    close_results: dict[int, RuntimeComponentResult] = field(default_factory=dict)
 
 
 def _validate_timeout(timeout: object) -> float:
@@ -260,18 +262,13 @@ class ApplicationRuntimeServices:
         return False
 
     def model_close_components(self) -> tuple[str, ...]:
-        components: list[str] = []
-        identities: set[int] = set()
-        for component, target in self.extra_closeables:
-            if (
-                not component.startswith("model_")
-                or id(target) in identities
-                or not callable(getattr(target, "close", None))
-            ):
-                continue
-            identities.add(id(target))
-            components.append(component)
-        return tuple(components)
+        return tuple(
+            component
+            for component, _target, _operation in self._targets(
+                include_models=True
+            )
+            if component.startswith("model_")
+        )
 
     def _targets(
         self, *, include_models: bool = True
@@ -281,6 +278,7 @@ class ApplicationRuntimeServices:
             for component, resource in self.extra_closeables
             if component.startswith("model_")
         }
+        journal_identity = id(self.event_journal)
         candidates: list[tuple[str, object | None, str]] = [
             ("observability_dispatcher", self.observability_dispatcher, "close"),
             ("span_recorder", self.span_recorder, "close"),
@@ -311,7 +309,14 @@ class ApplicationRuntimeServices:
             if (
                 resource is None
                 or id(resource) in identities
-                or (not include_models and id(resource) in model_identities)
+                or (
+                    id(resource) == journal_identity
+                    and component != "event_journal"
+                )
+                or (
+                    id(resource) in model_identities
+                    and not component.startswith("model_")
+                )
             ):
                 continue
             identities.add(id(resource))
@@ -387,6 +392,7 @@ class ApplicationRuntimeServices:
                     status="COMPLETED" if error_code is None else "FAILED",
                     duration_seconds=max(0.0, time.monotonic() - started),
                     error_code=error_code,
+                    operation="FLUSH",
                 )
             )
         return RuntimeLifecycleReport(
@@ -414,14 +420,25 @@ class ApplicationRuntimeServices:
             ):
                 if not callable(getattr(target, operation, None)):
                     continue
+                identity = id(target)
+                previous = self._lifecycle.close_results.get(identity)
+                if previous is not None:
+                    components.append(previous)
+                    if previous.error_code is not None:
+                        issues.append(
+                            RuntimeLifecycleIssue(
+                                previous.component, previous.error_code
+                            )
+                        )
+                    continue
                 started = time.monotonic()
+                if component == "event_journal":
+                    point = FaultPoint.SHUTDOWN_BEFORE_JOURNAL_CLOSE
+                elif component.startswith("model_"):
+                    point = FaultPoint.SHUTDOWN_BEFORE_MODEL_CLOSE
+                else:
+                    point = FaultPoint.SHUTDOWN_COMPONENT_CLOSE
                 try:
-                    if component == "event_journal":
-                        point = FaultPoint.SHUTDOWN_BEFORE_JOURNAL_CLOSE
-                    elif component.startswith("model_"):
-                        point = FaultPoint.SHUTDOWN_BEFORE_MODEL_CLOSE
-                    else:
-                        point = FaultPoint.SHUTDOWN_COMPONENT_CLOSE
                     await execute_shutdown_fault(
                         fault_controller,
                         point,
@@ -430,41 +447,58 @@ class ApplicationRuntimeServices:
                         operation_kind="COMPONENT_CLOSE",
                         shutdown_component=component,
                     )
-                    completed = await _invoke_bounded(
-                        target,
-                        operation,
-                        _remaining_timeout(started, active_timeout),
-                    )
+                except asyncio.CancelledError:
+                    # The physical close has not started; a later shutdown may
+                    # give this component its first bounded close attempt.
+                    raise
                 except ShutdownFaultTimeoutError:
                     error_code = _close_fault_code(component, timeout=True)
-                    issues.append(RuntimeLifecycleIssue(component, error_code))
                 except InjectedFaultError:
                     error_code = _close_fault_code(component, timeout=False)
-                    issues.append(RuntimeLifecycleIssue(component, error_code))
-                except TimeoutError:
-                    error_code = "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
-                    issues.append(RuntimeLifecycleIssue(component, error_code))
-                except Exception:
-                    error_code = "RUNTIME_COMPONENT_CLOSE_FAILED"
-                    issues.append(RuntimeLifecycleIssue(component, error_code))
                 else:
-                    if not completed:
+                    try:
+                        completed = await _invoke_bounded(
+                            target,
+                            operation,
+                            _remaining_timeout(started, active_timeout),
+                        )
+                    except asyncio.CancelledError:
+                        # A sync close may continue in its worker thread after
+                        # waiter cancellation. Never invoke that identity twice.
+                        result = RuntimeComponentResult(
+                            component=component,
+                            status="UNKNOWN",
+                            duration_seconds=max(
+                                0.0, time.monotonic() - started
+                            ),
+                            error_code=(
+                                "RUNTIME_COMPONENT_CLOSE_CANCELLED_UNKNOWN"
+                            ),
+                            operation="CLOSE",
+                        )
+                        self._lifecycle.close_results[identity] = result
+                        raise
+                    except TimeoutError:
                         error_code = "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
-                        issues.append(RuntimeLifecycleIssue(component, error_code))
+                    except Exception:
+                        error_code = "RUNTIME_COMPONENT_CLOSE_FAILED"
                     else:
-                        error_code = None
-                components.append(
-                    RuntimeComponentResult(
-                        component=component,
-                        status=(
-                            "COMPLETED" if error_code is None else "FAILED"
-                        ),
-                        duration_seconds=max(
-                            0.0, time.monotonic() - started
-                        ),
-                        error_code=error_code,
-                    )
+                        error_code = (
+                            None
+                            if completed
+                            else "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
+                        )
+                if error_code is not None:
+                    issues.append(RuntimeLifecycleIssue(component, error_code))
+                result = RuntimeComponentResult(
+                    component=component,
+                    status="COMPLETED" if error_code is None else "FAILED",
+                    duration_seconds=max(0.0, time.monotonic() - started),
+                    error_code=error_code,
+                    operation="CLOSE",
                 )
+                self._lifecycle.close_results[identity] = result
+                components.append(result)
             report = RuntimeLifecycleReport(
                 "close", not issues, tuple(issues), tuple(components)
             )
@@ -507,6 +541,7 @@ class ApplicationRuntimeServices:
                     "COMPLETED" if error_code is None else "FAILED",
                     max(0.0, time.monotonic() - started),
                     error_code,
+                    "WORKER_ADMISSION",
                 )
             )
         return RuntimeLifecycleReport(
@@ -551,6 +586,7 @@ class ApplicationRuntimeServices:
                     "COMPLETED" if error_code is None else "DETACHED",
                     max(0.0, time.monotonic() - started),
                     error_code,
+                    "WORKER_DRAIN",
                 )
             )
         return RuntimeLifecycleReport(
