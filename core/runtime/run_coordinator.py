@@ -232,6 +232,7 @@ class RunCoordinator:
         timeout: float | None,
         cancellation_token=None,
         shutdown_token=None,
+        fault_controller=None,
     ) -> CheckpointResult:
         """Explicit opt-in entry; this does not schedule automatic checkpoints."""
         if self.checkpoint_coordinator is None:
@@ -245,6 +246,7 @@ class RunCoordinator:
             timeout=timeout,
             cancellation_token=cancellation_token,
             shutdown_token=shutdown_token,
+            fault_controller=fault_controller,
         )
 
     def add_cleanup_callback(self, callback: CleanupCallback) -> None:

@@ -35,7 +35,7 @@ async def test_partial_publication_retains_record_consumes_sequence_and_never_re
     with pytest.raises(EventPublicationError) as captured:
         await channel.publish(run_started_draft())
 
-    failed_event = captured.value.event
+    failed_event = captured.value.evidence
     assert captured.value.partially_persisted is True
     assert journal.last_sequence("run-a") == failed_event.sequence == 1
     assert channel.buffered_count == 0

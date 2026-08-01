@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from core.runtime.checkpoint_contract import CheckpointKind
+from core.runtime.cancellation import CancellationToken, RunCancelledError
 from core.runtime.event_journal import (
     MAX_READ_LIMIT,
     JournalError,
@@ -32,6 +33,14 @@ from core.runtime.snapshot_contract import (
     RunSnapshot,
 )
 from core.runtime.snapshot_serialization import sha256_digest
+from core.runtime.snapshot_serialization import text_digest
+from core.runtime.fault_injection import FaultInjectionController
+from core.runtime.fault_injection_contract import (
+    FaultAction,
+    FaultMatchContext,
+    FaultPoint,
+    InjectedFaultError,
+)
 from core.runtime.snapshot_store import (
     SnapshotErrorCode,
     SnapshotStore,
@@ -63,18 +72,36 @@ class RecoveryValidator:
         *,
         snapshot_id: str,
         current_plan: Plan,
+        fault_controller: FaultInjectionController | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> RecoveryAssessment:
         """Load by ID and assess; ``assess`` is an equivalent spelling."""
-        return self.assess(snapshot_id=snapshot_id, current_plan=current_plan)
+        return self.assess(
+            snapshot_id=snapshot_id,
+            current_plan=current_plan,
+            fault_controller=fault_controller,
+            cancellation_token=cancellation_token,
+        )
 
     def assess(
         self,
         *,
         snapshot_id: str,
         current_plan: Plan,
+        fault_controller: FaultInjectionController | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> RecoveryAssessment:
         if self.snapshot_store is None:
             raise ValueError("snapshot_store is required when loading by ID")
+        _validate_fault_controller(fault_controller)
+        failure = _execute_recovery_fault(
+            fault_controller,
+            FaultPoint.SNAPSHOT_BEFORE_READ,
+            cancellation_token=cancellation_token,
+            snapshot_id=snapshot_id,
+        )
+        if failure is not None:
+            return failure
         try:
             snapshot = self.snapshot_store.get(snapshot_id)
         except SnapshotStoreError as exc:
@@ -107,16 +134,24 @@ class RecoveryValidator:
                 reason=RecoveryReason.SNAPSHOT_NOT_FOUND,
                 snapshot_id=snapshot_id,
             )
-        return self.assess_snapshot(snapshot=snapshot, current_plan=current_plan)
+        return self.assess_snapshot(
+            snapshot=snapshot,
+            current_plan=current_plan,
+            fault_controller=fault_controller,
+            cancellation_token=cancellation_token,
+        )
 
     def assess_snapshot(
         self,
         *,
         snapshot: RunSnapshot,
         current_plan: Plan,
+        fault_controller: FaultInjectionController | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> RecoveryAssessment:
         if not isinstance(snapshot, RunSnapshot):
             raise TypeError("snapshot must be RunSnapshot")
+        _validate_fault_controller(fault_controller)
         identity = {
             "snapshot_id": _safe_identity(snapshot, "snapshot_id"),
             "run_id": _safe_identity(snapshot, "run_id"),
@@ -203,6 +238,16 @@ class RecoveryValidator:
             )
 
         # 9-10. Journal alignment. None means an empty journal, sequence zero.
+        failure = _execute_recovery_fault(
+            fault_controller,
+            FaultPoint.RECOVERY_BEFORE_TAIL_READ,
+            cancellation_token=cancellation_token,
+            snapshot_id=snapshot.snapshot_id,
+            run_id=snapshot.run_id,
+            snapshot_sequence=snapshot.last_journal_sequence,
+        )
+        if failure is not None:
+            return failure
         try:
             journal_last = self.journal.last_sequence(snapshot.run_id) or 0
         except JournalError as exc:
@@ -245,6 +290,18 @@ class RecoveryValidator:
                 journal_last_sequence=journal_last,
                 **identity,
             )
+
+        failure = _execute_recovery_fault(
+            fault_controller,
+            FaultPoint.RECOVERY_AFTER_TAIL_READ,
+            cancellation_token=cancellation_token,
+            snapshot_id=snapshot.snapshot_id,
+            run_id=snapshot.run_id,
+            snapshot_sequence=snapshot.last_journal_sequence,
+            journal_last_sequence=journal_last,
+        )
+        if failure is not None:
+            return failure
 
         # 11. Tail validation reuses JournalRecord.verify; numeric gaps are
         # intentionally legal.
@@ -432,11 +489,91 @@ def assess_recovery(
     snapshot: RunSnapshot,
     current_plan: Plan,
     journal: RunEventJournal,
+    fault_controller: FaultInjectionController | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> RecoveryAssessment:
     """Convenience entry point for callers that already loaded a snapshot."""
     return RecoveryValidator(journal=journal).assess_snapshot(
-        snapshot=snapshot, current_plan=current_plan
+        snapshot=snapshot,
+        current_plan=current_plan,
+        fault_controller=fault_controller,
+        cancellation_token=cancellation_token,
     )
+
+
+def _validate_fault_controller(
+    controller: FaultInjectionController | None,
+) -> None:
+    if controller is not None and not isinstance(
+        controller, FaultInjectionController
+    ):
+        raise TypeError(
+            "fault_controller must be FaultInjectionController or None"
+        )
+
+
+def _execute_recovery_fault(
+    controller: FaultInjectionController | None,
+    point: FaultPoint,
+    *,
+    cancellation_token: CancellationToken | None,
+    snapshot_id: str | None,
+    run_id: str | None = None,
+    snapshot_sequence: int | None = None,
+    journal_last_sequence: int | None = None,
+) -> RecoveryAssessment | None:
+    identity = {
+        "snapshot_id": snapshot_id,
+        "run_id": run_id,
+        "snapshot_sequence": snapshot_sequence,
+        "journal_last_sequence": journal_last_sequence,
+    }
+    try:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+        if controller is None:
+            return None
+        controller.execute_blocking_if_matched(
+            FaultMatchContext(
+                fault_point=point,
+                component="recovery_validator",
+                run_id_digest=(text_digest(run_id) if run_id is not None else None),
+                operation_kind=(
+                    "SNAPSHOT_READ"
+                    if point is FaultPoint.SNAPSHOT_BEFORE_READ
+                    else "JOURNAL_TAIL_READ"
+                ),
+            ),
+            raise_if_cancelled=(
+                cancellation_token.raise_if_cancelled
+                if cancellation_token is not None
+                else None
+            ),
+            allowed_actions={
+                FaultAction.RAISE_TYPED_ERROR,
+                FaultAction.DELAY,
+                FaultAction.BLOCK_UNTIL_RELEASED,
+            },
+        )
+        return None
+    except RunCancelledError:
+        return _failure(
+            status=RecoveryStatus.UNSUPPORTED,
+            reason=RecoveryReason.RECOVERY_VALIDATION_CANCELLED,
+            **identity,
+        )
+    except InjectedFaultError:
+        if point is FaultPoint.SNAPSHOT_BEFORE_READ:
+            reason = RecoveryReason.SNAPSHOT_READ_FAILED
+        elif point is FaultPoint.RECOVERY_BEFORE_TAIL_READ:
+            reason = RecoveryReason.JOURNAL_TAIL_READ_NOT_EXECUTED
+        else:
+            reason = RecoveryReason.RECOVERY_VALIDATION_FAILED
+        return _failure(
+            status=RecoveryStatus.UNSUPPORTED,
+            reason=reason,
+            **identity,
+        )
 
 
 def _validate_activity(snapshot: RunSnapshot) -> None:
