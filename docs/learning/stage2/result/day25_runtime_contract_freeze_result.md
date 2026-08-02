@@ -98,6 +98,7 @@
 
 | Contract | Reader | Writer | Digest owner | Unknown high version |
 |---|---|---|---|---|
+| AgentState | v1 | v1，`AgentState.to_dict()` | 无独立 digest | fail closed；缺失 schema_version 也 fail closed |
 | RuntimeEvent | v1/v2 | v2 | Journal 对持久投影计算 | fail closed |
 | JournalRecord | v1/v2 | v2 | event_journal canonical JSON SHA-256 | fail closed |
 | RunSnapshot | v1 | v1 | snapshot_serialization + RunSnapshot | fail closed |
@@ -153,10 +154,10 @@ Fault Plan/Controller/Scope/Recorder/Report 是 TEST_ONLY/显式 operation seam�
 
 完整矩阵见 `docs/runtime/runtime_capability_matrix.md`。
 
-- SUPPORTED：Coordinated、显式 Legacy、Parallel engine、Budget、Retry、Model fallback、Circuit breaker、Tool idempotency/evidence/lease、Retrieval runtime、Event streaming、Journal-first、Observability、Trace、Disconnect、Worker tracking、Graceful shutdown；
+- SUPPORTED：Coordinated、显式 Legacy、Parallel engine、Budget、Retry、Model fallback、Circuit breaker、Tool idempotency/evidence/lease、Retrieval runtime、Event streaming、Journal-first、Observability、Trace、Disconnect、Worker tracking、Graceful shutdown、确定性 Fault Injection 测试能力；
 - PARTIALLY_SUPPORTED：Snapshot、Recovery validation；
-- CONTRACT_ONLY：Fault Injection test seam；
-- NOT_IMPLEMENTED：Recovery execution、Replay、Random Chaos、Cross-process Registry、Exactly-once、Automatic compensation、Step result rehydration；
+- CONTRACT_ONLY：能力级无；个别 FaultPoint 可由 support report 标为 CONTRACT_ONLY；
+- NOT_IMPLEMENTED：Recovery execution、Replay、Production Fault Enablement、Random / Probabilistic Chaos、Cross-process Registry、Exactly-once、Automatic compensation、Step result rehydration；
 - LEGACY_ONLY：无；
 - DEPRECATED：能力级无。
 
@@ -471,7 +472,7 @@ Public stable contracts：RunContext、Plan/PlanStep、Tool/Model/Retrieval exec
 Versioned contracts：AgentState、RuntimeEvent、JournalRecord、RunSnapshot、tool evidence
 Internal evolving contracts：RuntimeEventDraft、operation/attempt contexts
 Test-only contracts：Fault plan/decision/reports、test oracle/fixture/mutator
-Schema matrix：Event 1/2->2；Journal 1/2->2；Snapshot 1->1；FaultPlan 1->1；Shutdown unversioned
+Schema matrix：AgentState 1->1；Event 1/2->2；Journal 1/2->2；Snapshot 1->1；FaultPlan 1->1；Shutdown unversioned
 Digest owners：Journal canonicalizer；Snapshot canonicalizer/RunSnapshot；Tool/Fault semantic canonicalizers
 Legacy boundary：显式兼容路径，不拥有完整 Coordinated 能力
 Fault production enablement：无，默认 controller=None
@@ -481,8 +482,8 @@ Derived reports：Shutdown/Fault/Observability/Trace reports
 Test fixtures：仅 tests package
 Supported capabilities：见 runtime_capability_matrix.md
 Partially supported：Snapshot、Recovery validation
-Contract-only：Fault Injection test seam
-Not implemented：Recovery execution、Replay、Random Chaos、cross-process Registry、Exactly-once、automatic compensation、step result rehydration
+Contract-only：能力级无；个别 FaultPoint 仍可为 CONTRACT_ONLY
+Not implemented：Recovery execution、Replay、Production Fault Enablement、Random / Probabilistic Chaos、cross-process Registry、Exactly-once、automatic compensation、step result rehydration
 Deprecated items：ShutdownReport.completed；其余兼容项见 architecture matrix
 真实代码修复：3 项（Scope unregister、FaultPlan version gate、test fixture isolation）
 新增测试：8 个文件，24 tests

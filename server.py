@@ -185,6 +185,24 @@ async def _stop_disconnect_watcher(
     await asyncio.gather(watcher, return_exceptions=True)
 
 
+def _publish_compatibility_handles(app: FastAPI, service, services) -> None:
+    """Publish identical application-scope compatibility handles."""
+    global application_runtime_services, chat_service
+    chat_service = service
+    application_runtime_services = services
+    app.state.chat_service = service
+    app.state.runtime_services = services
+
+
+def _clear_compatibility_handles(app: FastAPI) -> None:
+    """Invalidate both compatibility views after application shutdown."""
+    global application_runtime_services, chat_service
+    chat_service = None
+    application_runtime_services = None
+    app.state.chat_service = None
+    app.state.runtime_services = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """构建 FastAPI 生命周期内共享的服务对象。
@@ -533,7 +551,11 @@ async def lifespan(app: FastAPI):
             settings.runtime_component_close_timeout_seconds
         ),
     )
-    app.state.runtime_services = application_runtime_services
+    _publish_compatibility_handles(
+        app,
+        chat_service,
+        application_runtime_services,
+    )
     app.state.coordinated_runtime_factory = coordinated_runtime_factory
     app.state.runtime_metrics = runtime_metrics
     app.state.runtime_metrics_collector = RuntimeMetricsCollector(
@@ -571,8 +593,7 @@ async def lifespan(app: FastAPI):
                     ),
                 },
             )
-        chat_service = None
-        application_runtime_services = None
+        _clear_compatibility_handles(app)
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
 
