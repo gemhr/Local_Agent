@@ -26,8 +26,9 @@
 | Client disconnect | SUPPORTED | 是 | HTTP disconnect watcher + RunRegistry cancel | 不持久化 watcher | cancel-and-drain；超时 force abort | 无自动 resume | 两条路径覆盖 | client/server stream cancellation | 依赖 cooperative cancellation 与 bounded grace |
 | Worker tracking | SUPPORTED | 是 | BoundedBlockingExecutor / ToolConcurrencyController | 进程内 snapshots | active/detached/unknown 分类 | Shutdown 等待或保守 deferred close | 两类 worker 覆盖 | worker lifecycle/shutdown | 已 detached 的同步线程不能被 Python 强杀 |
 | Graceful shutdown | SUPPORTED | lifespan exit | GracefulShutdownCoordinator | ShutdownReport 进程内派生 | 关闭 admission、取消、drain、flush、close；失败继续 | 不自动重启/恢复 | Coordinated + Legacy workers | graceful shutdown/truthfulness | `completed` 只表示 orchestration；应看 `fully_closed` |
-| Fault Injection | CONTRACT_ONLY | 生产关闭 | 显式测试 FaultInjectionScope/Controller | test recorder/report；不进生产存储 | 确定性 typed fault；生产 `None` | 不拥有 recovery | 生产未启用 | day24 fault matrix + production isolation | 是测试 seam，不是 production chaos platform |
-| Random Chaos | NOT_IMPLEMENTED | 否 | 无 | 无 | 无随机触发 | 无 | 否 | capability negative assertion | FaultTrigger 只有确定性触发 |
+| Deterministic Fault Injection | SUPPORTED | 无；仅 `TEST_SCOPE` / 显式 operation scope | FaultInjectionScope/Controller | test recorder/report；不进生产存储 | 确定性 typed fault；生产路径 controller 为 `None` | 不拥有 recovery | 生产未启用 | day24 fault matrix + production isolation | 个别 FaultPoint 仍由 support report 区分 SUPPORTED/CONTRACT_ONLY/NOT_APPLICABLE |
+| Production Fault Enablement | NOT_IMPLEMENTED | 否 | 无 | 无 | 无 Settings/API/prompt/tool 激活入口 | 无 | 否 | production isolation + capability negative assertion | `production_enablement=false` |
+| Random / Probabilistic Chaos | NOT_IMPLEMENTED | 否 | 无 | 无 | 无随机或概率触发 | 无 | 否 | capability negative assertion | FaultTrigger 只有确定性触发 |
 | Cross-process Registry | NOT_IMPLEMENTED | 否 | 无 | 无 | 进程退出即丢失 | 无 | 否 | capability negative assertion | RunRegistry 是进程内对象 |
 | Exactly-once | NOT_IMPLEMENTED | 否 | 无系统级 owner | 局部 idempotency/journal evidence | 仅局部去重与保守失败 | 无跨进程 reconcile executor | 否 | idempotency/event consumer tests | 局部 at-most-once/幂等证据不能提升为全系统 guarantee |
 | Automatic compensation | NOT_IMPLEMENTED | 否 | 无自动编排 owner | 仅 compensation evidence | 不自动触发补偿 | 只报告/评估 | 否 | tool contract/fault invariant | adapter 可报告结果，但 Runtime 不自动执行策略 |
@@ -35,9 +36,9 @@
 
 ## Status summary
 
-- SUPPORTED：Coordinated、显式 Legacy、Parallel engine、Budget、Retry、Model fallback、Circuit breaker、Tool contract/evidence/lease、Retrieval、Streaming、Journal-first、Observability、Trace、Disconnect、Worker tracking、Graceful shutdown。
+- SUPPORTED：Coordinated、显式 Legacy、Parallel engine、Budget、Retry、Model fallback、Circuit breaker、Tool contract/evidence/lease、Retrieval、Streaming、Journal-first、Observability、Trace、Disconnect、Worker tracking、Graceful shutdown、确定性 Fault Injection 测试能力。
 - PARTIALLY_SUPPORTED：Snapshot、Recovery validation（均为 opt-in/validation-only）。
-- CONTRACT_ONLY：Fault Injection test seam。
-- NOT_IMPLEMENTED：Recovery execution、Replay、Random Chaos、Cross-process Registry、Exactly-once、Automatic compensation、Step result rehydration。
+- CONTRACT_ONLY：能力级无；个别 FaultPoint 可在 `FaultPointSupportReport` 中标为 CONTRACT_ONLY。
+- NOT_IMPLEMENTED：Recovery execution、Replay、Production Fault Enablement、Random / Probabilistic Chaos、Cross-process Registry、Exactly-once、Automatic compensation、Step result rehydration。
 - LEGACY_ONLY：当前矩阵没有仅 Legacy 拥有且 Coordinated 缺失的目标能力。
 - DEPRECATED：能力级无；兼容字段见架构文档的 Deprecated / Compatibility Matrix。

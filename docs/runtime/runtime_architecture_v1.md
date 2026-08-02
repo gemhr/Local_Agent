@@ -120,6 +120,7 @@ Observability、Trace、Report、RecoveryValidator 不反向修改 AgentState、
 
 | contract | schema_version | digest_version | canonicalization_owner | reader_versions | writer_version | unknown_version_behavior | missing_field_behavior | write_back_behavior |
 |---|---:|---|---|---|---:|---|---|---|
+| AgentState | 1 | 无 | `AgentState.to_dict()` | 1 | 1 | `AgentState.from_dict()` fail closed | `schema_version` 缺失 fail closed；其他字段按当前 v1 校验/默认处理 | 不写回 |
 | RuntimeEvent | 2 | 无独立 event digest | RuntimeEvent 安全投影；Journal 负责持久 digest | 1, 2 | 2 | 构造/Recovery consumer fail closed | v1/v2 可选字段使用既有默认或 Unknown | 不写回 |
 | JournalRecord | 2 | 随 journal schema 的 canonical JSON SHA-256 | `event_journal.canonical_json/_digest` | 1, 2 | 2 | journal schema fail closed；未知 event schema 在 Recovery fail closed | v1 无 span 字段按 v1 digest 规则读取 | 不写回 |
 | RunSnapshot | 1 | Snapshot v1 canonical JSON SHA-256 | `snapshot_serialization` + `RunSnapshot.digest_source()` | 1 | 1 | fail closed | 严格 v1 字段集合；不存在 Snapshot v0 | 不写回 |

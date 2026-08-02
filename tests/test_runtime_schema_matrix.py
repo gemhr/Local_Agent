@@ -6,12 +6,15 @@ from datetime import UTC, datetime
 import pytest
 
 from core.runtime import (
+    AGENT_STATE_SCHEMA_VERSION,
+    AgentState,
     FAULT_PLAN_SCHEMA_VERSION,
     FaultPlan,
     JournalRecord,
     RuntimeEvent,
     RuntimeEventType,
     ToolCompletedPayload,
+    UnsupportedStateVersionError,
 )
 from core.runtime.snapshot_serialization import canonical_json, snapshot_from_json
 from tests._recovery_fixtures import runtime_event
@@ -65,3 +68,21 @@ def test_persistent_canonicalization_is_key_order_stable_not_repr_based() -> Non
 
     assert left == right
     assert left == '{"a":1,"b":[2,3]}'
+
+
+def test_agent_state_has_independent_v1_reader_writer_and_fails_closed() -> None:
+    state = AgentState.for_run_context("agent-state-schema-run")
+    payload = state.to_dict()
+
+    assert payload["schema_version"] == AGENT_STATE_SCHEMA_VERSION == 1
+    assert AgentState.from_dict(payload).to_dict() == payload
+
+    missing = dict(payload)
+    missing.pop("schema_version")
+    with pytest.raises(UnsupportedStateVersionError, match="schema_version is required"):
+        AgentState.from_dict(missing)
+
+    unknown = dict(payload)
+    unknown["schema_version"] = 999
+    with pytest.raises(UnsupportedStateVersionError, match="unsupported AgentState"):
+        AgentState.from_dict(unknown)
