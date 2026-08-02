@@ -101,7 +101,7 @@
 - 可能原因：worker 中断、completion publication gap、进程退出。
 - 禁止操作：调用 Tool、使用测试 fixture/live Registry 回填、自动补偿。
 - 诊断步骤：执行 `runtime_recovery_runbook.md` 的八步人工对账。
-- 安全处置：标记 NOT_STARTED/COMMITTED/UNKNOWN，人工决定独立流程。
+- 安全处置：把 NOT_STARTED/COMMITTED/UNKNOWN 写入独立外部 Incident / Reconciliation Record，作为审批后新操作身份的输入；不写回 Journal/Snapshot/AgentState，不补造 `TOOL_COMPLETED`。
 - 恢复条件：持久化 evidence 或外部权威确认足以支持人工决策。
 - 需要人工升级的条件：非幂等、COMMITTED/UNKNOWN、补偿失败。
 - 相关错误码：`TOOL_OUTCOME_UNKNOWN`、`TOOL_EVIDENCE_INSUFFICIENT`。
@@ -156,7 +156,7 @@
 - 安全处置：修正配置并重启，再执行新身份 smoke test。
 - 恢复条件：lifespan READY、admission ACCEPTING、health 正常。
 - 需要人工升级的条件：权限、模型加载或持久化损坏无法安全解决。
-- 相关错误码：该域当前无统一固定 safe code；不得发明。
+- 相关错误码：`RUNTIME_CONFIGURATION_ERROR` 只覆盖 ChatService/Coordinated factory 缺失的局部配置失败；Settings/startup 全域尚无统一 taxonomy，不得扩大解释或发明代码。
 - 相关测试：`test_settings.py`、`test_runtime_lifespan.py`。
 
 ## Legacy Rollback Runbook
@@ -164,4 +164,3 @@
 适合：Coordinated 默认入口存在启动/兼容问题、目标请求尚未开始、且已确认 Legacy 覆盖基础场景。不适合：非幂等副作用后重跑、需要 Snapshot/Recovery evidence、修复 Journal 损坏、绕过 Budget/Cancellation/安全策略。
 
 流程：停止接收新请求→等待/处置现有 Run→修改真实 `CHAT_RUNTIME_MODE` 为 `LEGACY`→重启→请求前确认 mode→执行安全 smoke test。回滚后使用新 RunContext/AgentState；不能对已开始或失败的 Coordinated 请求动态切换，不能宣称 Legacy 拥有完整 Journal/Snapshot/Recovery。共享 Application resource 仍按 identity close once。恢复 Coordinated 时执行同样的请求前配置、重启与 smoke test。
-

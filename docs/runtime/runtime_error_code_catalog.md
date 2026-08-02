@@ -1,10 +1,11 @@
 # Runtime Error Code Catalog
 
-本目录只收录源码枚举或固定字符串。它不保存原始异常、业务正文、路径、Provider URL、Fault Rule ID、Tool argument/output。Runtime configuration 当前主要通过类型化 `ValueError/RuntimeError` fail closed，尚无统一固定 safe code；因此不为配置错误虚构代码。
+本目录只收录源码枚举或固定字符串。它不保存原始异常、业务正文、路径、Provider URL、Fault Rule ID、Tool argument/output。`RUNTIME_CONFIGURATION_ERROR` 是真实固定码，但仅覆盖 ChatService 缺少 Coordinated factory 的局部 Runtime/Chat configuration failure。Settings load、非法环境值、lifespan/startup、model/store path 等尚未完整建立统一 Settings Validation Error Taxonomy；不得把局部码扩大为所有配置错误的合同，也不得为缺口虚构代码。
 
 | safe_error_code | domain | phase | owner | trigger_summary | retry_semantics | side_effect_semantics | user_visibility | operator_action | related_health_field | related_test |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `RUNTIME_EXECUTION_FAILED` | Runtime | request | ChatService/stream adapter | selected path failed safely | do not cross-runtime retry | preserve started facts | fixed wire code | inspect Journal/terminal | terminal/error event | `test_runtime_full_e2e.py::test_runtime_error_is_safe_single_terminal_and_never_falls_back` |
+| `RUNTIME_CONFIGURATION_ERROR` | Runtime configuration | coordinated entry | ChatService | Coordinated runtime factory is absent | do not switch Runtime/retry same request | provider not started | fixed wire code | correct assembly/config and restart before a new request | transport error | `test_default_runtime_entry.py::test_factory_missing_returns_fixed_configuration_error` |
 | `RUNTIME_ADMISSION_SETTLE_TIMEOUT` | Admission | shutdown | GracefulShutdownCoordinator | admission lease did not settle | no business retry | no new work admitted | report only | inspect active leases/runs | ShutdownReport component | `test_graceful_shutdown.py` |
 | `RUNTIME_RUN_DRAIN_TIMEOUT` | Shutdown | run drain | GracefulShutdownCoordinator | active runs exceeded grace | bounded force-abort follows | preserve run facts | report only | inspect remaining handles | remaining_run_count | `test_graceful_shutdown.py::test_shutdown_cancels_active_run_forces_timeout_and_is_idempotent` |
 | `RUNTIME_RUN_FORCE_ABORT_TIMEOUT` | Shutdown | force abort | GracefulShutdownCoordinator | force abort timed out | no automatic rerun | outcome may remain unknown | report only | manual inspection | components/remaining_run_count | `test_graceful_shutdown.py` |
@@ -54,4 +55,3 @@
 - Capability unsupported / Evidence corrupted：fail closed，不升级写回，不当作空数据。
 - Diagnostic degraded：Observability/Trace 失败不等于业务未执行。
 - Shutdown deferred：保留 worker/resource 真值，不能强关 Model 或伪造 idle。
-

@@ -8,6 +8,8 @@
 
 生产恢复权威输入仅为原始 `RunSnapshot` 与 `JournalRecord`。开始诊断前冻结副本并保留原件；不得手工修改 SQLite、digest、sequence、watermark，不得从当前 Registry、Memory、adapter 或测试 fixture 回填历史事实。
 
+边界必须分开：Historical Authority 只有 Snapshot 与 Journal；New Reconciliation Evidence 是独立人工审计记录、外部权威系统确认，以及审批后创建的新操作身份。人工结论写入外部工单或未来独立的 Incident / Reconciliation Record，作为后续人工操作输入。仓库当前没有 Reconciliation Store，本轮不实现 Store。该新记录不得改写原始 JournalRecord、已有 RunSnapshot、历史 AgentState，不得补造 `TOOL_COMPLETED`。
+
 ## Snapshot Check
 
 1. 校验 snapshot schema version=1，未知版本为 `UNSUPPORTED/INCOMPATIBLE_SCHEMA`。
@@ -47,9 +49,8 @@
 3. 确认 Tool 是 read-only、idempotent 还是 non-idempotent。
 4. 仅检查持久化 Completion Evidence；不使用当前 Registry 或测试 oracle。
 5. 通过外部权威系统由人工确认副作用是否发生；不得把查询结果写回原 Journal。
-6. 将人工结论记录为 `NOT_STARTED`、`COMMITTED` 或 `UNKNOWN` 的独立审计记录。
-7. 由授权人员决定是否创建全新身份的补偿或重试流程；非幂等 `COMMITTED/UNKNOWN` 默认不重试。
+6. 将人工结论记录为 `NOT_STARTED`、`COMMITTED` 或 `UNKNOWN` 的独立 Incident / Reconciliation Record；该记录属于外部工单或未来能力，不写回历史权威数据。
+7. 由授权人员把该新证据作为输入，决定是否创建审批后的全新操作身份；非幂等 `COMMITTED/UNKNOWN` 默认不重试。
 8. `RecoveryValidator` 始终只读，不自动执行 Tool/compensation。
 
 升级条件：外部系统不可查询、证据冲突、补偿失败、non-idempotent outcome unknown、worker 仍 detached。相关测试：RC-15/16、`test_recovery_integration.py`、`test_recovery_tool_completion_gap.py`、`test_recovery_version_compatibility.py`。
-
