@@ -1,6 +1,8 @@
-# Stage2 Runtime RC1 Resource Baseline
+# Stage2 Runtime RC1 Runtime Orchestration Overhead Baseline
 
-该基线只使用离线 Fake Adapter，数据仅描述本机测试环境，不构成跨机器或生产 SLA。发布硬 Gate 是 owner 计数归零与事实保真，不是耗时阈值。
+中文名称：**运行时编排开销基线**（Runtime orchestration overhead baseline）。
+
+该基线只使用 Offline Fake Adapter，数据仅描述本机测试环境，不构成跨机器或生产 SLA。它不包含真实 LLM、Embedding、Vector Store、Tool I/O、网络或远程数据库，因此不能解释为生产延迟、吞吐或容量。发布硬 Gate 是 Owner 计数归零与资源事实保真，不是毫秒阈值。
 
 ## Sequential baseline
 

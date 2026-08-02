@@ -1,6 +1,21 @@
 # Stage2 Runtime RC1 Release Gate
 
-本 Gate 适用于逻辑候选版本 `Stage2 Runtime RC1`。Gate 结论只能由真实测试与检查结果派生，Markdown 本身不是判定源。
+本 Gate 适用于逻辑候选版本 `Stage2 Runtime RC1`。`PASS` 仅表示 **Stage2 Runtime RC1 code-level gate passed**。Gate 结论只能由真实测试与检查结果派生，Markdown 本身不是判定源。
+
+## Gate Scope
+
+覆盖当前代码级契约、20 个 Required RC 场景、全仓回归、离线资源 Owner 不变量、固定敏感 marker 扫描与文档/代码一致性。它不是无条件发布授权。
+
+## Environment Assumptions
+
+- 单进程、当前 Python/依赖锁与本机文件系统；
+- Offline Fake Adapter 的编排开销基线；
+- 不访问真实 Model、Embedding、Vector Store、Tool、网络或远程数据库；
+- Snapshot 仍按默认关闭/显式 opt-in 合同；Recovery 仍为 validation only。
+
+## Out-of-scope Production Validation
+
+PASS 不等于生产容量验证、真实外部依赖验证、跨进程容灾、长时间 Soak Test、渗透测试已经完成，也不表示可以无条件大规模发布。这些验证需要独立环境、权限与发布决策。
 
 ## 判定规则
 
@@ -59,4 +74,3 @@
 ## Derived Assessment
 
 `ReleaseGateAssessment` 是测试辅助派生值，不是 Runtime Owner。它只保存固定 ID、计数和布尔检查结果，不保存路径、业务正文或原始异常。当前最终数值见第二轮结果文档；任何检查变化都必须重新计算，不能读取本文勾选项。
-
