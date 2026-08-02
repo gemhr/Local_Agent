@@ -80,7 +80,7 @@ RC1 包含 20 个必选场景：API E2E 4、Runtime E2E 3、Subsystem Integratio
 
 ## 20. Evidence Manifest
 
-`docs/runtime/stage2_runtime_evidence_manifest.md` 记录 43 个 Claim 的权威代码 Owner、真实测试节点、证据等级与限制。它是文档级 Derived Report，不持有 Runtime 对象，也不是事实 Owner。
+`docs/runtime/stage2_runtime_evidence_manifest.md` 记录 44 个 Claim 的 Authority 或 Derivation Owner、真实测试目标、证据等级、执行证据与限制。它是文档级 Derived Report，不持有 Runtime 对象，也不是事实 Owner。
 
 ## 21. Final Runtime Invariants
 
@@ -164,4 +164,4 @@ Recovery execution、Replay、Step result rehydration、Production Fault Enablem
 
 ## 32. 需要带回 ChatGPT 审查的信息
 
-请审查：43 项 Evidence Manifest 是否逐项可解析；P2-01 与 KL-01～KL-07 是否准确；最终测试计数是否来自本轮实际收集/执行；生产未验证项是否充分；人工对账、配置错误码、Legacy 与 shutdown 语义是否仍有夸大空间。
+请审查：44 项 Evidence Manifest 是否逐项可解析；P2-01 与 KL-01～KL-07 是否准确；最终测试计数是否来自本轮实际收集/执行；生产未验证项是否充分；人工对账、配置错误码、Legacy 与 shutdown 语义是否仍有夸大空间。
