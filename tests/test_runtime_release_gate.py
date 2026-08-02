@@ -15,6 +15,7 @@ def test_gate_pass_is_derived_from_actual_checks_and_fixed_ids() -> None:
         p2_findings=("P2-01",),
         known_limitations=("KL-01", "KL-02"),
         contract_tests_passed=True,
+        operations_docs_tests_passed=True,
         full_suite_passed=True,
         resource_invariants_passed=True,
         security_scan_passed=True,
@@ -31,6 +32,7 @@ def test_gate_pass_is_derived_from_actual_checks_and_fixed_ids() -> None:
         {"p0_blockers": ("P0-01",)},
         {"p1_blockers": ("P1-01",)},
         {"full_suite_passed": False},
+        {"operations_docs_tests_passed": False},
         {"resource_invariants_passed": False},
         {"security_scan_passed": False},
     ),
@@ -39,6 +41,7 @@ def test_each_hard_gate_failure_forces_fail(change) -> None:
     values = {
         "scenario_results": {"RC-01": True},
         "contract_tests_passed": True,
+        "operations_docs_tests_passed": True,
         "full_suite_passed": True,
         "resource_invariants_passed": True,
         "security_scan_passed": True,
@@ -53,8 +56,8 @@ def test_gate_rejects_paths_or_raw_errors_as_finding_ids() -> None:
             scenario_results={"RC-01": True},
             p0_blockers=(r"C:\private\provider-error",),
             contract_tests_passed=True,
+            operations_docs_tests_passed=True,
             full_suite_passed=True,
             resource_invariants_passed=True,
             security_scan_passed=True,
         )
-

@@ -45,9 +45,10 @@ def test_catalog_covers_critical_domains_without_universal_retry_advice() -> Non
         "Legacy compatibility",
     )
     assert all(domain in text for domain in domains)
-    assert "尚无统一固定 safe code；因此不为配置错误虚构代码" in text
+    assert "`RUNTIME_CONFIGURATION_ERROR` 是真实固定码" in text
+    assert "仅覆盖 ChatService 缺少 Coordinated factory" in text
+    assert "尚未完整建立统一 Settings Validation Error Taxonomy" in text
     assert "不 universally retryable" not in text
     assert "no automatic Tool call" in text
     assert "do not repeat search automatically" in text
     assert "Diagnostic degraded" in text
-

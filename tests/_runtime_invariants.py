@@ -27,10 +27,13 @@ class RuntimeInvariantReport:
 
     runtime_selection_count: int
     run_context_count: int
+    agent_state_owner_count: int
     cancellation_source_count: int
     channel_count: int
     sequence_owner_count: int
     registry_registration_count: int
+    reservation_count: int
+    permit_count: int
     root_span_count: int
     terminal_count: int
     post_terminal_business_event_count: int
@@ -39,12 +42,15 @@ class RuntimeInvariantReport:
     active_span_count: int
     pending_watcher_count: int
     pending_producer_count: int
+    detached_worker_count: int
+    active_worker_count: int
 
     @property
     def violations(self) -> tuple[str, ...]:
         expected_one = {
             "runtime_selection": self.runtime_selection_count,
             "run_context": self.run_context_count,
+            "agent_state_owner": self.agent_state_owner_count,
             "cancellation_source": self.cancellation_source_count,
             "channel": self.channel_count,
             "sequence_owner": self.sequence_owner_count,
@@ -64,8 +70,12 @@ class RuntimeInvariantReport:
             "active_registry": self.active_registry_count,
             "active_channel": self.active_channel_count,
             "active_span": self.active_span_count,
+            "reservation": self.reservation_count,
+            "permit": self.permit_count,
             "pending_watcher": self.pending_watcher_count,
             "pending_producer": self.pending_producer_count,
+            "detached_worker": self.detached_worker_count,
+            "active_worker": self.active_worker_count,
         }
         violations.extend(
             f"{name}_count"
@@ -87,16 +97,21 @@ def build_runtime_invariant_report(
     *,
     runtime_selection_count: int = 1,
     run_context_count: int = 1,
+    agent_state_owner_count: int = 1,
     cancellation_source_count: int = 1,
     channel_count: int = 1,
     sequence_owner_count: int = 1,
     registry_registration_count: int = 1,
+    reservation_count: int = 0,
+    permit_count: int = 0,
     root_span_count: int = 1,
     active_registry_count: int = 0,
     active_channel_count: int = 0,
     active_span_count: int = 0,
     pending_watcher_count: int = 0,
     pending_producer_count: int = 0,
+    detached_worker_count: int = 0,
+    active_worker_count: int = 0,
 ) -> RuntimeInvariantReport:
     materialized = tuple(events)
     terminals = [
@@ -112,10 +127,13 @@ def build_runtime_invariant_report(
     return RuntimeInvariantReport(
         runtime_selection_count=runtime_selection_count,
         run_context_count=run_context_count,
+        agent_state_owner_count=agent_state_owner_count,
         cancellation_source_count=cancellation_source_count,
         channel_count=channel_count,
         sequence_owner_count=sequence_owner_count,
         registry_registration_count=registry_registration_count,
+        reservation_count=reservation_count,
+        permit_count=permit_count,
         root_span_count=root_span_count,
         terminal_count=len(terminals),
         post_terminal_business_event_count=post_terminal_business,
@@ -124,4 +142,6 @@ def build_runtime_invariant_report(
         active_span_count=active_span_count,
         pending_watcher_count=pending_watcher_count,
         pending_producer_count=pending_producer_count,
+        detached_worker_count=detached_worker_count,
+        active_worker_count=active_worker_count,
     )

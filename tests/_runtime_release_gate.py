@@ -15,6 +15,7 @@ class ReleaseGateAssessment:
     p2_findings: tuple[str, ...]
     known_limitations: tuple[str, ...]
     contract_tests_passed: bool
+    operations_docs_tests_passed: bool
     rc_scenarios_passed: int
     rc_scenarios_required: int
     full_suite_passed: bool
@@ -38,6 +39,7 @@ def assess_release_gate(
     p2_findings: tuple[str, ...] = (),
     known_limitations: tuple[str, ...] = (),
     contract_tests_passed: bool,
+    operations_docs_tests_passed: bool,
     full_suite_passed: bool,
     resource_invariants_passed: bool,
     security_scan_passed: bool,
@@ -50,6 +52,7 @@ def assess_release_gate(
         and required > 0
         and passed == required
         and contract_tests_passed
+        and operations_docs_tests_passed
         and full_suite_passed
         and resource_invariants_passed
         and security_scan_passed
@@ -60,6 +63,7 @@ def assess_release_gate(
         p2_findings=p2_findings,
         known_limitations=known_limitations,
         contract_tests_passed=contract_tests_passed,
+        operations_docs_tests_passed=operations_docs_tests_passed,
         rc_scenarios_passed=passed,
         rc_scenarios_required=required,
         full_suite_passed=full_suite_passed,
@@ -67,4 +71,3 @@ def assess_release_gate(
         security_scan_passed=security_scan_passed,
         release_gate_status="PASS" if gate_passed else "FAIL",
     )
-
