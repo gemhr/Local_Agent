@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable, Dict, Generator, Optional
 
 from core.memory_manager import MemoryManager
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from core.runtime import (
     ContextBuildRequest, ContextBuilder, ContextBudgetExceededError, ContextItem, ContextSourceType, ContextTrustLevel,
     DeterministicTokenEstimator, ModelContextRequirements, ModelCostProfile, ModelPreference, ModelProfile,
@@ -188,29 +189,10 @@ class AgentRouter:
         self.summary_plan_max_tokens = 256
         self.knowledge_rewrite_max_tokens = 128
         self.tools: Dict[str, Dict[str, object]] = {}
-        self.agents_config = {
-            "core_router": {
-                "name": "Core Router",
-                "role": "处理通用问题，并协调辅助智能体。",
-                "avatar": "avatar_router.png",
-            },
-            "data_analyst": {
-                "name": "Data Analyst",
-                "role": "分析 CSV 和 Excel 文件，并总结洞见。",
-                "avatar": "avatar_excel.png",
-            },
-            "code_expert": {
-                "name": "Code Expert",
-                "role": "审查代码、排查问题并改进架构。",
-                "avatar": "avatar_code.png",
-            },
-            "knowledge_expert": {
-                "name": "Knowledge Expert",
-                "role": "在可用时依据本地知识库回答问题。",
-                "avatar": "avatar_knowledge.png",
-            },
-        }
-        self.delegate_agent_ids = ["data_analyst", "code_expert", "knowledge_expert"]
+        # Legacy 展示配置和委派 ID 从同一静态 Registry 派生；本轮不改变其
+        # 路由、执行或 fallback 行为。
+        self.agents_config = DEFAULT_AGENT_REGISTRY.legacy_display_config()
+        self.delegate_agent_ids = list(DEFAULT_AGENT_REGISTRY.delegated_specialist_ids())
 
     def register_tool(
         self,

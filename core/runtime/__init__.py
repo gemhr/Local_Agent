@@ -53,8 +53,25 @@ from core.runtime.model_context import (
     ContextItem, ContextSourceType, ContextStats, ContextTrustLevel, DeterministicTokenEstimator,
     MemoryContextRecord, MemoryProvenance, ModelContextRequirements, TokenEstimator,
 )
-from core.runtime.planning import Plan, PlanSource, PlanStep, PlanValidator, RiskLevel, TaskCapabilityRequirements, create_single_step_plan
+from core.runtime.planning import ExecutionKind, OutputPolicy, Plan, PlanSource, PlanStep, PlanValidator, RiskLevel, TaskCapabilityRequirements, create_single_step_plan
 from core.runtime.plan_graph import PlanGraph, PlanGraphValidationError, PlanGraphValidator
+from core.runtime.agent_registry import (
+    AgentRegistration, AgentRegistry, AgentRegistryError, AgentRegistryErrorCode,
+    DEFAULT_AGENT_REGISTRY, ResultContentType,
+)
+from core.runtime.invocation_bindings import (
+    AgentInvocationSpec, InvocationBindingError, InvocationBindingErrorCode,
+    StepInvocationBindings,
+)
+from core.runtime.multi_agent_planning import (
+    DelegatedPlanDecision, DelegatedTaskDecision, DirectAnswerDecision,
+    PLANNER_SCHEMA_VERSION, PlanResolver, PlanningDecision, PlanningError,
+    PlanningErrorCode, PlanningModel, PlanningRequest, PlanningSource,
+    ResolvedPlan, StrictPlanningDecisionParser,
+)
+from core.runtime.plan_compiler import (
+    PlanCompileConfig, PlanCompileError, PlanCompileErrorCode, PlanCompiler,
+)
 from core.runtime.model_selection import (ModelCostProfile, ModelPreference, ModelProfile, ModelProfileId, ModelResolver, ModelSelectionDecision, ModelSelectionError, ModelSelectionObjective, ModelSelectionPolicy, ModelSelectionReason, ModelSelectionRequest)
 from core.runtime.state_machine import (
     AgentStateMachine,
@@ -169,8 +186,12 @@ __all__ = [
     "ContextDropRecord", "ContextItem", "ContextSourceType", "ContextStats", "ContextTrustLevel",
     "DeterministicTokenEstimator", "MemoryContextRecord", "MemoryProvenance",
     "ModelContextRequirements", "TokenEstimator",
-    "Plan", "PlanSource", "PlanStep", "PlanValidator", "RiskLevel", "TaskCapabilityRequirements", "create_single_step_plan",
+    "ExecutionKind", "OutputPolicy", "Plan", "PlanSource", "PlanStep", "PlanValidator", "RiskLevel", "TaskCapabilityRequirements", "create_single_step_plan",
     "PlanGraph", "PlanGraphValidationError", "PlanGraphValidator",
+    "AgentRegistration", "AgentRegistry", "AgentRegistryError", "AgentRegistryErrorCode", "DEFAULT_AGENT_REGISTRY", "ResultContentType",
+    "AgentInvocationSpec", "InvocationBindingError", "InvocationBindingErrorCode", "StepInvocationBindings",
+    "DelegatedPlanDecision", "DelegatedTaskDecision", "DirectAnswerDecision", "PLANNER_SCHEMA_VERSION", "PlanResolver", "PlanningDecision", "PlanningError", "PlanningErrorCode", "PlanningModel", "PlanningRequest", "PlanningSource", "ResolvedPlan", "StrictPlanningDecisionParser",
+    "PlanCompileConfig", "PlanCompileError", "PlanCompileErrorCode", "PlanCompiler",
     "ModelCostProfile", "ModelPreference", "ModelProfile", "ModelProfileId", "ModelResolver", "ModelSelectionDecision", "ModelSelectionError", "ModelSelectionObjective", "ModelSelectionPolicy", "ModelSelectionReason", "ModelSelectionRequest",
     "CancellationToken",
     "Clock",
