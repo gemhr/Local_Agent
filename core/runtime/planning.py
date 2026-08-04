@@ -21,6 +21,21 @@ class RiskLevel(str, Enum):
     HIGH = "high"
 
 
+class ExecutionKind(str, Enum):
+    """Plan Step 的稳定执行分类；不表示任何运行状态。"""
+
+    AGENT = "AGENT"
+    SYNTHESIS = "SYNTHESIS"
+
+
+class OutputPolicy(str, Enum):
+    """由 Registry/Compiler 授权的静态输出策略。"""
+
+    INTERNAL = "INTERNAL"
+    FINAL_PASSTHROUGH = "FINAL_PASSTHROUGH"
+    FINAL_SYNTHESIS = "FINAL_SYNTHESIS"
+
+
 @dataclass(frozen=True, slots=True)
 class TaskCapabilityRequirements:
     """描述任务所需能力，不保存用户正文或具体模型信息。"""
@@ -55,6 +70,8 @@ class PlanStep:
     completion_criteria: str
     preferred_agent: str
     capability_requirements: TaskCapabilityRequirements
+    execution_kind: ExecutionKind = ExecutionKind.AGENT
+    output_policy: OutputPolicy = OutputPolicy.FINAL_PASSTHROUGH
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +109,14 @@ class PlanValidator:
                 raise ValueError("depends_on 只能包含非空步骤标识")
             if not isinstance(step.completion_criteria, str) or not step.completion_criteria.strip():
                 raise ValueError("completion_criteria 不能为空")
+            if not isinstance(step.preferred_agent, str) or not step.preferred_agent.strip():
+                raise ValueError("preferred_agent 不能为空")
             if not isinstance(step.capability_requirements, TaskCapabilityRequirements):
                 raise ValueError("capability_requirements 必须合法")
+            if not isinstance(step.execution_kind, ExecutionKind):
+                raise ValueError("execution_kind 必须合法")
+            if not isinstance(step.output_policy, OutputPolicy):
+                raise ValueError("output_policy 必须合法")
 
 
 def create_single_step_plan(agent_id: str, requirements: TaskCapabilityRequirements) -> Plan:
