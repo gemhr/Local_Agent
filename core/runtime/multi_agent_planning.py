@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 import json
@@ -39,6 +40,7 @@ class PlanningErrorCode(str, Enum):
     INVALID_REQUEST = "INVALID_REQUEST"
     PLANNING_MODEL_REQUIRED = "PLANNING_MODEL_REQUIRED"
     PLANNING_MODEL_FAILED = "PLANNING_MODEL_FAILED"
+    PLANNER_TIMEOUT = "PLANNER_TIMEOUT"
     PLANNER_SCHEMA_INVALID = "PLANNER_SCHEMA_INVALID"
     PLANNER_SCHEMA_VERSION_UNSUPPORTED = "PLANNER_SCHEMA_VERSION_UNSUPPORTED"
     PLANNER_DECISION_UNKNOWN = "PLANNER_DECISION_UNKNOWN"
@@ -347,7 +349,7 @@ class StrictPlanningDecisionParser:
 
 
 class PlanResolver:
-    """只做 resolution；WP1 不把它接入 API 或 Coordinator。"""
+    """Resolve a request into one validated Plan and run-scoped Bindings."""
 
     def __init__(
         self,
@@ -405,6 +407,7 @@ class PlanResolver:
                     RunCancelledError,
                     RunDeadlineExceededError,
                     BudgetExceededError,
+                    asyncio.CancelledError,
                 ),
             ):
                 raise

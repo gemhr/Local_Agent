@@ -75,7 +75,7 @@ async def test_run_span_start_fault_is_best_effort_and_business_runs_once():
         component="runtime",
     )
     scope = await CoordinatedRuntimeFactory(router, services).create_run_scope(
-        "agent", "query", fault_controller=controller
+        "core_router", "query", fault_controller=controller
     )
 
     result = await scope.execute()
@@ -103,7 +103,7 @@ async def test_run_span_end_fault_does_not_change_runtime_result_or_journal():
     )
     scope = await CoordinatedRuntimeFactory(
         FakeRouter(), services
-    ).create_run_scope("agent", "query", fault_controller=controller)
+    ).create_run_scope("core_router", "query", fault_controller=controller)
 
     result = await scope.execute()
     records = services.event_journal.read_after(scope.run_id, 0, 100)

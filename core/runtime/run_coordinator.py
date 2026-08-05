@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
 
 from core.runtime.activity import RuntimeActivityProvider, RuntimeActivityTracker
@@ -32,7 +34,17 @@ from core.runtime.parallel_execution import (
     StepExecutionMode,
 )
 from core.runtime.plan_graph import PlanGraphValidationError, PlanGraphValidator
-from core.runtime.planning import Plan
+from core.runtime.plan_fingerprint import PlanFingerprinter
+from core.runtime.planning import ExecutionKind, OutputPolicy, Plan
+from core.runtime.multi_agent_planning import (
+    PLANNER_SCHEMA_VERSION,
+    PlanResolver,
+    PlanningError,
+    PlanningRequest,
+    ResolvedPlan,
+)
+from core.runtime.agent_registry import AgentRegistryError
+from core.runtime.plan_compiler import PlanCompileError
 from core.runtime.run_registry import ActiveRunControlHandle, RunHandle, RunRegistry
 from core.runtime.scheduler import SchedulerError, SchedulerSnapshot, SerialScheduler
 from core.runtime.state import AgentState, RunStatus, StepStatus, StopReason
@@ -49,6 +61,8 @@ from core.runtime.events import (
     BudgetExhaustedPayload,
     CancellationPayload,
     ErrorPayload,
+    PlanCreatedPayload,
+    PlanningStartedPayload,
     RunCompletedPayload,
     RunStartedPayload,
     RuntimeEventType,
@@ -80,7 +94,15 @@ _SAFE_MESSAGES = {
     StopReason.BUDGET_EXHAUSTED: "运行预算已耗尽",
     StopReason.NO_ACTION: "当前计划没有可继续执行的步骤",
     StopReason.UNHANDLED_ERROR: "运行未能完成",
+    StopReason.PLANNING_FAILED: "运行规划失败",
 }
+
+
+class DynamicPlanState(str, Enum):
+    UNRESOLVED = "UNRESOLVED"
+    RESOLVING = "RESOLVING"
+    FROZEN = "FROZEN"
+    FAILED = "FAILED"
 
 
 class RunCoordinatorError(RuntimeError):
@@ -121,7 +143,7 @@ class RunCoordinatorResult:
     """Coordinator 返回的安全结构化结果，不保存业务正文或原始异常。"""
 
     run_id: str
-    plan_id: str
+    plan_id: str | None
     status: RunStatus
     stop_reason: StopReason
     succeeded_step_ids: tuple[str, ...]
@@ -138,7 +160,7 @@ CleanupCallback = Callable[[], Any]
 
 
 class RunCoordinator:
-    """绑定一个 Run 和一个不可变 Plan 的单次使用 Parent Runtime。"""
+    """Single-use Parent Runtime for either a trusted or dynamically frozen Plan."""
 
     def __init__(
         self,
@@ -157,14 +179,111 @@ class RunCoordinator:
         span_recorder=None,
         snapshot_store=None,
         runtime_metadata=None,
+        metrics_recorder=None,
+    ) -> None:
+        self._initialize_base(
+            run_context=run_context,
+            agent_state=agent_state,
+            budget_ledger=budget_ledger,
+            run_handle=run_handle,
+            run_registry=run_registry,
+            policy=policy,
+            state_machine=state_machine,
+            event_emitter=event_emitter,
+            span_recorder=span_recorder,
+            snapshot_store=snapshot_store,
+            runtime_metadata=runtime_metadata,
+            metrics_recorder=metrics_recorder,
+        )
+        self._bind_static_plan(plan, scheduler, executor)
+
+    @classmethod
+    def for_static_plan(cls, **kwargs) -> "RunCoordinator":
+        """显式构造已经拥有可信 Plan 的兼容 Runtime。"""
+        return cls(**kwargs)
+
+    @classmethod
+    def for_dynamic_resolver(
+        cls,
+        *,
+        run_context: RunContext,
+        plan_resolver: PlanResolver,
+        planning_request: PlanningRequest,
+        execution_factory: Callable[[], tuple[SerialScheduler, ParallelExecutor]],
+        agent_state: AgentState,
+        budget_ledger: BudgetLedger,
+        run_handle: ActiveRunControlHandle,
+        run_registry: RunRegistry,
+        policy: ParallelExecutionPolicy,
+        planning_timeout_seconds: float = 15.0,
+        state_machine: AgentStateMachine | None = None,
+        event_emitter: RunEventEmitter | None = None,
+        span_recorder=None,
+        snapshot_store=None,
+        runtime_metadata=None,
+        metrics_recorder=None,
+    ) -> "RunCoordinator":
+        """构造尚无 Plan/Scheduler/Checkpoint 的动态规划 Runtime。"""
+        if not isinstance(plan_resolver, PlanResolver):
+            raise TypeError("plan_resolver 必须是 PlanResolver")
+        if not isinstance(planning_request, PlanningRequest):
+            raise TypeError("planning_request 必须是 PlanningRequest")
+        if not callable(execution_factory):
+            raise TypeError("execution_factory 必须可调用")
+        if (
+            isinstance(planning_timeout_seconds, bool)
+            or not isinstance(planning_timeout_seconds, (int, float))
+            or not math.isfinite(float(planning_timeout_seconds))
+            or planning_timeout_seconds <= 0
+        ):
+            raise ValueError("planning_timeout_seconds 必须是正数")
+        self = cls.__new__(cls)
+        self._initialize_base(
+            run_context=run_context,
+            agent_state=agent_state,
+            budget_ledger=budget_ledger,
+            run_handle=run_handle,
+            run_registry=run_registry,
+            policy=policy,
+            state_machine=state_machine,
+            event_emitter=event_emitter,
+            span_recorder=span_recorder,
+            snapshot_store=snapshot_store,
+            runtime_metadata=runtime_metadata,
+            metrics_recorder=metrics_recorder,
+        )
+        self._dynamic = True
+        self._dynamic_plan_state = DynamicPlanState.UNRESOLVED
+        self._plan_resolver = plan_resolver
+        self._planning_request = planning_request
+        self._execution_factory = execution_factory
+        self._planning_timeout_seconds = float(planning_timeout_seconds)
+        return self
+
+    def _initialize_base(
+        self,
+        *,
+        run_context: RunContext,
+        agent_state: AgentState,
+        budget_ledger: BudgetLedger,
+        run_handle: ActiveRunControlHandle,
+        run_registry: RunRegistry,
+        policy: ParallelExecutionPolicy,
+        state_machine: AgentStateMachine | None,
+        event_emitter: RunEventEmitter | None,
+        span_recorder,
+        snapshot_store,
+        runtime_metadata,
+        metrics_recorder,
     ) -> None:
         self.run_context = run_context
-        self.plan = plan
+        self._plan: Plan | None = None
+        self._invocation_bindings = None
         self.agent_state = agent_state
         self.budget_ledger = budget_ledger
         self.run_handle = run_handle
-        self.scheduler = scheduler
-        self.executor = executor
+        self.scheduler: SerialScheduler | None = None
+        self.executor: ParallelExecutor | None = None
         self.run_registry = run_registry
         self.policy = policy
         self.state_machine = state_machine or AgentStateMachine()
@@ -175,43 +294,16 @@ class RunCoordinator:
             tracker = RuntimeActivityTracker(run_context.run_id)
             run_context.attach_activity_tracker(tracker)
         self.activity_tracker = tracker
-        event_channel = event_emitter.channel if event_emitter is not None else None
         self.checkpoint_coordinator = None
-        if snapshot_store is not None:
-            if event_channel is None:
-                raise ValueError("snapshot_store requires an event-backed coordinator")
-            PlanGraphValidator.validate(plan)
-            with agent_state.runtime_lock:
-                for step in plan.steps:
-                    existing = agent_state.steps.get(step.step_id)
-                    if existing is not None and existing.name != step.title:
-                        raise ValueError("Plan and AgentState step definitions differ")
-                for step in plan.steps:
-                    if step.step_id not in agent_state.steps:
-                        self.state_machine.register_plan_step(
-                            agent_state,
-                            step_id=step.step_id,
-                            name=step.title,
-                        )
-            provider = RuntimeActivityProvider(
-                run_id=run_context.run_id,
-                tracker=tracker,
-                claim_gate=scheduler.claim_gate,
-                agent_state=agent_state,
-                budget_ledger=budget_ledger,
-                event_channel=event_channel,
-            )
-            self.checkpoint_coordinator = CheckpointCoordinator(
-                run_context=run_context,
-                plan=plan,
-                agent_state=agent_state,
-                budget_ledger=budget_ledger,
-                event_channel=event_channel,
-                snapshot_store=snapshot_store,
-                claim_gate=scheduler.claim_gate,
-                activity_provider=provider,
-                runtime_metadata=runtime_metadata or default_runtime_metadata(),
-            )
+        self._snapshot_store = snapshot_store
+        self._runtime_metadata = runtime_metadata
+        self._metrics_recorder = metrics_recorder
+        self._dynamic = False
+        self._dynamic_plan_state = DynamicPlanState.FROZEN
+        self._plan_resolver = None
+        self._planning_request = None
+        self._execution_factory = None
+        self._planning_timeout_seconds = 0.0
 
         self._start_lock = threading.Lock()
         self._started = False
@@ -223,6 +315,238 @@ class RunCoordinator:
         self._cleanup_callbacks: list[CleanupCallback] = []
         self._deadline_watcher: threading.Timer | None = None
         self._executor_task: asyncio.Task[Any] | None = None
+
+    @property
+    def plan_frozen(self) -> bool:
+        return self._plan is not None and self._dynamic_plan_state is DynamicPlanState.FROZEN
+
+    @property
+    def plan(self) -> Plan | None:
+        return self._plan
+
+    @property
+    def invocation_bindings(self):
+        return self._invocation_bindings
+
+    @property
+    def dynamic_plan_state(self) -> DynamicPlanState:
+        return self._dynamic_plan_state
+
+    def _bind_static_plan(
+        self,
+        plan: Plan,
+        scheduler: SerialScheduler,
+        executor: ParallelExecutor,
+    ) -> None:
+        if not isinstance(plan, Plan):
+            raise TypeError("static coordinator 必须提供 Plan")
+        self._plan = plan
+        self.scheduler = scheduler
+        self.executor = executor
+        self._register_plan_steps_and_checkpoint()
+
+    def _freeze_dynamic_plan(self, resolved: ResolvedPlan) -> None:
+        if not self._dynamic or self._dynamic_plan_state is not DynamicPlanState.RESOLVING:
+            raise RunCoordinatorError("DYNAMIC_PLAN_FREEZE_INVALID", "动态 Plan 只能冻结一次")
+        scheduler, executor = self._execution_factory()
+        if not isinstance(scheduler, SerialScheduler) or not isinstance(executor, ParallelExecutor):
+            raise RunCoordinatorError("DYNAMIC_EXECUTION_FACTORY_INVALID", "动态执行组件构造失败")
+        self._plan = resolved.plan
+        self._invocation_bindings = resolved.invocation_bindings
+        self.scheduler = scheduler
+        self.executor = executor
+        self._register_plan_steps_and_checkpoint()
+        self._dynamic_plan_state = DynamicPlanState.FROZEN
+
+    def _register_plan_steps_and_checkpoint(self) -> None:
+        plan = self.plan
+        scheduler = self.scheduler
+        if plan is None or scheduler is None:
+            raise RunCoordinatorError("PLAN_NOT_FROZEN", "执行组件只能在 Plan 冻结后初始化")
+        PlanGraphValidator.validate(plan)
+        with self.agent_state.runtime_lock:
+            for step in plan.steps:
+                existing = self.agent_state.steps.get(step.step_id)
+                if existing is not None and existing.name != step.title:
+                    raise ValueError("Plan and AgentState step definitions differ")
+            for step in plan.steps:
+                if step.step_id not in self.agent_state.steps:
+                    self.state_machine.register_plan_step(
+                        self.agent_state, step_id=step.step_id, name=step.title
+                    )
+        if self._snapshot_store is None:
+            return
+        if self.event_emitter is None:
+            raise ValueError("snapshot_store requires an event-backed coordinator")
+        provider = RuntimeActivityProvider(
+            run_id=self.run_context.run_id,
+            tracker=self.activity_tracker,
+            claim_gate=scheduler.claim_gate,
+            agent_state=self.agent_state,
+            budget_ledger=self.budget_ledger,
+            event_channel=self.event_emitter.channel,
+        )
+        self.checkpoint_coordinator = CheckpointCoordinator(
+            run_context=self.run_context,
+            plan=plan,
+            agent_state=self.agent_state,
+            budget_ledger=self.budget_ledger,
+            event_channel=self.event_emitter.channel,
+            snapshot_store=self._snapshot_store,
+            claim_gate=scheduler.claim_gate,
+            activity_provider=provider,
+            runtime_metadata=self._runtime_metadata or default_runtime_metadata(),
+        )
+
+    async def _prepare_dynamic_execution(self) -> RunFinalizationDecision | None:
+        if self._dynamic_plan_state is not DynamicPlanState.UNRESOLVED:
+            raise RunCoordinatorError(
+                "DYNAMIC_PLAN_STATE_INVALID", "动态规划生命周期状态无效"
+            )
+        self._dynamic_plan_state = DynamicPlanState.RESOLVING
+        await self._emit_planning_started()
+        self.run_context.raise_if_inactive()
+        remaining = self.run_context.remaining_seconds()
+        effective_timeout = self._planning_timeout_seconds
+        limited_by_run_deadline = (
+            remaining is not None
+            and remaining <= self._planning_timeout_seconds
+        )
+        if remaining is not None:
+            effective_timeout = min(effective_timeout, remaining)
+        if effective_timeout <= 0:
+            raise RunDeadlineExceededError("run deadline exceeded")
+        planning_started = time.monotonic()
+        try:
+            try:
+                resolved = await asyncio.wait_for(
+                    self._plan_resolver.resolve(
+                        self._planning_request,
+                        self.run_context,
+                    ),
+                    timeout=effective_timeout,
+                )
+            except TimeoutError:
+                if limited_by_run_deadline:
+                    raise RunDeadlineExceededError("run deadline exceeded") from None
+                remaining_after = self.run_context.remaining_seconds()
+                if remaining_after is not None and remaining_after <= 0:
+                    raise RunDeadlineExceededError("run deadline exceeded") from None
+                raise PlanningError(
+                    self._planner_timeout_code(), "Planner 独立超时"
+                ) from None
+        except BaseException:
+            self._record_planning_metrics(
+                planning_source="unknown",
+                status="FAILED",
+                duration_seconds=time.monotonic() - planning_started,
+            )
+            raise
+        self._record_planning_metrics(
+            planning_source=resolved.planning_source.value,
+            status="SUCCEEDED",
+            duration_seconds=time.monotonic() - planning_started,
+        )
+        self.run_context.raise_if_inactive()
+        self._freeze_dynamic_plan(resolved)
+        await self._emit_plan_created(resolved)
+        if self.checkpoint_coordinator is not None:
+            checkpoint = await self.create_checkpoint(
+                mode=CheckpointMode.REQUIRE_QUIESCENT,
+                checkpoint_kind=CheckpointKind.POST_PLAN_PRE_EXECUTION,
+                timeout=self.run_context.remaining_seconds(),
+                cancellation_token=self.run_context.cancellation_token,
+            )
+            if not checkpoint.persisted:
+                self.run_context.raise_if_inactive()
+                return self._infrastructure_decision(
+                    "POST_PLAN_PRE_EXECUTION_CHECKPOINT_FAILED"
+                )
+        if self._multi_step_execution_not_ready():
+            return self._infrastructure_decision(
+                "MULTI_AGENT_EXECUTION_NOT_READY"
+            )
+        return None
+
+    @staticmethod
+    def _planner_timeout_code():
+        from core.runtime.multi_agent_planning import PlanningErrorCode
+
+        return PlanningErrorCode.PLANNER_TIMEOUT
+
+    def _record_planning_metrics(
+        self,
+        *,
+        planning_source: str,
+        status: str,
+        duration_seconds: float,
+    ) -> None:
+        recorder = self._metrics_recorder
+        if recorder is None:
+            return
+        labels = {"planning_source": planning_source, "status": status}
+        try:
+            recorder.increment_counter(
+                "runtime_planning_total", labels=labels
+            )
+            recorder.observe_histogram(
+                "runtime_planning_duration_seconds",
+                max(0.0, duration_seconds),
+                labels=labels,
+            )
+        except Exception:
+            return
+
+    def _multi_step_execution_not_ready(self) -> bool:
+        if self.plan is None:
+            raise RunCoordinatorError("PLAN_NOT_FROZEN", "执行准入要求冻结 Plan")
+        # WP3 removal marker: real MultiAgentDriver 接入后删除此阶段性保护。
+        return (
+            len(self.plan.steps) > 1
+            or any(step.execution_kind is ExecutionKind.SYNTHESIS for step in self.plan.steps)
+            or any(step.output_policy is OutputPolicy.INTERNAL for step in self.plan.steps)
+        )
+
+    async def _emit_planning_started(self) -> None:
+        if self.event_emitter is None:
+            return
+        await self.event_emitter.emit(
+            RuntimeEventType.PLANNING_STARTED,
+            PlanningStartedPayload(
+                planner_schema_version=PLANNER_SCHEMA_VERSION,
+                configured_timeout_ms=max(
+                    0, int(self._planning_timeout_seconds * 1000)
+                ),
+            ),
+            component="run_coordinator",
+        )
+
+    async def _emit_plan_created(self, resolved: ResolvedPlan) -> None:
+        if self.event_emitter is None:
+            return
+        await self.event_emitter.emit(
+            RuntimeEventType.PLAN_CREATED,
+            PlanCreatedPayload(
+                plan_id=resolved.plan.plan_id,
+                plan_version=resolved.plan.version,
+                fingerprint=PlanFingerprinter.fingerprint(resolved.plan),
+                step_count=len(resolved.plan.steps),
+                planning_source=resolved.planning_source.value,
+            ),
+            component="run_coordinator",
+        )
+
+    def _clear_invocation_bindings(
+        self, cleanup_error_codes: list[str]
+    ) -> None:
+        bindings = self._invocation_bindings
+        self._invocation_bindings = None
+        if bindings is None:
+            return
+        try:
+            bindings.close_and_clear()
+        except Exception:
+            cleanup_error_codes.append("INVOCATION_BINDINGS_CLEANUP_FAILED")
 
     async def create_checkpoint(
         self,
@@ -311,16 +635,22 @@ class RunCoordinator:
                 component="planner", operation="plan"
             )
             with activate_span(planner_span):
-                PlanGraphValidator.validate(self.plan)
+                if self._dynamic:
+                    decision = await self._prepare_dynamic_execution()
+                else:
+                    assert self.plan is not None and self.scheduler is not None
+                    PlanGraphValidator.validate(self.plan)
+            if decision is None:
+                assert self.plan is not None and self.scheduler is not None
                 self.scheduler.prepare(
                     self.plan, self.agent_state, self._event_time(),
                     self.policy.max_concurrency,
                 )
-            decision = await self._execute_batches(
-                driver=driver,
-                execution_mode=execution_mode,
-                concurrency_specs=concurrency_specs,
-            )
+                decision = await self._execute_batches(
+                    driver=driver,
+                    execution_mode=execution_mode,
+                    concurrency_specs=concurrency_specs,
+                )
         except BudgetExceededError as exc:
             self._budget_dimension = exc.dimension
             decision = self._budget_decision()
@@ -328,6 +658,12 @@ class RunCoordinator:
             decision = self._deadline_decision()
         except RunCancelledError:
             decision = self._cancellation_decision()
+        except (PlanningError, AgentRegistryError, PlanCompileError) as exc:
+            self._dynamic_plan_state = DynamicPlanState.FAILED
+            code = getattr(exc, "error_code", "PLANNING_FAILED")
+            decision = self._planning_failure_decision(
+                code.value if isinstance(code, Enum) else str(code)
+            )
         except asyncio.CancelledError:
             task_cancelled = True
             decision = self._cancellation_decision(
@@ -357,6 +693,11 @@ class RunCoordinator:
                 decision = self._infrastructure_decision(
                     "COORDINATOR_FINALIZATION_REQUIRED"
                 )
+            if self._dynamic and self._dynamic_plan_state in {
+                DynamicPlanState.UNRESOLVED,
+                DynamicPlanState.RESOLVING,
+            }:
+                self._dynamic_plan_state = DynamicPlanState.FAILED
             await self._settle_active_steps(decision, cleanup_error_codes)
             with self.activity_tracker.track(
                 "state_event_transitions_in_flight"
@@ -370,6 +711,7 @@ class RunCoordinator:
                         "RUNTIME_TERMINAL_PUBLICATION_FAILED"
                     )
             self._stop_deadline_watcher(cleanup_error_codes)
+            self._clear_invocation_bindings(cleanup_error_codes)
             await self._run_cleanup_callbacks(cleanup_error_codes)
             budget_snapshot = self._snapshot_budget(cleanup_error_codes)
             if registered:
@@ -403,6 +745,11 @@ class RunCoordinator:
         execution_mode: StepExecutionMode,
         concurrency_specs: dict[str, StepConcurrencySpec] | None,
     ) -> RunFinalizationDecision:
+        if self.plan is None or self.scheduler is None or self.executor is None:
+            raise RunCoordinatorError(
+                "EXECUTION_BEFORE_PLAN_FROZEN",
+                "Plan 冻结前不得进入执行阶段",
+            )
         while True:
             self.run_context.raise_if_inactive()
             snapshot = self.scheduler.evaluate(
@@ -568,6 +915,15 @@ class RunCoordinator:
             StopReason.DEADLINE_EXCEEDED,
             "DEADLINE_EXCEEDED",
             _SAFE_MESSAGES[StopReason.DEADLINE_EXCEEDED],
+        )
+
+    @staticmethod
+    def _planning_failure_decision(error_code: str) -> RunFinalizationDecision:
+        return RunFinalizationDecision(
+            RunStatus.FAILED,
+            StopReason.PLANNING_FAILED,
+            error_code,
+            _SAFE_MESSAGES[StopReason.PLANNING_FAILED],
         )
 
     @staticmethod
@@ -878,7 +1234,8 @@ class RunCoordinator:
         budget_snapshot: BudgetSnapshot,
         cleanup_error_codes: list[str],
     ) -> RunCoordinatorResult:
-        ordered_ids = tuple(step.step_id for step in self.plan.steps)
+        plan = self.plan
+        ordered_ids = tuple(step.step_id for step in plan.steps) if plan else ()
 
         def ids_for(status: StepStatus) -> tuple[str, ...]:
             return tuple(
@@ -890,7 +1247,7 @@ class RunCoordinator:
 
         return RunCoordinatorResult(
             run_id=self.run_context.run_id,
-            plan_id=self.plan.plan_id,
+            plan_id=plan.plan_id if plan is not None else None,
             status=self.agent_state.status,
             stop_reason=self.agent_state.stop_reason or decision.stop_reason,
             succeeded_step_ids=ids_for(StepStatus.SUCCEEDED),

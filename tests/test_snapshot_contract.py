@@ -221,3 +221,45 @@ def test_attempt_unknown_round_trips_as_null_and_started_contradiction_fails():
         replace(step, execution_started=True)
     with pytest.raises(ValueError, match="attempt_count"):
         replace(step, attempt_count=True)
+
+
+def test_v1_plan_snapshot_payload_remains_readable_without_v2_output_policy():
+    from core.runtime.snapshot_serialization import sha256_digest
+
+    snapshot = make_snapshot()
+    payload = snapshot.to_payload()
+    plan_payload = payload["plan_snapshot"]
+    plan_payload["plan_schema_version"] = 1
+    for step in plan_payload["steps"]:
+        step.pop("output_policy")
+    legacy_plan = PlanSnapshot.from_payload(plan_payload)
+    payload["plan_fingerprint"] = PlanFingerprinter.fingerprint_snapshot(
+        legacy_plan
+    )
+    payload["payload_digest"] = sha256_digest(
+        {key: value for key, value in payload.items() if key != "payload_digest"}
+    )
+
+    restored = RunSnapshot.from_payload(payload)
+
+    assert restored.plan_snapshot.plan_schema_version == 1
+    assert restored.plan_snapshot.steps[0].output_policy == "FINAL_PASSTHROUGH"
+
+
+def test_v2_plan_snapshot_rejects_missing_output_policy():
+    payload = make_snapshot().to_payload()
+    payload["plan_snapshot"]["steps"][0].pop("output_policy")
+    with pytest.raises(ValueError, match="requires output_policy"):
+        RunSnapshot.from_payload(payload)
+
+
+def test_unknown_plan_snapshot_schema_and_execution_contract_fail_closed():
+    payload = make_snapshot().to_payload()
+    payload["plan_snapshot"]["plan_schema_version"] = 3
+    with pytest.raises(ValueError, match="unsupported plan snapshot schema"):
+        RunSnapshot.from_payload(payload)
+
+    payload = make_snapshot().to_payload()
+    payload["plan_snapshot"]["steps"][0]["static_execution_kind"] = "TOOL"
+    with pytest.raises(ValueError):
+        RunSnapshot.from_payload(payload)

@@ -90,6 +90,7 @@ from core.runtime.scheduler import (
     StepClaim,
 )
 from core.runtime.run_coordinator import (
+    DynamicPlanState,
     RunCoordinator,
     RunCoordinatorError,
     RunCoordinatorResult,
@@ -104,6 +105,8 @@ from core.runtime.events import (
     ModelCompletedPayload,
     ModelStartedPayload,
     OutputDeltaPayload,
+    PlanCreatedPayload,
+    PlanningStartedPayload,
     RunCompletedPayload,
     RunStartedPayload,
     RetrievalBudgetPayload,
@@ -204,6 +207,7 @@ __all__ = [
     "RunCancelledError",
     "RunContext",
     "RunCoordinator",
+    "DynamicPlanState",
     "RunCoordinatorError",
     "RunCoordinatorResult",
     "RunContextData",
@@ -254,6 +258,8 @@ __all__ = [
     "ModelCompletedPayload",
     "ModelStartedPayload",
     "OutputDeltaPayload",
+    "PlanCreatedPayload",
+    "PlanningStartedPayload",
     "RunCompletedPayload",
     "RunEventEmitter",
     "RunStartedPayload",
@@ -784,7 +790,9 @@ from core.runtime.runtime_factory import (
     CoordinatedRunScope,
     CoordinatedRuntimeFactory,
     CoordinatedSingleAgentDriver,
+    ResolvedSingleStepDriver,
 )
+from core.runtime.planning_model_adapter import UnifiedPlanningModelAdapter
 
 __all__ += [
     "ApplicationRuntimeServices",
@@ -793,6 +801,8 @@ __all__ += [
     "CoordinatedRunScope",
     "CoordinatedRuntimeFactory",
     "CoordinatedSingleAgentDriver",
+    "ResolvedSingleStepDriver",
+    "UnifiedPlanningModelAdapter",
     "RuntimeInitializationError",
     "RuntimeInitializationStack",
     "RuntimeLifecycleIssue",

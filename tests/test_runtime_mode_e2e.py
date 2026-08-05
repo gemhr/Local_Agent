@@ -34,7 +34,17 @@ class _FakeModel:
         self.calls += 1
         if self.error is not None:
             raise self.error
-        yield self.output
+        if "LocalAgent Planner" in messages[0]["content"]:
+            yield json.dumps(
+                {
+                    "schema_version": 1,
+                    "decision": "DIRECT_ANSWER",
+                    "agent_id": "core_router",
+                    "reason_code": "MODEL_DIRECT",
+                }
+            )
+        else:
+            yield self.output
 
 
 async def _endpoint_chunks(service):
@@ -86,7 +96,7 @@ async def test_api_to_factory_to_output_delta_to_terminal_happy_path(monkeypatch
     assert wire_text == "offline answer"
     assert _terminal_count(chunks) == 1
     assert registry.observability_snapshot()["active_runs"] == 0
-    assert model.calls == 1
+    assert model.calls == 2
 
 
 @pytest.mark.asyncio

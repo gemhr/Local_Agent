@@ -48,6 +48,8 @@ class ChatStreamProtocolError(RuntimeError):
 _CONTROL_EVENT_TYPES = frozenset(
     {
         RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.PLANNING_STARTED,
+        RuntimeEventType.PLAN_CREATED,
         RuntimeEventType.STEP_STARTED,
         RuntimeEventType.STEP_COMPLETED,
         RuntimeEventType.MODEL_STARTED,
@@ -66,6 +68,17 @@ _CONTROL_EVENT_TYPES = frozenset(
 
 _PAYLOAD_FIELD_ALLOWLIST: dict[RuntimeEventType, tuple[str, ...]] = {
     RuntimeEventType.RUN_STARTED: ("status",),
+    RuntimeEventType.PLANNING_STARTED: (
+        "planner_schema_version",
+        "configured_timeout_ms",
+    ),
+    RuntimeEventType.PLAN_CREATED: (
+        "plan_id",
+        "plan_version",
+        "fingerprint",
+        "step_count",
+        "planning_source",
+    ),
     RuntimeEventType.STEP_STARTED: ("status",),
     RuntimeEventType.STEP_COMPLETED: (
         "status",

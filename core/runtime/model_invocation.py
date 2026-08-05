@@ -31,7 +31,7 @@ from core.runtime.model_routing import (
 )
 from core.runtime.model_selection import ModelProfileId
 from core.runtime.retry import RetryExecutor, RetryPolicy
-from core.runtime.event_emitter import StepEventEmitter
+from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
 from core.runtime.event_journal import JournalError
 from core.runtime.fault_injection import FaultInjectionController
 from core.runtime.fault_injection_contract import (
@@ -366,7 +366,7 @@ class ModelInvocationRouter:
         token_estimate: int,
         max_tokens: int,
         output_started: bool = False,
-        event_emitter: StepEventEmitter | None = None,
+        event_emitter: RunEventEmitter | StepEventEmitter | None = None,
         generation_options: Mapping[str, object] | None = None,
         fault_controller: FaultInjectionController | None = None,
     ) -> ModelInvocationResult:
@@ -378,7 +378,7 @@ class ModelInvocationRouter:
             component="model_invocation",
             operation="invoke",
             step_id=(
-                event_emitter.step_id
+                getattr(event_emitter, "step_id", None)
                 if event_emitter is not None
                 else None
             ),
@@ -457,7 +457,7 @@ class ModelInvocationRouter:
         token_estimate: int,
         max_tokens: int,
         output_started: bool = False,
-        event_emitter: StepEventEmitter | None = None,
+        event_emitter: RunEventEmitter | StepEventEmitter | None = None,
         generation_options: Mapping[str, object] | None = None,
         fault_controller: FaultInjectionController | None = None,
     ) -> ModelInvocationResult:
@@ -942,7 +942,7 @@ class ModelInvocationRouter:
     def _start_model_attempt_span(
         self,
         run_context: RunContext,
-        event_emitter: StepEventEmitter | None,
+        event_emitter: RunEventEmitter | StepEventEmitter | None,
         candidate: ModelRoutingCandidate,
         candidate_index: int,
         retry_index: int,
@@ -954,7 +954,7 @@ class ModelInvocationRouter:
             run_id=run_context.run_id,
             component="model_attempt",
             operation="attempt",
-            step_id=event_emitter.step_id if event_emitter is not None else None,
+            step_id=getattr(event_emitter, "step_id", None),
         )
         if handle.context is not None:
             handle.set_safe_attribute("model_profile", candidate.profile_id.value)
@@ -965,7 +965,7 @@ class ModelInvocationRouter:
     def _record_pre_provider_attempt_span(
         self,
         run_context: RunContext,
-        event_emitter: StepEventEmitter | None,
+        event_emitter: RunEventEmitter | StepEventEmitter | None,
         candidate: ModelRoutingCandidate,
         candidate_index: int,
         retry_index: int,
@@ -1000,7 +1000,7 @@ class ModelInvocationRouter:
 
     @staticmethod
     def _emit_attempt_completed(
-        event_emitter: StepEventEmitter | None,
+        event_emitter: RunEventEmitter | StepEventEmitter | None,
         *,
         candidate: ModelRoutingCandidate,
         candidate_index: int,
@@ -1034,7 +1034,7 @@ class ModelInvocationRouter:
 
     @staticmethod
     def _emit_attempt_started(
-        event_emitter: StepEventEmitter | None,
+        event_emitter: RunEventEmitter | StepEventEmitter | None,
         *,
         candidate: ModelRoutingCandidate,
         candidate_index: int,

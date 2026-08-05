@@ -471,6 +471,17 @@ class CheckpointCoordinator:
                 )
             ):
                 raise ValueError("checkpoint kind is inconsistent")
+        elif checkpoint_kind is CheckpointKind.POST_PLAN_PRE_EXECUTION:
+            if (
+                not quiescent
+                or run_status is not RunStatus.RUNNING
+                or running
+                or any(
+                    step.execution_started
+                    for step in state_snapshot.step_states
+                )
+            ):
+                raise ValueError("checkpoint kind is inconsistent")
         elif checkpoint_kind is CheckpointKind.STEP_BOUNDARY:
             if not quiescent or terminal or running:
                 raise ValueError("checkpoint kind is inconsistent")

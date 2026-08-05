@@ -64,7 +64,7 @@ async def test_terminal_publication_fault_keeps_authoritative_state_and_cleanup(
     services = make_services(journal=journal, snapshot_enabled=False)
     factory = CoordinatedRuntimeFactory(FakeRouter(), services)
     scope = await factory.create_run_scope(
-        "agent",
+        "core_router",
         "query",
         fault_controller=event_controller(
             point, event_type=RuntimeEventType.RUN_COMPLETED
@@ -102,14 +102,14 @@ async def test_run_scoped_controller_isolation_does_not_close_normal_run_channel
     services = make_services(journal=journal, snapshot_enabled=False)
     factory = CoordinatedRuntimeFactory(FakeRouter(), services)
     failed_scope = await factory.create_run_scope(
-        "agent",
+        "core_router",
         "query-a",
         fault_controller=event_controller(
             FaultPoint.EVENT_BEFORE_JOURNAL_APPEND,
             event_type=RuntimeEventType.RUN_STARTED,
         ),
     )
-    normal_scope = await factory.create_run_scope("agent", "query-b")
+    normal_scope = await factory.create_run_scope("core_router", "query-b")
 
     failed_result = await failed_scope.execute()
     normal_result = await normal_scope.execute()

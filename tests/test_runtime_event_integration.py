@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 import uuid
@@ -52,7 +53,17 @@ class FakeModel:
         self.calls += 1
         if self.error is not None:
             raise self.error
-        yield self.output
+        if "LocalAgent Planner" in messages[0]["content"]:
+            yield json.dumps(
+                {
+                    "schema_version": 1,
+                    "decision": "DIRECT_ANSWER",
+                    "agent_id": "core_router",
+                    "reason_code": "MODEL_DIRECT",
+                }
+            )
+        else:
+            yield self.output
 
 
 class RuntimeEventIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -83,6 +94,10 @@ class RuntimeEventIntegrationTests(unittest.IsolatedAsyncioTestCase):
             types,
             [
                 RuntimeEventType.RUN_STARTED,
+                RuntimeEventType.PLANNING_STARTED,
+                RuntimeEventType.MODEL_STARTED,
+                RuntimeEventType.MODEL_COMPLETED,
+                RuntimeEventType.PLAN_CREATED,
                 RuntimeEventType.STEP_STARTED,
                 RuntimeEventType.MODEL_STARTED,
                 RuntimeEventType.MODEL_COMPLETED,
@@ -100,7 +115,7 @@ class RuntimeEventIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(output.payload, OutputDeltaPayload("coordinated answer"))
         self.assertNotIn("[[ORCH]]", output.payload.text)
-        self.assertEqual(model.calls, 1)
+        self.assertEqual(model.calls, 2)
 
     async def test_compatibility_method_reads_output_from_event_channel(self):
         with tempfile.TemporaryDirectory() as directory:

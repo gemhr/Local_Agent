@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import tempfile
 import threading
 import unittest
@@ -613,7 +614,17 @@ class RunCoordinatorRealEntryTests(unittest.IsolatedAsyncioTestCase):
 
             def generate(self, messages, **kwargs):
                 self.calls += 1
-                yield "coordinated answer"
+                if "LocalAgent Planner" in messages[0]["content"]:
+                    yield json.dumps(
+                        {
+                            "schema_version": 1,
+                            "decision": "DIRECT_ANSWER",
+                            "agent_id": "core_router",
+                            "reason_code": "MODEL_DIRECT",
+                        }
+                    )
+                else:
+                    yield "coordinated answer"
 
         with tempfile.TemporaryDirectory() as directory:
             memory = MemoryManager(str(Path(directory) / "memory.db"))
@@ -642,8 +653,8 @@ class RunCoordinatorRealEntryTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(output, "coordinated answer")
         self.assertEqual(result.status, RunStatus.SUCCEEDED)
-        self.assertEqual(plan_count, 1)
-        self.assertEqual(model.calls, 1)
+        self.assertEqual(plan_count, 0)
+        self.assertEqual(model.calls, 2)
         self.assertEqual(states[-1].status, RunStatus.SUCCEEDED)
 
     def test_new_driver_has_no_lifecycle_or_registry_writes(self) -> None:

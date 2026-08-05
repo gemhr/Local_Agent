@@ -73,6 +73,7 @@ _GLOBAL_ALLOWED_LABELS = frozenset(
         "runtime_mode",
         "tool_name",
         "budget_dimension",
+        "planning_source",
         "reason",
     }
 )
@@ -188,6 +189,7 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
         _descriptor("runtime_model_attempts_total", MetricType.COUNTER, "Model Attempt 数", "attempts", "model_profile"),
         _descriptor("runtime_tool_attempts_total", MetricType.COUNTER, "Tool Attempt 数", "attempts", "tool_name"),
         _descriptor("runtime_retrievals_total", MetricType.COUNTER, "Retrieval 数", "retrievals"),
+        _descriptor("runtime_planning_total", MetricType.COUNTER, "Planning resolution count", "resolutions", "planning_source", "status"),
         _descriptor("runtime_retries_total", MetricType.COUNTER, "Retry Attempt 数", "retries", "component"),
         _descriptor("runtime_budget_exhaustions_total", MetricType.COUNTER, "预算耗尽数", "events", "component", "budget_dimension", "status"),
         _descriptor("runtime_timeouts_total", MetricType.COUNTER, "超时数", "events", "component", "status"),
@@ -216,6 +218,7 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
         _descriptor("runtime_model_duration_seconds", MetricType.HISTOGRAM, "Model Attempt 时长", "seconds", "status", "model_profile"),
         _descriptor("runtime_tool_duration_seconds", MetricType.HISTOGRAM, "Tool Attempt 时长", "seconds", "status", "tool_name"),
         _descriptor("runtime_retrieval_duration_seconds", MetricType.HISTOGRAM, "Retrieval 时长", "seconds", "status"),
+        _descriptor("runtime_planning_duration_seconds", MetricType.HISTOGRAM, "Planning resolution duration", "seconds", "planning_source", "status"),
         _descriptor("runtime_retrieval_stage_duration_seconds", MetricType.HISTOGRAM, "Retrieval Stage 时长", "seconds", "status", "retrieval_stage"),
         _descriptor("runtime_journal_append_duration_seconds", MetricType.HISTOGRAM, "Journal 追加时长", "seconds"),
         _descriptor("runtime_blocking_executor_wait_seconds", MetricType.HISTOGRAM, "Blocking Executor 等待时长", "seconds"),

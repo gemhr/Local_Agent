@@ -14,7 +14,13 @@ from typing import Any
 
 from core.runtime.budget import BudgetSnapshot as RuntimeBudgetSnapshot
 from core.runtime.checkpoint_contract import CheckpointKind, RuntimeActivitySnapshot
-from core.runtime.planning import Plan, PlanStep, PlanValidator
+from core.runtime.planning import (
+    ExecutionKind,
+    OutputPolicy,
+    Plan,
+    PlanStep,
+    PlanValidator,
+)
 from core.runtime.snapshot_serialization import (
     parse_utc,
     require_finite_number,
@@ -28,7 +34,7 @@ from core.runtime.state import AgentState, RunStatus, StepState, StepStatus, Sto
 
 
 SNAPSHOT_SCHEMA_VERSION = 1
-PLAN_SNAPSHOT_SCHEMA_VERSION = 1
+PLAN_SNAPSHOT_SCHEMA_VERSION = 2
 STATE_SNAPSHOT_SCHEMA_VERSION = 1
 BUDGET_SNAPSHOT_SCHEMA_VERSION = 1
 SNAPSHOT_DIGEST_ALGORITHM = "sha256-v1"
@@ -196,11 +202,15 @@ class PlanStepSnapshot:
     capability_requirements: Mapping[str, Any]
     completion_criteria: TextSummary
     static_inputs: Mapping[str, TextSummary]
+    output_policy: str = "FINAL_PASSTHROUGH"
 
     def __post_init__(self) -> None:
         _require_safe_token(self.step_id, "step_id")
         _require_safe_token(self.agent, "agent")
         _require_safe_token(self.static_execution_kind, "static_execution_kind")
+        _require_safe_token(self.output_policy, "output_policy")
+        ExecutionKind(self.static_execution_kind)
+        OutputPolicy(self.output_policy)
         if not isinstance(self.dependency_step_ids, tuple):
             raise ValueError("dependency_step_ids must be a tuple")
         if len(set(self.dependency_step_ids)) != len(self.dependency_step_ids):
@@ -240,7 +250,8 @@ class PlanStepSnapshot:
             dependency_step_ids=tuple(
                 sorted(_safe_identifier(item) for item in step.depends_on)
             ),
-            static_execution_kind="AGENT",
+            static_execution_kind=step.execution_kind.value,
+            output_policy=step.output_policy.value,
             capability_requirements=capability,
             completion_criteria=TextSummary.from_text(step.completion_criteria),
             static_inputs=MappingProxyType(
@@ -264,6 +275,7 @@ class PlanStepSnapshot:
             agent=payload.get("agent"),
             dependency_step_ids=tuple(dependencies),
             static_execution_kind=payload.get("static_execution_kind"),
+            output_policy=payload.get("output_policy", "FINAL_PASSTHROUGH"),
             capability_requirements=payload.get("capability_requirements"),
             completion_criteria=TextSummary.from_payload(
                 payload.get("completion_criteria")
@@ -273,6 +285,20 @@ class PlanStepSnapshot:
                 for key, value in static_inputs.items()
             },
         )
+
+    def to_contract_payload(self, *, include_output_policy: bool) -> dict[str, object]:
+        payload = {
+            "step_id": self.step_id,
+            "agent": self.agent,
+            "dependency_step_ids": self.dependency_step_ids,
+            "static_execution_kind": self.static_execution_kind,
+            "capability_requirements": self.capability_requirements,
+            "completion_criteria": self.completion_criteria,
+            "static_inputs": self.static_inputs,
+        }
+        if include_output_policy:
+            payload["output_policy"] = self.output_policy
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +312,8 @@ class PlanSnapshot:
 
     def __post_init__(self) -> None:
         require_int(self.plan_schema_version, "plan_schema_version", minimum=1)
+        if self.plan_schema_version not in {1, PLAN_SNAPSHOT_SCHEMA_VERSION}:
+            raise ValueError("unsupported plan snapshot schema version")
         _require_safe_token(self.plan_id, "plan_id")
         require_int(self.plan_version, "plan_version", minimum=1)
         _require_safe_token(self.source, "source")
@@ -329,14 +357,36 @@ class PlanSnapshot:
     def from_payload(cls, payload: object) -> "PlanSnapshot":
         if not isinstance(payload, Mapping) or not isinstance(payload.get("steps"), list):
             raise ValueError("plan snapshot must be an object with steps")
+        version = payload.get("plan_schema_version")
+        if version == PLAN_SNAPSHOT_SCHEMA_VERSION and any(
+            not isinstance(item, Mapping) or "output_policy" not in item
+            for item in payload["steps"]
+        ):
+            raise ValueError("v2 plan step snapshot requires output_policy")
         return cls(
-            plan_schema_version=payload.get("plan_schema_version"),
+            plan_schema_version=version,
             plan_id=payload.get("plan_id"),
             plan_version=payload.get("plan_version"),
             source=payload.get("source"),
             task_summary=TextSummary.from_payload(payload.get("task_summary")),
             steps=tuple(PlanStepSnapshot.from_payload(item) for item in payload["steps"]),
         )
+
+    def to_contract_payload(self) -> dict[str, object]:
+        include_output_policy = self.plan_schema_version >= 2
+        return {
+            "plan_schema_version": self.plan_schema_version,
+            "plan_id": self.plan_id,
+            "plan_version": self.plan_version,
+            "source": self.source,
+            "task_summary": self.task_summary,
+            "steps": tuple(
+                step.to_contract_payload(
+                    include_output_policy=include_output_policy
+                )
+                for step in self.steps
+            ),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -820,11 +870,11 @@ class RunSnapshot:
         )
         return cls(
             **source,
-            payload_digest=sha256_digest(source),
+            payload_digest=sha256_digest(cls._digest_contract_values(source)),
         )
 
     def digest_source(self) -> dict[str, object]:
-        return self._digest_source_values(
+        source = self._digest_source_values(
             snapshot_schema_version=self.snapshot_schema_version,
             snapshot_id=self.snapshot_id,
             run_id=self.run_id,
@@ -844,10 +894,19 @@ class RunSnapshot:
             activity_snapshot=self.activity_snapshot,
             created_at=self.created_at,
         )
+        return self._digest_contract_values(source)
 
     @staticmethod
     def _digest_source_values(**values: object) -> dict[str, object]:
         return dict(values)
+
+    @staticmethod
+    def _digest_contract_values(values: Mapping[str, object]) -> dict[str, object]:
+        contracted = dict(values)
+        plan_snapshot = contracted.get("plan_snapshot")
+        if isinstance(plan_snapshot, PlanSnapshot):
+            contracted["plan_snapshot"] = plan_snapshot.to_contract_payload()
+        return contracted
 
     def verify_digest(self) -> None:
         self.validate_consistency()

@@ -15,8 +15,8 @@ async def test_factory_creates_isolated_single_identity_run_scopes() -> None:
     services = make_services()
     factory = CoordinatedRuntimeFactory(FakeRouter(), services)
 
-    first = await factory.create_run_scope("agent-a", "question")
-    second = await factory.create_run_scope("agent-a", "question")
+    first = await factory.create_run_scope("core_router", "question")
+    second = await factory.create_run_scope("core_router", "question")
 
     assert first.run_context.run_id == first.agent_state.run_id
     assert first.event_channel.run_id == first.run_context.run_id
@@ -24,7 +24,9 @@ async def test_factory_creates_isolated_single_identity_run_scopes() -> None:
     assert first.coordinator.event_emitter is first.event_emitter
     assert first.coordinator.activity_tracker is first.run_context.activity_tracker
     assert first.cancellation_source.token is first.run_context.cancellation_token
-    assert first.checkpoint_coordinator is not None
+    assert first.checkpoint_coordinator is None
+    assert first.plan is None
+    assert first.scheduler is None
     assert first.run_context.run_id != second.run_context.run_id
     assert first.agent_state is not second.agent_state
     assert first.event_channel is not second.event_channel
@@ -39,7 +41,7 @@ async def test_factory_creates_isolated_single_identity_run_scopes() -> None:
 async def test_factory_does_not_cache_request_scope_or_auto_checkpoint() -> None:
     services = make_services()
     factory = CoordinatedRuntimeFactory(FakeRouter(), services)
-    scope = await factory.create("agent-a", "question")
+    scope = await factory.create("core_router", "question")
 
     assert not hasattr(services, "run_context")
     assert not hasattr(services, "agent_state")
@@ -56,11 +58,11 @@ async def test_factory_transports_fault_controller_only_on_the_selected_run() ->
     controller = FaultInjectionController.disabled()
 
     selected = await factory.create_run_scope(
-        "agent-a",
+        "core_router",
         "question",
         fault_controller=controller,
     )
-    ordinary = await factory.create_run_scope("agent-a", "question")
+    ordinary = await factory.create_run_scope("core_router", "question")
 
     assert selected.fault_controller is controller
     assert selected.driver._fault_controller is controller
@@ -77,7 +79,7 @@ async def test_unexecuted_scope_can_be_aborted_safely() -> None:
     services = make_services()
     scope = await CoordinatedRuntimeFactory(
         FakeRouter(), services
-    ).create_run_scope("agent-a", "question")
+    ).create_run_scope("core_router", "question")
 
     await scope.close(abort=True)
     await scope.close(abort=True)
@@ -92,7 +94,8 @@ async def test_factory_failure_unregisters_request_channel(monkeypatch) -> None:
     dispatcher = services.observability_dispatcher
 
     class BrokenCoordinator:
-        def __init__(self, **kwargs) -> None:
+        @classmethod
+        def for_dynamic_resolver(cls, **kwargs):
             raise RuntimeError("constructor failed")
 
     monkeypatch.setattr(
@@ -102,6 +105,6 @@ async def test_factory_failure_unregisters_request_channel(monkeypatch) -> None:
     factory = CoordinatedRuntimeFactory(FakeRouter(), services)
 
     with pytest.raises(RuntimeError, match="constructor failed"):
-        await factory.create_run_scope("agent-a", "question")
+        await factory.create_run_scope("core_router", "question")
 
     assert dispatcher.gauge_provider.channels == set()

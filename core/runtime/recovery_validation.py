@@ -29,6 +29,7 @@ from core.runtime.recovery_contract import (
     ToolRecoveryDecisionStatus,
 )
 from core.runtime.snapshot_contract import (
+    PLAN_SNAPSHOT_SCHEMA_VERSION,
     SNAPSHOT_SCHEMA_VERSION,
     RunSnapshot,
 )
@@ -223,7 +224,11 @@ class RecoveryValidator:
                 **identity,
             )
         try:
-            current_fingerprint = PlanFingerprinter.fingerprint(current_plan)
+            current_fingerprint = (
+                PlanFingerprinter.legacy_fingerprint(current_plan)
+                if snapshot.plan_snapshot.plan_schema_version < PLAN_SNAPSHOT_SCHEMA_VERSION
+                else PlanFingerprinter.fingerprint(current_plan)
+            )
         except (ValueError, TypeError):
             return _failure(
                 status=RecoveryStatus.PLAN_MISMATCH,
@@ -612,6 +617,18 @@ def _validate_checkpoint_before_tail(snapshot: RunSnapshot) -> CheckpointKind:
             or not snapshot.quiescent
         ):
             raise ValueError("invalid PRE_RUN checkpoint")
+    elif kind is CheckpointKind.POST_PLAN_PRE_EXECUTION:
+        if (
+            snapshot.plan_snapshot.plan_schema_version < PLAN_SNAPSHOT_SCHEMA_VERSION
+            or run_status is not RunStatus.RUNNING
+            or any(item.execution_started for item in snapshot.step_states)
+            or StepStatus.RUNNING in statuses
+            or not snapshot.quiescent
+        ):
+            raise ValueError("invalid POST_PLAN_PRE_EXECUTION checkpoint")
+        # Bindings are intentionally absent from Snapshot. WP2 can validate this
+        # checkpoint but cannot safely resume it before WP3 owns rehydration.
+        raise _UnsupportedCheckpoint()
     elif kind is CheckpointKind.STEP_BOUNDARY:
         if (
             not snapshot.quiescent

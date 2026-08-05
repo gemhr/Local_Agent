@@ -810,7 +810,7 @@ class CoordinatedInvocationIntegrationTests(unittest.IsolatedAsyncioTestCase):
             output, result = await make_coordinated_chat_service(
                 router
             ).run_coordinated_agent(
-                "core_router", "简单问题", persist=False
+                "core_router", "hello", persist=False
             )
         self.assertEqual(output, "fallback answer")
         self.assertEqual(result.status, RunStatus.SUCCEEDED)
@@ -856,7 +856,7 @@ class CoordinatedInvocationIntegrationTests(unittest.IsolatedAsyncioTestCase):
             output, result = await make_coordinated_chat_service(
                 router
             ).run_coordinated_agent(
-                "core_router", "简单问题", persist=False
+                "core_router", "hello", persist=False
             )
         self.assertIsNone(output)
         self.assertEqual(result.status, RunStatus.FAILED)

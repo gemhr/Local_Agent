@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from core.runtime import (
     ApplicationRuntimeServices,
     CoordinatedRuntimeFactory,
@@ -13,6 +15,7 @@ from core.runtime import (
     TaskCapabilityRequirements,
     create_single_step_plan,
     process_run_registry,
+    process_blocking_executor,
 )
 from core.chat_service import ChatService
 
@@ -60,6 +63,16 @@ class FakeRouter:
     def complete_single_agent(self, agent_id: str, query: str, **kwargs) -> str:
         return "assembled-output"
 
+    def complete_planning_decision(self, user_request: str, **kwargs) -> str:
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "decision": "DIRECT_ANSWER",
+                "agent_id": "core_router",
+                "reason_code": "MODEL_DIRECT",
+            }
+        )
+
 
 def make_services(
     *,
@@ -67,6 +80,7 @@ def make_services(
     snapshot_store=None,
     dispatcher=None,
     span_recorder=None,
+    runtime_metrics_recorder=None,
     run_registry=None,
     snapshot_enabled: bool = True,
 ) -> ApplicationRuntimeServices:
@@ -82,7 +96,9 @@ def make_services(
         event_journal=active_journal,
         observability_dispatcher=active_dispatcher,
         structured_logger=NoopStructuredRuntimeLogger(),
-        runtime_metrics_recorder=NoopMetricsRecorder(),
+        runtime_metrics_recorder=(
+            runtime_metrics_recorder or NoopMetricsRecorder()
+        ),
         span_recorder=span_recorder or NoopSpanRecorder(),
         snapshot_store=active_snapshot,
         recovery_validator=(
@@ -99,6 +115,7 @@ def make_services(
         blocking_executors=(),
         worker_trackers=(),
         run_registry=run_registry or RunRegistry(),
+        coordinated_step_executor=process_blocking_executor,
         snapshot_enabled=snapshot_enabled,
         recovery_enabled=snapshot_enabled,
     )

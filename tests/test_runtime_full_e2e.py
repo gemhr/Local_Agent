@@ -59,7 +59,7 @@ async def test_default_composition_root_model_output_and_terminal_matrix():
     events = [
         event
         async for event in service.stream_coordinated_agent_events(
-            "agent-a", "question", persist=False
+            "core_router", "question", persist=False
         )
     ]
 
@@ -74,7 +74,7 @@ async def test_default_composition_root_model_output_and_terminal_matrix():
 
 
 @pytest.mark.asyncio
-async def test_enabled_snapshot_and_recovery_have_no_automatic_chat_io():
+async def test_enabled_snapshot_captures_dynamic_post_plan_checkpoint():
     class CountingSnapshotStore(InMemorySnapshotStore):
         def __init__(self):
             super().__init__()
@@ -115,7 +115,7 @@ async def test_enabled_snapshot_and_recovery_have_no_automatic_chat_io():
     chunks = [
         chunk
         async for chunk in service.stream_coordinated_agent_text(
-            "agent-a", "question", persist=False
+            "core_router", "question", persist=False
         )
     ]
 
@@ -123,7 +123,11 @@ async def test_enabled_snapshot_and_recovery_have_no_automatic_chat_io():
     assert "full-e2e-output" in chunks
     assert services.snapshot_enabled is True
     assert services.recovery_enabled is True
-    assert store.io_calls == 0
+    assert store.io_calls == 1
+    assert len(store._records) == 1
+    assert next(iter(store._records.values())).checkpoint_kind == (
+        "POST_PLAN_PRE_EXECUTION"
+    )
 
 
 @pytest.mark.asyncio
@@ -155,7 +159,7 @@ async def test_terminal_journal_failure_never_reruns_business_and_cleans_scope()
     chunks = [
         chunk
         async for chunk in service.stream_coordinated_agent_text(
-            "agent-a", "question", persist=False
+            "core_router", "question", persist=False
         )
     ]
 
@@ -190,7 +194,7 @@ async def test_runtime_error_is_safe_single_terminal_and_never_falls_back():
     chunks = [
         chunk
         async for chunk in service.stream_coordinated_agent_text(
-            "agent-a", "question", persist=False
+            "core_router", "question", persist=False
         )
     ]
 
