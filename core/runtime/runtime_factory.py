@@ -21,10 +21,16 @@ from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
 from core.runtime.fault_injection import FaultInjectionController
 from core.runtime.model_invocation import ModelInvocationResult
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
+from core.runtime.agent_adapter_factory import (
+    AgentAdapterFactory,
+    AgentRouterSingleAgentAdapter,
+)
 from core.runtime.multi_agent_planning import PlanResolver, PlanningRequest
+from core.runtime.multi_agent_driver import MultiAgentDriver
 from core.runtime.plan_compiler import PlanCompiler
 from core.runtime.planning import ExecutionKind, OutputPolicy, Plan
 from core.runtime.planning_model_adapter import UnifiedPlanningModelAdapter
+from core.runtime.synthesis import SynthesisAgentAdapter
 from core.runtime.parallel_execution import (
     ParallelExecutionPolicy,
     ParallelExecutor,
@@ -286,6 +292,11 @@ class CoordinatedRuntimeFactory:
         "_services",
         "_event_channel_capacity",
         "_planning_timeout_seconds",
+        "_adapter_factory",
+        "_max_concurrency",
+        "_step_result_per_result_chars",
+        "_step_result_run_total_chars",
+        "_step_result_max_entries",
     )
 
     def __init__(
@@ -295,6 +306,10 @@ class CoordinatedRuntimeFactory:
         *,
         event_channel_capacity: int = 32,
         planning_timeout_seconds: float = 15.0,
+        max_concurrency: int = 2,
+        step_result_per_result_chars: int = 20_000,
+        step_result_run_total_chars: int = 60_000,
+        step_result_max_entries: int = 16,
     ) -> None:
         if not isinstance(services, ApplicationRuntimeServices):
             raise TypeError("services must be ApplicationRuntimeServices")
@@ -311,10 +326,48 @@ class CoordinatedRuntimeFactory:
             or planning_timeout_seconds <= 0
         ):
             raise ValueError("planning_timeout_seconds must be positive")
+        if (
+            isinstance(max_concurrency, bool)
+            or not isinstance(max_concurrency, int)
+            or max_concurrency <= 0
+        ):
+            raise ValueError("max_concurrency must be a positive integer")
+        for value, name in (
+            (step_result_per_result_chars, "step_result_per_result_chars"),
+            (step_result_run_total_chars, "step_result_run_total_chars"),
+            (step_result_max_entries, "step_result_max_entries"),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive integer")
+        if step_result_run_total_chars < step_result_per_result_chars:
+            raise ValueError(
+                "step_result_run_total_chars must be >= step_result_per_result_chars"
+            )
         self._router = router
         self._services = services
         self._event_channel_capacity = event_channel_capacity
         self._planning_timeout_seconds = float(planning_timeout_seconds)
+        self._max_concurrency = max_concurrency
+        self._step_result_per_result_chars = step_result_per_result_chars
+        self._step_result_run_total_chars = step_result_run_total_chars
+        self._step_result_max_entries = step_result_max_entries
+        self._adapter_factory = AgentAdapterFactory(
+            DEFAULT_AGENT_REGISTRY,
+            (
+                ("core_router_adapter", AgentRouterSingleAgentAdapter(router)),
+                ("data_analyst_adapter", AgentRouterSingleAgentAdapter(router)),
+                ("code_expert_adapter", AgentRouterSingleAgentAdapter(router)),
+                (
+                    "knowledge_expert_adapter",
+                    AgentRouterSingleAgentAdapter(router),
+                ),
+                ("synthesis_agent_adapter", SynthesisAgentAdapter(router)),
+            ),
+        )
 
     @property
     def services(self) -> ApplicationRuntimeServices:
@@ -440,7 +493,7 @@ class CoordinatedRuntimeFactory:
                 )
             agent_state = AgentState.for_run_context(run_context.run_id)
             machine = AgentStateMachine()
-            policy = ParallelExecutionPolicy(max_concurrency=1)
+            policy = ParallelExecutionPolicy(max_concurrency=self._max_concurrency)
             channel = RuntimeEventChannel(
                 self._event_channel_capacity,
                 run_id=run_context.run_id,
@@ -537,7 +590,18 @@ class CoordinatedRuntimeFactory:
                     snapshot_store=snapshot_store,
                     planning_timeout_seconds=self._planning_timeout_seconds,
                     metrics_recorder=self._services.runtime_metrics_recorder,
+                    step_result_per_result_chars=self._step_result_per_result_chars,
+                    step_result_run_total_chars=self._step_result_run_total_chars,
+                    step_result_max_entries=self._step_result_max_entries,
                 )
+                multi_agent_driver = MultiAgentDriver(
+                    router=self._router,
+                    coordinator=coordinator,
+                    adapter_factory=self._adapter_factory,
+                    registry=DEFAULT_AGENT_REGISTRY,
+                    fault_controller=fault_controller,
+                )
+                coordinator.attach_multi_agent_runtime(multi_agent_driver)
                 driver = ResolvedSingleStepDriver(
                     self._router,
                     coordinator=coordinator,

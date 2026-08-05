@@ -243,16 +243,28 @@ async def test_multi_step_plan_is_frozen_then_fails_closed_before_any_step() -> 
 
     assert result.status is RunStatus.FAILED
     assert result.stop_reason is StopReason.UNHANDLED_ERROR
-    assert result.error_code == "MULTI_AGENT_EXECUTION_NOT_READY"
+    # WP3: the WP2 temporary multi-step admission gate is removed. Specialists
+    # and synthesis really execute; the Run fails closed only because the
+    # user-visible final output pipeline (WP4 OutputGate) is not ready.
+    assert result.error_code == "FINAL_OUTPUT_PIPELINE_NOT_READY"
     assert scope.coordinator.plan_frozen is True
-    assert router.agent_calls == []
+    assert sorted(agent for agent, _ in router.agent_calls) == [
+        "code_expert",
+        "data_analyst",
+        "synthesis_agent",
+    ]
     assert scope.coordinator.invocation_bindings is None
     types = event_types(services, scope.run_id)
     assert RuntimeEventType.PLAN_CREATED in types
-    assert RuntimeEventType.STEP_STARTED not in types
+    assert types.count(RuntimeEventType.STEP_STARTED) == 3
+    assert types.count(RuntimeEventType.STEP_COMPLETED) == 3
     assert RuntimeEventType.OUTPUT_DELTA not in types
     assert types.count(RuntimeEventType.RUN_COMPLETED) == 1
     assert len(services.snapshot_store.list_for_run(scope.run_id, 10)) == 1
+    store = scope.coordinator.step_result_store
+    assert store is not None
+    assert store.is_cleared is True
+    assert store.entry_count() == 0
     await scope.close()
 
 
