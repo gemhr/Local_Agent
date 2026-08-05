@@ -586,6 +586,78 @@ from core.runtime.retrieval_adapters import (
     RuntimeKnowledgeRetrievalAdapter,
 )
 from core.runtime.retrieval_execution import RetrievalExecutionService
+
+from core.runtime.step_result import (
+    ResultContentType,
+    StepResult,
+    StepResultError,
+    StepResultErrorCode,
+)
+from core.runtime.step_result_store import (
+    DependencyResultEntry,
+    DependencyResultView,
+    StepResultStore,
+    StepResultStoreError,
+    StepResultStoreErrorCode,
+    StoreEntryStatus,
+    StoreStatus,
+)
+from core.runtime.agent_adapter_factory import (
+    AgentAdapterError,
+    AgentAdapterErrorCode,
+    AgentAdapterFactory,
+    AgentAdapterResult,
+    AgentExecutionAdapter,
+    AgentExecutionRequest,
+    AgentRouterSingleAgentAdapter,
+)
+from core.runtime.step_completion import (
+    StepCommitStatus,
+    StepCompletionErrorCode,
+    StepCompletionResult,
+    StepResultCommitter,
+)
+from core.runtime.multi_agent_driver import (
+    MultiAgentDriver,
+    MultiAgentDriverError,
+    MultiAgentDriverErrorCode,
+)
+from core.runtime.synthesis import (
+    SynthesisAgentAdapter,
+    SynthesisInputError,
+    SynthesisInputErrorCode,
+)
+
+__all__ += [
+    "ResultContentType",
+    "StepResult",
+    "StepResultError",
+    "StepResultErrorCode",
+    "DependencyResultEntry",
+    "DependencyResultView",
+    "StepResultStore",
+    "StepResultStoreError",
+    "StepResultStoreErrorCode",
+    "StoreEntryStatus",
+    "StoreStatus",
+    "AgentAdapterError",
+    "AgentAdapterErrorCode",
+    "AgentAdapterFactory",
+    "AgentAdapterResult",
+    "AgentExecutionAdapter",
+    "AgentExecutionRequest",
+    "AgentRouterSingleAgentAdapter",
+    "StepCommitStatus",
+    "StepCompletionErrorCode",
+    "StepCompletionResult",
+    "StepResultCommitter",
+    "MultiAgentDriver",
+    "MultiAgentDriverError",
+    "MultiAgentDriverErrorCode",
+    "SynthesisAgentAdapter",
+    "SynthesisInputError",
+    "SynthesisInputErrorCode",
+]
 from core.knowledge_base.vector_scores import (
     VectorScoreSemantics,
     normalize_vector_score,

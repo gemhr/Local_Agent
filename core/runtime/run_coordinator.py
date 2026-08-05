@@ -27,12 +27,16 @@ from core.runtime.checkpoint_contract import (
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.parallel_execution import (
     ParallelExecutionInfrastructureError,
+    ParallelExecutionReport,
     ParallelExecutionPolicy,
     ParallelExecutor,
     StepConcurrencySpec,
     StepExecutionDriver,
     StepExecutionMode,
 )
+from core.runtime.step_completion import StepResultCommitter
+from core.runtime.step_result_store import StepResultStore
+from core.runtime.multi_agent_driver import MultiAgentDriver
 from core.runtime.plan_graph import PlanGraphValidationError, PlanGraphValidator
 from core.runtime.plan_fingerprint import PlanFingerprinter
 from core.runtime.planning import ExecutionKind, OutputPolicy, Plan
@@ -222,6 +226,10 @@ class RunCoordinator:
         snapshot_store=None,
         runtime_metadata=None,
         metrics_recorder=None,
+        multi_agent_driver: MultiAgentDriver | None = None,
+        step_result_per_result_chars: int = 20_000,
+        step_result_run_total_chars: int = 60_000,
+        step_result_max_entries: int = 16,
     ) -> "RunCoordinator":
         """构造尚无 Plan/Scheduler/Checkpoint 的动态规划 Runtime。"""
         if not isinstance(plan_resolver, PlanResolver):
@@ -258,6 +266,32 @@ class RunCoordinator:
         self._planning_request = planning_request
         self._execution_factory = execution_factory
         self._planning_timeout_seconds = float(planning_timeout_seconds)
+        if multi_agent_driver is not None and not isinstance(
+            multi_agent_driver, MultiAgentDriver
+        ):
+            raise TypeError("multi_agent_driver 必须是 MultiAgentDriver")
+        for value, name in (
+            (step_result_per_result_chars, "step_result_per_result_chars"),
+            (step_result_run_total_chars, "step_result_run_total_chars"),
+            (step_result_max_entries, "step_result_max_entries"),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} 必须是正整数")
+        if step_result_run_total_chars < step_result_per_result_chars:
+            raise ValueError(
+                "step_result_run_total_chars 不得小于 step_result_per_result_chars"
+            )
+        self._multi_agent_driver = multi_agent_driver
+        self._step_result_store: StepResultStore | None = None
+        self._step_completion_owner: StepResultCommitter | None = None
+        self._typed_multi_step_plan = False
+        self._step_result_per_result_chars = step_result_per_result_chars
+        self._step_result_run_total_chars = step_result_run_total_chars
+        self._step_result_max_entries = step_result_max_entries
         return self
 
     def _initialize_base(
@@ -300,6 +334,13 @@ class RunCoordinator:
         self._metrics_recorder = metrics_recorder
         self._dynamic = False
         self._dynamic_plan_state = DynamicPlanState.FROZEN
+        self._multi_agent_driver = None
+        self._step_result_store = None
+        self._step_completion_owner = None
+        self._typed_multi_step_plan = False
+        self._step_result_per_result_chars = 20_000
+        self._step_result_run_total_chars = 60_000
+        self._step_result_max_entries = 16
         self._plan_resolver = None
         self._planning_request = None
         self._execution_factory = None
@@ -329,8 +370,86 @@ class RunCoordinator:
         return self._invocation_bindings
 
     @property
+    def step_result_store(self) -> StepResultStore | None:
+        """Run-scoped Store; only the completion owner may write it."""
+        return self._step_result_store
+
+    @property
+    def step_completion_owner(self) -> StepResultCommitter | None:
+        return self._step_completion_owner
+
+    @property
+    def user_request(self) -> str | None:
+        if self._planning_request is None:
+            return None
+        return self._planning_request.user_request
+
+    @property
     def dynamic_plan_state(self) -> DynamicPlanState:
         return self._dynamic_plan_state
+
+    def attach_multi_agent_runtime(self, driver: MultiAgentDriver) -> None:
+        """WP3 typed runtime injection; must happen before execution."""
+        if not isinstance(driver, MultiAgentDriver):
+            raise TypeError("driver 必须是 MultiAgentDriver")
+        with self._start_lock:
+            if self._started:
+                raise RunCoordinatorError(
+                    "COORDINATOR_ALREADY_STARTED",
+                    "启动后不能再注入多 Agent Runtime",
+                )
+            self._multi_agent_driver = driver
+
+    def _is_typed_multi_step_plan(self) -> bool:
+        plan = self.plan
+        if plan is None:
+            return False
+        return (
+            len(plan.steps) > 1
+            or any(
+                step.execution_kind is ExecutionKind.SYNTHESIS
+                for step in plan.steps
+            )
+            or any(
+                step.output_policy is OutputPolicy.INTERNAL
+                for step in plan.steps
+            )
+        )
+
+    def _typed_multi_step_enabled(self) -> bool:
+        return (
+            self._typed_multi_step_plan
+            and self._multi_agent_driver is not None
+            and self._step_result_store is not None
+            and self._step_completion_owner is not None
+        )
+
+    def _initialize_typed_runtime(self) -> None:
+        if not self._is_typed_multi_step_plan():
+            return
+        if self._multi_agent_driver is None:
+            raise RunCoordinatorError(
+                "MULTI_AGENT_RUNTIME_NOT_INJECTED",
+                "多 Step Plan 需要 MultiAgentDriver 注入",
+            )
+        plan = self.plan
+        assert plan is not None
+        store = StepResultStore(
+            plan,
+            run_id=self.run_context.run_id,
+            per_result_chars=self._step_result_per_result_chars,
+            run_total_chars=self._step_result_run_total_chars,
+            max_entries=self._step_result_max_entries,
+        )
+        committer = StepResultCommitter(
+            store=store,
+            state_machine=self.state_machine,
+            event_emitter=self.event_emitter,
+            plan=plan,
+        )
+        self._step_result_store = store
+        self._step_completion_owner = committer
+        self._typed_multi_step_plan = True
 
     def _bind_static_plan(
         self,
@@ -356,6 +475,7 @@ class RunCoordinator:
         self.scheduler = scheduler
         self.executor = executor
         self._register_plan_steps_and_checkpoint()
+        self._initialize_typed_runtime()
         self._dynamic_plan_state = DynamicPlanState.FROZEN
 
     def _register_plan_steps_and_checkpoint(self) -> None:
@@ -462,10 +582,6 @@ class RunCoordinator:
                 return self._infrastructure_decision(
                     "POST_PLAN_PRE_EXECUTION_CHECKPOINT_FAILED"
                 )
-        if self._multi_step_execution_not_ready():
-            return self._infrastructure_decision(
-                "MULTI_AGENT_EXECUTION_NOT_READY"
-            )
         return None
 
     @staticmethod
@@ -496,16 +612,6 @@ class RunCoordinator:
             )
         except Exception:
             return
-
-    def _multi_step_execution_not_ready(self) -> bool:
-        if self.plan is None:
-            raise RunCoordinatorError("PLAN_NOT_FROZEN", "执行准入要求冻结 Plan")
-        # WP3 removal marker: real MultiAgentDriver 接入后删除此阶段性保护。
-        return (
-            len(self.plan.steps) > 1
-            or any(step.execution_kind is ExecutionKind.SYNTHESIS for step in self.plan.steps)
-            or any(step.output_policy is OutputPolicy.INTERNAL for step in self.plan.steps)
-        )
 
     async def _emit_planning_started(self) -> None:
         if self.event_emitter is None:
@@ -547,6 +653,32 @@ class RunCoordinator:
             bindings.close_and_clear()
         except Exception:
             cleanup_error_codes.append("INVOCATION_BINDINGS_CLEANUP_FAILED")
+
+    def _seal_step_result_store(
+        self, cleanup_error_codes: list[str]
+    ) -> None:
+        """Seal immediately at Run terminal so detached workers/late results
+        are rejected before any cleanup proceeds."""
+        store = self._step_result_store
+        if store is None:
+            return
+        try:
+            store.seal()
+        except Exception:
+            cleanup_error_codes.append("STEP_RESULT_STORE_SEAL_FAILED")
+
+    def _clear_step_result_store(
+        self, cleanup_error_codes: list[str]
+    ) -> None:
+        """Clear at a safe lifecycle point (no live workers) and release raw
+        content; idempotent."""
+        store = self._step_result_store
+        if store is None:
+            return
+        try:
+            store.clear()
+        except Exception:
+            cleanup_error_codes.append("STEP_RESULT_STORE_CLEAR_FAILED")
 
     async def create_checkpoint(
         self,
@@ -689,6 +821,7 @@ class RunCoordinator:
             )
         finally:
             await self._stop_executor_task(cleanup_error_codes)
+            self._seal_step_result_store(cleanup_error_codes)
             if decision is None:
                 decision = self._infrastructure_decision(
                     "COORDINATOR_FINALIZATION_REQUIRED"
@@ -711,6 +844,7 @@ class RunCoordinator:
                         "RUNTIME_TERMINAL_PUBLICATION_FAILED"
                     )
             self._stop_deadline_watcher(cleanup_error_codes)
+            self._clear_step_result_store(cleanup_error_codes)
             self._clear_invocation_bindings(cleanup_error_codes)
             await self._run_cleanup_callbacks(cleanup_error_codes)
             budget_snapshot = self._snapshot_budget(cleanup_error_codes)
@@ -766,6 +900,27 @@ class RunCoordinator:
                     )
                 return self._no_action_decision()
 
+            if self._typed_multi_step_plan and self._multi_agent_driver is None:
+                raise RunCoordinatorError(
+                    "MULTI_AGENT_RUNTIME_NOT_INJECTED",
+                    "多 Step Plan 需要 MultiAgentDriver 注入",
+                )
+            typed = self._typed_multi_step_enabled()
+            effective_driver = self._multi_agent_driver if typed else driver
+            completion_owner = self._step_completion_owner if typed else None
+            effective_specs = concurrency_specs
+            if typed:
+                # Independent specialists must really overlap: give every Step
+                # its own resource key so the default shared key (limit 1)
+                # cannot serialize them. Global max concurrency still bounds
+                # the batch.
+                effective_specs = dict(concurrency_specs or {})
+                for step in self.plan.steps:
+                    if step.step_id not in effective_specs:
+                        effective_specs[step.step_id] = StepConcurrencySpec(
+                            resource_key=f"step:{step.step_id}",
+                            resource_limit=1,
+                        )
             self._executor_task = asyncio.create_task(
                 self.executor.execute_ready(
                     scheduler=self.scheduler,
@@ -773,18 +928,23 @@ class RunCoordinator:
                     state=self.agent_state,
                     occurred_at=self._event_time(),
                     run_context=self.run_context,
-                    driver=driver,
+                    driver=effective_driver,
                     policy=self.policy,
                     execution_mode=execution_mode,
-                    concurrency_specs=concurrency_specs,
+                    concurrency_specs=effective_specs,
+                    completion_owner=completion_owner,
                 )
             )
             try:
-                # 单批报告只描述已 Claim Step；Run 终态始终由下一轮全 Plan 快照决定。
-                await self._executor_task
+                report = await self._executor_task
             finally:
                 if self._executor_task.done():
                     self._executor_task = None
+            # WP3: consume safe completion failures before the next Scheduler
+            # success decision; raw StepResult never enters this report.
+            decision = self._decision_from_batch_report(report)
+            if decision is not None:
+                return decision
 
     def _decision_from_snapshot(
         self, snapshot: SchedulerSnapshot
@@ -795,6 +955,17 @@ class RunCoordinator:
         if token_decision is not None:
             return token_decision
         if snapshot.is_complete and not self.agent_state.active_step_ids:
+            if self._typed_multi_step_enabled():
+                if not self._final_result_ready():
+                    return self._infrastructure_decision(
+                        "FINAL_OUTPUT_PIPELINE_NOT_READY"
+                    )
+                # WP4 REMOVAL MARKER: the unique final StepResult is READABLE,
+                # but user-visible delivery (OutputGate) is WP4-only. Fail
+                # closed before WP4 delivery exists.
+                return self._infrastructure_decision(
+                    "FINAL_OUTPUT_PIPELINE_NOT_READY"
+                )
             return RunFinalizationDecision(
                 RunStatus.SUCCEEDED,
                 StopReason.COMPLETED,
@@ -803,19 +974,76 @@ class RunCoordinator:
             )
         if snapshot.ready_step_ids or snapshot.running_step_ids:
             return None
+        if self._typed_multi_step_enabled() and snapshot.blocked_step_ids:
+            return RunFinalizationDecision(
+                RunStatus.FAILED,
+                StopReason.UNHANDLED_ERROR,
+                "REQUIRED_DEPENDENCY_FAILED",
+                "required dependency 失败导致 synthesis 被阻塞",
+            )
         if any(
             step.status == StepStatus.FAILED
             for step in self.agent_state.steps.values()
         ):
+            error_code = "STEP_EXECUTION_FAILED"
+            if self._typed_multi_step_enabled():
+                error_code = self._typed_failure_code()
             return RunFinalizationDecision(
                 RunStatus.FAILED,
                 StopReason.UNHANDLED_ERROR,
-                "STEP_EXECUTION_FAILED",
+                error_code,
                 "一个或多个步骤执行失败",
             )
         if snapshot.has_unresolved_pending or snapshot.blocked_step_ids:
             return self._no_action_decision()
         return None
+
+    def _decision_from_batch_report(
+        self,
+        report: ParallelExecutionReport,
+    ) -> RunFinalizationDecision | None:
+        """Consume safe completion failures before the next Scheduler
+        success judgment. Producer driver failures are left for the next
+        snapshot so required-dependency BLOCKED propagation decides the Run."""
+        if not self._typed_multi_step_enabled():
+            return None
+        for completion in report.completion_results:
+            if completion is not None and completion.error_code is not None:
+                return RunFinalizationDecision(
+                    RunStatus.FAILED,
+                    StopReason.UNHANDLED_ERROR,
+                    completion.error_code,
+                    _SAFE_MESSAGES[StopReason.UNHANDLED_ERROR],
+                )
+        return None
+
+    def _typed_failure_code(self) -> str:
+        plan = self.plan
+        for step_id, step in self.agent_state.steps.items():
+            if step.status is not StepStatus.FAILED:
+                continue
+            if plan is None:
+                return "AGENT_STEP_FAILED"
+            for plan_step in plan.steps:
+                if plan_step.step_id == step_id:
+                    if plan_step.execution_kind is ExecutionKind.SYNTHESIS:
+                        return "SYNTHESIS_FAILED"
+                    return "AGENT_STEP_FAILED"
+        return "AGENT_STEP_FAILED"
+
+    def _final_result_ready(self) -> bool:
+        store = self._step_result_store
+        plan = self.plan
+        if store is None or plan is None:
+            return False
+        finals = tuple(
+            step
+            for step in plan.steps
+            if step.output_policy is not OutputPolicy.INTERNAL
+        )
+        if len(finals) != 1:
+            return False
+        return store.has_readable(finals[0].step_id)
 
     def _mark_started_once(self) -> None:
         with self._start_lock:
