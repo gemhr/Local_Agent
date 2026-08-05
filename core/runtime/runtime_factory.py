@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import math
 import time
 
 from core.runtime.application_services import (
@@ -19,6 +20,11 @@ from core.runtime.event_channel import RuntimeEventChannel
 from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
 from core.runtime.fault_injection import FaultInjectionController
 from core.runtime.model_invocation import ModelInvocationResult
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
+from core.runtime.multi_agent_planning import PlanResolver, PlanningRequest
+from core.runtime.plan_compiler import PlanCompiler
+from core.runtime.planning import ExecutionKind, OutputPolicy, Plan
+from core.runtime.planning_model_adapter import UnifiedPlanningModelAdapter
 from core.runtime.parallel_execution import (
     ParallelExecutionPolicy,
     ParallelExecutor,
@@ -76,6 +82,50 @@ class CoordinatedSingleAgentDriver:
         return self.output
 
 
+class ResolvedSingleStepDriver:
+    """WP2 compatibility driver consuming the frozen claim Binding."""
+
+    def __init__(
+        self,
+        router,
+        *,
+        coordinator: RunCoordinator,
+        persist: bool,
+        event_emitter: RunEventEmitter,
+        fault_controller: FaultInjectionController | None = None,
+    ) -> None:
+        self._router = router
+        self._coordinator = coordinator
+        self._persist = persist
+        self._event_emitter = event_emitter
+        self._fault_controller = fault_controller
+        self.emits_user_output = True
+        self.output: str | None = None
+        self.invocation_result: ModelInvocationResult | None = None
+
+    def execute(self, claim: StepClaim, run_context) -> str:
+        bindings = self._coordinator.invocation_bindings
+        plan = self._coordinator.plan
+        if bindings is None or plan is None or len(plan.steps) != 1:
+            raise RuntimeError("Resolved single-step driver requires one frozen Plan")
+        binding = bindings.resolve_for_step(
+            claim.step_id, expected_agent_id=claim.preferred_agent
+        )
+        invocation_results: list[ModelInvocationResult] = []
+        self.output = self._router.complete_single_agent(
+            claim.preferred_agent,
+            binding.instruction,
+            run_context=run_context,
+            capability_requirements=claim.capability_requirements,
+            persist=self._persist,
+            invocation_result_out=invocation_results,
+            event_emitter=self._event_emitter.for_step(claim.step_id),
+            fault_controller=self._fault_controller,
+        )
+        self.invocation_result = invocation_results[0] if invocation_results else None
+        return self.output
+
+
 @dataclass(slots=True)
 class CoordinatedRunScope:
     """The strong owner of every object created for one coordinated request."""
@@ -84,15 +134,15 @@ class CoordinatedRunScope:
     cancellation_source: object
     agent_state: AgentState
     budget_ledger: BudgetLedger
-    plan: object
+    plan: object | None
     state_machine: AgentStateMachine
     policy: ParallelExecutionPolicy
-    scheduler: SerialScheduler
-    executor: ParallelExecutor
+    scheduler: SerialScheduler | None
+    executor: ParallelExecutor | None
     event_channel: RuntimeEventChannel
     event_emitter: RunEventEmitter
     coordinator: RunCoordinator
-    driver: CoordinatedSingleAgentDriver
+    driver: CoordinatedSingleAgentDriver | ResolvedSingleStepDriver
     run_registry: object
     run_handle: ActiveRunControlHandle
     fault_controller: FaultInjectionController | None = field(
@@ -129,10 +179,15 @@ class CoordinatedRunScope:
         if self._executed:
             raise RuntimeError("coordinated run scope is single-use")
         self._executed = True
-        return await self.coordinator.execute(
-            driver=self.driver,
-            execution_mode=StepExecutionMode.SYNC_BLOCKING,
-        )
+        try:
+            return await self.coordinator.execute(
+                driver=self.driver,
+                execution_mode=StepExecutionMode.SYNC_BLOCKING,
+            )
+        finally:
+            self.plan = self.coordinator.plan
+            self.scheduler = self.coordinator.scheduler
+            self.executor = self.coordinator.executor
 
     def bind_producer_task(self, task: asyncio.Task) -> None:
         if self._producer_task is not None:
@@ -226,7 +281,12 @@ class CoordinatedRunScope:
 class CoordinatedRuntimeFactory:
     """Application-scoped factory; it never caches a returned run scope."""
 
-    __slots__ = ("_router", "_services", "_event_channel_capacity")
+    __slots__ = (
+        "_router",
+        "_services",
+        "_event_channel_capacity",
+        "_planning_timeout_seconds",
+    )
 
     def __init__(
         self,
@@ -234,6 +294,7 @@ class CoordinatedRuntimeFactory:
         services: ApplicationRuntimeServices,
         *,
         event_channel_capacity: int = 32,
+        planning_timeout_seconds: float = 15.0,
     ) -> None:
         if not isinstance(services, ApplicationRuntimeServices):
             raise TypeError("services must be ApplicationRuntimeServices")
@@ -243,9 +304,17 @@ class CoordinatedRuntimeFactory:
             or event_channel_capacity <= 0
         ):
             raise ValueError("event_channel_capacity must be a positive integer")
+        if (
+            isinstance(planning_timeout_seconds, bool)
+            or not isinstance(planning_timeout_seconds, (int, float))
+            or not math.isfinite(float(planning_timeout_seconds))
+            or planning_timeout_seconds <= 0
+        ):
+            raise ValueError("planning_timeout_seconds must be positive")
         self._router = router
         self._services = services
         self._event_channel_capacity = event_channel_capacity
+        self._planning_timeout_seconds = float(planning_timeout_seconds)
 
     @property
     def services(self) -> ApplicationRuntimeServices:
@@ -263,6 +332,74 @@ class CoordinatedRuntimeFactory:
         budget: RunBudget | None = None,
         persist: bool = True,
         fault_controller: FaultInjectionController | None = None,
+    ) -> CoordinatedRunScope:
+        """默认 Coordinated 入口：始终经过动态 PlanResolver。"""
+        return await self._create_run_scope(
+            agent_id,
+            query,
+            session_id=session_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            timeout_seconds=timeout_seconds,
+            budget=budget,
+            persist=persist,
+            fault_controller=fault_controller,
+            static_plan=None,
+        )
+
+    async def create_static_run_scope(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        trusted_plan: Plan | None = None,
+        session_id: str = LEGACY_DEFAULT_SESSION_ID,
+        run_id: str | None = None,
+        trace_id: str | None = None,
+        timeout_seconds: float | None = None,
+        budget: RunBudget | None = None,
+        persist: bool = True,
+        fault_controller: FaultInjectionController | None = None,
+    ) -> CoordinatedRunScope:
+        """仅供可信内部 Plan、测试和兼容路径使用。"""
+        plan = trusted_plan or self._router.build_single_agent_plan(agent_id, query)
+        if (
+            len(plan.steps) != 1
+            or plan.steps[0].step_id != "answer"
+            or plan.steps[0].preferred_agent != agent_id
+            or plan.steps[0].depends_on
+            or plan.steps[0].execution_kind is not ExecutionKind.AGENT
+            or plan.steps[0].output_policy is not OutputPolicy.FINAL_PASSTHROUGH
+        ):
+            raise ValueError(
+                "static factory compatibility path requires one answer passthrough step"
+            )
+        return await self._create_run_scope(
+            agent_id,
+            query,
+            session_id=session_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            timeout_seconds=timeout_seconds,
+            budget=budget,
+            persist=persist,
+            fault_controller=fault_controller,
+            static_plan=plan,
+        )
+
+    async def _create_run_scope(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        session_id: str,
+        run_id: str | None,
+        trace_id: str | None,
+        timeout_seconds: float | None,
+        budget: RunBudget | None,
+        persist: bool,
+        fault_controller: FaultInjectionController | None,
+        static_plan: Plan | None,
     ) -> CoordinatedRunScope:
         """Create one identity set and clean up any partially built transport."""
         if self._services.lifecycle_state is not RuntimeLifecycleState.READY:
@@ -302,7 +439,6 @@ class CoordinatedRuntimeFactory:
                     cancellation_token=run_context.cancellation_token,
                 )
             agent_state = AgentState.for_run_context(run_context.run_id)
-            plan = self._router.build_single_agent_plan(agent_id, query)
             machine = AgentStateMachine()
             policy = ParallelExecutionPolicy(max_concurrency=1)
             channel = RuntimeEventChannel(
@@ -323,16 +459,17 @@ class CoordinatedRuntimeFactory:
                 trace_id=run_context.trace_id,
                 channel=channel,
             )
-            scheduler = SerialScheduler(machine)
-            executor = ParallelExecutor(
-                machine,
-                max_concurrency=1,
-                event_emitter=emitter,
-                span_recorder=span_recorder,
-                blocking_executor=(
-                    self._services.coordinated_step_executor
-                ),
-            )
+            def execution_factory() -> tuple[SerialScheduler, ParallelExecutor]:
+                return (
+                    SerialScheduler(machine),
+                    ParallelExecutor(
+                        machine,
+                        max_concurrency=1,
+                        event_emitter=emitter,
+                        span_recorder=span_recorder,
+                        blocking_executor=self._services.coordinated_step_executor,
+                    ),
+                )
             run_handle = ActiveRunControlHandle(
                 run_id=run_context.run_id,
                 runtime_mode="COORDINATED",
@@ -340,33 +477,77 @@ class CoordinatedRuntimeFactory:
                 owner="coordinated_runtime_factory",
                 active_step_count=lambda: len(agent_state.active_step_ids),
             )
-            coordinator = RunCoordinator(
-                run_context=run_context,
-                plan=plan,
-                agent_state=agent_state,
-                budget_ledger=ledger,
-                run_handle=run_handle,
-                scheduler=scheduler,
-                executor=executor,
-                run_registry=self._services.run_registry,
-                policy=policy,
-                state_machine=machine,
-                event_emitter=emitter,
-                span_recorder=span_recorder,
-                snapshot_store=(
-                    self._services.snapshot_store
-                    if self._services.snapshot_enabled
-                    else None
-                ),
+            snapshot_store = (
+                self._services.snapshot_store
+                if self._services.snapshot_enabled
+                else None
             )
-            driver = CoordinatedSingleAgentDriver(
-                self._router,
-                user_query=query,
-                agent_id=agent_id,
-                persist=persist,
-                event_emitter=emitter.for_step("answer"),
-                fault_controller=fault_controller,
-            )
+            if static_plan is not None:
+                scheduler, executor = execution_factory()
+                coordinator = RunCoordinator.for_static_plan(
+                    run_context=run_context,
+                    plan=static_plan,
+                    agent_state=agent_state,
+                    budget_ledger=ledger,
+                    run_handle=run_handle,
+                    scheduler=scheduler,
+                    executor=executor,
+                    run_registry=self._services.run_registry,
+                    policy=policy,
+                    state_machine=machine,
+                    event_emitter=emitter,
+                    span_recorder=span_recorder,
+                    snapshot_store=snapshot_store,
+                    metrics_recorder=self._services.runtime_metrics_recorder,
+                )
+                driver = CoordinatedSingleAgentDriver(
+                    self._router,
+                    user_query=query,
+                    agent_id=agent_id,
+                    persist=persist,
+                    event_emitter=emitter.for_step("answer"),
+                    fault_controller=fault_controller,
+                )
+                plan = static_plan
+            else:
+                planning_model = UnifiedPlanningModelAdapter(
+                    self._router,
+                    blocking_executor=self._services.coordinated_step_executor,
+                    event_emitter=emitter,
+                    fault_controller=fault_controller,
+                )
+                resolver = PlanResolver(
+                    DEFAULT_AGENT_REGISTRY,
+                    PlanCompiler(DEFAULT_AGENT_REGISTRY),
+                    planning_model,
+                )
+                coordinator = RunCoordinator.for_dynamic_resolver(
+                    run_context=run_context,
+                    plan_resolver=resolver,
+                    planning_request=PlanningRequest(agent_id, query),
+                    execution_factory=execution_factory,
+                    agent_state=agent_state,
+                    budget_ledger=ledger,
+                    run_handle=run_handle,
+                    run_registry=self._services.run_registry,
+                    policy=policy,
+                    state_machine=machine,
+                    event_emitter=emitter,
+                    span_recorder=span_recorder,
+                    snapshot_store=snapshot_store,
+                    planning_timeout_seconds=self._planning_timeout_seconds,
+                    metrics_recorder=self._services.runtime_metrics_recorder,
+                )
+                driver = ResolvedSingleStepDriver(
+                    self._router,
+                    coordinator=coordinator,
+                    persist=persist,
+                    event_emitter=emitter,
+                    fault_controller=fault_controller,
+                )
+                plan = None
+                scheduler = None
+                executor = None
             scope = CoordinatedRunScope(
                 run_context=run_context,
                 cancellation_source=cancellation_source,
@@ -423,4 +604,5 @@ __all__ = [
     "CoordinatedRunScope",
     "CoordinatedRuntimeFactory",
     "CoordinatedSingleAgentDriver",
+    "ResolvedSingleStepDriver",
 ]

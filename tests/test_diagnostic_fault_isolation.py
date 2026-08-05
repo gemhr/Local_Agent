@@ -80,7 +80,7 @@ async def test_diagnostic_failure_cannot_change_snapshot_or_recovery_authority()
     router = CountingRouter()
     controller = combined_controller()
     scope = await CoordinatedRuntimeFactory(router, services).create_run_scope(
-        "agent", "query", fault_controller=controller
+        "core_router", "query", fault_controller=controller
     )
 
     runtime_result = await scope.execute()

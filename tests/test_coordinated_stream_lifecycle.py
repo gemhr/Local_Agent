@@ -78,7 +78,7 @@ async def test_normal_completion_closes_scope_channel_and_registry_once():
     chunks = [
         chunk
         async for chunk in service.stream_coordinated_agent_text(
-            "agent-a",
+            "core_router",
             "question",
             persist=False,
         )
@@ -117,7 +117,7 @@ async def test_runtime_failure_is_safe_has_one_terminal_and_does_not_double_run(
     chunks = [
         chunk
         async for chunk in service.stream_coordinated_agent_text(
-            "agent-a",
+            "core_router",
             "question",
             persist=False,
         )
@@ -154,7 +154,7 @@ async def test_adapter_encoding_failure_aborts_current_scope_and_cleans_registry
     chunks = [
         chunk
         async for chunk in service.stream_coordinated_agent_text(
-            "agent-a",
+            "core_router",
             "question",
             persist=False,
         )
@@ -187,7 +187,7 @@ async def test_scope_creation_failure_is_fixed_safe_error_and_never_calls_legacy
     chunks = [
         chunk
         async for chunk in service.stream_coordinated_agent_text(
-            "agent-a",
+            "core_router",
             "question",
         )
     ]
@@ -201,7 +201,7 @@ async def test_scope_close_and_abort_are_bounded_idempotent_owners():
     scope = await CoordinatedRuntimeFactory(
         FakeRouter(),
         services,
-    ).create_run_scope("agent-a", "question")
+    ).create_run_scope("core_router", "question")
 
     await scope.abort()
     await scope.abort()

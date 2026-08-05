@@ -33,6 +33,7 @@ class CheckpointMode(str, Enum):
 
 class CheckpointKind(str, Enum):
     PRE_RUN = "PRE_RUN"
+    POST_PLAN_PRE_EXECUTION = "POST_PLAN_PRE_EXECUTION"
     STEP_BOUNDARY = "STEP_BOUNDARY"
     TERMINAL = "TERMINAL"
     NON_QUIESCENT_AUDIT = "NON_QUIESCENT_AUDIT"

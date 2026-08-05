@@ -3,6 +3,8 @@ from datetime import UTC, datetime, timedelta
 
 from core.runtime.plan_fingerprint import PlanFingerprinter
 from core.runtime.planning import (
+    ExecutionKind,
+    OutputPolicy,
     Plan,
     PlanSource,
     PlanStep,
@@ -20,6 +22,8 @@ def _step(
     criteria: str = "done",
     title: str = "title",
     agent: str = "router",
+    execution_kind: ExecutionKind = ExecutionKind.AGENT,
+    output_policy: OutputPolicy = OutputPolicy.FINAL_PASSTHROUGH,
 ) -> PlanStep:
     return PlanStep(
         step_id,
@@ -29,6 +33,8 @@ def _step(
         criteria,
         agent,
         capability or TaskCapabilityRequirements(),
+        execution_kind=execution_kind,
+        output_policy=output_policy,
     )
 
 
@@ -135,3 +141,34 @@ def test_runtime_step_status_is_outside_fingerprint_owner():
     state.mark_running()
     state.start_step("a")
     assert PlanFingerprinter.fingerprint(plan) == before
+
+
+def test_execution_kind_output_policy_and_schema_change_fingerprint():
+    base = _plan((_step("a"),))
+    execution_variant = _plan(
+        (_step("a", execution_kind=ExecutionKind.SYNTHESIS),)
+    )
+    output_variant = _plan(
+        (_step("a", output_policy=OutputPolicy.INTERNAL),)
+    )
+    fingerprint = PlanFingerprinter.fingerprint(base)
+    assert PlanFingerprinter.fingerprint(execution_variant) != fingerprint
+    assert PlanFingerprinter.fingerprint(output_variant) != fingerprint
+    snapshot = PlanSnapshot.from_plan(base)
+    assert PlanFingerprinter.fingerprint_snapshot(
+        replace(snapshot, plan_schema_version=1)
+    ) != fingerprint
+
+
+def test_v1_fingerprint_ignores_v2_output_policy_field() -> None:
+    snapshot = replace(
+        PlanSnapshot.from_plan(_plan((_step("a"),))),
+        plan_schema_version=1,
+    )
+    changed = replace(
+        snapshot,
+        steps=(replace(snapshot.steps[0], output_policy="INTERNAL"),),
+    )
+    assert PlanFingerprinter.fingerprint_snapshot(snapshot) == (
+        PlanFingerprinter.fingerprint_snapshot(changed)
+    )

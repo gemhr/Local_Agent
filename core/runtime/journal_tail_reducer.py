@@ -47,6 +47,8 @@ IGNORED_EVENT_TYPES = frozenset(
         RuntimeEventType.RETRIEVAL_STAGE_COMPLETED,
         RuntimeEventType.RETRIEVAL_COMPLETED,
         RuntimeEventType.ERROR,
+        RuntimeEventType.PLANNING_STARTED,
+        RuntimeEventType.PLAN_CREATED,
     }
 )
 SUPPORTED_RECOVERY_EVENT_TYPES = REDUCED_EVENT_TYPES | IGNORED_EVENT_TYPES

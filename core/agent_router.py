@@ -21,7 +21,7 @@ from core.runtime import (
     ModelFailureCategory, ModelInvocationChainError, ModelInvocationConfirmationRequired,
     ModelInvocationResult, ModelInvocationRouter, ModelRoutingError, ModelRoutingPolicy,
     ModelSelectionError,
-    StepEventEmitter,
+    RunEventEmitter, StepEventEmitter,
     RunBudget, BudgetLedger,
     ToolAdapter, ToolAdapterInvocationError, ToolErrorCategory,
     ToolExecutionError, ToolExecutionFailed, ToolExecutionPhase,
@@ -1311,7 +1311,7 @@ class AgentRouter:
         run_context: RunContext,
         capability_requirements: TaskCapabilityRequirements,
         max_tokens: int,
-        event_emitter: StepEventEmitter | None,
+        event_emitter: RunEventEmitter | StepEventEmitter | None,
         generation_options: dict[str, object] | None = None,
         fault_controller: FaultInjectionController | None = None,
     ) -> ModelInvocationResult:
@@ -1520,6 +1520,52 @@ class AgentRouter:
             event_emitter=event_emitter,
             fault_controller=fault_controller,
         )
+
+    def complete_planning_decision(
+        self,
+        user_request: str,
+        *,
+        run_context: RunContext,
+        event_emitter: RunEventEmitter | StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
+    ) -> str:
+        """通过统一 ModelInvocation 合同生成 strict Planner schema v1 JSON。"""
+        system_prompt = (
+            "你是 LocalAgent Planner。只输出一个 JSON 对象，不得输出 Markdown。"
+            "schema_version 必须为 1。decision 只能为 DIRECT_ANSWER 或 DELEGATE。"
+            "DIRECT_ANSWER 只允许字段 schema_version,decision,agent_id,reason_code，"
+            "不得包含 instruction。DELEGATE 只允许 schema_version,decision,tasks,"
+            "synthesis_required；task 只允许 task_id,agent_id,instruction,input_type,"
+            "capabilities。不得声明 output_policy、execution_kind、depends_on、"
+            "optional dependency、driver、callable、provider、runtime status 或 result type。"
+            "DIRECT_ANSWER 的 agent_id 只能是 core_router。"
+            "DELEGATE task 的 agent_id 只能是 knowledge_expert、code_expert 或 data_analyst。"
+            "文档检索与知识库问题交给 knowledge_expert，代码问题交给 code_expert，"
+            "数据分析问题交给 data_analyst。只有单个 knowledge_expert task 可以设置 "
+            "synthesis_required=false；其他专业任务必须设置 synthesis_required=true。"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_request},
+        ]
+        capabilities = TaskCapabilityRequirements(
+            requires_multi_agent=True,
+            risk_level=RiskLevel.LOW,
+            estimated_steps=1,
+        )
+        result = self._invoke_model_contract(
+            agent_id="core_router",
+            user_query=user_request,
+            messages=messages,
+            context_requirements=None,
+            run_context=run_context,
+            capability_requirements=capabilities,
+            max_tokens=min(self.max_tokens, 512),
+            event_emitter=event_emitter,
+            generation_options={"enable_thinking": False},
+            fault_controller=fault_controller,
+        )
+        return result.output
 
     def _build_orchestration_event(self, event_type: str, **payload: object) -> str:
         """构建前后端约定的编排状态事件。"""

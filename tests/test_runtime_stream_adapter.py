@@ -3,6 +3,7 @@ import unittest
 
 from core.runtime import (
     OutputDeltaPayload,
+    PlanningStartedPayload,
     RunStartedPayload,
     RuntimeEventChannel,
     RuntimeEventDraft,
@@ -46,6 +47,17 @@ class RuntimeStreamAdapterTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(encoded.removeprefix("[[ORCH]]"))
         self.assertEqual(payload["event_type"], "RUN_STARTED")
         self.assertEqual(payload["payload"], {"status": "RUNNING"})
+
+    async def test_planning_event_is_control_json_not_user_text(self):
+        event = await self.make_event(
+            RuntimeEventType.PLANNING_STARTED,
+            PlanningStartedPayload(1, 15000),
+        )
+        encoded = RuntimeEventTextAdapter().encode(event)
+        self.assertTrue(encoded.startswith("[[ORCH]]"))
+        payload = json.loads(encoded.removeprefix("[[ORCH]]"))
+        self.assertEqual(payload["event_type"], "PLANNING_STARTED")
+        self.assertNotIn("query", encoded.lower())
 
     async def test_adapter_uses_only_safe_fields_and_escapes_json(self):
         event = await self.make_event(

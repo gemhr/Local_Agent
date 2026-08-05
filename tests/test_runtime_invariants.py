@@ -29,7 +29,7 @@ async def test_default_coordinated_request_satisfies_central_invariants():
     events = [
         event
         async for event in service.stream_coordinated_agent_events(
-            "agent-a", "question", persist=False
+            "core_router", "question", persist=False
         )
     ]
     report = build_runtime_invariant_report(

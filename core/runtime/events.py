@@ -20,6 +20,8 @@ class RuntimeEventType(str, Enum):
     """第一版 Runtime Event 的固定类型。"""
 
     RUN_STARTED = "RUN_STARTED"
+    PLANNING_STARTED = "PLANNING_STARTED"
+    PLAN_CREATED = "PLAN_CREATED"
     STEP_STARTED = "STEP_STARTED"
     MODEL_STARTED = "MODEL_STARTED"
     MODEL_COMPLETED = "MODEL_COMPLETED"
@@ -53,6 +55,32 @@ class RunStartedPayload:
 
     def __post_init__(self) -> None:
         _require_text(self.status, "status")
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningStartedPayload:
+    planner_schema_version: int
+    configured_timeout_ms: int
+
+    def __post_init__(self) -> None:
+        _require_index(self.planner_schema_version, "planner_schema_version")
+        _require_index(self.configured_timeout_ms, "configured_timeout_ms")
+
+
+@dataclass(frozen=True, slots=True)
+class PlanCreatedPayload:
+    plan_id: str
+    plan_version: int
+    fingerprint: str
+    step_count: int
+    planning_source: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.plan_id, "plan_id")
+        _require_index(self.plan_version, "plan_version")
+        _require_text(self.fingerprint, "fingerprint")
+        _require_index(self.step_count, "step_count")
+        _require_text(self.planning_source, "planning_source")
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,6 +437,8 @@ class RunCompletedPayload:
 
 RuntimeEventPayload: TypeAlias = (
     RunStartedPayload
+    | PlanningStartedPayload
+    | PlanCreatedPayload
     | StepStartedPayload
     | ModelStartedPayload
     | ModelCompletedPayload
@@ -429,6 +459,8 @@ RuntimeEventPayload: TypeAlias = (
 
 _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
     RuntimeEventType.RUN_STARTED: RunStartedPayload,
+    RuntimeEventType.PLANNING_STARTED: PlanningStartedPayload,
+    RuntimeEventType.PLAN_CREATED: PlanCreatedPayload,
     RuntimeEventType.STEP_STARTED: StepStartedPayload,
     RuntimeEventType.MODEL_STARTED: ModelStartedPayload,
     RuntimeEventType.MODEL_COMPLETED: ModelCompletedPayload,
@@ -449,6 +481,17 @@ _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
 
 _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
     RunStartedPayload: ("status",),
+    PlanningStartedPayload: (
+        "planner_schema_version",
+        "configured_timeout_ms",
+    ),
+    PlanCreatedPayload: (
+        "plan_id",
+        "plan_version",
+        "fingerprint",
+        "step_count",
+        "planning_source",
+    ),
     StepStartedPayload: ("status",),
     ModelStartedPayload: (
         "profile_id",

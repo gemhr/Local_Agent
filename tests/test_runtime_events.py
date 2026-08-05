@@ -5,6 +5,8 @@ from core.runtime import (
     EventChannelClosedError,
     EventEmitterSyncError,
     OutputDeltaPayload,
+    PlanCreatedPayload,
+    PlanningStartedPayload,
     RunCompletedPayload,
     RunEventEmitter,
     RunStartedPayload,
@@ -17,6 +19,35 @@ from core.runtime import (
 
 
 class RuntimeEventSchemaTests(unittest.IsolatedAsyncioTestCase):
+    async def test_planning_payloads_contain_only_safe_contract_metadata(self):
+        channel = RuntimeEventChannel(4, run_id="run-a")
+        planning = await channel.publish(
+            RuntimeEventDraft(
+                "run-a",
+                "trace-a",
+                RuntimeEventType.PLANNING_STARTED,
+                "coordinator",
+                PlanningStartedPayload(1, 15000),
+            )
+        )
+        created = await channel.publish(
+            RuntimeEventDraft(
+                "run-a",
+                "trace-a",
+                RuntimeEventType.PLAN_CREATED,
+                "coordinator",
+                PlanCreatedPayload("plan", 1, "a" * 64, 1, "MODEL"),
+            )
+        )
+        self.assertEqual(
+            planning.to_safe_dict()["payload"],
+            {"planner_schema_version": 1, "configured_timeout_ms": 15000},
+        )
+        self.assertEqual(created.to_safe_dict()["payload"]["step_count"], 1)
+        rendered = repr((planning.to_safe_dict(), created.to_safe_dict()))
+        self.assertNotIn("query", rendered.lower())
+        self.assertNotIn("instruction", rendered.lower())
+
     async def test_envelope_schema_identity_utc_and_safe_serialization(self):
         channel = RuntimeEventChannel(4, run_id="run-a")
         event = await channel.publish(
