@@ -26,6 +26,18 @@ def test_default_registry_has_unique_expected_agents_and_shared_legacy_metadata(
         "code_expert",
         "knowledge_expert",
     )
+    adapter_ids = tuple(
+        DEFAULT_AGENT_REGISTRY.resolve(agent_id).execution_adapter_id
+        for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+    )
+    assert adapter_ids == (
+        "core_router_adapter",
+        "data_analyst_adapter",
+        "code_expert_adapter",
+        "knowledge_expert_adapter",
+        "synthesis_agent_adapter",
+    )
+    assert len(adapter_ids) == len(set(adapter_ids))
 
 
 def test_entry_delegated_and_synthesis_policies_are_distinct() -> None:
@@ -82,6 +94,8 @@ def test_registry_rejects_duplicate_and_invalid_policy_registration() -> None:
         )
     with pytest.raises(ValueError):
         replace(core, agent_id="INVALID-ID")
+    with pytest.raises(ValueError):
+        replace(core, execution_adapter_id="unsafe adapter id")
     with pytest.raises(ValueError):
         replace(
             DEFAULT_AGENT_REGISTRY.resolve("code_expert"),

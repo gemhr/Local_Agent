@@ -42,6 +42,7 @@ class AgentRegistryError(LookupError):
 @dataclass(frozen=True, slots=True)
 class AgentRegistration:
     agent_id: str
+    execution_adapter_id: str
     display_name: str
     role: str
     avatar: str
@@ -62,6 +63,8 @@ class AgentRegistration:
     def __post_init__(self) -> None:
         if _SAFE_AGENT_ID.fullmatch(self.agent_id) is None:
             raise ValueError("agent_id 必须是安全、稳定的标识符")
+        if _SAFE_TYPE_ID.fullmatch(self.execution_adapter_id) is None:
+            raise ValueError("execution_adapter_id 必须是安全、稳定的符号标识")
         if not all(isinstance(value, str) and value.strip() for value in (self.display_name, self.role, self.avatar)):
             raise ValueError("Agent 展示元数据不能为空")
         for value in (self.enabled, self.entry_allowed, self.model_direct_allowed, self.delegation_allowed, self.allows_single_delegated_passthrough, self.synthesis_only, self.supports_parallel):
@@ -207,6 +210,7 @@ class AgentRegistry:
 
 def _registration(
     agent_id: str,
+    execution_adapter_id: str,
     display_name: str,
     role: str,
     avatar: str,
@@ -222,6 +226,7 @@ def _registration(
 ) -> AgentRegistration:
     return AgentRegistration(
         agent_id=agent_id,
+        execution_adapter_id=execution_adapter_id,
         display_name=display_name,
         role=role,
         avatar=avatar,
@@ -248,28 +253,28 @@ def _registration(
 DEFAULT_AGENT_REGISTRY = AgentRegistry(
     (
         _registration(
-            "core_router", "Core Router", "处理通用问题，并协调辅助智能体。", "avatar_router.png",
+            "core_router", "core_router_adapter", "Core Router", "处理通用问题，并协调辅助智能体。", "avatar_router.png",
             entry_allowed=True, model_direct_allowed=True, delegation_allowed=False,
             delegated_output_policy=OutputPolicy.INTERNAL,
             capabilities=frozenset({"general_chat", "planning"}),
             aliases=("core_router", "主智能体", "核心智能体"),
         ),
         _registration(
-            "data_analyst", "Data Analyst", "分析 CSV 和 Excel 文件，并总结洞见。", "avatar_excel.png",
+            "data_analyst", "data_analyst_adapter", "Data Analyst", "分析 CSV 和 Excel 文件，并总结洞见。", "avatar_excel.png",
             entry_allowed=True, delegation_allowed=True,
             delegated_output_policy=OutputPolicy.INTERNAL,
             capabilities=frozenset({"data_analysis"}),
             aliases=("data_analyst", "数据分析师", "数据专家"),
         ),
         _registration(
-            "code_expert", "Code Expert", "审查代码、排查问题并改进架构。", "avatar_code.png",
+            "code_expert", "code_expert_adapter", "Code Expert", "审查代码、排查问题并改进架构。", "avatar_code.png",
             entry_allowed=True, delegation_allowed=True,
             delegated_output_policy=OutputPolicy.INTERNAL,
             capabilities=frozenset({"code_reasoning"}),
             aliases=("code_expert", "代码专家"),
         ),
         _registration(
-            "knowledge_expert", "Knowledge Expert", "在可用时依据本地知识库回答问题。", "avatar_knowledge.png",
+            "knowledge_expert", "knowledge_expert_adapter", "Knowledge Expert", "在可用时依据本地知识库回答问题。", "avatar_knowledge.png",
             entry_allowed=True, delegation_allowed=True,
             delegated_output_policy=OutputPolicy.INTERNAL,
             capabilities=frozenset({"rag"}),
@@ -277,7 +282,7 @@ DEFAULT_AGENT_REGISTRY = AgentRegistry(
             single_passthrough=True,
         ),
         _registration(
-            "synthesis_agent", "Synthesis Agent", "汇总已授权的专业结果。", "avatar_router.png",
+            "synthesis_agent", "synthesis_agent_adapter", "Synthesis Agent", "汇总已授权的专业结果。", "avatar_router.png",
             entry_allowed=False, delegation_allowed=True,
             delegated_output_policy=OutputPolicy.FINAL_SYNTHESIS,
             capabilities=frozenset({"synthesis", "structured_output"}),

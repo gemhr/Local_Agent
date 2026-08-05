@@ -59,7 +59,7 @@ Bad Case 一律使用：
 
 LocalAgent Stage 2.5 的目标不是“多调用几个模型”，而是把自然语言请求可靠地编译成经过 Agent 权限校验、固定图形校验和敏感数据隔离的不可变 Runtime Plan，并保证失败时不由主 Agent 静默补答。
 
-WP1 完成的是规划与编译合同：`AgentRegistry + PlanningDecision + strict parser + PlanResolver + PlanCompiler + StepInvocationBindings`。默认 API 接入、动态 Run 生命周期和真实多 Agent 执行仍属于后续工作。
+WP1 完成的是规划与编译合同：`AgentRegistry + PlanningDecision + strict parser + PlanResolver + PlanCompiler + StepInvocationBindings`。本次补证进一步收口了 Direct Answer 的 instruction authority，并为未来 Adapter 解析冻结了 Registry 合同。默认 API 接入、动态 Run 生命周期和真实多 Agent 执行仍属于后续工作。
 
 ## 3. 真实用户场景与实际问题
 
@@ -114,6 +114,7 @@ OUTPUT_DELTA -> STEP_COMPLETED -> RUN_COMPLETED(SUCCEEDED)
 5. **数据合同**：raw instruction 放在哪里，如何避免进入 Plan/Snapshot/日志。
 6. **失败合同**：unknown Agent、schema failure 或 specialist failure是否回退 Core。
 7. **真实性合同**：类型实现、默认入口接线和生产执行能力分别陈述。
+8. **权限来源**：明确哪些字段由用户请求决定，哪些字段只能由 Planner 提议，哪些字段由 Compiler/Registry 授权。
 
 ## 5. 方案讨论与取舍
 
@@ -137,6 +138,12 @@ OUTPUT_DELTA -> STEP_COMPLETED -> RUN_COMPLETED(SUCCEEDED)
 ### 5.3 为什么 raw instruction 不进入 Plan
 
 Plan 可能进入 repr、Snapshot、fingerprint、Journal 或诊断链。用户请求可能含文件路径、查询词和业务数据。WP1 将调度合同与调用正文分离：Plan 只保存安全结构，raw instruction 只在 run-scoped Bindings 中按 Step/Agent 读取。
+
+### 5.4 为什么 Direct Answer 不能使用 Planner instruction
+
+Direct Answer 的语义是“选择由哪个 Agent 直接回答”，不是“让 Planner 改写用户问题”。如果模型能返回 Direct instruction，调用方很容易误以为 Planner 有权重写用户请求，进而出现用户要求调用知识专家、Planner 却把任务改成普通回答的问题。
+
+最终合同是：`PlanningRequest.user_request` 是 Direct Binding 的唯一 instruction authority；`DirectAnswerDecision` 只保存 `agent_id/reason_code`；Direct schema 删除并禁止 `instruction`。Planner 仍可为 `DelegatedTaskDecision` 提供 specialist instruction，因为那是 typed task 的执行输入，而不是对用户请求的改写。
 
 ## 6. 最终架构与四种合法图
 
@@ -169,6 +176,7 @@ PlanningRequest
 | 事实 | Owner |
 |---|---|
 | Agent 身份、entry/delegated 权限、capability | `AgentRegistry` |
+| Agent 执行适配符号 | `AgentRegistry.execution_adapter_id`；实现由独立 Adapter Factory 解析 |
 | direct/delegate task 提议 | `PlanningDecision` |
 | Planner schema | `StrictPlanningDecisionParser` |
 | policy、execution kind、固定依赖、合法图 | `PlanCompiler` |
@@ -181,6 +189,7 @@ PlanningRequest
 ### 7.1 Registry 与 Resolver
 
 - 五个初始 Agent：core、data、code、knowledge、synthesis。
+- 每个 `AgentRegistration` 还声明稳定字符串 `execution_adapter_id`；Registry 不保存 callable、实例或 secret，WP3 由独立 `AgentAdapterFactory` 解析。
 - entry 与 delegated permission 分离。
 - knowledge 只有“唯一 delegated task、无其他 Step”可 direct passthrough。
 - code/data delegated 为 INTERNAL，并生成 synthesis。
@@ -191,6 +200,8 @@ PlanningRequest
 ### 7.2 Strict Planner Schema
 
 - schema version 固定为 1，只接受 `DIRECT_ANSWER` 或 `DELEGATE`。
+- `DIRECT_ANSWER` 只包含 `schema_version/decision/agent_id/reason_code`，不包含 instruction；模型伪造该字段时 fail closed。
+- Direct Binding 使用原始 `PlanningRequest.user_request`；Delegated task 继续使用 Planner 生成的 specialist instruction。
 - unknown field 明确拒绝。
 - 拒绝 policy、execution kind、dependency、optional dependency、callable、driver、provider、Runtime state 和 output/result type。
 - raw model output 不进入异常文本或 cause。
@@ -201,7 +212,7 @@ PlanningRequest
 - 复用现有 DAG validator。
 - 检查权限、唯一 final、唯一 sink、fan-out、synthesis 依赖全集。
 - 硬限制 8 个 specialist、9 个 Step、单 instruction 8000 字符、总 instruction 24000 字符。
-- raw-bearing Request/Decision/InvocationSpec 不使用 dataclass，因为 `repr=False` 不能阻止 `asdict()` 导出字段。
+- raw-bearing Request/DelegatedTaskDecision/InvocationSpec 不使用 dataclass，因为 `repr=False` 不能阻止 `asdict()` 导出字段；DirectAnswerDecision 本身不承载 raw instruction。
 - Bindings 无 `get_all()`、不可 pickle，关闭后清空 raw 引用。
 
 ## 8. 高价值 Bad Cases
@@ -240,7 +251,7 @@ PlanningRequest
 - 回归测试：`test_resolved_plan_rejects_missing_extra_and_agent_mismatch_bindings`。
 - 对应知识点：聚合根不变量、异常抽象层次、错误信息最小化。
 - 面试表达：我把 Plan 与 Binding 一致性放在聚合构造边界验证，避免上层依赖底层异常细节。
-- 当前状态：已修复；最终 WP1 66 passed，全仓 1155 passed、42 subtests passed。
+- 当前状态：已修复；最终 WP1 68 passed，全仓 1157 passed、42 subtests passed。
 
 ### Bad Case 4：公开 validate_plan 接受 Core 作为 specialist
 
@@ -252,7 +263,7 @@ PlanningRequest
 - 回归测试：defensive graph rejection matrix 新增 Core specialist，期望 `DELEGATED_AGENT_NOT_ALLOWED`。
 - 对应知识点：TOCTOU、defense in depth、构建与验证路径一致性。
 - 面试表达：不能假设所有 Plan 都由当前 builder 产生；公开 validator 必须独立验证权限。
-- 当前状态：已修复并纳入最终 66 个 WP1 专项测试。
+- 当前状态：已修复并纳入最终 68 个 WP1 专项测试。
 
 ### Bad Case 5：Registry 对外只读，但内部槽位仍可重绑
 
@@ -350,11 +361,47 @@ PlanningRequest
 - 面试表达：我没有为新模块复制 DAG 算法，而是复用 Scheduler 同一验证权威，避免双标准。
 - 当前状态：WP1 已按该方案实现并通过回归。
 
+### Bad Case 13：Planner 伪造 Direct instruction 改写用户请求
+
+- 类型：真实发现（WP1 补充验收发现，源于真实代码路径；不是生产事故）
+- 触发条件：模型返回 `DIRECT_ANSWER`，并额外提供与原始用户请求不同的 `instruction`。
+- 故障表现：旧实现会把 Planner instruction 传入 `DirectAnswerDecision`，再绑定给 `core_router`；Planner 因而获得了改写用户问题的事实权限。
+- 根因分析：Direct decision 同时承载了路由选择和执行正文，Resolver 没有把原始 `PlanningRequest.user_request` 作为权威输入显式传给 Compiler。
+- 修复方案：删除 `DirectAnswerDecision.instruction`；Direct schema 只保留 `agent_id/reason_code`，出现 instruction 时返回 `PLANNER_FIELD_FORBIDDEN`；Compiler 只接受 Resolver 传入的原始请求。Delegated task 继续保留 specialist instruction。
+- 回归测试：`test_model_direct_binding_uses_original_request_and_delegate_keeps_typed_instruction`、`test_model_direct_forged_instruction_is_forbidden_without_echo_or_log`。
+- 对应知识点：confused deputy、authority separation、typed decision、fail closed、数据流最小化。
+- 面试表达：我把“Planner 选择谁回答”和“用户到底问了什么”拆成两个 authority；模型只能决定前者，不能改写后者。
+- 当前状态：已修复；Direct instruction authority 为 `ORIGINAL_REQUEST`，伪造 instruction 不进入 Plan、Binding、异常或日志。
+
+### Bad Case 14：Registry 有 Agent 身份但没有未来执行适配合同
+
+- 类型：真实发现（WP1 架构验收发现，不是生产事故）
+- 触发条件：只按 `agent_id` 注册权限，却没有定义 WP3 如何从 Agent 身份解析真实 adapter。
+- 故障表现：未来 `MultiAgentDriver` 容易出现按 agent_id 散落的 `if/elif`，身份、权限、执行实现和生命周期逐渐分裂。
+- 根因分析：把 Registry 错称为“完整执行事实源”，但当前 WP1 实际只实现了 typed identity/policy，没有 Adapter Factory 或真实 Driver。
+- 修复方案：采用方案 A，为 `AgentRegistration` 增加稳定字符串 `execution_adapter_id`；WP3 通过独立 `AgentAdapterFactory` 解析实现，Registry 不保存 callable、实例、secret 或生命周期对象。
+- 回归测试：默认五个 Adapter ID 唯一稳定；非法 Adapter ID 被拒绝；Registry immutable/repr-safe 测试通过。
+- 对应知识点：symbolic binding、dependency inversion、lifecycle ownership、single source of truth。
+- 面试表达：Registry 负责“这个 Agent 是谁以及能不能做”，Factory 负责“如何执行它”；用稳定符号连接两者，避免 driver 按身份写分支。
+- 当前状态：合同已冻结；真实 Adapter、Factory、MultiAgentDriver 留给 WP3，不能宣称当前 Registry 已经能执行 Agent。
+
+### Bad Case 15：兼容默认让旧多 Step Plan 看起来都是 final
+
+- 类型：假设构造（源码审计风险，不是生产事故）
+- 触发条件：旧的多 Step static Plan 省略 `output_policy`，依赖 `PlanStep` 的兼容默认 `FINAL_PASSTHROUGH`。
+- 故障表现：WP4 若直接把所有 `output_policy != INTERNAL` 的 Step 接入 OutputGate，旧中间 Step 可能被当成多个 final。
+- 根因分析：WP1 为保持旧位置参数兼容而保留默认值；当前生产静态入口主要是一 Step，但测试和 fixture 已存在多 Step 构造。
+- 修复方案：本轮不提前改默认值、不实现 OutputGate；WP4 接入时审计多 Step static Plan，把中间 Step 显式迁移为 `INTERNAL`，唯一终点显式声明 final policy。
+- 回归测试：本轮完成 `PlanStep` 默认值和多 Step 构造源码核验；OutputGate 迁移测试属于 WP4。
+- 对应知识点：backward compatibility、semantic default、single final sink、迁移策略。
+- 面试表达：兼容默认不是永久语义保证；我把风险留在 WP4 的 OutputGate 接入边界，避免在 WP1 越权修改 Runtime。
+- 当前状态：风险分类为 `DEFERRED_TO_WP4`，当前不构成 WP1 P0/P1。
+
 ## 9. 测试与真实性证据
 
 ```text
-WP1 专项：66 passed
-全仓：1155 passed, 42 subtests passed
+WP1 专项：68 passed
+全仓：1157 passed, 42 subtests passed
 compileall：PASS
 git diff --check：PASS
 WP2 禁止范围文件改动：0
@@ -371,7 +418,7 @@ WP2 禁止范围文件改动：0
 
 ## 10. 当前能力边界
 
-已经完成：Registry 权限、显式 specialist 零模型 resolution、高置信文档规则、strict Planner schema、固定图 Compiler、资源限制和 raw instruction/Plan 分离。
+已经完成：Registry 权限与稳定 Adapter 符号、显式 specialist 零模型 resolution、高置信文档规则、strict Planner schema、Direct 原始请求 authority、固定图 Compiler、资源限制和 raw instruction/Plan 分离。
 
 尚未完成：
 
@@ -389,7 +436,7 @@ WP2 禁止范围文件改动：0
 
 ### 11.1 30 秒版本
 
-我在 LocalAgent 里遇到一个真实问题：用户让主 Agent 调知识专家总结本地 Markdown，但日志显示主 Run 只有模型调用，没有 retrieval，直接知识专家却有完整检索链。我的处理不是继续堆 prompt，而是设计 Registry、typed Resolver 和 Compiler，把 Agent 权限、四种合法图、唯一 final 和 raw instruction 边界做成可测试合同。WP1 有 66 个专项测试，全仓 1155 passed；我也明确保留边界——默认 API 尚未接线。
+我在 LocalAgent 里遇到一个真实问题：用户让主 Agent 调知识专家总结本地 Markdown，但日志显示主 Run 只有模型调用，没有 retrieval，直接知识专家却有完整检索链。我的处理不是继续堆 prompt，而是设计 Registry、typed Resolver 和 Compiler，把 Agent 权限、四种合法图、唯一 final 和 raw instruction 边界做成可测试合同。本次又补上 Direct Answer authority 和 Adapter binding 合同，WP1 有 68 个专项测试，全仓 1157 passed；我也明确保留边界——默认 API 尚未接线。
 
 ### 11.2 2 分钟版本
 
@@ -397,7 +444,7 @@ WP2 禁止范围文件改动：0
 
 我比较了纯 prompt、关键词路由、Planner 直接产 DAG 和 typed compiler。最终让 Resolver 处理 explicit/deterministic/model 三种来源；Planner 只能提出任务，Registry 管身份和权限，Compiler 独占 output policy 和固定图构造，并复用现有 DAG validator。raw instruction 不进入 Plan，而是放在不可序列化的 run-scoped Bindings。
 
-实现中有两个真实测试/审计发现：ResolvedPlan 一度透出底层 mismatch 异常；公开 validate_plan 一度没有重复检查 Core delegated permission。两者都补了边界校验。最终 WP1 66 passed，全仓 1155 passed；当前只完成规划编译合同，Runtime 接线属于 WP2。
+实现中有四个高价值审计发现：ResolvedPlan 一度透出底层 mismatch 异常；公开 validate_plan 一度没有重复检查 Core delegated permission；DirectAnswerDecision 一度允许 Planner instruction 改写请求；Registry 一度缺少未来 Adapter 的符号绑定合同。它们都补了边界校验或合同冻结。最终 WP1 68 passed，全仓 1157 passed；当前只完成规划编译合同，Runtime 接线属于 WP2。
 
 ### 11.3 深入追问：为什么这能支持任意多 Agent
 
@@ -415,7 +462,7 @@ WP2 禁止范围文件改动：0
 
 推荐：
 
-> 设计并实现 LocalAgent 多 Agent 规划编译层：以 immutable AgentRegistry、strict typed Planner schema 和固定图 PlanCompiler 收口 Agent 权限、DAG、唯一 final 与敏感调用参数边界；覆盖 66 个 WP1 专项测试并保持全仓 1155 tests + 42 subtests 通过。
+> 设计并实现 LocalAgent 多 Agent 规划编译层：以 immutable AgentRegistry、strict typed Planner schema 和固定图 PlanCompiler 收口 Agent 权限、DAG、唯一 final、Direct request authority 与敏感调用参数边界；覆盖 68 个 WP1 专项测试并保持全仓 1157 tests + 42 subtests 通过。
 
 不推荐：
 
@@ -432,6 +479,6 @@ WP2 禁止范围文件改动：0
 - 能否解释 `repr=False` 与 `asdict()` 的差异？
 - 能否说明为什么 unknown Agent 不 fallback Core？
 - 能否说出两项真实实现期发现，而不包装成生产事故？
-- 能否准确说出 66 个专项测试和 1155 passed、42 subtests passed？
+- 能否准确说出 68 个专项测试和 1157 passed、42 subtests passed？
 - 能否明确说默认 API 和生产多 Agent 执行仍为 NO？
 - 能否说明 WP2 要接什么，而不声称已经实现？
