@@ -87,12 +87,11 @@ class PlanningRequest:
 
 
 class DirectAnswerDecision:
-    __slots__ = ("_agent_id", "_instruction", "_reason_code", "_locked")
+    __slots__ = ("_agent_id", "_reason_code", "_locked")
 
-    def __init__(self, agent_id: str, instruction: str, reason_code: str) -> None:
-        _validate_decision_text(agent_id, instruction, reason_code)
+    def __init__(self, agent_id: str, reason_code: str) -> None:
+        _validate_direct_decision_text(agent_id, reason_code)
         object.__setattr__(self, "_agent_id", agent_id.strip())
-        object.__setattr__(self, "_instruction", instruction)
         object.__setattr__(self, "_reason_code", reason_code)
         object.__setattr__(self, "_locked", True)
 
@@ -106,15 +105,11 @@ class DirectAnswerDecision:
         return self._agent_id
 
     @property
-    def instruction(self) -> str:
-        return self._instruction
-
-    @property
     def reason_code(self) -> str:
         return self._reason_code
 
     def __repr__(self) -> str:
-        return f"DirectAnswerDecision(agent_id={self.agent_id!r}, instruction=<redacted>, reason_code={self.reason_code!r})"
+        return f"DirectAnswerDecision(agent_id={self.agent_id!r}, reason_code={self.reason_code!r})"
 
 
 class DelegatedTaskDecision:
@@ -230,7 +225,13 @@ class PlanningModel(Protocol):
 
 
 class PlanCompilerProtocol(Protocol):
-    def compile(self, decision: PlanningDecision, *, planning_source: PlanningSource) -> ResolvedPlan:
+    def compile(
+        self,
+        decision: PlanningDecision,
+        *,
+        planning_source: PlanningSource,
+        direct_instruction: str | None = None,
+    ) -> ResolvedPlan:
         """把 typed decision 编译为已校验 ResolvedPlan。"""
 
 
@@ -263,14 +264,18 @@ class StrictPlanningDecisionParser:
             )
         decision = payload.get("decision")
         if decision == "DIRECT_ANSWER":
+            if "instruction" in payload:
+                raise PlanningError(
+                    PlanningErrorCode.PLANNER_FIELD_FORBIDDEN,
+                    "Planner direct decision 无权声明 instruction",
+                )
             cls._require_exact_keys(
                 payload,
-                {"schema_version", "decision", "agent_id", "instruction", "reason_code"},
+                {"schema_version", "decision", "agent_id", "reason_code"},
             )
             try:
                 return DirectAnswerDecision(
                     agent_id=payload["agent_id"],
-                    instruction=payload["instruction"],
                     reason_code=payload["reason_code"],
                 )
             except (KeyError, TypeError, ValueError):
@@ -365,10 +370,13 @@ class PlanResolver:
         if not selected.model_direct_allowed:
             decision = DirectAnswerDecision(
                 selected.agent_id,
-                request.user_request,
                 "EXPLICIT_ENTRY_SELECTION",
             )
-            return self._compiler.compile(decision, planning_source=PlanningSource.EXPLICIT_ENTRY)
+            return self._compiler.compile(
+                decision,
+                planning_source=PlanningSource.EXPLICIT_ENTRY,
+                direct_instruction=request.user_request,
+            )
 
         deterministic = self._deterministic_core_decision(
             request.user_request,
@@ -378,6 +386,11 @@ class PlanResolver:
             return self._compiler.compile(
                 deterministic,
                 planning_source=PlanningSource.DETERMINISTIC_RULE,
+                direct_instruction=(
+                    request.user_request
+                    if isinstance(deterministic, DirectAnswerDecision)
+                    else None
+                ),
             )
         if self._planning_model is None:
             raise PlanningError(PlanningErrorCode.PLANNING_MODEL_REQUIRED, "请求需要 Planner model")
@@ -398,13 +411,21 @@ class PlanResolver:
             raise PlanningError(PlanningErrorCode.PLANNING_MODEL_FAILED, "Planner model 调用失败") from None
         run_context.raise_if_inactive()
         decision = StrictPlanningDecisionParser.parse(raw_output)
-        return self._compiler.compile(decision, planning_source=PlanningSource.MODEL)
+        return self._compiler.compile(
+            decision,
+            planning_source=PlanningSource.MODEL,
+            direct_instruction=(
+                request.user_request
+                if isinstance(decision, DirectAnswerDecision)
+                else None
+            ),
+        )
 
     def _deterministic_core_decision(
         self, user_request: str, *, core_agent_id: str
     ) -> PlanningDecision | None:
         if _DIRECT_GREETING.fullmatch(user_request.strip()):
-            return DirectAnswerDecision(core_agent_id, user_request, "DETERMINISTIC_GREETING")
+            return DirectAnswerDecision(core_agent_id, "DETERMINISTIC_GREETING")
         selected: list[str] = []
         for agent_id in self._registry.delegated_specialist_ids():
             registration = self._registry.resolve(agent_id)
@@ -439,11 +460,9 @@ class PlanResolver:
         return DelegatedPlanDecision(tasks, synthesis_required=not direct_allowed)
 
 
-def _validate_decision_text(agent_id: object, instruction: object, reason_code: object) -> None:
+def _validate_direct_decision_text(agent_id: object, reason_code: object) -> None:
     if not isinstance(agent_id, str) or not agent_id.strip():
         raise ValueError("agent_id 不能为空")
-    if not isinstance(instruction, str) or not instruction.strip():
-        raise ValueError("instruction 不能为空")
     if not isinstance(reason_code, str) or _SAFE_REASON.fullmatch(reason_code) is None:
         raise ValueError("reason_code 必须是安全标识")
 

@@ -52,8 +52,9 @@ def assert_binding_parity(resolved: ResolvedPlan) -> None:
 
 def test_shape_0_core_direct() -> None:
     resolved = compiler().compile(
-        DirectAnswerDecision("core_router", RAW, "MODEL_DIRECT"),
+        DirectAnswerDecision("core_router", "MODEL_DIRECT"),
         planning_source=PlanningSource.MODEL,
+        direct_instruction=RAW,
     )
     assert [(step.step_id, step.preferred_agent, step.depends_on, step.execution_kind, step.output_policy) for step in resolved.plan.steps] == [
         ("answer", "core_router", (), ExecutionKind.AGENT, OutputPolicy.FINAL_PASSTHROUGH)
@@ -64,8 +65,9 @@ def test_shape_0_core_direct() -> None:
 @pytest.mark.parametrize("agent_id", ["knowledge_expert", "code_expert", "data_analyst"])
 def test_shape_1_authorized_explicit_entry_specialist(agent_id: str) -> None:
     resolved = compiler().compile(
-        DirectAnswerDecision(agent_id, RAW, "EXPLICIT_ENTRY_SELECTION"),
+        DirectAnswerDecision(agent_id, "EXPLICIT_ENTRY_SELECTION"),
         planning_source=PlanningSource.EXPLICIT_ENTRY,
+        direct_instruction=RAW,
     )
     step = resolved.plan.steps[0]
     assert (step.step_id, step.preferred_agent, step.depends_on) == ("answer", agent_id, ())
@@ -135,9 +137,9 @@ def test_plan_and_step_ids_are_stable_without_instruction_digest() -> None:
 @pytest.mark.parametrize(
     "decision,source,error_code",
     [
-        (DirectAnswerDecision("unknown_agent", RAW, "TEST"), PlanningSource.EXPLICIT_ENTRY, PlanCompileErrorCode.UNKNOWN_AGENT),
-        (DirectAnswerDecision("synthesis_agent", RAW, "TEST"), PlanningSource.EXPLICIT_ENTRY, PlanCompileErrorCode.SYNTHESIS_ENTRY_FORBIDDEN),
-        (DirectAnswerDecision("code_expert", RAW, "TEST"), PlanningSource.MODEL, PlanCompileErrorCode.MODEL_DIRECT_AGENT_NOT_ALLOWED),
+        (DirectAnswerDecision("unknown_agent", "TEST"), PlanningSource.EXPLICIT_ENTRY, PlanCompileErrorCode.UNKNOWN_AGENT),
+        (DirectAnswerDecision("synthesis_agent", "TEST"), PlanningSource.EXPLICIT_ENTRY, PlanCompileErrorCode.SYNTHESIS_ENTRY_FORBIDDEN),
+        (DirectAnswerDecision("code_expert", "TEST"), PlanningSource.MODEL, PlanCompileErrorCode.MODEL_DIRECT_AGENT_NOT_ALLOWED),
         (DelegatedPlanDecision((), True), PlanningSource.MODEL, PlanCompileErrorCode.EMPTY_TASKS),
         (DelegatedPlanDecision((task("same", "code_expert"), task("same", "knowledge_expert")), True), PlanningSource.MODEL, PlanCompileErrorCode.DUPLICATE_TASK_ID),
         (DelegatedPlanDecision((task("INVALID", "code_expert"),), True), PlanningSource.MODEL, PlanCompileErrorCode.INVALID_TASK_ID),
@@ -153,7 +155,11 @@ def test_plan_and_step_ids_are_stable_without_instruction_digest() -> None:
 )
 def test_typed_decision_rejection_matrix(decision, source, error_code) -> None:
     with pytest.raises(PlanCompileError) as captured:
-        compiler().compile(decision, planning_source=source)
+        compiler().compile(
+            decision,
+            planning_source=source,
+            direct_instruction=RAW if isinstance(decision, DirectAnswerDecision) else None,
+        )
     assert captured.value.error_code is error_code
     assert RAW not in str(captured.value)
 

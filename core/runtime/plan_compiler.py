@@ -105,12 +105,22 @@ class PlanCompiler:
         self._registry = registry
         self._config = config or PlanCompileConfig()
 
-    def compile(self, decision: PlanningDecision, *, planning_source: PlanningSource) -> ResolvedPlan:
+    def compile(
+        self,
+        decision: PlanningDecision,
+        *,
+        planning_source: PlanningSource,
+        direct_instruction: str | None = None,
+    ) -> ResolvedPlan:
         if not isinstance(planning_source, PlanningSource):
             raise TypeError("planning_source 必须合法")
         if isinstance(decision, DirectAnswerDecision):
-            return self._compile_direct(decision, planning_source)
+            if direct_instruction is None:
+                raise TypeError("direct decision 必须由 Resolver 提供原始请求")
+            return self._compile_direct(decision, planning_source, direct_instruction)
         if isinstance(decision, DelegatedPlanDecision):
+            if direct_instruction is not None:
+                raise TypeError("delegated decision 不接受 direct instruction")
             return self._compile_delegated(decision, planning_source)
         raise TypeError("decision 必须是合法 PlanningDecision")
 
@@ -199,8 +209,13 @@ class PlanCompiler:
         if final.depends_on != tuple(step.step_id for step in specialists):
             self._fail(PlanCompileErrorCode.INVALID_GRAPH_SHAPE, "synthesis 必须依赖全部且仅依赖 specialist")
 
-    def _compile_direct(self, decision: DirectAnswerDecision, source: PlanningSource) -> ResolvedPlan:
-        self._validate_instruction(decision.instruction)
+    def _compile_direct(
+        self,
+        decision: DirectAnswerDecision,
+        source: PlanningSource,
+        direct_instruction: str,
+    ) -> ResolvedPlan:
+        self._validate_instruction(direct_instruction)
         registration = self._resolve_registration(decision.agent_id)
         if registration.synthesis_only:
             self._fail(PlanCompileErrorCode.SYNTHESIS_ENTRY_FORBIDDEN, "synthesis Agent 不允许作为 entry")
@@ -214,7 +229,7 @@ class PlanCompiler:
         )
         return self._resolved(
             (step,),
-            (AgentInvocationSpec("answer", registration.agent_id, decision.instruction),),
+            (AgentInvocationSpec("answer", registration.agent_id, direct_instruction),),
             source,
             safe_identity=("direct", registration.agent_id),
         )

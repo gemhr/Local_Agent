@@ -22,13 +22,12 @@ from core.runtime.planning import OutputPolicy
 RAW = "private model output C:/secret/file.md"
 
 
-def direct_json(agent_id: str = "core_router", instruction: str = "answer safely") -> str:
+def direct_json(agent_id: str = "core_router") -> str:
     return json.dumps(
         {
             "schema_version": 1,
             "decision": "DIRECT_ANSWER",
             "agent_id": agent_id,
-            "instruction": instruction,
             "reason_code": "MODEL_DIRECT",
         }
     )
@@ -173,6 +172,66 @@ async def test_unresolved_core_request_calls_model_once_and_compiles_typed_outpu
 
 
 @pytest.mark.asyncio
+async def test_model_direct_binding_uses_original_request_and_delegate_keeps_typed_instruction() -> None:
+    original_request = "用户原始请求：不要由 Planner 改写"
+    direct = await resolver(FakePlanningModel(output=direct_json())).resolve(
+        PlanningRequest("core_router", original_request), context()
+    )
+    direct_binding = direct.invocation_bindings.resolve_for_step(
+        "answer", expected_agent_id="core_router"
+    )
+    assert direct_binding.instruction == original_request
+
+    specialist_instruction = "仅供知识专家执行的 typed task"
+    delegated = await resolver(
+        FakePlanningModel(
+            output=delegate_json(
+                [{"task_id": "knowledge", "agent_id": "knowledge_expert", "instruction": specialist_instruction}],
+                False,
+            )
+        )
+    ).resolve(PlanningRequest("core_router", original_request), context())
+    delegated_binding = delegated.invocation_bindings.resolve_for_step(
+        "task-knowledge", expected_agent_id="knowledge_expert"
+    )
+    assert delegated_binding.instruction == specialist_instruction
+
+
+@pytest.mark.asyncio
+async def test_model_direct_forged_instruction_is_forbidden_without_echo_or_log(caplog) -> None:
+    forged = "PLANNER_FORGED_INSTRUCTION_DO_NOT_LEAK"
+
+    class CompilerMustNotRun:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def compile(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("forged direct instruction must not reach Plan or Binding")
+
+    compiler = CompilerMustNotRun()
+    raw = json.dumps(
+        {
+            "schema_version": 1,
+            "decision": "DIRECT_ANSWER",
+            "agent_id": "core_router",
+            "instruction": forged,
+            "reason_code": "MODEL_DIRECT",
+        }
+    )
+    with pytest.raises(PlanningError) as captured:
+        await PlanResolver(
+            DEFAULT_AGENT_REGISTRY, compiler, FakePlanningModel(output=raw)
+        ).resolve(
+            PlanningRequest("core_router", "原始请求"), context()
+        )
+    assert captured.value.error_code is PlanningErrorCode.PLANNER_FIELD_FORBIDDEN
+    assert compiler.calls == 0
+    assert forged not in str(captured.value)
+    assert forged not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_schema_compile_and_model_failures_never_fallback_to_core() -> None:
     cases = (
         (FakePlanningModel(output="invalid " + RAW), PlanningError, PlanningErrorCode.PLANNER_SCHEMA_INVALID),
@@ -192,7 +251,7 @@ async def test_schema_compile_and_model_failures_never_fallback_to_core() -> Non
 
 def test_sensitive_planning_objects_are_immutable_repr_and_asdict_safe() -> None:
     request = PlanningRequest("core_router", RAW)
-    decision = DirectAnswerDecision("core_router", RAW, "TEST")
+    decision = DirectAnswerDecision("core_router", "TEST")
     delegated = StrictPlanningDecisionParser.parse(
         delegate_json([{"task_id": "code", "agent_id": "code_expert", "instruction": RAW}], True)
     )
@@ -200,7 +259,7 @@ def test_sensitive_planning_objects_are_immutable_repr_and_asdict_safe() -> None
     assert RAW not in repr(decision)
     assert RAW not in repr(delegated)
     resolved = PlanCompiler(DEFAULT_AGENT_REGISTRY).compile(
-        decision, planning_source=PlanningSource.MODEL
+        decision, planning_source=PlanningSource.MODEL, direct_instruction=RAW
     )
     assert "invocation_bindings" not in repr(resolved)
     with pytest.raises(AttributeError):

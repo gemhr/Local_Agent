@@ -21,7 +21,7 @@ WP1 已完成：实现了不可变 `AgentRegistry`、typed planning contracts、
 | 模型统一入口 | `ModelInvocationRouter` 已负责候选、预算、取消、deadline、重试和 Trace；Legacy 由 `AgentRouter._invoke_model_contract` 使用 | WP1 定义异步 `PlanningModel` Protocol，不直接调用 provider，也不强迫修改 Runtime 生命周期 |
 | Legacy deterministic | `_resolve_explicit_knowledge_delegate` 和自由文本 `Delegate:` parser 存在；自由文本非法项会被忽略 | 只借鉴高置信别名/文档规则，不复用自由文本 Delegate 作为 Plan |
 
-与候选设计的一个实现差异：包含 raw instruction 的 Request/Decision/InvocationSpec 使用带 `__slots__` 的不可变普通类，而不是 dataclass。原因是 `repr=False` 不能阻止 `dataclasses.asdict()` 导出原文；当前实现让默认 `asdict()` 直接拒绝这些对象。
+与候选设计的一个实现差异：包含 raw instruction 的 Request/DelegatedTaskDecision/InvocationSpec 使用带 `__slots__` 的不可变普通类，而不是 dataclass。原因是 `repr=False` 不能阻止 `dataclasses.asdict()` 导出原文；当前实现让默认 `asdict()` 直接拒绝这些对象。验收补证后，`DirectAnswerDecision` 不再包含 instruction。
 
 ## 3. Files Changed
 
@@ -46,14 +46,14 @@ WP1 已完成：实现了不可变 `AgentRegistry`、typed planning contracts、
 
 ### AgentRegistration / AgentRegistry
 
-`AgentRegistration` 是 frozen+slots 配置，包含：身份/展示元数据、enabled、entry permission/policy、model-direct permission、delegation permission/policy、单 delegated passthrough 例外、synthesis-only、parallel support、input/result types、capabilities、deterministic aliases。
+`AgentRegistration` 是 frozen+slots 配置，包含：身份、稳定 `execution_adapter_id`、展示元数据、enabled、entry permission/policy、model-direct permission、delegation permission/policy、单 delegated passthrough 例外、synthesis-only、parallel support、input/result types、capabilities、deterministic aliases。
 
 `AgentRegistry`：
 
 - 复制并冻结构造输入，拒绝空/重复/非法 registration。
 - `resolve`、`require_entry`、`require_delegated` 均返回 typed registration 或稳定错误码。
 - `synthesis_registration()` 要求恰好一个 enabled synthesis Agent。
-- 不保存 Run、用户请求、结果、driver/factory 或 secret。
+- 不保存 Run、用户请求、结果、callable、adapter 实例、factory 或 secret；WP3 由独立 factory 按 `execution_adapter_id` 解析实现。
 - `legacy_display_config()` 只为尚未迁移的 Legacy 返回同源展示配置副本。
 
 ### OutputPolicy / ExecutionKind
@@ -68,7 +68,7 @@ ExecutionKind: AGENT | SYNTHESIS
 ### PlanningRequest / PlanningDecision
 
 - `PlanningRequest(selected_agent_id, user_request)`：不可变，repr 隐去正文。
-- `DirectAnswerDecision(agent_id, instruction, reason_code)`：用于 Core direct 或确定性 explicit entry。
+- `DirectAnswerDecision(agent_id, reason_code)`：只决定 Core direct 或确定性 explicit entry，不携带或改写 instruction；Compiler 由 Resolver 接收原始 `PlanningRequest.user_request`。
 - `DelegatedTaskDecision(task_id, agent_id, instruction, input_type, required_capabilities)`：Planner 只提出任务。
 - `DelegatedPlanDecision(tasks, synthesis_required)`：不包含 output policy、依赖图、driver 或 Runtime state。
 
@@ -76,7 +76,7 @@ ExecutionKind: AGENT | SYNTHESIS
 
 `PlanningModel.generate_plan(request, run_context) -> str` 是异步 Protocol。实现必须使用统一模型服务并承担预算/取消/deadline；WP1 只使用 fake 测试。
 
-`StrictPlanningDecisionParser` 要求 schema v1、顶层对象、严格 decision enum 和字段集合。它拒绝 policy、execution kind、dependency、optional dependency、callable、driver、provider/model、Runtime status 和 output/result type 等越权字段；异常不保存 raw output。
+`StrictPlanningDecisionParser` 要求 schema v1、顶层对象、严格 decision enum 和字段集合。它明确禁止 `DIRECT_ANSWER.instruction`，并拒绝 policy、execution kind、dependency、optional dependency、callable、driver、provider/model、Runtime status 和 output/result type 等越权字段；异常不保存 raw output。
 
 ### StepInvocationBindings
 
@@ -157,7 +157,7 @@ Planner cancellation、deadline 和 budget 异常不被改写为普通 planning 
 
 ## 7. Security Boundary
 
-- raw instruction 只在不可变 Request/Decision/InvocationSpec/Bindings 内存对象中；Plan/PlanStep 无 `instruction`、`input_digest` 或文件路径字段。
+- raw instruction 只在不可变 Request/DelegatedTaskDecision/InvocationSpec/Bindings 内存对象中；DirectAnswerDecision、Plan/PlanStep 无 `instruction`、`input_digest` 或文件路径字段。
 - raw-bearing 类不是 dataclass，默认 `asdict()` 拒绝；repr 固定显示 `<redacted>`。
 - `ResolvedPlan` repr 排除整个 `invocation_bindings` 字段。
 - parser 不将 raw model output 放入 error、cause、日志或对象。
