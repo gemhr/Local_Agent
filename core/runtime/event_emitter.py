@@ -10,6 +10,7 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 from core.runtime.event_channel import RuntimeEventChannel
+from core.runtime.event_channel import EventPublicationError
 from core.runtime.events import (
     RuntimeEvent,
     RuntimeEventDraft,
@@ -166,20 +167,29 @@ class StepEventEmitter:
                 raise RuntimeError("StepEventEmitter 已关闭")
             step_sequence = self._sequence + 1
             span = current_trace_context()
-            event = await self.parent.channel.publish(
-                RuntimeEventDraft(
-                    run_id=self.parent.run_id,
-                    trace_id=self.parent.trace_id,
-                    event_type=event_type,
-                    component=component,
-                    payload=payload,
-                    step_id=self.step_id,
-                    step_sequence=step_sequence,
-                    span_id=span.span_id if span else None,
-                    parent_span_id=span.parent_span_id if span else None,
-                ),
-                ignore_run_cancellation=ignore_run_cancellation,
-            )
+            try:
+                event = await self.parent.channel.publish(
+                    RuntimeEventDraft(
+                        run_id=self.parent.run_id,
+                        trace_id=self.parent.trace_id,
+                        event_type=event_type,
+                        component=component,
+                        payload=payload,
+                        step_id=self.step_id,
+                        step_sequence=step_sequence,
+                        span_id=span.span_id if span else None,
+                        parent_span_id=span.parent_span_id if span else None,
+                    ),
+                    ignore_run_cancellation=ignore_run_cancellation,
+                )
+            except EventPublicationError as exc:
+                if exc.partially_persisted:
+                    # The event is already journaled with this step sequence;
+                    # consume the local sequence exactly once so a subsequent
+                    # event (e.g. STEP_COMPLETED) uses the next sequence and
+                    # never reuses a sequence already written to the journal.
+                    self._sequence = step_sequence
+                raise
             self._sequence = step_sequence
             if close:
                 self._closed = True

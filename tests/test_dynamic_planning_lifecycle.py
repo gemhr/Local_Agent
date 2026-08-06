@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 
 import pytest
@@ -78,6 +79,10 @@ def event_records(services, run_id: str):
 
 def event_types(services, run_id: str) -> list[RuntimeEventType]:
     return [record.event_type for record in event_records(services, run_id)]
+
+
+def last_index(types: list, event_type) -> int:
+    return len(types) - 1 - list(reversed(types)).index(event_type)
 
 
 @pytest.mark.asyncio
@@ -232,7 +237,7 @@ async def test_delegated_knowledge_direct_uses_binding_instruction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_multi_step_plan_is_frozen_then_fails_closed_before_any_step() -> None:
+async def test_multi_step_plan_runs_and_delivers_unique_final() -> None:
     services = make_services()
     router = RecordingRouter(delegated_json(multi_step=True))
     scope = await CoordinatedRuntimeFactory(router, services).create_run_scope(
@@ -241,12 +246,9 @@ async def test_multi_step_plan_is_frozen_then_fails_closed_before_any_step() -> 
 
     result = await scope.execute()
 
-    assert result.status is RunStatus.FAILED
-    assert result.stop_reason is StopReason.UNHANDLED_ERROR
-    # WP3: the WP2 temporary multi-step admission gate is removed. Specialists
-    # and synthesis really execute; the Run fails closed only because the
-    # user-visible final output pipeline (WP4 OutputGate) is not ready.
-    assert result.error_code == "FINAL_OUTPUT_PIPELINE_NOT_READY"
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.stop_reason is StopReason.COMPLETED
+    assert result.error_code is None
     assert scope.coordinator.plan_frozen is True
     assert sorted(agent for agent, _ in router.agent_calls) == [
         "code_expert",
@@ -258,8 +260,23 @@ async def test_multi_step_plan_is_frozen_then_fails_closed_before_any_step() -> 
     assert RuntimeEventType.PLAN_CREATED in types
     assert types.count(RuntimeEventType.STEP_STARTED) == 3
     assert types.count(RuntimeEventType.STEP_COMPLETED) == 3
-    assert RuntimeEventType.OUTPUT_DELTA not in types
+    assert types.count(RuntimeEventType.OUTPUT_DELTA) == 1
     assert types.count(RuntimeEventType.RUN_COMPLETED) == 1
+    assert types.index(RuntimeEventType.OUTPUT_DELTA) < last_index(
+        types,
+        RuntimeEventType.STEP_COMPLETED
+    )
+    # The unique final text is exactly the synthesis candidate (journal keeps
+    # only the safe text digest, never the raw body).
+    output_records = [
+        record
+        for record in event_records(services, scope.run_id)
+        if record.event_type is RuntimeEventType.OUTPUT_DELTA
+    ]
+    assert len(output_records) == 1
+    assert output_records[0].safe_payload["text_digest"] == hashlib.sha256(
+        "dynamic-output".encode("utf-8")
+    ).hexdigest()
     assert len(services.snapshot_store.list_for_run(scope.run_id, 10)) == 1
     store = scope.coordinator.step_result_store
     assert store is not None

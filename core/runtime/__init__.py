@@ -594,6 +594,16 @@ from core.runtime.step_result import (
     StepResultErrorCode,
 )
 from core.runtime.history_policy import HistoryPolicy
+from core.runtime.invocation_bindings import InvocationRole
+from core.runtime.output_gate import (
+    DeliveryAttempt,
+    DeliveryStatus,
+    OutputGate,
+    OutputGateErrorCode,
+    OutputGateRejectionError,
+    OutputGateState,
+)
+from core.runtime.final_memory_writer import RunFinalMemoryWriter
 from core.runtime.step_result_store import (
     DependencyResultEntry,
     DependencyResultView,
@@ -632,6 +642,14 @@ from core.runtime.synthesis import (
 __all__ += [
     "ResultContentType",
     "HistoryPolicy",
+    "InvocationRole",
+    "DeliveryAttempt",
+    "DeliveryStatus",
+    "OutputGate",
+    "OutputGateErrorCode",
+    "OutputGateRejectionError",
+    "OutputGateState",
+    "RunFinalMemoryWriter",
     "StepResult",
     "StepResultError",
     "StepResultErrorCode",

@@ -21,6 +21,7 @@ from core.runtime.cancellation import RunCancelledError
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.event_emitter import StepEventEmitter
 from core.runtime.history_policy import HistoryPolicy
+from core.runtime.invocation_bindings import InvocationRole
 from core.runtime.planning import ExecutionKind, TaskCapabilityRequirements
 from core.runtime.step_result import ResultContentType, StepResult
 from core.runtime.step_result_store import DependencyResultView
@@ -61,6 +62,8 @@ class AgentExecutionRequest:
         "_step_id",
         "_agent_id",
         "_instruction",
+        "_invocation_role",
+        "_history_policy",
         "_execution_kind",
         "_input_type",
         "_capability_requirements",
@@ -77,6 +80,8 @@ class AgentExecutionRequest:
         step_id: str,
         agent_id: str,
         instruction: str,
+        invocation_role: InvocationRole = InvocationRole.ENTRY,
+        history_policy: HistoryPolicy = HistoryPolicy.AGENT_SCOPE,
         execution_kind: ExecutionKind,
         input_type: str,
         capability_requirements: TaskCapabilityRequirements,
@@ -99,6 +104,16 @@ class AgentExecutionRequest:
             raise AgentAdapterError(
                 AgentAdapterErrorCode.REQUEST_INVALID,
                 "instruction 不能为空",
+            )
+        if not isinstance(invocation_role, InvocationRole):
+            raise AgentAdapterError(
+                AgentAdapterErrorCode.REQUEST_INVALID,
+                "invocation_role 必须是 InvocationRole",
+            )
+        if not isinstance(history_policy, HistoryPolicy):
+            raise AgentAdapterError(
+                AgentAdapterErrorCode.REQUEST_INVALID,
+                "history_policy 必须是 HistoryPolicy",
             )
         if not isinstance(execution_kind, ExecutionKind):
             raise AgentAdapterError(
@@ -137,6 +152,8 @@ class AgentExecutionRequest:
         object.__setattr__(self, "_step_id", step_id.strip())
         object.__setattr__(self, "_agent_id", agent_id.strip())
         object.__setattr__(self, "_instruction", instruction)
+        object.__setattr__(self, "_invocation_role", invocation_role)
+        object.__setattr__(self, "_history_policy", history_policy)
         object.__setattr__(self, "_execution_kind", execution_kind)
         object.__setattr__(self, "_input_type", input_type.strip())
         object.__setattr__(
@@ -164,6 +181,14 @@ class AgentExecutionRequest:
     @property
     def instruction(self) -> str:
         return self._instruction
+
+    @property
+    def invocation_role(self) -> InvocationRole:
+        return self._invocation_role
+
+    @property
+    def history_policy(self) -> HistoryPolicy:
+        return self._history_policy
 
     @property
     def execution_kind(self) -> ExecutionKind:
@@ -197,6 +222,7 @@ class AgentExecutionRequest:
         return (
             "AgentExecutionRequest("
             f"step_id={self.step_id!r}, agent_id={self.agent_id!r}, "
+            f"invocation_role={self.invocation_role.value!r}, "
             f"execution_kind={self.execution_kind.value!r}, "
             f"input_type={self.input_type!r}, "
             f"content_type={self.content_type.value!r}, "
@@ -327,7 +353,7 @@ class AgentRouterSingleAgentAdapter:
                 run_context=run_context,
                 capability_requirements=request.capability_requirements,
                 persist=False,
-                history_policy=HistoryPolicy.NONE,
+                history_policy=request.history_policy,
                 event_emitter=request.event_emitter,
                 fault_controller=request.fault_controller,
             )

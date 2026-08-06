@@ -331,8 +331,8 @@ async def test_shape3_real_router_never_reads_old_memory() -> None:
         )
         result = await scope.execute()
 
-        assert result.status is RunStatus.FAILED
-        assert result.error_code == "FINAL_OUTPUT_PIPELINE_NOT_READY"
+        assert result.status is RunStatus.SUCCEEDED
+        assert result.error_code is None
 
         rendered = render_messages(model.all_messages)
         assert OLD_MEMORY_SECRET not in rendered

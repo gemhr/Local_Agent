@@ -51,8 +51,70 @@ class FakeDispatcher:
         return True
 
 
+class FakeMemoryManager:
+    """In-memory add/count/read stub for the delivered-only final writer.
+
+    The real Memory contract tests use the real SQLite MemoryManager; this
+    stub keeps assembly fixtures deterministic without a database file.
+    """
+
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+        self._seq = 0
+
+    def add_message(
+        self,
+        agent_id: str,
+        role: str,
+        content: str,
+        metadata: dict | None = None,
+        memory_scope: str = "direct",
+    ) -> int:
+        self._seq += 1
+        self.messages.append(
+            {
+                "id": self._seq,
+                "agent_id": agent_id,
+                "role": role,
+                "content": content,
+                "metadata": metadata or {},
+                "memory_scope": memory_scope,
+            }
+        )
+        return self._seq
+
+    def count_messages(
+        self, agent_id: str, memory_scope: str | None = "direct"
+    ) -> int:
+        return sum(
+            1
+            for message in self.messages
+            if message["agent_id"] == agent_id
+            and (memory_scope is None or message["memory_scope"] == memory_scope)
+        )
+
+    def get_chat_history(
+        self,
+        agent_id: str,
+        limit: int = 10,
+        offset: int = 0,
+        ascending: bool = False,
+        memory_scope: str | None = "direct",
+    ) -> list[dict]:
+        rows = [
+            message
+            for message in self.messages
+            if message["agent_id"] == agent_id
+            and (memory_scope is None or message["memory_scope"] == memory_scope)
+        ]
+        if not ascending:
+            rows = list(reversed(rows))
+        return rows[offset : offset + limit]
+
+
 class FakeRouter:
     def __init__(self) -> None:
+        self.memory_manager = FakeMemoryManager()
         self.model_invocation_router = object()
         self.tool_execution_service = object()
         self.retrieval_execution_service = object()
