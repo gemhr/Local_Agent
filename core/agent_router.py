@@ -31,6 +31,7 @@ from core.runtime import (
     RetrievalAdapterError, RetrievalInvocation, RetrievalStage,
     RetrievalStageStatus, RuntimeKnowledgeRetrievalAdapter,
     RunCancelledError, FaultInjectionController,
+    HistoryPolicy,
 )
 
 if TYPE_CHECKING:
@@ -741,6 +742,7 @@ class AgentRouter:
         *,
         allow_delegation: bool = False,
         history_scope: str = DIRECT_MEMORY_SCOPE,
+        history_policy: HistoryPolicy = HistoryPolicy.AGENT_SCOPE,
         context_requirements_out: list[ModelContextRequirements] | None = None,
         run_context: RunContext | None = None,
         event_emitter: StepEventEmitter | None = None,
@@ -748,16 +750,21 @@ class AgentRouter:
     ) -> list[dict[str, str]]:
         """构建一次推理所需的完整消息序列。"""
         summary_text = ""
-        if history_scope == self.DIRECT_MEMORY_SCOPE:
+        if (
+            history_policy is HistoryPolicy.AGENT_SCOPE
+            and history_scope == self.DIRECT_MEMORY_SCOPE
+        ):
             summary_text = self._update_summary_if_needed(agent_id)
 
-        history = self.memory_manager.get_chat_history(
-            agent_id=agent_id,
-            limit=self.history_window_size,
-            ascending=True,
-            memory_scope=history_scope,
-        )
-        history = self._dedupe_current_user_message(history, user_query)
+        history = ()
+        if history_policy is HistoryPolicy.AGENT_SCOPE:
+            history = self.memory_manager.get_chat_history(
+                agent_id=agent_id,
+                limit=self.history_window_size,
+                ascending=True,
+                memory_scope=history_scope,
+            )
+            history = self._dedupe_current_user_message(history, user_query)
 
         system_prompt = self._build_system_prompt(agent_id, allow_delegation=allow_delegation)
 
@@ -1095,6 +1102,7 @@ class AgentRouter:
         user_query: str,
         *,
         history_scope: str = DIRECT_MEMORY_SCOPE,
+        history_policy: HistoryPolicy = HistoryPolicy.AGENT_SCOPE,
         run_context: RunContext | None = None,
         context_requirements_out: list[ModelContextRequirements] | None = None,
         event_emitter: StepEventEmitter | None = None,
@@ -1108,6 +1116,7 @@ class AgentRouter:
             agent_id=agent_id,
             allow_delegation=False,
             history_scope=history_scope,
+            history_policy=history_policy,
             context_requirements_out=context_requirements_out,
             run_context=run_context,
             event_emitter=event_emitter,
@@ -1222,6 +1231,7 @@ class AgentRouter:
         user_query: str,
         *,
         history_scope: str = DIRECT_MEMORY_SCOPE,
+        history_policy: HistoryPolicy = HistoryPolicy.AGENT_SCOPE,
         run_context: RunContext | None = None,
         capability_requirements: TaskCapabilityRequirements | None = None,
         unified_invocation: bool = False,
@@ -1235,6 +1245,7 @@ class AgentRouter:
             agent_id=agent_id,
             user_query=user_query,
             history_scope=history_scope,
+            history_policy=history_policy,
             run_context=run_context,
             context_requirements_out=context_requirements_out,
             event_emitter=event_emitter,
@@ -1457,6 +1468,7 @@ class AgentRouter:
         persist: bool = True,
         persist_scope: str = DIRECT_MEMORY_SCOPE,
         history_scope: str = DIRECT_MEMORY_SCOPE,
+        history_policy: HistoryPolicy = HistoryPolicy.AGENT_SCOPE,
         run_context: RunContext | None = None,
         capability_requirements: TaskCapabilityRequirements | None = None,
         unified_invocation: bool = False,
@@ -1478,6 +1490,7 @@ class AgentRouter:
             agent_id=agent_id,
             user_query=user_query,
             history_scope=history_scope,
+            history_policy=history_policy,
             run_context=run_context,
             capability_requirements=capability_requirements,
             unified_invocation=unified_invocation,
@@ -1504,6 +1517,7 @@ class AgentRouter:
         run_context: RunContext,
         capability_requirements: TaskCapabilityRequirements,
         persist: bool = True,
+        history_policy: HistoryPolicy = HistoryPolicy.AGENT_SCOPE,
         invocation_result_out: list[ModelInvocationResult] | None = None,
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
@@ -1513,6 +1527,7 @@ class AgentRouter:
             agent_id=agent_id,
             user_query=user_query,
             persist=persist,
+            history_policy=history_policy,
             run_context=run_context,
             capability_requirements=capability_requirements,
             unified_invocation=True,
