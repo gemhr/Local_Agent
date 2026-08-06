@@ -12,6 +12,7 @@ from core.runtime.event_journal import (
     JournalError,
     JournalRecord,
 )
+from core.runtime.checkpoint_contract import CheckpointKind
 from core.runtime.events import RUNTIME_EVENT_SCHEMA_VERSION, RuntimeEventType
 from core.runtime.recovery_contract import (
     RecoveryProjection,
@@ -28,6 +29,8 @@ SUPPORTED_EVENT_SCHEMA_VERSIONS = frozenset({1, RUNTIME_EVENT_SCHEMA_VERSION})
 REDUCED_EVENT_TYPES = frozenset(
     {
         RuntimeEventType.RUN_STARTED,
+        RuntimeEventType.PLANNING_STARTED,
+        RuntimeEventType.PLAN_CREATED,
         RuntimeEventType.STEP_STARTED,
         RuntimeEventType.STEP_COMPLETED,
         RuntimeEventType.CANCELLATION,
@@ -47,8 +50,6 @@ IGNORED_EVENT_TYPES = frozenset(
         RuntimeEventType.RETRIEVAL_STAGE_COMPLETED,
         RuntimeEventType.RETRIEVAL_COMPLETED,
         RuntimeEventType.ERROR,
-        RuntimeEventType.PLANNING_STARTED,
-        RuntimeEventType.PLAN_CREATED,
     }
 )
 SUPPORTED_RECOVERY_EVENT_TYPES = REDUCED_EVENT_TYPES | IGNORED_EVENT_TYPES
@@ -201,7 +202,25 @@ class LimitedJournalTailReducer:
         last_applied = snapshot.last_journal_sequence
         terminal_seen = RunStatus(run_status) in _TERMINAL_RUN_STATUSES
         output_available = snapshot.state_snapshot.final_output.present
+        output_publication_attempted = output_available
         budget_exhausted = stop_reason == StopReason.BUDGET_EXHAUSTED.value
+        planning_started = snapshot.checkpoint_kind != CheckpointKind.PRE_RUN.value
+        plan_created = snapshot.checkpoint_kind in {
+            CheckpointKind.POST_PLAN_PRE_EXECUTION.value,
+            CheckpointKind.STEP_BOUNDARY.value,
+            CheckpointKind.TERMINAL.value,
+        }
+        plan_shape = _plan_shape_from_snapshot_steps(
+            snapshot.plan_snapshot.steps
+        )
+        delivery_status = None
+        final_step_status = None
+        memory_commit_status = None
+        final_step_ids = {
+            item.step_id
+            for item in snapshot.plan_snapshot.steps
+            if item.output_policy != "INTERNAL"
+        }
         evidence: list[ToolRecoveryEvidence] = []
         reasons: list[RecoveryReason] = []
 
@@ -219,6 +238,14 @@ class LimitedJournalTailReducer:
                 run_status = status.value
                 stop_reason = None
                 cancellation_reason = None
+            elif event_type is RuntimeEventType.PLANNING_STARTED:
+                planning_started = True
+            elif event_type is RuntimeEventType.PLAN_CREATED:
+                plan_created = True
+                shape = payload.get("shape")
+                if shape is not None and shape not in {"0", "1", "2", "3"}:
+                    _corrupted()
+                plan_shape = shape
             elif event_type is RuntimeEventType.STEP_STARTED:
                 step = _known_step(steps, record.step_id)
                 if payload.get("status") != StepStatus.RUNNING.value:
@@ -255,6 +282,11 @@ class LimitedJournalTailReducer:
                         payload.get("safe_error_code")
                     ),
                 )
+                if record.step_id in final_step_ids:
+                    final_step_status = status.value
+                    projected_delivery = payload.get("delivery_status")
+                    if projected_delivery is not None:
+                        delivery_status = _required_text(projected_delivery)
             elif event_type is RuntimeEventType.CANCELLATION:
                 reason = _stop_reason(payload.get("reason"))
                 if reason not in _CANCELLATION_REASONS:
@@ -276,9 +308,24 @@ class LimitedJournalTailReducer:
                     reason.value if reason in _CANCELLATION_REASONS else None
                 )
                 terminal_seen = True
+                projected_delivery = payload.get("delivery_status")
+                if projected_delivery is not None:
+                    delivery_status = _required_text(projected_delivery)
+                projected_final = payload.get("final_step_status")
+                if projected_final is not None:
+                    final_step_status = _required_text(projected_final)
+                projected_memory = payload.get("memory_commit_status")
+                if projected_memory is not None:
+                    memory_commit_status = _required_text(projected_memory)
+                shape = payload.get("shape")
+                if shape is not None and shape not in {"0", "1", "2", "3"}:
+                    _corrupted()
+                if shape is not None:
+                    plan_shape = shape
             elif event_type is RuntimeEventType.OUTPUT_DELTA:
                 # Only the presence of journal metadata is projected.
                 output_available = True
+                output_publication_attempted = True
             elif event_type is RuntimeEventType.MODEL_STARTED:
                 key = _model_key(payload)
                 model_started[key] = model_started.get(key, 0) + 1
@@ -321,8 +368,23 @@ class LimitedJournalTailReducer:
                     _append_reason(reasons, RecoveryReason.TOOL_OUTCOME_UNKNOWN)
                 _collect_tool_risk(item, reasons)
             elif event_type is RuntimeEventType.ERROR:
-                # Safe diagnostic fact only. RUN_COMPLETED is authoritative.
-                pass
+                # Safe layered facts; RUN_COMPLETED remains authoritative.
+                projected_delivery = payload.get("delivery_status")
+                if projected_delivery is not None:
+                    delivery_status = _required_text(projected_delivery)
+                projected_final = payload.get("final_step_status")
+                if projected_final is not None:
+                    final_step_status = _required_text(projected_final)
+                projected_memory = payload.get("memory_commit_status")
+                if projected_memory is not None:
+                    memory_commit_status = _required_text(projected_memory)
+                if payload.get("safe_error_code") in {
+                    "FINAL_OUTPUT_DELIVERY_FAILED",
+                    "FINAL_OUTPUT_DELIVERY_UNKNOWN",
+                }:
+                    output_publication_attempted = True
+                if payload.get("safe_error_code") == "FINAL_OUTPUT_DELIVERY_UNKNOWN":
+                    delivery_status = "OUTCOME_UNKNOWN"
             else:  # pragma: no cover - validator closes this set first
                 raise JournalTailReductionError(
                     RecoveryStatus.UNSUPPORTED,
@@ -347,12 +409,43 @@ class LimitedJournalTailReducer:
             terminal_event_seen=terminal_seen,
             output_available=output_available,
             budget_exhausted=budget_exhausted,
+            planning_started=planning_started,
+            plan_created=plan_created,
+            plan_shape=plan_shape,
+            delivery_status=delivery_status,
+            final_step_status=final_step_status,
+            memory_commit_status=memory_commit_status,
+            output_publication_attempted=output_publication_attempted,
         )
         return JournalTailReduction(
             projection=projection,
             tool_evidence=tuple(evidence),
             reconciliation_reasons=tuple(reasons),
         )
+
+
+def _plan_shape_from_snapshot_steps(steps) -> str | None:
+    """从 PlanSnapshot 安全步骤推导四种合法 shape，无法推导返回 None。"""
+    finals = tuple(
+        item for item in steps if item.output_policy != "INTERNAL"
+    )
+    if len(finals) != 1:
+        return None
+    if len(steps) == 1:
+        if finals[0].output_policy == "FINAL_PASSTHROUGH":
+            if finals[0].agent == "core_router":
+                return "0"
+            return "1"
+        return None
+    internals = tuple(
+        item for item in steps if item.output_policy == "INTERNAL"
+    )
+    if (
+        len(internals) == len(steps) - 1
+        and finals[0].output_policy == "FINAL_SYNTHESIS"
+    ):
+        return "2" if len(internals) == 1 else "3"
+    return None
 
 
 def _tool_evidence(

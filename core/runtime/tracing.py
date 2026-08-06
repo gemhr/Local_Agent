@@ -24,6 +24,7 @@ from core.runtime.fault_injection_contract import (
 )
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_OPERATION = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 SAFE_SPAN_ATTRIBUTES = frozenset({
     "component", "operation", "status", "error_code", "retry_index",
     "candidate_index", "model_profile", "retrieval_stage", "budget_dimension",
@@ -31,6 +32,22 @@ SAFE_SPAN_ATTRIBUTES = frozenset({
     "side_effect_state", "retry_disposition", "provider_started",
     "execution_detached", "worker_terminated", "resource_release_pending",
     "degraded", "input_count", "output_count", "citation_count", "tool_name",
+    # Trace Contract v1（Stage 2.5 WP5）：运行/规划/步骤/交付/Memory 安全属性。
+    "plan_id", "plan_version", "plan_fingerprint", "planning_source",
+    "step_count", "selected_entry_agent_id", "runtime_mode",
+    "runtime_version", "prompt_version", "model_config_hash",
+    "toolset_hash", "kb_version", "final_status", "stop_reason",
+    "session_id", "schema_version", "planner_model_invoked",
+    "planner_attempt_count", "planner_timeout_source", "compiled_shape",
+    "specialist_count", "synthesis_required", "preferred_agent",
+    "execution_kind", "output_policy", "invocation_role",
+    "dependency_count", "content_type", "result_char_count", "state",
+    "final_step_id", "delivery_status", "gate_terminal_state",
+    "publish_attempt_count", "partially_persisted", "output_char_count",
+    "persist_enabled", "entry_agent_id", "memory_scope",
+    "user_write_status", "assistant_write_status", "transaction_used",
+    "owning_agent_id", "attempt_index", "requested_top_k", "returned_count",
+    "grounded_count", "shape",
 })
 DENIED_SPAN_ATTRIBUTES = frozenset({
     "prompt", "messages", "user_input", "model_output", "tool_arguments",
@@ -45,6 +62,14 @@ def _identifier(value: str | None, name: str, *, optional: bool = False) -> None
         return
     if not isinstance(value, str) or not _ID.fullmatch(value):
         raise ValueError(f"{name} must be 1-128 safe identifier characters")
+
+
+def _operation_identifier(value: str, name: str) -> None:
+    """Span operation 允许 ``.``（Trace Contract v1 命名如 runtime.run）。"""
+    if not isinstance(value, str) or not _OPERATION.fullmatch(value):
+        raise ValueError(
+            f"{name} must be 1-128 safe operation characters (A-Z a-z 0-9 _ . -)"
+        )
 
 @dataclass(frozen=True, slots=True)
 class TraceContext:
@@ -71,7 +96,7 @@ class SpanRecord:
     attributes: Mapping[str, object] = field(default_factory=dict, repr=False)
     def __post_init__(self) -> None:
         TraceContext(self.trace_id,self.span_id,self.parent_span_id,self.run_id,self.step_id)
-        _identifier(self.component,"component"); _identifier(self.operation,"operation")
+        _identifier(self.component,"component"); _operation_identifier(self.operation,"operation")
         for value in (self.started_at, self.completed_at):
             if value is not None and (value.tzinfo is None or value.utcoffset().total_seconds()!=0):
                 raise ValueError("span times must be UTC")

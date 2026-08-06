@@ -7,6 +7,28 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
+from uuid import uuid4
+
+
+class MemoryExchangeErrorCode:
+    DUPLICATE_EXCHANGE = "DUPLICATE_EXCHANGE"
+    INVALID_ARGUMENT = "MEMORY_EXCHANGE_INVALID_ARGUMENT"
+    EXCHANGE_FAILED = "MEMORY_EXCHANGE_FAILED"
+
+
+class MemoryExchangeError(RuntimeError):
+    """类型化 Memory exchange 错误；不暴露 SQL/路径/正文。"""
+
+    def __init__(self, error_code: str, safe_message: str) -> None:
+        self.error_code = error_code
+        self.safe_message = safe_message
+        super().__init__(f"{safe_message} (error_code={error_code})")
+
+    def __repr__(self) -> str:
+        return (
+            f"MemoryExchangeError(error_code={self.error_code!r}, "
+            f"safe_message={self.safe_message!r})"
+        )
 
 
 class MemoryManager:
@@ -37,6 +59,27 @@ class MemoryManager:
         finally:
             conn.close()
 
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """显式单连接事务：成功 COMMIT，任何失败 ROLLBACK。"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            conn.execute("COMMIT")
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
         """初始化消息表、索引、摘要表与全文索引。"""
         with self._connect() as conn:
@@ -59,6 +102,18 @@ class MemoryManager:
             if "memory_scope" not in columns:
                 conn.execute(
                     "ALTER TABLE messages ADD COLUMN memory_scope TEXT NOT NULL DEFAULT 'direct'"
+                )
+            if "exchange_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN exchange_id TEXT"
+                )
+            if "run_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN run_id TEXT"
+                )
+            if "sequence" not in columns:
+                conn.execute(
+                    "ALTER TABLE messages ADD COLUMN sequence INTEGER"
                 )
             conn.execute(
                 """
@@ -92,6 +147,28 @@ class MemoryManager:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_timestamp "
                 "ON messages(timestamp DESC, id DESC)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_exchange_role "
+                "ON messages(exchange_id, role) WHERE exchange_id IS NOT NULL"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_exchanges (
+                    exchange_id TEXT PRIMARY KEY,
+                    run_id TEXT UNIQUE,
+                    agent_id TEXT NOT NULL,
+                    memory_scope TEXT NOT NULL DEFAULT 'direct',
+                    state TEXT NOT NULL,
+                    user_message_id INTEGER,
+                    assistant_message_id INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exchanges_state "
+                "ON message_exchanges(state)"
             )
             conn.execute(
                 """
@@ -183,6 +260,142 @@ class MemoryManager:
             )
             return int(cursor.lastrowid)
 
+    @staticmethod
+    def _validate_exchange_args(
+        *,
+        agent_id: str,
+        memory_scope: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        for value, name in (
+            (agent_id, "agent_id"),
+            (memory_scope, "memory_scope"),
+            (user_message, "user_message"),
+            (assistant_message, "assistant_message"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise MemoryExchangeError(
+                    MemoryExchangeErrorCode.INVALID_ARGUMENT,
+                    f"{name} 必须是非空字符串",
+                )
+
+    def append_exchange_atomic(
+        self,
+        agent_id: str,
+        memory_scope: str,
+        user_message: str,
+        assistant_message: str,
+        run_id: Optional[str] = None,
+        exchange_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """在一个 SQLite 事务中原子提交 user + assistant exchange。
+
+        幂等键：``exchange_id`` 或 ``run_id``（二者其一必须稳定提供）。
+        同一 Run 只能提交一次；重复提交抛出 ``DUPLICATE_EXCHANGE``，
+        绝不会重发用户正文。任一行写入失败整体回滚。
+        """
+        self._validate_exchange_args(
+            agent_id=agent_id,
+            memory_scope=memory_scope,
+            user_message=user_message,
+            assistant_message=assistant_message,
+        )
+        if run_id is not None and (
+            not isinstance(run_id, str) or not run_id.strip()
+        ):
+            raise MemoryExchangeError(
+                MemoryExchangeErrorCode.INVALID_ARGUMENT,
+                "run_id 必须是非空字符串",
+            )
+        if exchange_id is not None and (
+            not isinstance(exchange_id, str) or not exchange_id.strip()
+        ):
+            raise MemoryExchangeError(
+                MemoryExchangeErrorCode.INVALID_ARGUMENT,
+                "exchange_id 必须是非空字符串",
+            )
+        if run_id is None and exchange_id is None:
+            raise MemoryExchangeError(
+                MemoryExchangeErrorCode.INVALID_ARGUMENT,
+                "append_exchange_atomic 必须提供 run_id 或 exchange_id",
+            )
+        final_exchange_id = exchange_id or run_id or uuid4().hex
+        with self._transaction() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO message_exchanges
+                        (exchange_id, run_id, agent_id, memory_scope, state)
+                    VALUES (?, ?, ?, ?, 'PENDING')
+                    """,
+                    (final_exchange_id, run_id, agent_id, memory_scope),
+                )
+            except sqlite3.IntegrityError:
+                raise MemoryExchangeError(
+                    MemoryExchangeErrorCode.DUPLICATE_EXCHANGE,
+                    "该 Run 的 exchange 已提交，拒绝重复写入",
+                ) from None
+            user_cursor = conn.execute(
+                """
+                INSERT INTO messages
+                    (agent_id, role, content, metadata, memory_scope,
+                     exchange_id, run_id, sequence)
+                VALUES (?, 'user', ?, NULL, ?, ?, ?, 0)
+                """,
+                (agent_id, user_message, memory_scope, final_exchange_id, run_id),
+            )
+            user_message_id = int(user_cursor.lastrowid)
+            assistant_cursor = conn.execute(
+                """
+                INSERT INTO messages
+                    (agent_id, role, content, metadata, memory_scope,
+                     exchange_id, run_id, sequence)
+                VALUES (?, 'assistant', ?, NULL, ?, ?, ?, 1)
+                """,
+                (
+                    agent_id,
+                    assistant_message,
+                    memory_scope,
+                    final_exchange_id,
+                    run_id,
+                ),
+            )
+            assistant_message_id = int(assistant_cursor.lastrowid)
+            conn.execute(
+                """
+                UPDATE message_exchanges
+                SET state = 'COMMITTED',
+                    user_message_id = ?,
+                    assistant_message_id = ?
+                WHERE exchange_id = ?
+                """,
+                (user_message_id, assistant_message_id, final_exchange_id),
+            )
+        return {
+            "exchange_id": final_exchange_id,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+        }
+
+    @staticmethod
+    def _committed_exchange_filter(
+        table_alias: str = "m",
+        join_prefix: str = "me",
+    ) -> str:
+        """历史读取只返回 legacy 消息或已 COMMITTED exchange 的消息。"""
+        return (
+            f"({table_alias}.exchange_id IS NULL OR "
+            f"{join_prefix}.state = 'COMMITTED')"
+        )
+
+    @staticmethod
+    def _committed_exchange_join() -> str:
+        return (
+            " LEFT JOIN message_exchanges me "
+            "ON me.exchange_id = m.exchange_id"
+        )
+
     def count_messages(self, agent_id: str, memory_scope: Optional[str] = "direct") -> int:
         """统计某个智能体在指定作用域内的消息数量。"""
         with self._connect() as conn:
@@ -216,9 +429,12 @@ class MemoryManager:
             if memory_scope is None:
                 rows = conn.execute(
                     f"""
-                    SELECT id, agent_id, memory_scope, role, content, timestamp, metadata
-                    FROM messages
-                    WHERE agent_id = ?
+                    SELECT m.id, m.agent_id, m.memory_scope, m.role,
+                           m.content, m.timestamp, m.metadata
+                    FROM messages m
+                    {self._committed_exchange_join()}
+                    WHERE m.agent_id = ?
+                    AND {self._committed_exchange_filter()}
                     ORDER BY timestamp {order}, id {order}
                     LIMIT ? OFFSET ?
                     """,
@@ -227,9 +443,12 @@ class MemoryManager:
             else:
                 rows = conn.execute(
                     f"""
-                    SELECT id, agent_id, memory_scope, role, content, timestamp, metadata
-                    FROM messages
-                    WHERE agent_id = ? AND memory_scope = ?
+                    SELECT m.id, m.agent_id, m.memory_scope, m.role,
+                           m.content, m.timestamp, m.metadata
+                    FROM messages m
+                    {self._committed_exchange_join()}
+                    WHERE m.agent_id = ? AND m.memory_scope = ?
+                    AND {self._committed_exchange_filter()}
                     ORDER BY timestamp {order}, id {order}
                     LIMIT ? OFFSET ?
                     """,
@@ -292,21 +511,28 @@ class MemoryManager:
         with self._connect() as conn:
             if memory_scope is None:
                 rows = conn.execute(
-                    """
-                    SELECT id, agent_id, memory_scope, role, content, timestamp, metadata
-                    FROM messages
-                    WHERE agent_id = ? AND id > ? AND id <= ?
-                    ORDER BY id ASC
+                    f"""
+                    SELECT m.id, m.agent_id, m.memory_scope, m.role,
+                           m.content, m.timestamp, m.metadata
+                    FROM messages m
+                    {self._committed_exchange_join()}
+                    WHERE m.agent_id = ? AND m.id > ? AND m.id <= ?
+                    AND {self._committed_exchange_filter()}
+                    ORDER BY m.id ASC
                     """,
                     (agent_id, after_id, before_id),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """
-                    SELECT id, agent_id, memory_scope, role, content, timestamp, metadata
-                    FROM messages
-                    WHERE agent_id = ? AND memory_scope = ? AND id > ? AND id <= ?
-                    ORDER BY id ASC
+                    f"""
+                    SELECT m.id, m.agent_id, m.memory_scope, m.role,
+                           m.content, m.timestamp, m.metadata
+                    FROM messages m
+                    {self._committed_exchange_join()}
+                    WHERE m.agent_id = ? AND m.memory_scope = ?
+                      AND m.id > ? AND m.id <= ?
+                    AND {self._committed_exchange_filter()}
+                    ORDER BY m.id ASC
                     """,
                     (agent_id, memory_scope, after_id, before_id),
                 ).fetchall()
@@ -327,11 +553,13 @@ class MemoryManager:
             try:
                 if memory_scope is None:
                     rows = conn.execute(
-                        """
+                        f"""
                         SELECT m.id, m.agent_id, m.memory_scope, m.role, m.content, m.timestamp, m.metadata
                         FROM messages_fts f
                         JOIN messages m ON m.id = f.rowid
+                        LEFT JOIN message_exchanges me ON me.exchange_id = m.exchange_id
                         WHERE messages_fts MATCH ?
+                        AND (m.exchange_id IS NULL OR me.state = 'COMMITTED')
                         ORDER BY m.timestamp DESC, m.id DESC
                         LIMIT ?
                         """,
@@ -339,11 +567,13 @@ class MemoryManager:
                     ).fetchall()
                 else:
                     rows = conn.execute(
-                        """
+                        f"""
                         SELECT m.id, m.agent_id, m.memory_scope, m.role, m.content, m.timestamp, m.metadata
                         FROM messages_fts f
                         JOIN messages m ON m.id = f.rowid
+                        LEFT JOIN message_exchanges me ON me.exchange_id = m.exchange_id
                         WHERE messages_fts MATCH ? AND m.memory_scope = ?
+                        AND (m.exchange_id IS NULL OR me.state = 'COMMITTED')
                         ORDER BY m.timestamp DESC, m.id DESC
                         LIMIT ?
                         """,
@@ -352,22 +582,28 @@ class MemoryManager:
             except sqlite3.OperationalError:
                 if memory_scope is None:
                     rows = conn.execute(
-                        """
-                        SELECT id, agent_id, memory_scope, role, content, timestamp, metadata
-                        FROM messages
-                        WHERE content LIKE ?
-                        ORDER BY timestamp DESC, id DESC
+                        f"""
+                        SELECT m.id, m.agent_id, m.memory_scope, m.role,
+                               m.content, m.timestamp, m.metadata
+                        FROM messages m
+                        {self._committed_exchange_join()}
+                        WHERE m.content LIKE ?
+                        AND {self._committed_exchange_filter()}
+                        ORDER BY m.timestamp DESC, m.id DESC
                         LIMIT ?
                         """,
                         (f"%{keyword}%", limit),
                     ).fetchall()
                 else:
                     rows = conn.execute(
-                        """
-                        SELECT id, agent_id, memory_scope, role, content, timestamp, metadata
-                        FROM messages
-                        WHERE content LIKE ? AND memory_scope = ?
-                        ORDER BY timestamp DESC, id DESC
+                        f"""
+                        SELECT m.id, m.agent_id, m.memory_scope, m.role,
+                               m.content, m.timestamp, m.metadata
+                        FROM messages m
+                        {self._committed_exchange_join()}
+                        WHERE m.content LIKE ? AND m.memory_scope = ?
+                        AND {self._committed_exchange_filter()}
+                        ORDER BY m.timestamp DESC, m.id DESC
                         LIMIT ?
                         """,
                         (f"%{keyword}%", memory_scope, limit),
@@ -383,21 +619,27 @@ class MemoryManager:
         with self._connect() as conn:
             if memory_scope is None:
                 rows = conn.execute(
-                    """
-                    SELECT id, agent_id, memory_scope, role, content, timestamp, metadata
-                    FROM messages
-                    ORDER BY timestamp DESC, id DESC
+                    f"""
+                    SELECT m.id, m.agent_id, m.memory_scope, m.role,
+                           m.content, m.timestamp, m.metadata
+                    FROM messages m
+                    {self._committed_exchange_join()}
+                    WHERE {self._committed_exchange_filter()}
+                    ORDER BY m.timestamp DESC, m.id DESC
                     LIMIT ?
                     """,
                     (limit,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """
-                    SELECT id, agent_id, memory_scope, role, content, timestamp, metadata
-                    FROM messages
-                    WHERE memory_scope = ?
-                    ORDER BY timestamp DESC, id DESC
+                    f"""
+                    SELECT m.id, m.agent_id, m.memory_scope, m.role,
+                           m.content, m.timestamp, m.metadata
+                    FROM messages m
+                    {self._committed_exchange_join()}
+                    WHERE m.memory_scope = ?
+                    AND {self._committed_exchange_filter()}
+                    ORDER BY m.timestamp DESC, m.id DESC
                     LIMIT ?
                     """,
                     (memory_scope, limit),

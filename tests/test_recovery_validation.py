@@ -135,7 +135,7 @@ def test_terminal_snapshot_is_terminal_only_after_all_safety_checks():
     assert result.reasons == (RecoveryReason.SNAPSHOT_DIGEST_INVALID,)
 
 
-def test_output_delta_only_marks_metadata_presence():
+def test_output_delta_without_terminal_marks_delivery_unknown():
     journal = InMemoryRunEventJournal()
     journal.append(
         runtime_event(
@@ -145,8 +145,14 @@ def test_output_delta_only_marks_metadata_presence():
         )
     )
     result = assess(recovery_snapshot(), journal=journal)
-    assert result.status is RecoveryStatus.RESUMABLE
+    # WP5: OUTPUT journaled 但无 terminal -> delivery outcome 不确定，fail closed。
+    assert result.status is RecoveryStatus.REQUIRES_RECONCILIATION
     assert result.reduced_projection.output_available
+    assert result.reduced_projection.output_publication_attempted
+    assert (
+        RecoveryReason.FINAL_OUTPUT_DELIVERY_UNKNOWN
+        in result.reasons
+    )
     assert not hasattr(result.reduced_projection, "output")
 
 

@@ -75,9 +75,55 @@ _GLOBAL_ALLOWED_LABELS = frozenset(
         "budget_dimension",
         "planning_source",
         "reason",
+        "execution_kind",
+        "output_policy",
+        "shape",
+        "delivery_status",
+        "memory_commit_status",
+        "agent_id",
     }
 )
 _SAFE_LABEL_VALUE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+_DELIVERY_ERROR_CODES = frozenset(
+    {
+        "OK",
+        "FINAL_OUTPUT_DELIVERY_FAILED",
+        "FINAL_OUTPUT_DELIVERY_UNKNOWN",
+        "OUTPUT_GATE_DUPLICATE_ATTEMPT",
+        "OUTPUT_GATE_INTERNAL_STEP",
+        "OUTPUT_GATE_NOT_FINAL",
+        "OUTPUT_GATE_STEP_NOT_CLAIMED",
+        "OUTPUT_GATE_STEP_NOT_SUCCEEDED",
+        "OUTPUT_GATE_STORE_NOT_READABLE",
+        "OUTPUT_GATE_STORE_SEALED",
+        "OUTPUT_GATE_RUN_NOT_ACTIVE",
+        "OUTPUT_GATE_CLAIM_MISMATCH",
+        "OUTPUT_GATE_CLOSED",
+    }
+)
+_MEMORY_ERROR_CODES = frozenset(
+    {
+        "OK",
+        "FINAL_OUTPUT_MEMORY_COMMIT_FAILED",
+        "DUPLICATE_EXCHANGE",
+        "MEMORY_EXCHANGE_INVALID_ARGUMENT",
+        "MEMORY_EXCHANGE_FAILED",
+        "MEMORY_MANAGER_UNAVAILABLE",
+    }
+)
+_EXECUTION_KIND_VALUES = frozenset({"AGENT", "SYNTHESIS", "unknown"})
+_OUTPUT_POLICY_VALUES = frozenset(
+    {"INTERNAL", "FINAL_PASSTHROUGH", "FINAL_SYNTHESIS", "unknown"}
+)
+_SHAPE_VALUES = frozenset({"0", "1", "2", "3", "unknown"})
+_DELIVERY_STATUS_VALUES = frozenset(
+    {"DELIVERED", "FAILED", "OUTCOME_UNKNOWN", "NOT_APPLICABLE", "unknown"}
+)
+_MEMORY_STATUS_VALUES = frozenset(
+    {"SUCCEEDED", "FAILED", "NOT_ATTEMPTED", "unknown"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +131,7 @@ class MetricLabelPolicy:
     allowed_labels: frozenset[str] = _GLOBAL_ALLOWED_LABELS
     denied_labels: frozenset[str] = _DENIED_LABELS
     tool_name_allowlist: frozenset[str] = frozenset()
+    agent_id_allowlist: frozenset[str] = frozenset()
     maximum_value_length: int = 64
 
     def normalize(
@@ -108,6 +155,8 @@ class MetricLabelPolicy:
                 raise TypeError("Metric Label Value 必须是字符串")
             value = raw_value
             if key == "tool_name" and value not in self.tool_name_allowlist:
+                value = "other"
+            if key == "agent_id" and value not in self.agent_id_allowlist:
                 value = "other"
             if (
                 len(value) > self.maximum_value_length
@@ -186,10 +235,93 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
         _descriptor("runtime_runs_total", MetricType.COUNTER, "终态 Run 数", "runs", "status"),
         _descriptor("runtime_runs_started_total", MetricType.COUNTER, "已开始 Run 数", "runs"),
         _descriptor("runtime_steps_total", MetricType.COUNTER, "终态 Step 数", "steps", "status"),
+        MetricDescriptor(
+            name="runtime_step_total",
+            type=MetricType.COUNTER,
+            description="按执行分类/输出策略统计的终态 Step 数",
+            unit="steps",
+            allowed_labels=frozenset(
+                {"execution_kind", "output_policy", "status"}
+            ),
+            required_labels=frozenset(
+                {"execution_kind", "output_policy", "status"}
+            ),
+            bounded_values={
+                "execution_kind": _EXECUTION_KIND_VALUES,
+                "output_policy": _OUTPUT_POLICY_VALUES,
+            },
+        ),
         _descriptor("runtime_model_attempts_total", MetricType.COUNTER, "Model Attempt 数", "attempts", "model_profile"),
         _descriptor("runtime_tool_attempts_total", MetricType.COUNTER, "Tool Attempt 数", "attempts", "tool_name"),
         _descriptor("runtime_retrievals_total", MetricType.COUNTER, "Retrieval 数", "retrievals"),
         _descriptor("runtime_planning_total", MetricType.COUNTER, "Planning resolution count", "resolutions", "planning_source", "status"),
+        MetricDescriptor(
+            name="runtime_multi_agent_runs_total",
+            type=MetricType.COUNTER,
+            description="按执行图 shape 统计的终态 Multi-Agent Run 数",
+            unit="runs",
+            allowed_labels=frozenset({"shape", "status"}),
+            required_labels=frozenset({"shape", "status"}),
+            bounded_values={"shape": _SHAPE_VALUES},
+        ),
+        MetricDescriptor(
+            name="runtime_specialist_count",
+            type=MetricType.HISTOGRAM,
+            description="每次 Run 的 INTERNAL specialist 数量分布",
+            unit="specialists",
+            allowed_labels=frozenset({"shape"}),
+            required_labels=frozenset({"shape"}),
+            bounded_values={"shape": _SHAPE_VALUES},
+        ),
+        _descriptor("runtime_synthesis_total", MetricType.COUNTER, "Synthesis Step 终态数", "steps", "status"),
+        MetricDescriptor(
+            name="runtime_output_delivery_total",
+            type=MetricType.COUNTER,
+            description="Final output delivery 尝试结果",
+            unit="deliveries",
+            allowed_labels=frozenset({"status", "error_code"}),
+            required_labels=frozenset({"status", "error_code"}),
+            bounded_values={
+                "status": _DELIVERY_STATUS_VALUES,
+                "error_code": _DELIVERY_ERROR_CODES,
+            },
+        ),
+        MetricDescriptor(
+            name="runtime_output_delivery_duration_seconds",
+            type=MetricType.HISTOGRAM,
+            description="Final output delivery 时长",
+            unit="seconds",
+            allowed_labels=frozenset({"status"}),
+            required_labels=frozenset({"status"}),
+            bounded_values={"status": _DELIVERY_STATUS_VALUES},
+        ),
+        _descriptor(
+            "runtime_output_partial_persisted_total",
+            MetricType.COUNTER,
+            "Final output 部分持久化次数",
+            "events",
+        ),
+        MetricDescriptor(
+            name="runtime_final_memory_commit_total",
+            type=MetricType.COUNTER,
+            description="Final delivered exchange Memory 提交结果",
+            unit="commits",
+            allowed_labels=frozenset({"status", "error_code"}),
+            required_labels=frozenset({"status", "error_code"}),
+            bounded_values={
+                "status": _MEMORY_STATUS_VALUES,
+                "error_code": _MEMORY_ERROR_CODES,
+            },
+        ),
+        MetricDescriptor(
+            name="runtime_final_memory_commit_duration_seconds",
+            type=MetricType.HISTOGRAM,
+            description="Final delivered exchange Memory 提交时长",
+            unit="seconds",
+            allowed_labels=frozenset({"status"}),
+            required_labels=frozenset({"status"}),
+            bounded_values={"status": _MEMORY_STATUS_VALUES},
+        ),
         _descriptor("runtime_retries_total", MetricType.COUNTER, "Retry Attempt 数", "retries", "component"),
         _descriptor("runtime_budget_exhaustions_total", MetricType.COUNTER, "预算耗尽数", "events", "component", "budget_dimension", "status"),
         _descriptor("runtime_timeouts_total", MetricType.COUNTER, "超时数", "events", "component", "status"),
@@ -214,7 +346,22 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
         _descriptor("runtime_event_channel_buffered", MetricType.GAUGE, "Event Channel 缓冲事件", "events"),
         _descriptor("runtime_circuit_breakers_open", MetricType.GAUGE, "Open Circuit Breaker", "breakers"),
         _descriptor("runtime_run_duration_seconds", MetricType.HISTOGRAM, "Run 时长", "seconds", "status"),
-        _descriptor("runtime_step_duration_seconds", MetricType.HISTOGRAM, "Step 时长", "seconds", "status"),
+        MetricDescriptor(
+            name="runtime_step_duration_seconds",
+            type=MetricType.HISTOGRAM,
+            description="按执行分类/输出策略统计的 Step 时长",
+            unit="seconds",
+            allowed_labels=frozenset(
+                {"execution_kind", "output_policy", "status"}
+            ),
+            required_labels=frozenset(
+                {"execution_kind", "output_policy", "status"}
+            ),
+            bounded_values={
+                "execution_kind": _EXECUTION_KIND_VALUES,
+                "output_policy": _OUTPUT_POLICY_VALUES,
+            },
+        ),
         _descriptor("runtime_model_duration_seconds", MetricType.HISTOGRAM, "Model Attempt 时长", "seconds", "status", "model_profile"),
         _descriptor("runtime_tool_duration_seconds", MetricType.HISTOGRAM, "Tool Attempt 时长", "seconds", "status", "tool_name"),
         _descriptor("runtime_retrieval_duration_seconds", MetricType.HISTOGRAM, "Retrieval 时长", "seconds", "status"),
@@ -469,6 +616,13 @@ class RuntimeMetricsProjector:
             self.recorder.increment_counter(
                 "runtime_runs_total", labels={"status": status}
             )
+            shape = payload.get("shape")
+            if not isinstance(shape, str) or shape not in _SHAPE_VALUES:
+                shape = "unknown"
+            self.recorder.increment_counter(
+                "runtime_multi_agent_runs_total",
+                labels={"shape": shape, "status": status},
+            )
             duration = self._duration_seconds(payload)
             if duration is not None:
                 self.recorder.observe_histogram(
@@ -481,13 +635,61 @@ class RuntimeMetricsProjector:
             self.recorder.increment_counter(
                 "runtime_steps_total", labels={"status": status}
             )
+            execution_kind = payload.get("execution_kind")
+            output_policy = payload.get("output_policy")
+            execution_kind = (
+                execution_kind
+                if isinstance(execution_kind, str)
+                and execution_kind in _EXECUTION_KIND_VALUES
+                else "unknown"
+            )
+            output_policy = (
+                output_policy
+                if isinstance(output_policy, str)
+                and output_policy in _OUTPUT_POLICY_VALUES
+                else "unknown"
+            )
+            self.recorder.increment_counter(
+                "runtime_step_total",
+                labels={
+                    "execution_kind": execution_kind,
+                    "output_policy": output_policy,
+                    "status": status,
+                },
+            )
+            if execution_kind == "SYNTHESIS":
+                self.recorder.increment_counter(
+                    "runtime_synthesis_total", labels={"status": status}
+                )
             duration = self._duration_seconds(payload)
             if duration is not None:
                 self.recorder.observe_histogram(
                     "runtime_step_duration_seconds",
                     duration,
-                    labels={"status": status},
+                    labels={
+                        "execution_kind": execution_kind,
+                        "output_policy": output_policy,
+                        "status": status,
+                    },
                 )
+        elif event_type is RuntimeEventType.PLAN_CREATED:
+            shape = payload.get("shape")
+            if not isinstance(shape, str) or shape not in _SHAPE_VALUES:
+                shape = "unknown"
+            specialist_count = int(payload.get("step_count", 0) or 0)
+            if shape == "2":
+                specialist_count = 1
+            elif shape == "3":
+                specialist_count = max(0, specialist_count - 1)
+            elif shape in {"0", "1"}:
+                specialist_count = 0
+            else:
+                specialist_count = 0
+            self.recorder.observe_histogram(
+                "runtime_specialist_count",
+                float(specialist_count),
+                labels={"shape": shape},
+            )
         elif event_type is RuntimeEventType.MODEL_STARTED:
             profile = str(payload.get("profile_id", "unknown"))
             self.recorder.increment_counter(

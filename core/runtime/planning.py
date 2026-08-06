@@ -131,3 +131,40 @@ def create_single_step_plan(agent_id: str, requirements: TaskCapabilityRequireme
     )
     PlanValidator.validate(plan)
     return plan
+
+
+def compute_plan_shape(plan: Plan) -> str:
+    """返回四种合法执行图的稳定 shape（0/1/2/3）。
+
+    - 0: Core direct（单 Step FINAL_PASSTHROUGH，agent 为 core_router）
+    - 1: 单个获批 entry specialist 透传
+    - 2: 单个 specialist -> synthesis
+    - 3: N 个 specialist -> synthesis
+
+    对不符合四种合法图的结构返回 ``unknown``，不虚构 shape。
+    """
+    if not isinstance(plan, Plan) or not plan.steps:
+        return "unknown"
+    finals = tuple(
+        step
+        for step in plan.steps
+        if step.output_policy is not OutputPolicy.INTERNAL
+    )
+    if len(finals) != 1:
+        return "unknown"
+    final_step = finals[0]
+    internals = tuple(
+        step for step in plan.steps if step.output_policy is OutputPolicy.INTERNAL
+    )
+    if len(plan.steps) == 1:
+        if final_step.output_policy is OutputPolicy.FINAL_PASSTHROUGH:
+            if final_step.preferred_agent == "core_router":
+                return "0"
+            return "1"
+        return "unknown"
+    if (
+        len(internals) == len(plan.steps) - 1
+        and final_step.output_policy is OutputPolicy.FINAL_SYNTHESIS
+    ):
+        return "2" if len(internals) == 1 else "3"
+    return "unknown"

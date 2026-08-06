@@ -19,7 +19,7 @@ from core.runtime.blocking_executor import (
     BoundedBlockingExecutor,
 )
 from core.runtime.scheduler import SerialScheduler, StepClaim
-from core.runtime.planning import ExecutionKind, Plan
+from core.runtime.planning import ExecutionKind, OutputPolicy, Plan
 from core.runtime.state import AgentState, StepStatus
 from core.runtime.state_machine import AgentStateMachine, StepEventType, StepStateEvent
 from core.runtime.event_channel import EventChannelClosedError
@@ -31,6 +31,10 @@ from core.runtime.events import (
     StepStartedPayload,
 )
 from core.runtime.step_completion import StepCompletionResult, StepResultCommitter
+from core.runtime.trace_contract import (
+    RUNTIME_STEP_SPAN,
+    set_span_attributes,
+)
 
 
 class ParallelFailureMode(str, Enum):
@@ -215,15 +219,29 @@ class ParallelExecutor:
             recorder = current_span_recorder() or self._span_recorder or NoopSpanRecorder()
             step_span = start_span_safely(recorder,
                 trace_id=run_context.trace_id, run_id=run_context.run_id,
-                component="step", operation="execute", step_id=claim.step_id,
+                component="step", operation=RUNTIME_STEP_SPAN, step_id=claim.step_id,
                 parent_context=parent_context,
             )
+            plan_step = None
+            if plan is not None:
+                for candidate in plan.steps:
+                    if candidate.step_id == claim.step_id:
+                        plan_step = candidate
+                        break
+            if plan_step is not None:
+                set_span_attributes(
+                    step_span,
+                    preferred_agent=plan_step.preferred_agent,
+                    execution_kind=plan_step.execution_kind.value,
+                    output_policy=plan_step.output_policy.value,
+                    dependency_count=len(plan_step.depends_on),
+                )
             activity_tracker = run_context.activity_tracker
             if activity_tracker is not None:
                 activity_tracker.increment("step_workers_active")
             try:  # 覆盖等待全局/资源许可、Driver、to_thread 等待及终态提交前的取消。
                 with activate_span(step_span):
-                    await self._emit_step_started(claim)
+                    await self._emit_step_started(claim, plan=plan)
                     run_context.raise_if_inactive()
                     spec = specs.get(claim.step_id, StepConcurrencySpec())
                     async with global_semaphore, resource_semaphores[spec.resource_key]:
@@ -245,7 +263,13 @@ class ParallelExecutor:
                                 else "STEP_EXECUTION_FAILED"
                             )
                             outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.FAILED, error_code=code, error_message="步骤业务执行失败")
-                            await self._emit_step_completed(claim, state, StepStatus.FAILED, code)
+                            await self._emit_step_completed(
+                                claim,
+                                state,
+                                StepStatus.FAILED,
+                                code,
+                                plan=plan,
+                            )
                             if failure_mode == ParallelFailureMode.FAIL_FAST:
                                 fail_fast_triggered.set(); raise _FailFastSignal() from None
                             return
@@ -255,6 +279,16 @@ class ParallelExecutor:
                         # OUTPUT_DELTA is ever produced for multi-step Steps.
                         completion = await effective_completion_owner.commit(claim, result, state)
                         completions[claim.step_id] = completion
+                        set_span_attributes(
+                            step_span,
+                            state=(
+                                completion.error_code
+                                if completion.error_code is not None
+                                else "SUCCEEDED"
+                            ),
+                            result_char_count=completion.char_count,
+                            delivery_status=completion.delivery_status.value,
+                        )
                         current = state.steps.get(claim.step_id)
                         if completion.error_code is not None:
                             status = (
@@ -285,7 +319,11 @@ class ParallelExecutor:
                             )
                         outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.SUCCEEDED, result=result)
                         await self._emit_step_completed(
-                            claim, state, StepStatus.SUCCEEDED, None
+                            claim,
+                            state,
+                            StepStatus.SUCCEEDED,
+                            None,
+                            plan=plan,
                         )
             except asyncio.CancelledError:
                 outcomes[claim.step_id] = self._settle_outcome(
@@ -293,7 +331,11 @@ class ParallelExecutor:
                     error_code="STEP_CANCELLED", error_message="步骤执行已取消",
                 )
                 await self._emit_step_completed(
-                    claim, state, StepStatus.CANCELLED, "STEP_CANCELLED"
+                    claim,
+                    state,
+                    StepStatus.CANCELLED,
+                    "STEP_CANCELLED",
+                    plan=plan,
                 )
                 raise
             except RunCancelledError:
@@ -303,7 +345,11 @@ class ParallelExecutor:
                     error_code="RUN_CANCELLED", error_message="运行已请求取消",
                 )
                 await self._emit_step_completed(
-                    claim, state, StepStatus.CANCELLED, "RUN_CANCELLED"
+                    claim,
+                    state,
+                    StepStatus.CANCELLED,
+                    "RUN_CANCELLED",
+                    plan=plan,
                 )
             except (BudgetExceededError, RunDeadlineExceededError):
                 raise
@@ -317,7 +363,11 @@ class ParallelExecutor:
                 )
                 outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.FAILED, error_code=code, error_message="步骤业务执行失败")
                 await self._emit_step_completed(
-                    claim, state, StepStatus.FAILED, code
+                    claim,
+                    state,
+                    StepStatus.FAILED,
+                    code,
+                    plan=plan,
                 )
                 if failure_mode == ParallelFailureMode.FAIL_FAST:
                     raise _FailFastSignal() from None
@@ -368,14 +418,40 @@ class ParallelExecutor:
             ordered_completions,
         )
 
-    async def _emit_step_started(self, claim: StepClaim) -> None:
+    async def _emit_step_started(
+        self, claim: StepClaim, *, plan: Plan | None = None
+    ) -> None:
         """Scheduler 已成功写入 RUNNING 后再发布事实。"""
         if self._event_emitter is None:
             return
+        plan_step = None
+        if plan is not None:
+            for candidate in plan.steps:
+                if candidate.step_id == claim.step_id:
+                    plan_step = candidate
+                    break
         try:
             await self._event_emitter.for_step(claim.step_id).emit(
                 RuntimeEventType.STEP_STARTED,
-                StepStartedPayload(StepStatus.RUNNING.value),
+                StepStartedPayload(
+                    StepStatus.RUNNING.value,
+                    agent_id=claim.preferred_agent,
+                    execution_kind=(
+                        plan_step.execution_kind.value
+                        if plan_step is not None
+                        else None
+                    ),
+                    output_policy=(
+                        plan_step.output_policy.value
+                        if plan_step is not None
+                        else None
+                    ),
+                    dependency_count=(
+                        len(plan_step.depends_on)
+                        if plan_step is not None
+                        else None
+                    ),
+                ),
                 component="scheduler",
             )
         except (EventChannelClosedError, RuntimeError):
@@ -387,6 +463,11 @@ class ParallelExecutor:
         state: AgentState,
         status: StepStatus,
         safe_error_code: str | None,
+        *,
+        result_char_count: int = 0,
+        delivery_status: str | None = None,
+        delivery_duration_ms: int = 0,
+        plan: Plan | None = None,
     ) -> None:
         """State Machine 已提交终态后发布并关闭该 StepEmitter。"""
         if self._event_emitter is None:
@@ -404,11 +485,32 @@ class ParallelExecutor:
             duration_ms = max(
                 0, int((step.ended_at - step.started_at).total_seconds() * 1000)
             )
+        plan_step = None
+        if plan is not None:
+            for candidate in plan.steps:
+                if candidate.step_id == claim.step_id:
+                    plan_step = candidate
+                    break
         try:
             await emitter.emit(
                 RuntimeEventType.STEP_COMPLETED,
                 StepCompletedPayload(
-                    status.value, safe_error_code, duration_ms=duration_ms
+                    status.value,
+                    safe_error_code,
+                    duration_ms=duration_ms,
+                    result_char_count=result_char_count,
+                    delivery_status=delivery_status,
+                    delivery_duration_ms=delivery_duration_ms,
+                    execution_kind=(
+                        plan_step.execution_kind.value
+                        if plan_step is not None
+                        else None
+                    ),
+                    output_policy=(
+                        plan_step.output_policy.value
+                        if plan_step is not None
+                        else None
+                    ),
                 ),
                 component="parallel_executor",
                 close=True,

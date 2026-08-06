@@ -45,6 +45,15 @@ from core.runtime.step_result_store import (
     StepResultStore,
     StepResultStoreError,
 )
+from core.runtime.trace_contract import (
+    RUNTIME_SYNTHESIS_SPAN,
+    set_span_attributes,
+)
+from core.runtime.tracing import (
+    activate_span,
+    current_trace_context,
+    start_span_safely,
+)
 
 
 class MultiAgentDriverErrorCode(str, Enum):
@@ -156,7 +165,28 @@ class MultiAgentDriver:
             ),
             fault_controller=self._fault_controller,
         )
-        adapter_result = adapter.execute(request, run_context)
+        if (
+            plan_step.execution_kind is ExecutionKind.SYNTHESIS
+            and getattr(self._coordinator, "span_recorder", None) is not None
+        ):
+            synthesis_span = start_span_safely(
+                self._coordinator.span_recorder,
+                trace_id=run_context.trace_id,
+                run_id=run_context.run_id,
+                component="synthesis",
+                operation=RUNTIME_SYNTHESIS_SPAN,
+                step_id=claim.step_id,
+                parent_context=current_trace_context(),
+            )
+            with activate_span(synthesis_span):
+                adapter_result = adapter.execute(request, run_context)
+                set_span_attributes(
+                    synthesis_span,
+                    state="SUCCEEDED",
+                    execution_kind=ExecutionKind.SYNTHESIS.value,
+                )
+        else:
+            adapter_result = adapter.execute(request, run_context)
         if not isinstance(adapter_result, AgentAdapterResult):
             raise MultiAgentDriverError(
                 MultiAgentDriverErrorCode.DRIVER_RESULT_MISMATCH,

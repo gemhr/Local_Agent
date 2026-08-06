@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import threading
+import time
 from typing import Callable
 import asyncio
 
@@ -36,6 +37,11 @@ from core.runtime.step_result_store import (
     StepResultStore,
     StepResultStoreError,
 )
+from core.runtime.trace_contract import (
+    RUNTIME_OUTPUT_DELIVERY_SPAN,
+    set_span_attributes,
+)
+from core.runtime.tracing import current_trace_context, start_span_safely
 
 
 class OutputGateState(str, Enum):
@@ -125,6 +131,8 @@ class OutputGate:
         event_emitter: RunEventEmitter | None,
         state_getter: Callable[[], AgentState] | None = None,
         run_active: Callable[[], bool] | None = None,
+        span_recorder=None,
+        metrics_recorder=None,
     ) -> None:
         if not isinstance(plan, Plan):
             raise TypeError("OutputGate 需要冻结的 Plan")
@@ -143,6 +151,8 @@ class OutputGate:
         self._event_emitter = event_emitter
         self._state_getter = state_getter
         self._run_active = run_active
+        self._span_recorder = span_recorder
+        self._metrics_recorder = metrics_recorder
         finals = tuple(
             step
             for step in plan.steps
@@ -305,9 +315,23 @@ class OutputGate:
             output_policy, _state = authorized
             self._state = OutputGateState.PUBLISHING
 
+        publish_started = time.monotonic()
+        delivery_span = None
+        if self._event_emitter is not None and self._span_recorder is not None:
+            delivery_span = start_span_safely(
+                self._span_recorder,
+                trace_id=self._event_emitter.trace_id,
+                run_id=self._event_emitter.run_id,
+                component="output_gate",
+                operation=RUNTIME_OUTPUT_DELIVERY_SPAN,
+                step_id=claim.step_id,
+                parent_context=current_trace_context(),
+            )
+        partially_persisted = False
         try:
             await self._publish_output(claim, result)
         except EventPublicationError as exc:
+            partially_persisted = exc.partially_persisted
             status = (
                 DeliveryStatus.OUTCOME_UNKNOWN
                 if exc.partially_persisted
@@ -359,6 +383,9 @@ class OutputGate:
                 output_policy,
                 DeliveryStatus.DELIVERED,
             )
+        delivery_duration_ms = max(
+            0, int((time.monotonic() - publish_started) * 1000)
+        )
         with self._lock:
             self._state = {
                 DeliveryStatus.DELIVERED: OutputGateState.PUBLISHED,
@@ -368,7 +395,59 @@ class OutputGate:
                 ),
             }[attempt.delivery_status]
             self._last_attempt = attempt
+            terminal_state = self._state.value
+        if delivery_span is not None:
+            set_span_attributes(
+                delivery_span,
+                final_step_id=claim.step_id,
+                output_policy=(
+                    output_policy.value if output_policy is not None else None
+                ),
+                delivery_status=attempt.delivery_status.value,
+                gate_terminal_state=terminal_state,
+                publish_attempt_count=1,
+                partially_persisted=partially_persisted,
+                output_char_count=result.char_count,
+            )
+            if attempt.delivery_status is DeliveryStatus.DELIVERED:
+                delivery_span.end_ok()
+            else:
+                delivery_span.end_error(attempt.error_code or "DELIVERY_FAILED")
+        self._record_delivery_metrics(
+            attempt=attempt,
+            duration_ms=delivery_duration_ms,
+            partially_persisted=partially_persisted,
+        )
         return attempt
+
+    def _record_delivery_metrics(
+        self,
+        *,
+        attempt: DeliveryAttempt,
+        duration_ms: int,
+        partially_persisted: bool,
+    ) -> None:
+        recorder = self._metrics_recorder
+        if recorder is None:
+            return
+        status = attempt.delivery_status.value
+        error_code = attempt.error_code or "OK"
+        try:
+            recorder.increment_counter(
+                "runtime_output_delivery_total",
+                labels={"status": status, "error_code": error_code},
+            )
+            recorder.observe_histogram(
+                "runtime_output_delivery_duration_seconds",
+                max(0.0, duration_ms / 1000.0),
+                labels={"status": status},
+            )
+            if partially_persisted:
+                recorder.increment_counter(
+                    "runtime_output_partial_persisted_total"
+                )
+        except Exception:
+            return
 
     async def _publish_output(
         self,

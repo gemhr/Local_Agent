@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
 from core.settings import Settings
 from core.cancellation_client import request_run_cancellation
+from core.runtime.multi_agent_status import format_frontend_status
 from ui.chat_panel import ChatPanel
 from ui.desktop_pet import DesktopPet
 
@@ -404,33 +405,10 @@ class MainController(QObject):
 
     def _on_worker_status(self, event: dict) -> None:
         """将多智能体编排事件转换为 UI 可读状态。"""
-        status_text = self._format_orchestration_status(event)
+        status_text = format_frontend_status(event)
         if not status_text:
             return
         self.chat_panel.append_orchestration_status(status_text, target_agent_id=self.worker.agent_id)
-
-    def _format_orchestration_status(self, event: dict) -> str:
-        """将后端编排事件格式化为中文状态文案。"""
-        event_type = event.get("type")
-        if event_type == "planning_started":
-            return "核心 Agent 正在判断是否需要委派专属 Agent。"
-        if event_type == "planning_skipped":
-            return "本轮无需委派，核心 Agent 直接回答。"
-        if event_type == "delegates_selected":
-            agents = event.get("agents", [])
-            names = "、".join(item.get("agent_name", item.get("agent_id", "")) for item in agents if item)
-            return f"已选择协作智能体：{names}" if names else "已生成协作计划。"
-        if event_type == "delegate_started":
-            agent_name = event.get("agent_name", event.get("agent_id", "专属 Agent"))
-            task = event.get("task", "")
-            return f"{agent_name} 开始处理：{task}" if task else f"{agent_name} 开始处理子任务。"
-        if event_type == "delegate_finished":
-            agent_name = event.get("agent_name", event.get("agent_id", "专属 Agent"))
-            summary = event.get("summary", "")
-            return f"{agent_name} 已返回结果：{summary}" if summary else f"{agent_name} 已完成子任务。"
-        if event_type == "synthesis_started":
-            return "核心 Agent 正在汇总专属 Agent 的结果。"
-        return ""
 
     def _on_worker_finished(self) -> None:
         """在流式输出结束后完成最终渲染和侧边栏更新。"""
