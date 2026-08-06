@@ -78,12 +78,24 @@ _PAYLOAD_FIELD_ALLOWLIST: dict[RuntimeEventType, tuple[str, ...]] = {
         "fingerprint",
         "step_count",
         "planning_source",
+        "shape",
     ),
-    RuntimeEventType.STEP_STARTED: ("status",),
+    RuntimeEventType.STEP_STARTED: (
+        "status",
+        "agent_id",
+        "execution_kind",
+        "output_policy",
+        "dependency_count",
+    ),
     RuntimeEventType.STEP_COMPLETED: (
         "status",
         "safe_error_code",
         "duration_ms",
+        "result_char_count",
+        "delivery_status",
+        "delivery_duration_ms",
+        "execution_kind",
+        "output_policy",
     ),
     RuntimeEventType.MODEL_STARTED: (
         "profile_id",
@@ -133,7 +145,17 @@ _PAYLOAD_FIELD_ALLOWLIST: dict[RuntimeEventType, tuple[str, ...]] = {
         "dimension",
         "safe_error_code",
     ),
-    RuntimeEventType.RUN_COMPLETED: ("status", "stop_reason", "duration_ms"),
+    RuntimeEventType.RUN_COMPLETED: (
+        "status",
+        "stop_reason",
+        "duration_ms",
+        "safe_error_code",
+        "delivery_status",
+        "final_step_status",
+        "memory_commit_status",
+        "memory_duration_ms",
+        "shape",
+    ),
 }
 
 _SAFE_TRANSPORT_ERROR_CODES = frozenset(

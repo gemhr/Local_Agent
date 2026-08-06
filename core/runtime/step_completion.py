@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 import threading
+import time
 from typing import Protocol
 
 from core.runtime.event_channel import (
@@ -263,7 +264,11 @@ class StepResultCommitter:
         except StepResultStoreError as exc:
             code = StepCompletionErrorCode.STEP_RESULT_COMMIT_FAILED
             await self._emit_step_completed(
-                claim, agent_state, StepStatus.SUCCEEDED, code.value
+                claim,
+                agent_state,
+                StepStatus.SUCCEEDED,
+                code.value,
+                result_char_count=result.char_count,
             )
             return self._failure(
                 claim,
@@ -278,27 +283,44 @@ class StepResultCommitter:
         delivery_attempt: DeliveryAttempt | None = None
         memory_error_code: str | None = None
         if is_final and self._output_gate is not None:
+            delivery_started = time.monotonic()
             delivery_attempt = await self._output_gate.attempt_publish(
                 claim=claim,
                 result=result,
             )
-            if (
-                delivery_attempt.delivery_status is DeliveryStatus.DELIVERED
-                and self._final_memory_writer is not None
-            ):
-                try:
-                    await asyncio.to_thread(
-                        self._final_memory_writer.write_delivered,
-                        final_step_id=claim.step_id,
-                        store=self._store,
-                    )
-                except Exception:
-                    memory_error_code = (
-                        StepCompletionErrorCode.FINAL_OUTPUT_MEMORY_COMMIT_FAILED.value
-                    )
+            delivery_duration_ms = max(
+                0, int((time.monotonic() - delivery_started) * 1000)
+            )
+        else:
+            delivery_duration_ms = 0
+        if (
+            delivery_attempt is not None
+            and delivery_attempt.delivery_status is DeliveryStatus.DELIVERED
+            and self._final_memory_writer is not None
+        ):
+            try:
+                await asyncio.to_thread(
+                    self._final_memory_writer.write_delivered,
+                    final_step_id=claim.step_id,
+                    store=self._store,
+                )
+            except Exception:
+                memory_error_code = (
+                    StepCompletionErrorCode.FINAL_OUTPUT_MEMORY_COMMIT_FAILED.value
+                )
 
         emitted = await self._emit_step_completed(
-            claim, agent_state, StepStatus.SUCCEEDED, None
+            claim,
+            agent_state,
+            StepStatus.SUCCEEDED,
+            None,
+            result_char_count=result.char_count,
+            delivery_status=(
+                delivery_attempt.delivery_status.value
+                if delivery_attempt is not None
+                else None
+            ),
+            delivery_duration_ms=delivery_duration_ms,
         )
         if not emitted:
             return self._failure(
@@ -449,6 +471,10 @@ class StepResultCommitter:
         agent_state: AgentState,
         status: StepStatus,
         safe_error_code: str | None,
+        *,
+        result_char_count: int = 0,
+        delivery_status: str | None = None,
+        delivery_duration_ms: int = 0,
     ) -> bool:
         """Return False only when the event could not be published."""
         if self._event_emitter is None:
@@ -466,11 +492,27 @@ class StepResultCommitter:
             duration_ms = max(
                 0, int((step.ended_at - step.started_at).total_seconds() * 1000)
             )
+        plan_step = self._plan_step(claim.step_id)
         try:
             await emitter.emit(
                 RuntimeEventType.STEP_COMPLETED,
                 StepCompletedPayload(
-                    status.value, safe_error_code, duration_ms=duration_ms
+                    status.value,
+                    safe_error_code,
+                    duration_ms=duration_ms,
+                    result_char_count=result_char_count,
+                    delivery_status=delivery_status,
+                    delivery_duration_ms=delivery_duration_ms,
+                    execution_kind=(
+                        plan_step.execution_kind.value
+                        if plan_step is not None
+                        else None
+                    ),
+                    output_policy=(
+                        plan_step.output_policy.value
+                        if plan_step is not None
+                        else None
+                    ),
                 ),
                 component="step_completion",
                 close=True,

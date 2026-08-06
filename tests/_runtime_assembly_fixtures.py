@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from core.memory_manager import MemoryExchangeError
 from core.runtime import (
     ApplicationRuntimeServices,
     CoordinatedRuntimeFactory,
@@ -61,6 +62,38 @@ class FakeMemoryManager:
     def __init__(self) -> None:
         self.messages: list[dict] = []
         self._seq = 0
+        self._exchanges: set[str] = set()
+
+    def append_exchange_atomic(
+        self,
+        agent_id: str,
+        memory_scope: str,
+        user_message: str,
+        assistant_message: str,
+        run_id: str | None = None,
+        exchange_id: str | None = None,
+    ) -> dict:
+        """WP5 桩：同一 run_id 只允许一次完整 exchange，模拟原子语义。"""
+        key = exchange_id or run_id
+        if key is None:
+            raise ValueError("append_exchange_atomic 必须提供 run_id 或 exchange_id")
+        if key in self._exchanges:
+            raise MemoryExchangeError(
+                "DUPLICATE_EXCHANGE",
+                "该 Run 的 exchange 已提交，拒绝重复写入",
+            )
+        self._exchanges.add(key)
+        user_id = self.add_message(
+            agent_id, "user", user_message, memory_scope=memory_scope
+        )
+        assistant_id = self.add_message(
+            agent_id, "assistant", assistant_message, memory_scope=memory_scope
+        )
+        return {
+            "exchange_id": key,
+            "user_message_id": user_id,
+            "assistant_message_id": assistant_id,
+        }
 
     def add_message(
         self,

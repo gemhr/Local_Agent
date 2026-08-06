@@ -84,6 +84,16 @@ class RecoveryReason(str, Enum):
     JOURNAL_TAIL_READ_NOT_EXECUTED = "JOURNAL_TAIL_READ_NOT_EXECUTED"
     RECOVERY_VALIDATION_FAILED = "RECOVERY_VALIDATION_FAILED"
     RECOVERY_VALIDATION_CANCELLED = "RECOVERY_VALIDATION_CANCELLED"
+    # WP5 delivery/Memory layered boundary facts.
+    FINAL_OUTPUT_JOURNAL_FACT_MISSING = "FINAL_OUTPUT_JOURNAL_FACT_MISSING"
+    FINAL_OUTPUT_DELIVERY_UNKNOWN = "FINAL_OUTPUT_DELIVERY_UNKNOWN"
+    FINAL_OUTPUT_MEMORY_COMMIT_UNKNOWN = (
+        "FINAL_OUTPUT_MEMORY_COMMIT_UNKNOWN"
+    )
+    MEMORY_COMMITTED_WITHOUT_TERMINAL = "MEMORY_COMMITTED_WITHOUT_TERMINAL"
+    POST_PLAN_BINDINGS_NOT_RECOVERABLE = (
+        "POST_PLAN_BINDINGS_NOT_RECOVERABLE"
+    )
 
 
 # These are the only human-readable recovery explanations. They deliberately
@@ -129,6 +139,11 @@ RECOVERY_REASON_TEXT: Mapping[RecoveryReason, str] = MappingProxyType(
         RecoveryReason.JOURNAL_TAIL_READ_NOT_EXECUTED: "Journal tail read did not execute.",
         RecoveryReason.RECOVERY_VALIDATION_FAILED: "Recovery validation did not complete.",
         RecoveryReason.RECOVERY_VALIDATION_CANCELLED: "Recovery validation was cancelled.",
+        RecoveryReason.FINAL_OUTPUT_JOURNAL_FACT_MISSING: "Final step succeeded without an output journal fact.",
+        RecoveryReason.FINAL_OUTPUT_DELIVERY_UNKNOWN: "Final output delivery outcome is unknown; do not resend.",
+        RecoveryReason.FINAL_OUTPUT_MEMORY_COMMIT_UNKNOWN: "Final memory commit outcome is unknown; manual coordination required.",
+        RecoveryReason.MEMORY_COMMITTED_WITHOUT_TERMINAL: "Final memory committed without a terminal event; do not rewrite or resend.",
+        RecoveryReason.POST_PLAN_BINDINGS_NOT_RECOVERABLE: "Post-plan run cannot resume because invocation bindings are not recoverable.",
     }
 )
 
@@ -305,6 +320,14 @@ class RecoveryProjection:
     terminal_event_seen: bool
     output_available: bool
     budget_exhausted: bool = False
+    # WP5 layered safe facts projected only from journal metadata.
+    planning_started: bool = False
+    plan_created: bool = False
+    plan_shape: str | None = None
+    delivery_status: str | None = None
+    final_step_status: str | None = None
+    memory_commit_status: str | None = None
+    output_publication_attempted: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.step_states, Mapping):
@@ -331,9 +354,23 @@ class RecoveryProjection:
             "terminal_event_seen",
             "output_available",
             "budget_exhausted",
+            "planning_started",
+            "plan_created",
+            "output_publication_attempted",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be bool")
+        for name in (
+            "plan_shape",
+            "delivery_status",
+            "final_step_status",
+            "memory_commit_status",
+        ):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"{name} must be a non-empty string")
 
 
 @dataclass(frozen=True, slots=True)

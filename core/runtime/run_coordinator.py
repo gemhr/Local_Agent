@@ -41,7 +41,7 @@ from core.runtime.final_memory_writer import RunFinalMemoryWriter
 from core.runtime.multi_agent_driver import MultiAgentDriver
 from core.runtime.plan_graph import PlanGraphValidationError, PlanGraphValidator
 from core.runtime.plan_fingerprint import PlanFingerprinter
-from core.runtime.planning import ExecutionKind, OutputPolicy, Plan
+from core.runtime.planning import ExecutionKind, OutputPolicy, Plan, compute_plan_shape
 from core.runtime.multi_agent_planning import (
     PLANNER_SCHEMA_VERSION,
     PlanResolver,
@@ -79,6 +79,11 @@ from core.runtime.tracing import (NoopSpanRecorder, activate_span,
                                   install_span_recorder, install_trace_context,
                                   reset_span_recorder, reset_trace_context,
                                   start_span_safely)
+from core.runtime.trace_contract import (
+    RUNTIME_PLANNING_SPAN,
+    RUNTIME_RUN_SPAN,
+    set_span_attributes,
+)
 
 
 _TERMINAL_RUN_STATUSES = frozenset(
@@ -457,6 +462,8 @@ class RunCoordinator:
             state_getter=lambda: self.agent_state,
             run_active=lambda: self.agent_state.status
             in {RunStatus.CREATED, RunStatus.RUNNING},
+            span_recorder=self.span_recorder,
+            metrics_recorder=self._metrics_recorder,
         )
         memory_writer: RunFinalMemoryWriter | None = None
         if self._planning_request is not None:
@@ -465,6 +472,9 @@ class RunCoordinator:
                 entry_agent_id=self._planning_request.selected_agent_id,
                 user_request=self._planning_request.user_request,
                 persist=self._persist,
+                run_id=self.run_context.run_id,
+                span_recorder=self.span_recorder,
+                metrics_recorder=self._metrics_recorder,
             )
         committer = StepResultCommitter(
             store=store,
@@ -666,9 +676,66 @@ class RunCoordinator:
                 fingerprint=PlanFingerprinter.fingerprint(resolved.plan),
                 step_count=len(resolved.plan.steps),
                 planning_source=resolved.planning_source.value,
+                shape=compute_plan_shape(resolved.plan),
             ),
             component="run_coordinator",
         )
+
+    def _layered_terminal_facts(
+        self, decision: RunFinalizationDecision
+    ) -> dict[str, object]:
+        """推导 STEP/Delivery/Memory/Run 四层终态事实（不虚构）。
+
+        只在可证明的边界填写：
+        - Run SUCCEEDED 仅当 OutputGate 报告 DELIVERED，因此 delivery=DELIVERED；
+        - FINAL_OUTPUT_MEMORY_COMMIT_FAILED 表示 delivered=true、memory=false；
+        - memory 只有在 delivery=DELIVERED 后才被尝试。
+        """
+        final_step_status = None
+        plan = self.plan
+        final_step_id = None
+        if plan is not None:
+            finals = tuple(
+                step
+                for step in plan.steps
+                if step.output_policy is not OutputPolicy.INTERNAL
+            )
+            if len(finals) == 1:
+                final_step_id = finals[0].step_id
+        if final_step_id is not None:
+            step = self.agent_state.steps.get(final_step_id)
+            if step is not None:
+                final_step_status = step.status.value
+
+        error_code = decision.error_code
+        delivery_status = None
+        memory_commit_status = None
+        if decision.status is RunStatus.SUCCEEDED:
+            delivery_status = "DELIVERED"
+            memory_commit_status = (
+                "SUCCEEDED" if self._persist else "NOT_ATTEMPTED"
+            )
+        elif error_code == "FINAL_OUTPUT_MEMORY_COMMIT_FAILED":
+            delivery_status = "DELIVERED"
+            memory_commit_status = "FAILED"
+        elif error_code == "FINAL_OUTPUT_DELIVERY_FAILED":
+            delivery_status = "FAILED"
+            memory_commit_status = "NOT_ATTEMPTED"
+        elif error_code == "FINAL_OUTPUT_DELIVERY_UNKNOWN":
+            delivery_status = "OUTCOME_UNKNOWN"
+            memory_commit_status = "NOT_ATTEMPTED"
+        elif delivery_status is None and final_step_status == "SUCCEEDED":
+            # Final Step 成功但 Run 未成功且无专门 delivery 错误码：交付结果
+            # 无法从已提交事实推导，保持未知，不虚构。
+            delivery_status = "OUTCOME_UNKNOWN"
+
+        return {
+            "delivery_status": delivery_status,
+            "final_step_status": final_step_status,
+            "memory_commit_status": memory_commit_status,
+            "safe_error_code": error_code,
+            "shape": compute_plan_shape(plan) if plan is not None else None,
+        }
 
     def _clear_invocation_bindings(
         self, cleanup_error_codes: list[str]
@@ -758,7 +825,7 @@ class RunCoordinator:
 
         run_span = start_span_safely(self.span_recorder,
             trace_id=self.run_context.trace_id, run_id=self.run_context.run_id,
-            component="runtime", operation="run"
+            component="runtime", operation=RUNTIME_RUN_SPAN
         )
         trace_token = install_trace_context(run_span.context)
         recorder_token = install_span_recorder(self.span_recorder)
@@ -792,7 +859,7 @@ class RunCoordinator:
             self._start_deadline_watcher()
             planner_span = start_span_safely(self.span_recorder,
                 trace_id=self.run_context.trace_id, run_id=self.run_context.run_id,
-                component="planner", operation="plan"
+                component="planner", operation=RUNTIME_PLANNING_SPAN
             )
             with activate_span(planner_span):
                 if self._dynamic:
@@ -800,6 +867,7 @@ class RunCoordinator:
                 else:
                     assert self.plan is not None and self.scheduler is not None
                     PlanGraphValidator.validate(self.plan)
+                self._attach_planning_span_attributes(planner_span)
             if decision is None:
                 assert self.plan is not None and self.scheduler is not None
                 self.scheduler.prepare(
@@ -884,6 +952,7 @@ class RunCoordinator:
             budget_snapshot=budget_snapshot,
             cleanup_error_codes=cleanup_error_codes,
         )
+        self._attach_run_span_attributes(run_span, result)
         if terminal_publication_failed:
             run_span.end_error("RUNTIME_TERMINAL_PUBLICATION_FAILED")
         elif result.status is RunStatus.SUCCEEDED: run_span.end_ok()
@@ -899,6 +968,64 @@ class RunCoordinator:
                 "Runtime terminal publication failed",
             ) from None
         return result
+
+    def _attach_planning_span_attributes(self, planner_span) -> None:
+        """只写 Trace Contract v1 允许的规划安全属性，不记录 raw 内容。"""
+        plan = self.plan
+        if plan is None:
+            return
+        internals = tuple(
+            step
+            for step in plan.steps
+            if step.output_policy is OutputPolicy.INTERNAL
+        )
+        set_span_attributes(
+            planner_span,
+            planning_source=plan.source.value,
+            schema_version=PLANNER_SCHEMA_VERSION,
+            planner_model_invoked=(
+                plan.source.value == "model_generated"
+            ),
+            compiled_shape=compute_plan_shape(plan),
+            specialist_count=len(internals),
+            synthesis_required=any(
+                step.execution_kind is ExecutionKind.SYNTHESIS
+                for step in plan.steps
+            ),
+        )
+
+    def _attach_run_span_attributes(self, run_span, result) -> None:
+        """Run root span 的安全归因属性；缺失版本一律不虚构。"""
+        plan = self.plan
+        selected_agent_id = None
+        if self._planning_request is not None:
+            selected_agent_id = self._planning_request.selected_agent_id
+        runtime_mode = None
+        metadata = self._runtime_metadata
+        if metadata is not None:
+            runtime_mode = getattr(metadata, "runtime_mode", None)
+        set_span_attributes(
+            run_span,
+            plan_id=plan.plan_id if plan is not None else None,
+            plan_version=plan.version if plan is not None else None,
+            plan_fingerprint=(
+                PlanFingerprinter.fingerprint(plan) if plan is not None else None
+            ),
+            planning_source=(
+                plan.source.value if plan is not None else "unknown"
+            ),
+            step_count=len(plan.steps) if plan is not None else None,
+            selected_entry_agent_id=selected_agent_id,
+            runtime_mode=runtime_mode,
+            runtime_version="not_configured",
+            prompt_version="not_configured",
+            model_config_hash="not_configured",
+            toolset_hash="not_configured",
+            kb_version="not_configured",
+            final_status=result.status.value,
+            stop_reason=result.stop_reason.value,
+            shape=compute_plan_shape(plan) if plan is not None else None,
+        )
 
     async def _execute_batches(
         self,
@@ -1321,6 +1448,7 @@ class RunCoordinator:
                     StopReason.DEADLINE_EXCEEDED,
                 }
             ):
+                facts = self._layered_terminal_facts(decision)
                 await self.event_emitter.emit(
                     RuntimeEventType.ERROR,
                     ErrorPayload(
@@ -1329,10 +1457,14 @@ class RunCoordinator:
                         safe_message=decision.safe_message,
                         component="run_coordinator",
                         fatal=True,
+                        delivery_status=facts["delivery_status"],
+                        final_step_status=facts["final_step_status"],
+                        memory_commit_status=facts["memory_commit_status"],
                     ),
                     component="run_coordinator",
                     ignore_run_cancellation=True,
                 )
+            facts = self._layered_terminal_facts(decision)
             await self.event_emitter.emit(
                 RuntimeEventType.RUN_COMPLETED,
                 RunCompletedPayload(
@@ -1355,6 +1487,11 @@ class RunCoordinator:
                         if self._started_monotonic is not None
                         else 0
                     ),
+                    safe_error_code=facts["safe_error_code"],
+                    delivery_status=facts["delivery_status"],
+                    final_step_status=facts["final_step_status"],
+                    memory_commit_status=facts["memory_commit_status"],
+                    shape=facts["shape"],
                 ),
                 component="run_coordinator",
                 ignore_run_cancellation=True,

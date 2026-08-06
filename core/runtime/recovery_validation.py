@@ -420,6 +420,71 @@ class RecoveryValidator:
             _append_reason(reasons, RecoveryReason.RUNNING_STEP_PRESENT)
 
         checkpoint_kind = CheckpointKind(snapshot.checkpoint_kind)
+        post_plan_bindings_unrecoverable = (
+            checkpoint_kind is CheckpointKind.POST_PLAN_PRE_EXECUTION
+        )
+        if post_plan_bindings_unrecoverable:
+            # POST_PLAN_PRE_EXECUTION 的 Run 需要未持久化的 invocation
+            # bindings 才能继续执行；bindings 缺失时 Recovery 必须 fail closed。
+            _append_reason(
+                reasons,
+                RecoveryReason.POST_PLAN_BINDINGS_NOT_RECOVERABLE,
+            )
+            post_plan_unsupported = True
+        else:
+            post_plan_unsupported = False
+
+        delivery_status = projection.delivery_status
+        memory_status = projection.memory_commit_status
+        final_succeeded = projection.final_step_status == "SUCCEEDED"
+        terminal_run = RunStatus(projection.run_status) in _TERMINAL_RUN_STATUSES
+        delivery_unsupported = False
+        if not terminal_run and not projection.terminal_event_seen:
+            if (
+                final_succeeded
+                and not projection.output_available
+                and delivery_status is None
+            ):
+                # Final Step SUCCEEDED 但没有 OUTPUT journal 事实：不能假设
+                # 未交付，根据 Journal 完整性给出 UNSUPPORTED。
+                _append_reason(
+                    reasons,
+                    RecoveryReason.FINAL_OUTPUT_JOURNAL_FACT_MISSING,
+                )
+                delivery_unsupported = True
+            elif delivery_status == "OUTCOME_UNKNOWN":
+                _append_reason(
+                    reasons,
+                    RecoveryReason.FINAL_OUTPUT_DELIVERY_UNKNOWN,
+                )
+            elif (
+                projection.output_publication_attempted
+                and delivery_status != "DELIVERED"
+            ):
+                # OUTPUT journaled 但无 terminal / 交付结果未知：不重发、
+                # 不自动写 Memory，标记人工协调。
+                _append_reason(
+                    reasons,
+                    RecoveryReason.FINAL_OUTPUT_DELIVERY_UNKNOWN,
+                )
+            elif (
+                delivery_status == "DELIVERED"
+                and memory_status is None
+            ):
+                # DELIVERED 已知、Memory commit 未知：不自动重写 Memory，
+                # 防止重复 exchange。
+                _append_reason(
+                    reasons,
+                    RecoveryReason.FINAL_OUTPUT_MEMORY_COMMIT_UNKNOWN,
+                )
+            elif memory_status == "SUCCEEDED":
+                # Memory commit 成功但 terminal 缺失：不重写 Memory，
+                # 不重新输出。
+                _append_reason(
+                    reasons,
+                    RecoveryReason.MEMORY_COMMITTED_WITHOUT_TERMINAL,
+                )
+
         dependency_output_blocked = (
             checkpoint_kind is CheckpointKind.STEP_BOUNDARY
             and resume_data.pending_steps_present
@@ -434,6 +499,9 @@ class RecoveryValidator:
                 reasons,
                 RecoveryReason.STEP_RESULT_REHYDRATION_UNSUPPORTED,
             )
+            status = RecoveryStatus.UNSUPPORTED
+            resume_ready = False
+        elif post_plan_unsupported or delivery_unsupported:
             status = RecoveryStatus.UNSUPPORTED
             resume_ready = False
         elif reasons:

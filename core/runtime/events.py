@@ -74,6 +74,8 @@ class PlanCreatedPayload:
     fingerprint: str
     step_count: int
     planning_source: str
+    # WP5: safe execution shape (0/1/2/3). Legacy records may omit it.
+    shape: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.plan_id, "plan_id")
@@ -81,14 +83,33 @@ class PlanCreatedPayload:
         _require_text(self.fingerprint, "fingerprint")
         _require_index(self.step_count, "step_count")
         _require_text(self.planning_source, "planning_source")
+        if self.shape is not None:
+            _require_text(self.shape, "shape")
+            if self.shape not in {"0", "1", "2", "3"}:
+                raise ValueError("shape 必须是 0/1/2/3")
 
 
 @dataclass(frozen=True, slots=True)
 class StepStartedPayload:
     status: str
+    # WP5 safe step facts. Legacy records may omit them; new emissions always
+    # set the full set from the frozen Plan + Registry claim.
+    agent_id: str | None = None
+    execution_kind: str | None = None
+    output_policy: str | None = None
+    dependency_count: int | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.status, "status")
+        for value, name in (
+            (self.agent_id, "agent_id"),
+            (self.execution_kind, "execution_kind"),
+            (self.output_policy, "output_policy"),
+        ):
+            if value is not None:
+                _require_text(value, name)
+        if self.dependency_count is not None:
+            _require_index(self.dependency_count, "dependency_count")
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,12 +389,28 @@ class StepCompletedPayload:
     status: str
     safe_error_code: str | None = None
     duration_ms: int = 0
+    # WP5 safe delivery/result facts. Legacy records may omit them.
+    result_char_count: int = 0
+    delivery_status: str | None = None
+    delivery_duration_ms: int = 0
+    execution_kind: str | None = None
+    output_policy: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.status, "status")
         if self.safe_error_code is not None:
             _require_text(self.safe_error_code, "safe_error_code")
         _require_index(self.duration_ms, "duration_ms")
+        _require_index(self.result_char_count, "result_char_count")
+        _require_index(self.delivery_duration_ms, "delivery_duration_ms")
+        if self.delivery_status is not None:
+            _require_text(self.delivery_status, "delivery_status")
+        for value, name in (
+            (self.execution_kind, "execution_kind"),
+            (self.output_policy, "output_policy"),
+        ):
+            if value is not None:
+                _require_text(value, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,6 +441,10 @@ class ErrorPayload:
     safe_message: str
     component: str
     fatal: bool
+    # WP5 layered delivery/Memory facts. Legacy records may omit them.
+    delivery_status: str | None = None
+    final_step_status: str | None = None
+    memory_commit_status: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.safe_error_code, "safe_error_code")
@@ -411,6 +452,13 @@ class ErrorPayload:
         _require_text(self.component, "component")
         if not isinstance(self.fatal, bool):
             raise TypeError("fatal 必须是 bool")
+        for value, name in (
+            (self.delivery_status, "delivery_status"),
+            (self.final_step_status, "final_step_status"),
+            (self.memory_commit_status, "memory_commit_status"),
+        ):
+            if value is not None:
+                _require_text(value, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,11 +476,30 @@ class RunCompletedPayload:
     status: str
     stop_reason: str
     duration_ms: int = 0
+    # WP5 layered terminal facts. Legacy records may omit them.
+    safe_error_code: str | None = None
+    delivery_status: str | None = None
+    final_step_status: str | None = None
+    memory_commit_status: str | None = None
+    memory_duration_ms: int = 0
+    shape: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.status, "status")
         _require_text(self.stop_reason, "stop_reason")
         _require_index(self.duration_ms, "duration_ms")
+        _require_index(self.memory_duration_ms, "memory_duration_ms")
+        for value, name in (
+            (self.safe_error_code, "safe_error_code"),
+            (self.delivery_status, "delivery_status"),
+            (self.final_step_status, "final_step_status"),
+            (self.memory_commit_status, "memory_commit_status"),
+            (self.shape, "shape"),
+        ):
+            if value is not None:
+                _require_text(value, name)
+        if self.shape is not None and self.shape not in {"0", "1", "2", "3"}:
+            raise ValueError("shape 必须是 0/1/2/3")
 
 
 RuntimeEventPayload: TypeAlias = (
@@ -491,8 +558,15 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "fingerprint",
         "step_count",
         "planning_source",
+        "shape",
     ),
-    StepStartedPayload: ("status",),
+    StepStartedPayload: (
+        "status",
+        "agent_id",
+        "execution_kind",
+        "output_policy",
+        "dependency_count",
+    ),
     ModelStartedPayload: (
         "profile_id",
         "candidate_index",
@@ -563,12 +637,39 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "execution_detached",
         "background_work_pending",
     ),
-    StepCompletedPayload: ("status", "safe_error_code", "duration_ms"),
+    StepCompletedPayload: (
+        "status",
+        "safe_error_code",
+        "duration_ms",
+        "result_char_count",
+        "delivery_status",
+        "delivery_duration_ms",
+        "execution_kind",
+        "output_policy",
+    ),
     BudgetExhaustedPayload: ("component", "dimension", "safe_error_code"),
     TimeoutPayload: ("component", "safe_error_code"),
-    ErrorPayload: ("safe_error_code", "safe_message", "component", "fatal"),
+    ErrorPayload: (
+        "safe_error_code",
+        "safe_message",
+        "component",
+        "fatal",
+        "delivery_status",
+        "final_step_status",
+        "memory_commit_status",
+    ),
     CancellationPayload: ("reason", "component"),
-    RunCompletedPayload: ("status", "stop_reason", "duration_ms"),
+    RunCompletedPayload: (
+        "status",
+        "stop_reason",
+        "duration_ms",
+        "safe_error_code",
+        "delivery_status",
+        "final_step_status",
+        "memory_commit_status",
+        "memory_duration_ms",
+        "shape",
+    ),
 }
 
 # 仅用于读取第 20 天收尾前已写入的 schema v1 记录。新事件始终写出这些字段；
@@ -618,8 +719,34 @@ _LEGACY_OPTIONAL_JOURNAL_FIELDS: dict[
 ] = {
     RuntimeEventType.MODEL_COMPLETED: frozenset({"duration_ms"}),
     RuntimeEventType.TOOL_COMPLETED: frozenset({"duration_ms", "status"}),
-    RuntimeEventType.STEP_COMPLETED: frozenset({"duration_ms"}),
-    RuntimeEventType.RUN_COMPLETED: frozenset({"duration_ms"}),
+    RuntimeEventType.PLAN_CREATED: frozenset({"shape"}),
+    RuntimeEventType.STEP_STARTED: frozenset(
+        {"agent_id", "execution_kind", "output_policy", "dependency_count"}
+    ),
+    RuntimeEventType.STEP_COMPLETED: frozenset(
+        {
+            "duration_ms",
+            "result_char_count",
+            "delivery_status",
+            "delivery_duration_ms",
+            "execution_kind",
+            "output_policy",
+        }
+    ),
+    RuntimeEventType.ERROR: frozenset(
+        {"delivery_status", "final_step_status", "memory_commit_status"}
+    ),
+    RuntimeEventType.RUN_COMPLETED: frozenset(
+        {
+            "duration_ms",
+            "safe_error_code",
+            "delivery_status",
+            "final_step_status",
+            "memory_commit_status",
+            "memory_duration_ms",
+            "shape",
+        }
+    ),
     RuntimeEventType.BUDGET_EXHAUSTED: frozenset({"dimension"}),
 }
 
