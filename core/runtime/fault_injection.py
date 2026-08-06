@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import math
 import threading
@@ -28,6 +29,43 @@ from core.runtime.fault_injection_contract import (
     NO_FAULT_DECISION,
 )
 from core.runtime.fault_injection_recording import FaultInjectionRecorder
+
+
+def evaluate_sync_fault(
+    controller: "FaultInjectionController | None",
+    *,
+    point: FaultPoint,
+    component: str,
+    run_id: str | None = None,
+    step_id: str | None = None,
+    operation_kind: str | None = None,
+    event_type: str | None = None,
+    checkpoint_kind: str | None = None,
+) -> None:
+    """Run-scoped synchronous fault seam (raise-only).
+
+    Deterministic Stage 2.5 seams (Store, OutputGate, Memory, Executor) run
+    inside sync owners. Only RAISE_TYPED_ERROR is supported: DELAY/BLOCK
+    would block an asyncio transport and are intentionally not offered here.
+    """
+    if controller is None:
+        return
+    controller.execute_blocking_if_matched(
+        FaultMatchContext(
+            fault_point=point,
+            component=component,
+            run_id_digest=(
+                hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+                if run_id is not None
+                else None
+            ),
+            step_id=step_id,
+            operation_kind=operation_kind,
+            event_type=event_type,
+            checkpoint_kind=checkpoint_kind,
+        ),
+        allowed_actions={FaultAction.RAISE_TYPED_ERROR},
+    )
 
 
 class FaultClock(Protocol):

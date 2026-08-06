@@ -1556,7 +1556,10 @@ class AgentRouter:
             "DIRECT_ANSWER 的 agent_id 只能是 core_router。"
             "DELEGATE task 的 agent_id 只能是 knowledge_expert、code_expert 或 data_analyst。"
             "文档检索与知识库问题交给 knowledge_expert，代码问题交给 code_expert，"
-            "数据分析问题交给 data_analyst。只有单个 knowledge_expert task 可以设置 "
+            "数据分析问题交给 data_analyst。task.capabilities 只能为空数组，或与 "
+            "agent 对应：knowledge_expert→rag，code_expert→code_reasoning，"
+            "data_analyst→data_analysis；不确定时不要声明 capabilities。"
+            "只有单个 knowledge_expert task 可以设置 "
             "synthesis_required=false；其他专业任务必须设置 synthesis_required=true。"
         )
         messages = [

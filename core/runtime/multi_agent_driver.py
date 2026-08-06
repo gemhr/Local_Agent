@@ -109,6 +109,17 @@ class MultiAgentDriver:
         claim: StepClaim,
         run_context,
     ) -> StepResult:
+        from core.runtime.fault_injection import evaluate_sync_fault
+        from core.runtime.fault_injection_contract import FaultPoint
+
+        evaluate_sync_fault(
+            self._fault_controller,
+            point=FaultPoint.STEP_BEFORE_DRIVER_EXECUTE,
+            component="multi_agent_driver",
+            run_id=getattr(run_context, "run_id", None),
+            step_id=claim.step_id,
+            operation_kind="DRIVER_EXECUTE",
+        )
         plan = self._coordinator.plan
         bindings = self._coordinator.invocation_bindings
         if plan is None or bindings is None:

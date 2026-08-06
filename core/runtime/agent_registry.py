@@ -264,7 +264,7 @@ DEFAULT_AGENT_REGISTRY = AgentRegistry(
             entry_allowed=True, delegation_allowed=True,
             delegated_output_policy=OutputPolicy.INTERNAL,
             capabilities=frozenset({"data_analysis"}),
-            aliases=("data_analyst", "数据分析师", "数据专家"),
+            aliases=("data_analyst", "数据分析师", "数据专家", "数据库", "csv", "excel"),
         ),
         _registration(
             "code_expert", "code_expert_adapter", "Code Expert", "审查代码、排查问题并改进架构。", "avatar_code.png",

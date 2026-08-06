@@ -521,6 +521,7 @@ class CoordinatedRuntimeFactory:
                         event_emitter=emitter,
                         span_recorder=span_recorder,
                         blocking_executor=self._services.coordinated_step_executor,
+                        fault_controller=fault_controller,
                     ),
                 )
             run_handle = ActiveRunControlHandle(
@@ -594,6 +595,7 @@ class CoordinatedRuntimeFactory:
                     step_result_per_result_chars=self._step_result_per_result_chars,
                     step_result_run_total_chars=self._step_result_run_total_chars,
                     step_result_max_entries=self._step_result_max_entries,
+                    fault_controller=fault_controller,
                 )
                 multi_agent_driver = MultiAgentDriver(
                     router=self._router,

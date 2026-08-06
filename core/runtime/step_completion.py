@@ -58,6 +58,7 @@ from core.runtime.step_result_store import (
     StepResultStoreError,
     StepResultStoreErrorCode,
 )
+from core.runtime.fault_injection_contract import InjectedFaultError
 
 
 class StepCommitStatus(str, Enum):
@@ -138,21 +139,21 @@ class StepResultCommitter:
         final_memory_writer: FinalMemoryWriter | None = None,
     ) -> None:
         if not isinstance(store, StepResultStore):
-            raise TypeError("committer ?? StepResultStore")
+            raise TypeError("committer 需要 StepResultStore")
         if not isinstance(state_machine, AgentStateMachine):
-            raise TypeError("committer ?? AgentStateMachine")
+            raise TypeError("committer 需要 AgentStateMachine")
         if not isinstance(plan, Plan):
-            raise TypeError("committer ????? Plan")
+            raise TypeError("committer 需要冻结的 Plan")
         if event_emitter is not None and not isinstance(
             event_emitter, RunEventEmitter
         ):
-            raise TypeError("committer event_emitter ????")
+            raise TypeError("committer event_emitter 必须合法")
         if output_gate is not None and not isinstance(output_gate, OutputGate):
-            raise TypeError("committer output_gate ????")
+            raise TypeError("committer output_gate 必须合法")
         if final_memory_writer is not None and not callable(
             getattr(final_memory_writer, "write_delivered", None)
         ):
-            raise TypeError("final_memory_writer ???? write_delivered")
+            raise TypeError("final_memory_writer 必须实现 write_delivered")
         self._store = store
         self._state_machine = state_machine
         self._event_emitter = event_emitter
@@ -167,7 +168,7 @@ class StepResultCommitter:
             if step.output_policy is not OutputPolicy.INTERNAL
         )
         if len(finals) != 1:
-            raise ValueError("Plan ?????? final Step")
+            raise ValueError("Plan 必须具有唯一 final Step")
         self._final_step_id = finals[0].step_id
 
     @property
@@ -205,7 +206,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.NONE,
                 StepCompletionErrorCode.STEP_RESULT_DUPLICATE_COMMIT,
-                "?? completion ?????",
+                "重复 completion 回调被拒绝",
             )
         if self._store.status is not StoreStatus.OPEN:
             return self._failure(
@@ -213,7 +214,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.NONE,
                 StepCompletionErrorCode.STEP_RESULT_LATE_COMMIT,
-                "Store ??????????",
+                "Store 已关闭，拒绝迟到提交",
             )
 
         validation_error = self._validate(claim, result)
@@ -228,7 +229,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.NONE,
                 validation_error,
-                "result ? claim/Plan ???",
+                "result 与 claim/Plan 不一致",
             )
 
         try:
@@ -236,15 +237,18 @@ class StepResultCommitter:
                 result,
                 expected_agent_id=claim.preferred_agent,
             )
-        except StepResultStoreError as exc:
-            code = self._map_prepare_error(exc.error_code)
+        except (StepResultStoreError, InjectedFaultError) as exc:
+            if isinstance(exc, InjectedFaultError):
+                code = StepCompletionErrorCode.STEP_RESULT_PREPARE_FAILED
+            else:
+                code = self._map_prepare_error(exc.error_code)
             await self._apply_failed_and_emit(claim, agent_state, code.value)
             return self._failure(
                 claim,
                 result,
                 StepCommitStatus.NONE,
                 code,
-                "result prepare ??",
+                "result prepare 失败",
             )
 
         try:
@@ -256,12 +260,12 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.PREPARED,
                 StepCompletionErrorCode.STEP_STATE_COMMIT_FAILED,
-                "Step ????????",
+                "Step 状态提交失败",
             )
 
         try:
             self._store.mark_readable(claim.step_id, agent_state)
-        except StepResultStoreError as exc:
+        except (StepResultStoreError, InjectedFaultError):
             code = StepCompletionErrorCode.STEP_RESULT_COMMIT_FAILED
             await self._emit_step_completed(
                 claim,
@@ -275,7 +279,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.PREPARED,
                 code,
-                "Store mark READABLE ??",
+                "Store mark READABLE 失败",
             )
 
         output_policy = self._plan_step(claim.step_id).output_policy
@@ -328,7 +332,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.COMMITTED,
                 StepCompletionErrorCode.STEP_COMPLETION_EVENT_FAILED,
-                "STEP_COMPLETED ??????",
+                "STEP_COMPLETED 事件发布失败",
                 final_result_ready=is_final,
                 event_emitted=False,
                 output_policy=output_policy,
@@ -341,7 +345,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.COMMITTED,
                 StepCompletionErrorCode.FINAL_OUTPUT_MEMORY_COMMIT_FAILED,
-                "final output ????? Memory ????",
+                "final output 已经交付但 Memory 提交失败",
                 final_result_ready=is_final,
                 event_emitted=True,
                 output_policy=output_policy,
@@ -451,13 +455,13 @@ class StepResultCommitter:
             try:
                 self._state_machine.apply_step_event(
                     agent_state,
-                    StepStateEvent(
-                        StepEventType.FAILED,
-                        claim.step_id,
-                        occurred_at=self._event_time(agent_state),
-                        error_code=error_code,
-                        error_message="??????",
-                    ),
+                        StepStateEvent(
+                            StepEventType.FAILED,
+                            claim.step_id,
+                            occurred_at=self._event_time(agent_state),
+                            error_code=error_code,
+                            error_message="步骤执行失败",
+                        ),
                 )
             except (InvalidStateTransitionError, ValueError):
                 return

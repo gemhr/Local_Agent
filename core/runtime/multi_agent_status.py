@@ -29,6 +29,9 @@ SAFE_ERROR_TEXT: dict[str, str] = {
         "回答已经交付，但未能保存到对话记忆。"
     ),
     "PLANNING_FAILED": "规划阶段失败，未生成执行计划。",
+    "INVALID_CAPABILITY": "规划结果包含未支持的专家能力，请换一种说法再试。",
+    "PLANNING_MODEL_FAILED": "规划模型调用失败，请重试或换个说法。",
+    "PLANNER_SCHEMA_INVALID": "规划结果格式不被支持，请换个说法再试。",
     "AGENT_STEP_FAILED": "专家步骤执行失败。",
     "SYNTHESIS_FAILED": "结果综合失败。",
     "REQUIRED_DEPENDENCY_FAILED": "必需的依赖结果失败，运行停止。",

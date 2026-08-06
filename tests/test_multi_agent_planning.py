@@ -152,6 +152,66 @@ async def test_core_deterministic_direct_knowledge_code_and_fanout_rules() -> No
 
 
 @pytest.mark.asyncio
+async def test_deterministic_data_query_routes_to_data_analyst_without_model() -> None:
+    """“查数据库…csv/xlsx”类数据查询在解析层直接委派 data_analyst，
+    不调用模型，避免模型发明未注册 capability。"""
+    model = FakePlanningModel(error=AssertionError("must not run"))
+    data_query = "查数据库，mock_test_results.csv这个表的第四列的表头是什么"
+    resolved = await resolver(model).resolve(
+        PlanningRequest("core_router", data_query), context()
+    )
+    assert tuple(step.preferred_agent for step in resolved.plan.steps) == (
+        "data_analyst",
+        "synthesis_agent",
+    )
+    assert resolved.planning_source is PlanningSource.DETERMINISTIC_RULE
+    assert model.calls == 0
+
+    xlsx = await resolver(model).resolve(
+        PlanningRequest(
+            "core_router", "查询 excel 表格 exports.xlsx 的前三行"
+        ),
+        context(),
+    )
+    assert tuple(step.preferred_agent for step in xlsx.plan.steps) == (
+        "data_analyst",
+        "synthesis_agent",
+    )
+    assert model.calls == 0
+
+    # 无数据别名时，带 .csv/.xlsx 引用的 query 走既有文档检索 fallback
+    # （knowledge_expert 单透传），仍是确定性路径，不调用模型。
+    file_query = await resolver(model).resolve(
+        PlanningRequest("core_router", "查询 exports.xlsx 的前三行"),
+        context(),
+    )
+    assert tuple(
+        step.preferred_agent for step in file_query.plan.steps
+    ) == ("knowledge_expert",)
+    assert file_query.planning_source is PlanningSource.DETERMINISTIC_RULE
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_non_data_queries_still_use_model_path() -> None:
+    """防过度路由：无数据别名或无语义信号的 query 仍走模型。"""
+    model = FakePlanningModel(output=direct_json())
+    for query in (
+        "查看这个代码仓库结构",
+        "数据库索引原理是什么",
+        "查一下天气",
+    ):
+        resolved = await resolver(model).resolve(
+            PlanningRequest("core_router", query), context()
+        )
+        assert resolved.planning_source is PlanningSource.MODEL
+        assert tuple(step.preferred_agent for step in resolved.plan.steps) == (
+            "core_router",
+        )
+    assert model.calls == 3
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "output,expected_agents",
     [

@@ -33,7 +33,12 @@ class UnifiedPlanningModelAdapter:
             remaining = run_context.remaining_seconds()
             return 30.0 if remaining is None else max(0.0, remaining)
 
-        handle = self._blocking_executor.submit(
+        # WP6 starvation 修复：准入等待可能阻塞较久（executor worker 被
+        # specialist 占满时）。必须把同步准入等待移到线程中，避免占住
+        # 事件循环导致同一 loop 上的取消/断连无法传播。这是最小修复，
+        # 不新增线程池、不改变准入语义。
+        handle = await asyncio.to_thread(
+            self._blocking_executor.submit,
             lambda: self._router.complete_planning_decision(
                 request.user_request,
                 run_context=run_context,
