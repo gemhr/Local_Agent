@@ -36,6 +36,8 @@ from core.runtime.parallel_execution import (
 )
 from core.runtime.step_completion import StepResultCommitter
 from core.runtime.step_result_store import StepResultStore
+from core.runtime.output_gate import OutputGate
+from core.runtime.final_memory_writer import RunFinalMemoryWriter
 from core.runtime.multi_agent_driver import MultiAgentDriver
 from core.runtime.plan_graph import PlanGraphValidationError, PlanGraphValidator
 from core.runtime.plan_fingerprint import PlanFingerprinter
@@ -227,6 +229,7 @@ class RunCoordinator:
         runtime_metadata=None,
         metrics_recorder=None,
         multi_agent_driver: MultiAgentDriver | None = None,
+        persist: bool = True,
         step_result_per_result_chars: int = 20_000,
         step_result_run_total_chars: int = 60_000,
         step_result_max_entries: int = 16,
@@ -286,8 +289,12 @@ class RunCoordinator:
                 "step_result_run_total_chars 不得小于 step_result_per_result_chars"
             )
         self._multi_agent_driver = multi_agent_driver
+        if type(persist) is not bool:
+            raise TypeError("persist 必须是 bool")
+        self._persist = persist
         self._step_result_store: StepResultStore | None = None
         self._step_completion_owner: StepResultCommitter | None = None
+        self._output_gate: OutputGate | None = None
         self._typed_multi_step_plan = False
         self._step_result_per_result_chars = step_result_per_result_chars
         self._step_result_run_total_chars = step_result_run_total_chars
@@ -335,8 +342,10 @@ class RunCoordinator:
         self._dynamic = False
         self._dynamic_plan_state = DynamicPlanState.FROZEN
         self._multi_agent_driver = None
+        self._persist = True
         self._step_result_store = None
         self._step_completion_owner = None
+        self._output_gate = None
         self._typed_multi_step_plan = False
         self._step_result_per_result_chars = 20_000
         self._step_result_run_total_chars = 60_000
@@ -379,6 +388,10 @@ class RunCoordinator:
         return self._step_completion_owner
 
     @property
+    def output_gate(self) -> OutputGate | None:
+        return self._output_gate
+
+    @property
     def user_request(self) -> str | None:
         if self._planning_request is None:
             return None
@@ -401,20 +414,16 @@ class RunCoordinator:
             self._multi_agent_driver = driver
 
     def _is_typed_multi_step_plan(self) -> bool:
+        """WP4: every dynamic Coordinated plan uses the typed pipeline.
+
+        The dynamic single-step forms (Core direct, explicit entry, delegated
+        knowledge direct) are migrated from the legacy string-output path to
+        the typed completion pipeline + OutputGate contract.
+        """
         plan = self.plan
         if plan is None:
             return False
-        return (
-            len(plan.steps) > 1
-            or any(
-                step.execution_kind is ExecutionKind.SYNTHESIS
-                for step in plan.steps
-            )
-            or any(
-                step.output_policy is OutputPolicy.INTERNAL
-                for step in plan.steps
-            )
-        )
+        return self._dynamic
 
     def _typed_multi_step_enabled(self) -> bool:
         return (
@@ -441,14 +450,33 @@ class RunCoordinator:
             run_total_chars=self._step_result_run_total_chars,
             max_entries=self._step_result_max_entries,
         )
+        gate = OutputGate(
+            plan=plan,
+            store=store,
+            event_emitter=self.event_emitter,
+            state_getter=lambda: self.agent_state,
+            run_active=lambda: self.agent_state.status
+            in {RunStatus.CREATED, RunStatus.RUNNING},
+        )
+        memory_writer: RunFinalMemoryWriter | None = None
+        if self._planning_request is not None:
+            memory_writer = RunFinalMemoryWriter(
+                self._multi_agent_driver._router,
+                entry_agent_id=self._planning_request.selected_agent_id,
+                user_request=self._planning_request.user_request,
+                persist=self._persist,
+            )
         committer = StepResultCommitter(
             store=store,
             state_machine=self.state_machine,
             event_emitter=self.event_emitter,
             plan=plan,
+            output_gate=gate,
+            final_memory_writer=memory_writer,
         )
         self._step_result_store = store
         self._step_completion_owner = committer
+        self._output_gate = gate
         self._typed_multi_step_plan = True
 
     def _bind_static_plan(
@@ -955,17 +983,6 @@ class RunCoordinator:
         if token_decision is not None:
             return token_decision
         if snapshot.is_complete and not self.agent_state.active_step_ids:
-            if self._typed_multi_step_enabled():
-                if not self._final_result_ready():
-                    return self._infrastructure_decision(
-                        "FINAL_OUTPUT_PIPELINE_NOT_READY"
-                    )
-                # WP4 REMOVAL MARKER: the unique final StepResult is READABLE,
-                # but user-visible delivery (OutputGate) is WP4-only. Fail
-                # closed before WP4 delivery exists.
-                return self._infrastructure_decision(
-                    "FINAL_OUTPUT_PIPELINE_NOT_READY"
-                )
             return RunFinalizationDecision(
                 RunStatus.SUCCEEDED,
                 StopReason.COMPLETED,
@@ -1009,10 +1026,18 @@ class RunCoordinator:
             return None
         for completion in report.completion_results:
             if completion is not None and completion.error_code is not None:
+                error_code = completion.error_code
+                if error_code in {
+                    "OUTPUT_GATE_DUPLICATE_ATTEMPT",
+                    "FINAL_OUTPUT_DELIVERY_FAILED",
+                    "FINAL_OUTPUT_DELIVERY_UNKNOWN",
+                    "FINAL_OUTPUT_MEMORY_COMMIT_FAILED",
+                }:
+                    error_code = completion.error_code
                 return RunFinalizationDecision(
                     RunStatus.FAILED,
                     StopReason.UNHANDLED_ERROR,
-                    completion.error_code,
+                    error_code,
                     _SAFE_MESSAGES[StopReason.UNHANDLED_ERROR],
                 )
         return None

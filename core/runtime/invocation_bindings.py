@@ -8,6 +8,32 @@ from enum import Enum
 import threading
 from typing import Iterable
 
+from core.runtime.history_policy import HistoryPolicy
+
+
+class InvocationRole(str, Enum):
+    """Explicit call role set by the PlanCompiler from a typed decision.
+
+    Role drives Memory history read policy; it is never inferred from step IDs
+    or Agent names:
+
+        ENTRY       -> HistoryPolicy.AGENT_SCOPE (Core direct / explicit entry)
+        DELEGATED   -> HistoryPolicy.NONE
+        SYNTHESIS   -> HistoryPolicy.NONE
+    """
+
+    ENTRY = "ENTRY"
+    DELEGATED = "DELEGATED"
+    SYNTHESIS = "SYNTHESIS"
+
+
+def history_policy_for_role(role: InvocationRole) -> HistoryPolicy:
+    if role is InvocationRole.ENTRY:
+        return HistoryPolicy.AGENT_SCOPE
+    return HistoryPolicy.NONE
+
+
+
 
 class InvocationBindingErrorCode(str, Enum):
     UNKNOWN_STEP = "UNKNOWN_STEP"
@@ -27,7 +53,14 @@ class InvocationBindingError(LookupError):
 class AgentInvocationSpec:
     """Raw instruction spec；刻意不是 dataclass，避免默认 asdict 泄漏。"""
 
-    __slots__ = ("_step_id", "_agent_id", "_instruction", "_input_type", "_locked")
+    __slots__ = (
+        "_step_id",
+        "_agent_id",
+        "_instruction",
+        "_input_type",
+        "_role",
+        "_locked",
+    )
 
     def __init__(
         self,
@@ -35,6 +68,7 @@ class AgentInvocationSpec:
         agent_id: str,
         instruction: str,
         input_type: str = "text",
+        role: InvocationRole = InvocationRole.ENTRY,
     ) -> None:
         if not isinstance(step_id, str) or not step_id.strip():
             raise ValueError("step_id 不能为空")
@@ -44,10 +78,13 @@ class AgentInvocationSpec:
             raise ValueError("instruction 不能为空")
         if not isinstance(input_type, str) or not input_type.strip():
             raise ValueError("input_type 不能为空")
+        if not isinstance(role, InvocationRole):
+            raise ValueError("role 必须是 InvocationRole")
         object.__setattr__(self, "_step_id", step_id.strip())
         object.__setattr__(self, "_agent_id", agent_id.strip())
         object.__setattr__(self, "_instruction", instruction)
         object.__setattr__(self, "_input_type", input_type.strip())
+        object.__setattr__(self, "_role", role)
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name, value) -> None:
@@ -71,11 +108,20 @@ class AgentInvocationSpec:
     def input_type(self) -> str:
         return self._input_type
 
+    @property
+    def role(self) -> InvocationRole:
+        return self._role
+
+    @property
+    def history_policy(self) -> HistoryPolicy:
+        return history_policy_for_role(self._role)
+
     def __repr__(self) -> str:
         return (
             "AgentInvocationSpec("
             f"step_id={self.step_id!r}, agent_id={self.agent_id!r}, "
-            f"instruction=<redacted>, input_type={self.input_type!r})"
+            f"instruction=<redacted>, input_type={self.input_type!r}, "
+            f"role={self.role.value!r})"
         )
 
 
@@ -160,5 +206,7 @@ __all__ = [
     "AgentInvocationSpec",
     "InvocationBindingError",
     "InvocationBindingErrorCode",
+    "InvocationRole",
     "StepInvocationBindings",
+    "history_policy_for_role",
 ]

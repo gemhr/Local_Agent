@@ -17,7 +17,11 @@ from core.runtime.agent_registry import (
     AgentRegistryError,
     AgentRegistryErrorCode,
 )
-from core.runtime.invocation_bindings import AgentInvocationSpec, StepInvocationBindings
+from core.runtime.invocation_bindings import (
+    AgentInvocationSpec,
+    InvocationRole,
+    StepInvocationBindings,
+)
 from core.runtime.multi_agent_planning import (
     DelegatedPlanDecision,
     DelegatedTaskDecision,
@@ -229,7 +233,14 @@ class PlanCompiler:
         )
         return self._resolved(
             (step,),
-            (AgentInvocationSpec("answer", registration.agent_id, direct_instruction),),
+            (
+                AgentInvocationSpec(
+                    "answer",
+                    registration.agent_id,
+                    direct_instruction,
+                    role=InvocationRole.ENTRY,
+                ),
+            ),
             source,
             safe_identity=("direct", registration.agent_id),
         )
@@ -276,7 +287,15 @@ class PlanCompiler:
             )
             return self._resolved(
                 (step,),
-                (AgentInvocationSpec(step_id, registration.agent_id, task.instruction, task.input_type),),
+                (
+                    AgentInvocationSpec(
+                        step_id,
+                        registration.agent_id,
+                        task.instruction,
+                        task.input_type,
+                        role=InvocationRole.DELEGATED,
+                    ),
+                ),
                 source,
                 safe_identity=("delegated-direct", task.task_id, registration.agent_id),
             )
@@ -291,7 +310,15 @@ class PlanCompiler:
                     multi_agent=True, requested=task.required_capabilities,
                 )
             )
-            bindings.append(AgentInvocationSpec(step_id, registration.agent_id, task.instruction, task.input_type))
+            bindings.append(
+                AgentInvocationSpec(
+                    step_id,
+                    registration.agent_id,
+                    task.instruction,
+                    task.input_type,
+                    role=InvocationRole.DELEGATED,
+                )
+            )
         synthesis_step = self._step(
             "synthesis", synthesis,
             tuple(step.step_id for step in specialist_steps),
@@ -304,6 +331,7 @@ class PlanCompiler:
                 "synthesis",
                 synthesis.agent_id,
                 "Synthesize all explicitly required specialist results for the user request.",
+                role=InvocationRole.SYNTHESIS,
             )
         )
         if len(specialist_steps) > self._config.max_steps:

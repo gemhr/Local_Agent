@@ -20,6 +20,7 @@ from core.runtime import (
     InMemorySpanRecorder,
     InjectedFaultCode,
     RecoveryStatus,
+    RuntimeEventType,
     RunStatus,
 )
 from tests._runtime_assembly_fixtures import FakeRouter, make_services
@@ -109,8 +110,18 @@ async def test_diagnostic_failure_cannot_change_snapshot_or_recovery_authority()
     assert observability.health.snapshot().record_failures == len(records)
     assert spans.health_snapshot().active_span_count == 0
     assert spans.health_snapshot().end_failures == 1
-    assert "OBSERVABILITY" not in scope.driver.output
-    assert "TRACE" not in scope.driver.output
+    # WP4 typed pipeline: the gate publishes only the StepResult content, so
+    # diagnostic fault markers can never enter the user output or Memory.
+    output_events = [
+        record
+        for record in records
+        if record.event_type is RuntimeEventType.OUTPUT_DELTA
+    ]
+    assert len(output_events) == 1
+    assert "OBSERVABILITY" not in repr(output_events[0].safe_payload)
+    assert "TRACE" not in repr(output_events[0].safe_payload)
+    assert "OBSERVABILITY" not in repr(router.memory_manager.messages)
+    assert "TRACE" not in repr(router.memory_manager.messages)
 
     metric_labels = tuple(
         labels

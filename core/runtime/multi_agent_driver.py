@@ -142,6 +142,8 @@ class MultiAgentDriver:
             step_id=claim.step_id,
             agent_id=claim.preferred_agent,
             instruction=instruction,
+            invocation_role=binding.role,
+            history_policy=binding.history_policy,
             execution_kind=plan_step.execution_kind,
             input_type=binding.input_type,
             capability_requirements=plan_step.capability_requirements,

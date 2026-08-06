@@ -590,6 +590,7 @@ class CoordinatedRuntimeFactory:
                     snapshot_store=snapshot_store,
                     planning_timeout_seconds=self._planning_timeout_seconds,
                     metrics_recorder=self._services.runtime_metrics_recorder,
+                    persist=persist,
                     step_result_per_result_chars=self._step_result_per_result_chars,
                     step_result_run_total_chars=self._step_result_run_total_chars,
                     step_result_max_entries=self._step_result_max_entries,

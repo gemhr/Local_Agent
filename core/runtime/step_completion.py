@@ -1,19 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""WP3 minimal result completion skeleton.
+"""WP4 full StepCompletionPipeline (keeps the StepResultCommitter name).
 
-The Store cannot be written by the Driver; ``StepResultCommitter`` is the only
-write owner and implements the WP3 result/state branch only:
+The Store cannot be written by the Driver; the completion owner is the only
+write owner and implements the complete INTERNAL/FINAL branch:
 
     result validation
     -> Store PREPARED
-    -> Step state terminal
+    -> Step RUNNING -> SUCCEEDED
     -> Store READABLE
-    -> STEP_COMPLETED
+    -> [FINAL only] OutputGate.attempt_publish
+         -> DELIVERED / FAILED / OUTCOME_UNKNOWN
+    -> [DELIVERED only] run-level final Memory writer
+    -> STEP_COMPLETED(SUCCEEDED)
     -> safe StepCompletionResult
 
-WP4 will add the OutputGate and delivery branch; this module deliberately
-contains no OutputGate or delivery status.
+INTERNAL steps never call the OutputGate and always report
+delivery_status=NOT_APPLICABLE. The gate is never retried, a gate failure
+never changes the Step to FAILED, and raw result text never enters the safe
+report.
 """
 
 from __future__ import annotations
@@ -23,10 +28,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 import threading
+from typing import Protocol
 
-from core.runtime.event_channel import EventChannelClosedError
+from core.runtime.event_channel import (
+    EventChannelClosedError,
+    EventPublicationError,
+)
 from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
 from core.runtime.events import RuntimeEventType, StepCompletedPayload
+from core.runtime.output_gate import (
+    DeliveryAttempt,
+    DeliveryStatus,
+    OutputGate,
+)
 from core.runtime.planning import OutputPolicy, Plan
 from core.runtime.scheduler import StepClaim
 from core.runtime.state import AgentState, StepStatus
@@ -59,6 +73,24 @@ class StepCompletionErrorCode(str, Enum):
     STEP_COMPLETION_EVENT_FAILED = "STEP_COMPLETION_EVENT_FAILED"
     STEP_RESULT_DUPLICATE_COMMIT = "STEP_RESULT_DUPLICATE_COMMIT"
     STEP_RESULT_LATE_COMMIT = "STEP_RESULT_LATE_COMMIT"
+    FINAL_OUTPUT_MEMORY_COMMIT_FAILED = "FINAL_OUTPUT_MEMORY_COMMIT_FAILED"
+    OUTPUT_GATE_DUPLICATE_ATTEMPT = "OUTPUT_GATE_DUPLICATE_ATTEMPT"
+    FINAL_OUTPUT_DELIVERY_FAILED = "FINAL_OUTPUT_DELIVERY_FAILED"
+    FINAL_OUTPUT_DELIVERY_UNKNOWN = "FINAL_OUTPUT_DELIVERY_UNKNOWN"
+
+
+class FinalMemoryWriter(Protocol):
+    """Delivered-only run-level final Memory commit owner.
+
+    Called by the completion pipeline only after OutputGate reports DELIVERED.
+    """
+
+    def write_delivered(
+        self,
+        *,
+        final_step_id: str,
+        store: StepResultStore,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +105,11 @@ class StepCompletionResult:
     commit_status: StepCommitStatus
     final_result_ready: bool
     event_emitted: bool
+    output_policy: OutputPolicy | None = None
+    delivery_status: DeliveryStatus = DeliveryStatus.NOT_APPLICABLE
+    delivery_error_code: str | None = None
+    completion_error_code: str | None = None
+    memory_error_code: str | None = None
     error_code: str | None = None
     safe_message: str = ""
 
@@ -82,7 +119,12 @@ class StepCompletionResult:
 
 
 class StepResultCommitter:
-    """Run-scoped completion owner; the only writer of StepResultStore."""
+    """Run-scoped completion owner; the only writer of StepResultStore.
+
+    WP4 evolves the WP3 minimal skeleton into the full StepCompletionPipeline.
+    There is exactly one Step completion owner per Run; the optional
+    OutputGate/FinalMemoryWriter are injected by the Coordinator.
+    """
 
     def __init__(
         self,
@@ -91,21 +133,31 @@ class StepResultCommitter:
         state_machine: AgentStateMachine,
         event_emitter: RunEventEmitter | None,
         plan: Plan,
+        output_gate: OutputGate | None = None,
+        final_memory_writer: FinalMemoryWriter | None = None,
     ) -> None:
         if not isinstance(store, StepResultStore):
-            raise TypeError("committer 需要 StepResultStore")
+            raise TypeError("committer ?? StepResultStore")
         if not isinstance(state_machine, AgentStateMachine):
-            raise TypeError("committer 需要 AgentStateMachine")
+            raise TypeError("committer ?? AgentStateMachine")
         if not isinstance(plan, Plan):
-            raise TypeError("committer 需要冻结的 Plan")
+            raise TypeError("committer ????? Plan")
         if event_emitter is not None and not isinstance(
             event_emitter, RunEventEmitter
         ):
-            raise TypeError("committer event_emitter 必须合法")
+            raise TypeError("committer event_emitter ????")
+        if output_gate is not None and not isinstance(output_gate, OutputGate):
+            raise TypeError("committer output_gate ????")
+        if final_memory_writer is not None and not callable(
+            getattr(final_memory_writer, "write_delivered", None)
+        ):
+            raise TypeError("final_memory_writer ???? write_delivered")
         self._store = store
         self._state_machine = state_machine
         self._event_emitter = event_emitter
         self._plan = plan
+        self._output_gate = output_gate
+        self._final_memory_writer = final_memory_writer
         self._guard_lock = threading.Lock()
         self._completed_steps: set[str] = set()
         finals = tuple(
@@ -114,12 +166,16 @@ class StepResultCommitter:
             if step.output_policy is not OutputPolicy.INTERNAL
         )
         if len(finals) != 1:
-            raise ValueError("Plan 必须具有唯一 final Step")
+            raise ValueError("Plan ?????? final Step")
         self._final_step_id = finals[0].step_id
 
     @property
     def store(self) -> StepResultStore:
         return self._store
+
+    @property
+    def output_gate(self) -> OutputGate | None:
+        return self._output_gate
 
     def _acquire_guard(self, step_id: str) -> bool:
         with self._guard_lock:
@@ -148,7 +204,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.NONE,
                 StepCompletionErrorCode.STEP_RESULT_DUPLICATE_COMMIT,
-                "重复 completion 回调被拒绝",
+                "?? completion ?????",
             )
         if self._store.status is not StoreStatus.OPEN:
             return self._failure(
@@ -156,7 +212,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.NONE,
                 StepCompletionErrorCode.STEP_RESULT_LATE_COMMIT,
-                "Store 已终结，拒绝迟到结果",
+                "Store ??????????",
             )
 
         validation_error = self._validate(claim, result)
@@ -171,7 +227,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.NONE,
                 validation_error,
-                "result 与 claim/Plan 不一致",
+                "result ? claim/Plan ???",
             )
 
         try:
@@ -187,7 +243,7 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.NONE,
                 code,
-                "result prepare 失败",
+                "result prepare ??",
             )
 
         try:
@@ -199,21 +255,13 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.PREPARED,
                 StepCompletionErrorCode.STEP_STATE_COMMIT_FAILED,
-                "Step 成功状态提交失败",
+                "Step ????????",
             )
 
         try:
             self._store.mark_readable(claim.step_id, agent_state)
         except StepResultStoreError as exc:
-            code = (
-                StepCompletionErrorCode.STEP_RESULT_COMMIT_FAILED
-                if exc.error_code
-                in {
-                    StepResultStoreErrorCode.PRODUCER_NOT_SUCCEEDED,
-                    StepResultStoreErrorCode.DUPLICATE_WRITE,
-                }
-                else StepCompletionErrorCode.STEP_RESULT_COMMIT_FAILED
-            )
+            code = StepCompletionErrorCode.STEP_RESULT_COMMIT_FAILED
             await self._emit_step_completed(
                 claim, agent_state, StepStatus.SUCCEEDED, code.value
             )
@@ -222,8 +270,32 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.PREPARED,
                 code,
-                "Store mark READABLE 失败",
+                "Store mark READABLE ??",
             )
+
+        output_policy = self._plan_step(claim.step_id).output_policy
+        is_final = claim.step_id == self._final_step_id
+        delivery_attempt: DeliveryAttempt | None = None
+        memory_error_code: str | None = None
+        if is_final and self._output_gate is not None:
+            delivery_attempt = await self._output_gate.attempt_publish(
+                claim=claim,
+                result=result,
+            )
+            if (
+                delivery_attempt.delivery_status is DeliveryStatus.DELIVERED
+                and self._final_memory_writer is not None
+            ):
+                try:
+                    await asyncio.to_thread(
+                        self._final_memory_writer.write_delivered,
+                        final_step_id=claim.step_id,
+                        store=self._store,
+                    )
+                except Exception:
+                    memory_error_code = (
+                        StepCompletionErrorCode.FINAL_OUTPUT_MEMORY_COMMIT_FAILED.value
+                    )
 
         emitted = await self._emit_step_completed(
             claim, agent_state, StepStatus.SUCCEEDED, None
@@ -234,9 +306,39 @@ class StepResultCommitter:
                 result,
                 StepCommitStatus.COMMITTED,
                 StepCompletionErrorCode.STEP_COMPLETION_EVENT_FAILED,
-                "STEP_COMPLETED 事件发布失败",
-                final_result_ready=(claim.step_id == self._final_step_id),
+                "STEP_COMPLETED ??????",
+                final_result_ready=is_final,
                 event_emitted=False,
+                output_policy=output_policy,
+                delivery_attempt=delivery_attempt,
+                memory_error_code=memory_error_code,
+            )
+        if memory_error_code is not None:
+            return self._failure(
+                claim,
+                result,
+                StepCommitStatus.COMMITTED,
+                StepCompletionErrorCode.FINAL_OUTPUT_MEMORY_COMMIT_FAILED,
+                "final output ????? Memory ????",
+                final_result_ready=is_final,
+                event_emitted=True,
+                output_policy=output_policy,
+                delivery_attempt=delivery_attempt,
+                memory_error_code=memory_error_code,
+            )
+        if delivery_attempt is not None and (
+            delivery_attempt.delivery_status is not DeliveryStatus.DELIVERED
+        ):
+            return self._failure(
+                claim,
+                result,
+                StepCommitStatus.COMMITTED,
+                self._delivery_failure_code(delivery_attempt),
+                delivery_attempt.safe_message,
+                final_result_ready=is_final,
+                event_emitted=True,
+                output_policy=output_policy,
+                delivery_attempt=delivery_attempt,
             )
         return StepCompletionResult(
             step_id=claim.step_id,
@@ -245,9 +347,28 @@ class StepResultCommitter:
             char_count=result.char_count,
             complete=result.complete,
             commit_status=StepCommitStatus.COMMITTED,
-            final_result_ready=(claim.step_id == self._final_step_id),
+            final_result_ready=is_final,
             event_emitted=True,
+            output_policy=output_policy,
+            delivery_status=(
+                delivery_attempt.delivery_status
+                if delivery_attempt is not None
+                else DeliveryStatus.NOT_APPLICABLE
+            ),
+            delivery_error_code=(
+                delivery_attempt.error_code
+                if delivery_attempt is not None
+                else None
+            ),
         )
+
+    @staticmethod
+    def _delivery_failure_code(attempt: DeliveryAttempt) -> StepCompletionErrorCode:
+        if attempt.error_code == "OUTPUT_GATE_DUPLICATE_ATTEMPT":
+            return StepCompletionErrorCode.OUTPUT_GATE_DUPLICATE_ATTEMPT
+        if attempt.delivery_status is DeliveryStatus.OUTCOME_UNKNOWN:
+            return StepCompletionErrorCode.FINAL_OUTPUT_DELIVERY_UNKNOWN
+        return StepCompletionErrorCode.FINAL_OUTPUT_DELIVERY_FAILED
 
     def _validate(
         self,
@@ -313,7 +434,7 @@ class StepResultCommitter:
                         claim.step_id,
                         occurred_at=self._event_time(agent_state),
                         error_code=error_code,
-                        error_message="结果提交失败",
+                        error_message="??????",
                     ),
                 )
             except (InvalidStateTransitionError, ValueError):
@@ -358,7 +479,7 @@ class StepResultCommitter:
             return True
         except asyncio.CancelledError:
             raise
-        except (EventChannelClosedError, RuntimeError):
+        except (EventChannelClosedError, EventPublicationError, RuntimeError):
             return False
 
     @staticmethod
@@ -375,7 +496,15 @@ class StepResultCommitter:
         *,
         final_result_ready: bool = False,
         event_emitted: bool = False,
+        output_policy: OutputPolicy | None = None,
+        delivery_attempt: DeliveryAttempt | None = None,
+        memory_error_code: str | None = None,
     ) -> StepCompletionResult:
+        delivery_status = DeliveryStatus.NOT_APPLICABLE
+        delivery_error_code: str | None = None
+        if delivery_attempt is not None:
+            delivery_status = delivery_attempt.delivery_status
+            delivery_error_code = delivery_attempt.error_code
         return StepCompletionResult(
             step_id=claim.step_id,
             producer_agent_id=claim.preferred_agent,
@@ -385,12 +514,22 @@ class StepResultCommitter:
             commit_status=commit_status,
             final_result_ready=final_result_ready,
             event_emitted=event_emitted,
+            output_policy=output_policy,
+            delivery_status=delivery_status,
+            delivery_error_code=delivery_error_code,
+            completion_error_code=(
+                StepCompletionErrorCode.STEP_COMPLETION_EVENT_FAILED.value
+                if error_code is StepCompletionErrorCode.STEP_COMPLETION_EVENT_FAILED
+                else None
+            ),
+            memory_error_code=memory_error_code,
             error_code=error_code.value,
             safe_message=safe_message,
         )
 
 
 __all__ = [
+    "FinalMemoryWriter",
     "StepCommitStatus",
     "StepCompletionErrorCode",
     "StepCompletionResult",

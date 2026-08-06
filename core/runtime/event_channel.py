@@ -507,6 +507,7 @@ class RuntimeEventChannel:
                     fault_point=point,
                     component="event_channel",
                     run_id_digest=_safe_digest(self.run_id),
+                    step_id=event.step_id,
                     event_type=event.event_type.value,
                     operation_kind=(
                         "CHANNEL_ENQUEUE"

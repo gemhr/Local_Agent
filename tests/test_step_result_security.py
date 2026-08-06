@@ -94,9 +94,8 @@ async def test_specialist_secrets_never_reach_observable_channels() -> None:
         "core_router", "coordinate two reviews"
     )
     result = await scope.execute()
-    assert result.status is RunStatus.FAILED
-    assert result.error_code == "FINAL_OUTPUT_PIPELINE_NOT_READY"
-    assert result.stop_reason is StopReason.UNHANDLED_ERROR
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.error_code is None
 
     # Synthesis model input may contain the raw specialist results.
     prompt = router.prompts_for("synthesis_agent")[0]
@@ -111,13 +110,30 @@ async def test_specialist_secrets_never_reach_observable_channels() -> None:
     assert SECRET not in repr(scope.coordinator.step_result_store)
     assert all(flag is False for flag in router.persist_flags())
 
-    # The synthesis final result exists only in the Store and never in user
-    # output events.
-    types = [
+    # WP4: the unique final candidate is delivered exactly once through
+    # OUTPUT_DELTA; raw text stays out of Journal/Trace/Snapshot/logs and only
+    # reaches the delivered Memory scope.
+    records = [
         record.event_type
         for record in services.event_journal.read_after(scope.run_id, 0, 1000)
     ]
-    assert RuntimeEventType.OUTPUT_DELTA not in types
+    assert records.count(RuntimeEventType.OUTPUT_DELTA) == 1
+    output_event = next(
+        record
+        for record in services.event_journal.read_after(scope.run_id, 0, 1000)
+        if record.event_type is RuntimeEventType.OUTPUT_DELTA
+    )
+    assert output_event.safe_payload["text_digest"] == (
+        __import__("hashlib").sha256(f"FINAL-{SECRET}".encode("utf-8")).hexdigest()
+    )
+    assert SECRET not in repr(output_event.safe_payload)
+    # The delivered final reaches the entry agent's direct Memory scope once.
+    written = router.memory_manager.messages
+    assert any(SECRET in message["content"] for message in written)
+    assert SECRET_PATH not in "".join(
+        message["content"] for message in written
+    )
+    assert [message["role"] for message in written] == ["user", "assistant"]
     await scope.close()
 
 
@@ -145,7 +161,7 @@ async def test_batch_report_and_exceptions_stay_clean() -> None:
         "core_router", "coordinate two reviews"
     )
     result = await scope.execute()
-    assert result.status is RunStatus.FAILED
+    assert result.status is RunStatus.SUCCEEDED
     rendered = "\n".join(
         [
             repr(result),

@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from enum import Enum
 import threading
 
-from core.runtime.planning import Plan
+from core.runtime.planning import OutputPolicy, Plan
 from core.runtime.state import AgentState, StepStatus
 from core.runtime.scheduler import StepClaim
 from core.runtime.step_result import ResultContentType, StepResult
@@ -483,6 +483,41 @@ class StepResultStore:
                 store_entry is not None
                 and store_entry.status is StoreEntryStatus.READABLE
             )
+
+    def read_final_content(self, step_id: str) -> str:
+        """Delivered-only read for the run-level final Memory writer.
+
+        Only the unique final StepResult may be read, only while the entry is
+        READABLE and the Store is OPEN. This is the sole read escape hatch and
+        it is consumed exclusively by the delivered-only Memory commit owner.
+        """
+        with self._lock:
+            if self._status is not StoreStatus.OPEN:
+                raise StepResultStoreError(
+                    StepResultStoreErrorCode.STORE_SEALED,
+                    "Store 已 seal，拒绝读取 final 正文",
+                )
+            plan_step = self._plan_step(step_id)
+            if plan_step is None:
+                raise StepResultStoreError(
+                    StepResultStoreErrorCode.UNKNOWN_PRODUCER,
+                    "final Step 不属于当前 Plan",
+                )
+            if plan_step.output_policy is OutputPolicy.INTERNAL:
+                raise StepResultStoreError(
+                    StepResultStoreErrorCode.READ_NOT_ALLOWED,
+                    "INTERNAL Step 正文不得读取用于交付",
+                )
+            store_entry = self._entries.get(step_id)
+            if (
+                store_entry is None
+                or store_entry.status is not StoreEntryStatus.READABLE
+            ):
+                raise StepResultStoreError(
+                    StepResultStoreErrorCode.ENTRY_NOT_READABLE,
+                    "final entry 尚未 READABLE",
+                )
+            return store_entry.content
 
     def entry_count(self) -> int:
         with self._lock:

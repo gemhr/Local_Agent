@@ -32,6 +32,10 @@ def event_types(services, run_id: str) -> list[RuntimeEventType]:
     return [record.event_type for record in event_records(services, run_id)]
 
 
+def last_index(types: list, event_type) -> int:
+    return len(types) - 1 - list(reversed(types)).index(event_type)
+
+
 def completed_steps(services, run_id: str) -> list[tuple[str, str, str]]:
     return [
         (record.step_id, record.safe_payload["status"], record.safe_payload["safe_error_code"])
@@ -59,9 +63,9 @@ async def test_shape2_code_then_synthesis_executes_once_each() -> None:
     router = Wp3RecordingRouter(shape2_planning_json())
     scope, result = await run_scope(router, services)
 
-    assert result.status is RunStatus.FAILED
-    assert result.stop_reason is StopReason.UNHANDLED_ERROR
-    assert result.error_code == "FINAL_OUTPUT_PIPELINE_NOT_READY"
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.stop_reason is StopReason.COMPLETED
+    assert result.error_code is None
     assert len(router.calls_for("code_expert")) == 1
     assert len(router.calls_for("synthesis_agent")) == 1
     assert len(router.calls_for("data_analyst")) == 0
@@ -75,12 +79,18 @@ async def test_shape2_code_then_synthesis_executes_once_each() -> None:
     steps = completed_steps(services, scope.run_id)
     assert ("task-code", "SUCCEEDED", None) in steps
     assert ("synthesis", "SUCCEEDED", None) in steps
-    assert RuntimeEventType.OUTPUT_DELTA not in event_types(services, scope.run_id)
+    types = event_types(services, scope.run_id)
+    assert types.count(RuntimeEventType.OUTPUT_DELTA) == 1
+    assert types.index(RuntimeEventType.OUTPUT_DELTA) < last_index(
+        types,
+        RuntimeEventType.STEP_COMPLETED
+    )
     assert scope.coordinator._final_result_ready() is False  # store cleared
     store = scope.coordinator.step_result_store
     assert store is not None
     assert store.is_cleared is True
     assert store.entry_count() == 0
+    assert result.succeeded_step_ids == ("task-code", "synthesis")
     await scope.close()
 
 
@@ -94,7 +104,8 @@ async def test_shape3_specialists_overlap_and_synthesis_waits() -> None:
     )
     scope, result = await run_scope(router, services)
 
-    assert result.error_code == "FINAL_OUTPUT_PIPELINE_NOT_READY"
+    assert result.status is RunStatus.SUCCEEDED
+    assert result.error_code is None
     assert len(router.calls_for("code_expert")) == 1
     assert len(router.calls_for("knowledge_expert")) == 1
     assert len(router.calls_for("synthesis_agent")) == 1
@@ -131,7 +142,12 @@ async def test_shape3_specialists_overlap_and_synthesis_waits() -> None:
     assert ("task-code", "SUCCEEDED", None) in steps
     assert ("task-knowledge", "SUCCEEDED", None) in steps
     assert ("synthesis", "SUCCEEDED", None) in steps
-    assert RuntimeEventType.OUTPUT_DELTA not in event_types(services, scope.run_id)
+    types = event_types(services, scope.run_id)
+    assert types.count(RuntimeEventType.OUTPUT_DELTA) == 1
+    assert types.index(RuntimeEventType.OUTPUT_DELTA) < last_index(
+        types,
+        RuntimeEventType.STEP_COMPLETED
+    )
     store = scope.coordinator.step_result_store
     assert store is not None and store.is_cleared is True
     await scope.close()
