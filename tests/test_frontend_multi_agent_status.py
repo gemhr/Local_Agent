@@ -91,6 +91,35 @@ def test_unknown_error_text_never_encourages_retry():
     )
 
 
+def test_planning_error_texts_are_explicit():
+    """planning 失败无副作用，文案明确可换说法重试。"""
+    assert (
+        safe_error_text("INVALID_CAPABILITY")
+        == "规划结果包含未支持的专家能力，请换一种说法再试。"
+    )
+    assert (
+        safe_error_text("PLANNING_MODEL_FAILED")
+        == "规划模型调用失败，请重试或换个说法。"
+    )
+    assert (
+        safe_error_text("PLANNER_SCHEMA_INVALID")
+        == "规划结果格式不被支持，请换个说法再试。"
+    )
+    rendered = format_frontend_status(
+        {
+            "event_type": "RUN_COMPLETED",
+            "payload": {
+                "status": "FAILED",
+                "safe_error_code": "INVALID_CAPABILITY",
+            },
+        }
+    )
+    assert (
+        rendered
+        == "运行失败：规划结果包含未支持的专家能力，请换一种说法再试。"
+    )
+
+
 def test_legacy_events_remain_compatible():
     assert (
         format_frontend_status({"type": "planning_started"})

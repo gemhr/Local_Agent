@@ -22,6 +22,11 @@ from core.runtime.planning import OutputPolicy, Plan
 from core.runtime.state import AgentState, StepStatus
 from core.runtime.scheduler import StepClaim
 from core.runtime.step_result import ResultContentType, StepResult
+from core.runtime.fault_injection import (
+    FaultInjectionController,
+    evaluate_sync_fault,
+)
+from core.runtime.fault_injection_contract import FaultPoint
 
 
 class StepResultStoreErrorCode(str, Enum):
@@ -239,6 +244,7 @@ class StepResultStore:
         per_result_chars: int = 20_000,
         run_total_chars: int = 60_000,
         max_entries: int = 16,
+        fault_controller: FaultInjectionController | None = None,
     ) -> None:
         if not isinstance(plan, Plan):
             raise TypeError("StepResultStore 需要冻结的 Plan")
@@ -266,11 +272,16 @@ class StepResultStore:
                 StepResultStoreErrorCode.INVALID_LIMIT,
                 "run_id 不能为空",
             )
+        if fault_controller is not None and not isinstance(
+            fault_controller, FaultInjectionController
+        ):
+            raise TypeError("fault_controller 必须是 FaultInjectionController 或 None")
         self._plan = plan
         self._run_id = run_id
         self._per_result_chars = per_result_chars
         self._run_total_chars = run_total_chars
         self._max_entries = max_entries
+        self._fault_controller = fault_controller
         self._entries: dict[str, _StoreEntry] = {}
         self._status = StoreStatus.OPEN
         self._lock = threading.RLock()
@@ -325,6 +336,14 @@ class StepResultStore:
         expected_agent_id: str,
     ) -> None:
         """Validate and store one PREPARED entry; once-write per logical Step."""
+        evaluate_sync_fault(
+            self._fault_controller,
+            point=FaultPoint.STORE_BEFORE_WRITE_PREPARED,
+            component="step_result_store",
+            run_id=self._run_id,
+            step_id=entry.step_id if isinstance(entry, StepResult) else None,
+            operation_kind="WRITE_PREPARED",
+        )
         if not isinstance(entry, StepResult):
             raise StepResultStoreError(
                 StepResultStoreErrorCode.UNKNOWN_PRODUCER,
@@ -380,6 +399,14 @@ class StepResultStore:
 
     def mark_readable(self, step_id: str, agent_state: AgentState) -> None:
         """PREPARED -> READABLE only after producer Step is SUCCEEDED."""
+        evaluate_sync_fault(
+            self._fault_controller,
+            point=FaultPoint.STORE_BEFORE_MARK_READABLE,
+            component="step_result_store",
+            run_id=self._run_id,
+            step_id=step_id,
+            operation_kind="MARK_READABLE",
+        )
         if not isinstance(agent_state, AgentState):
             raise TypeError("mark_readable 需要 AgentState")
         with self._lock:
@@ -410,6 +437,18 @@ class StepResultStore:
         agent_state: AgentState,
     ) -> DependencyResultView:
         """Return explicit dependencies in compiled depends_on order."""
+        evaluate_sync_fault(
+            self._fault_controller,
+            point=FaultPoint.STORE_BEFORE_DEPENDENCY_READ,
+            component="step_result_store",
+            run_id=self._run_id,
+            step_id=(
+                consumer_claim.step_id
+                if isinstance(consumer_claim, StepClaim)
+                else None
+            ),
+            operation_kind="DEPENDENCY_READ",
+        )
         if not isinstance(consumer_claim, StepClaim):
             raise TypeError("dependency_view_for 需要 StepClaim")
         if not isinstance(agent_state, AgentState):

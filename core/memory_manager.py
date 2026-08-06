@@ -34,7 +34,12 @@ class MemoryExchangeError(RuntimeError):
 class MemoryManager:
     """封装基于 SQLite 的消息存储、摘要与搜索能力。"""
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        *,
+        fault_controller: Optional[Any] = None,
+    ) -> None:
         """初始化消息数据库。
 
         Args:
@@ -44,6 +49,13 @@ class MemoryManager:
         default_dir = os.path.join(project_root, "data", "database")
         os.makedirs(default_dir, exist_ok=True)
         self.db_path = db_path or os.path.join(default_dir, "agent_memory.db")
+        from core.runtime.fault_injection import FaultInjectionController
+
+        if fault_controller is not None and not isinstance(
+            fault_controller, FaultInjectionController
+        ):
+            raise TypeError("fault_controller 必须是 FaultInjectionController 或 None")
+        self._fault_controller = fault_controller
         self._init_db()
 
     @contextmanager
@@ -321,6 +333,16 @@ class MemoryManager:
                 "append_exchange_atomic 必须提供 run_id 或 exchange_id",
             )
         final_exchange_id = exchange_id or run_id or uuid4().hex
+        from core.runtime.fault_injection import evaluate_sync_fault
+        from core.runtime.fault_injection_contract import FaultPoint
+
+        evaluate_sync_fault(
+            self._fault_controller,
+            point=FaultPoint.MEMORY_BEFORE_EXCHANGE_BEGIN,
+            component="memory_manager",
+            run_id=run_id,
+            operation_kind="EXCHANGE_BEGIN",
+        )
         with self._transaction() as conn:
             try:
                 conn.execute(
@@ -336,6 +358,13 @@ class MemoryManager:
                     MemoryExchangeErrorCode.DUPLICATE_EXCHANGE,
                     "该 Run 的 exchange 已提交，拒绝重复写入",
                 ) from None
+            evaluate_sync_fault(
+                self._fault_controller,
+                point=FaultPoint.MEMORY_BEFORE_USER_INSERT,
+                component="memory_manager",
+                run_id=run_id,
+                operation_kind="USER_INSERT",
+            )
             user_cursor = conn.execute(
                 """
                 INSERT INTO messages
@@ -346,6 +375,13 @@ class MemoryManager:
                 (agent_id, user_message, memory_scope, final_exchange_id, run_id),
             )
             user_message_id = int(user_cursor.lastrowid)
+            evaluate_sync_fault(
+                self._fault_controller,
+                point=FaultPoint.MEMORY_BEFORE_ASSISTANT_INSERT,
+                component="memory_manager",
+                run_id=run_id,
+                operation_kind="ASSISTANT_INSERT",
+            )
             assistant_cursor = conn.execute(
                 """
                 INSERT INTO messages
@@ -362,6 +398,13 @@ class MemoryManager:
                 ),
             )
             assistant_message_id = int(assistant_cursor.lastrowid)
+            evaluate_sync_fault(
+                self._fault_controller,
+                point=FaultPoint.MEMORY_BEFORE_EXCHANGE_COMMIT,
+                component="memory_manager",
+                run_id=run_id,
+                operation_kind="EXCHANGE_COMMIT",
+            )
             conn.execute(
                 """
                 UPDATE message_exchanges

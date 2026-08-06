@@ -6,11 +6,11 @@ from core.runtime import build_fault_coverage_report
 def test_fault_coverage_counts_only_supported_points_with_test_evidence():
     report = build_fault_coverage_report()
 
-    assert report.total_fault_points == 42
-    assert report.supported_count == 32
-    assert report.contract_only_count == 10
+    assert report.total_fault_points == 53
+    assert report.supported_count == 44
+    assert report.contract_only_count == 9
     assert report.not_applicable_count == 0
-    assert report.tested_supported_count == 32
+    assert report.tested_supported_count == 44
     assert report.untested_supported_count == 0
     assert report.dangerous_supported_count == 8
     assert report.fully_covered is True

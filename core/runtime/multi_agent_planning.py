@@ -23,10 +23,10 @@ from core.runtime.planning import Plan
 PLANNER_SCHEMA_VERSION = 1
 _SAFE_REASON = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _DOCUMENT_REFERENCE = re.compile(
-    r"(?:总结|讲讲|查找|查询|检索|搜索|阅读|分析).{0,120}\.(?:md|txt|pdf|docx?)\b",
+    r"(?:总结|讲讲|查找|查询|检索|搜索|阅读|分析).{0,120}\.(?:md|txt|pdf|docx?|csv|xlsx)\b",
     re.IGNORECASE,
 )
-_DELEGATION_VERB = re.compile(r"(?:调用|使用|请让|让|交给|委派)")
+_DELEGATION_VERB = re.compile(r"(?:调用|使用|请让|让|交给|委派|查询|查)")
 _DIRECT_GREETING = re.compile(r"^(?:你好|您好|嗨|hi|hello)[!！,.，。\s]*$", re.IGNORECASE)
 
 

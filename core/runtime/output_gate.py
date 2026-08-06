@@ -37,6 +37,11 @@ from core.runtime.step_result_store import (
     StepResultStore,
     StepResultStoreError,
 )
+from core.runtime.fault_injection import (
+    FaultInjectionController,
+    evaluate_sync_fault,
+)
+from core.runtime.fault_injection_contract import FaultPoint
 from core.runtime.trace_contract import (
     RUNTIME_OUTPUT_DELIVERY_SPAN,
     set_span_attributes,
@@ -133,6 +138,7 @@ class OutputGate:
         run_active: Callable[[], bool] | None = None,
         span_recorder=None,
         metrics_recorder=None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> None:
         if not isinstance(plan, Plan):
             raise TypeError("OutputGate 需要冻结的 Plan")
@@ -146,6 +152,10 @@ class OutputGate:
             raise TypeError("state_getter 必须可调用")
         if run_active is not None and not callable(run_active):
             raise TypeError("run_active 必须可调用")
+        if fault_controller is not None and not isinstance(
+            fault_controller, FaultInjectionController
+        ):
+            raise TypeError("fault_controller 必须是 FaultInjectionController 或 None")
         self._plan = plan
         self._store = store
         self._event_emitter = event_emitter
@@ -153,6 +163,7 @@ class OutputGate:
         self._run_active = run_active
         self._span_recorder = span_recorder
         self._metrics_recorder = metrics_recorder
+        self._fault_controller = fault_controller
         finals = tuple(
             step
             for step in plan.steps
@@ -454,6 +465,14 @@ class OutputGate:
         claim: StepClaim,
         result: StepResult,
     ) -> None:
+        evaluate_sync_fault(
+            self._fault_controller,
+            point=FaultPoint.OUTPUT_BEFORE_PUBLISH,
+            component="output_gate",
+            run_id=self._store.run_id,
+            step_id=claim.step_id,
+            operation_kind="OUTPUT_DELTA",
+        )
         if self._event_emitter is None:
             raise EventChannelClosedError("OutputGate 没有可用的 EventEmitter")
         emitter: StepEventEmitter = self._event_emitter.for_step(claim.step_id)

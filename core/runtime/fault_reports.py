@@ -20,6 +20,23 @@ _SUPPORTED_ACTIONS = (
     FaultAction.DELAY,
     FaultAction.BLOCK_UNTIL_RELEASED,
 )
+_SYNC_SEAM_ACTIONS = (FaultAction.RAISE_TYPED_ERROR,)
+_SYNC_SEAM_POINTS = frozenset(
+    {
+        FaultPoint.PLANNING_BEFORE_RESOLVE,
+        FaultPoint.PLANNING_BEFORE_PLAN_CREATED,
+        FaultPoint.STEP_BEFORE_DRIVER_EXECUTE,
+        FaultPoint.STORE_BEFORE_WRITE_PREPARED,
+        FaultPoint.STORE_BEFORE_MARK_READABLE,
+        FaultPoint.STORE_BEFORE_DEPENDENCY_READ,
+        FaultPoint.EXECUTOR_BEFORE_SUBMIT,
+        FaultPoint.OUTPUT_BEFORE_PUBLISH,
+        FaultPoint.MEMORY_BEFORE_EXCHANGE_BEGIN,
+        FaultPoint.MEMORY_BEFORE_USER_INSERT,
+        FaultPoint.MEMORY_BEFORE_ASSISTANT_INSERT,
+        FaultPoint.MEMORY_BEFORE_EXCHANGE_COMMIT,
+    }
+)
 
 
 class FaultPointSupportStatus(str, Enum):
@@ -284,6 +301,18 @@ _SUPPORTED: dict[FaultPoint, tuple[str, str, tuple[str, ...]]] = {
     FaultPoint.SHUTDOWN_BEFORE_JOURNAL_CLOSE: ("application_services", "before_journal_close", ("shutdown_component_fault",)),
     FaultPoint.SHUTDOWN_BEFORE_MODEL_CLOSE: ("application_services", "before_model_close", ("shutdown_component_fault",)),
     FaultPoint.SHUTDOWN_COMPONENT_CLOSE: ("application_services", "before_component_close", ("shutdown_component_fault",)),
+    FaultPoint.PLANNING_BEFORE_RESOLVE: ("run_coordinator", "before_plan_resolve", ("stage2_5_wp6_planning_faults",)),
+    FaultPoint.PLANNING_BEFORE_PLAN_CREATED: ("run_coordinator", "before_plan_created_event", ("stage2_5_wp6_planning_faults",)),
+    FaultPoint.STEP_BEFORE_DRIVER_EXECUTE: ("multi_agent_driver", "before_driver_execute", ("stage2_5_wp6_execution_faults",)),
+    FaultPoint.STORE_BEFORE_WRITE_PREPARED: ("step_result_store", "before_write_prepared", ("stage2_5_wp6_execution_faults",)),
+    FaultPoint.STORE_BEFORE_MARK_READABLE: ("step_result_store", "before_mark_readable", ("stage2_5_wp6_execution_faults",)),
+    FaultPoint.STORE_BEFORE_DEPENDENCY_READ: ("step_result_store", "before_dependency_read", ("stage2_5_wp6_execution_faults",)),
+    FaultPoint.EXECUTOR_BEFORE_SUBMIT: ("parallel_executor", "before_executor_submit", ("stage2_5_wp6_execution_faults", "stage2_5_wp6_starvation")),
+    FaultPoint.OUTPUT_BEFORE_PUBLISH: ("output_gate", "before_output_publish", ("stage2_5_wp6_delivery_faults",)),
+    FaultPoint.MEMORY_BEFORE_EXCHANGE_BEGIN: ("memory_manager", "before_exchange_begin", ("stage2_5_wp6_memory_faults",)),
+    FaultPoint.MEMORY_BEFORE_USER_INSERT: ("memory_manager", "before_user_insert", ("stage2_5_wp6_memory_faults",)),
+    FaultPoint.MEMORY_BEFORE_ASSISTANT_INSERT: ("memory_manager", "before_assistant_insert", ("stage2_5_wp6_memory_faults",)),
+    FaultPoint.MEMORY_BEFORE_EXCHANGE_COMMIT: ("memory_manager", "before_exchange_commit", ("stage2_5_wp6_memory_faults",)),
 }
 
 _CONTRACT_ONLY: dict[FaultPoint, str] = {
@@ -295,7 +324,6 @@ _CONTRACT_ONLY: dict[FaultPoint, str] = {
     FaultPoint.RETRIEVAL_AFTER_SEARCH: "RETRIEVAL_AFTER_SEARCH_SEAM_UNWIRED",
     FaultPoint.RETRIEVAL_BEFORE_RESULT_COMMIT: "RETRIEVAL_RESULT_COMMIT_SEAM_UNWIRED",
     FaultPoint.JOURNAL_BEFORE_READ: "JOURNAL_GENERIC_READ_SEAM_UNWIRED",
-    FaultPoint.EXECUTOR_BEFORE_SUBMIT: "EXECUTOR_SUBMIT_SEAM_UNWIRED",
     FaultPoint.EXECUTOR_AFTER_SUBMIT: "EXECUTOR_SUBMIT_SEAM_UNWIRED",
 }
 
@@ -321,7 +349,11 @@ def build_fault_point_support_report() -> FaultPointSupportReport:
                     physical_owner=owner,
                     physical_location=location,
                     dangerous_window=point in DANGEROUS_FAULT_POINTS,
-                    supported_actions=_SUPPORTED_ACTIONS,
+                    supported_actions=(
+                        _SYNC_SEAM_ACTIONS
+                        if point in _SYNC_SEAM_POINTS
+                        else _SUPPORTED_ACTIONS
+                    ),
                     test_ids=test_ids,
                     notes_safe_code="RUNTIME_SEAM_TESTED",
                 )

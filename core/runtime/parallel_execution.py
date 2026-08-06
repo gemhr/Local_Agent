@@ -31,6 +31,11 @@ from core.runtime.events import (
     StepStartedPayload,
 )
 from core.runtime.step_completion import StepCompletionResult, StepResultCommitter
+from core.runtime.fault_injection import (
+    FaultInjectionController,
+    evaluate_sync_fault,
+)
+from core.runtime.fault_injection_contract import FaultPoint
 from core.runtime.trace_contract import (
     RUNTIME_STEP_SPAN,
     set_span_attributes,
@@ -136,6 +141,7 @@ class ParallelExecutor:
         span_recorder=None,
         blocking_executor: BoundedBlockingExecutor | None = None,
         completion_owner: StepResultCommitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> None:
         self._validate_positive(max_concurrency, "max_concurrency")
         self._state_machine = state_machine or AgentStateMachine()
@@ -144,6 +150,11 @@ class ParallelExecutor:
         self._span_recorder = span_recorder
         self._blocking_executor = blocking_executor
         self._completion_owner = completion_owner
+        if fault_controller is not None and not isinstance(
+            fault_controller, FaultInjectionController
+        ):
+            raise TypeError("fault_controller 必须是 FaultInjectionController 或 None")
+        self._fault_controller = fault_controller
 
     async def execute_ready(self, *, scheduler: SerialScheduler, plan: Plan, state: AgentState, occurred_at: datetime, run_context: RunContext, driver: StepExecutionDriver, policy: ParallelExecutionPolicy, execution_mode: StepExecutionMode = StepExecutionMode.ASYNC, concurrency_specs: Mapping[str, StepConcurrencySpec] | None = None, completion_owner: StepResultCommitter | None = None) -> ParallelExecutionReport:
         """标准安全入口：同一 Policy 同时约束 Claim 和 Executor 容量。"""
@@ -537,6 +548,14 @@ class ParallelExecutor:
 
     async def _invoke(self, driver: StepExecutionDriver, claim: StepClaim, context: RunContext, mode: StepExecutionMode) -> Any:
         if mode == StepExecutionMode.SYNC_BLOCKING:
+            evaluate_sync_fault(
+                self._fault_controller,
+                point=FaultPoint.EXECUTOR_BEFORE_SUBMIT,
+                component="parallel_executor",
+                run_id=context.run_id,
+                step_id=claim.step_id,
+                operation_kind="EXECUTOR_SUBMIT",
+            )
             if self._blocking_executor is not None:
                 def remaining_seconds() -> float:
                     remaining = context.remaining_seconds()

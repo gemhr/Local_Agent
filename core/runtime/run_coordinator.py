@@ -46,6 +46,7 @@ from core.runtime.multi_agent_planning import (
     PLANNER_SCHEMA_VERSION,
     PlanResolver,
     PlanningError,
+    PlanningErrorCode,
     PlanningRequest,
     ResolvedPlan,
 )
@@ -83,6 +84,14 @@ from core.runtime.trace_contract import (
     RUNTIME_PLANNING_SPAN,
     RUNTIME_RUN_SPAN,
     set_span_attributes,
+)
+from core.runtime.fault_injection import (
+    FaultInjectionController,
+    evaluate_sync_fault,
+)
+from core.runtime.fault_injection_contract import (
+    FaultPoint,
+    InjectedFaultError,
 )
 
 
@@ -238,6 +247,7 @@ class RunCoordinator:
         step_result_per_result_chars: int = 20_000,
         step_result_run_total_chars: int = 60_000,
         step_result_max_entries: int = 16,
+        fault_controller: FaultInjectionController | None = None,
     ) -> "RunCoordinator":
         """构造尚无 Plan/Scheduler/Checkpoint 的动态规划 Runtime。"""
         if not isinstance(plan_resolver, PlanResolver):
@@ -246,6 +256,10 @@ class RunCoordinator:
             raise TypeError("planning_request 必须是 PlanningRequest")
         if not callable(execution_factory):
             raise TypeError("execution_factory 必须可调用")
+        if fault_controller is not None and not isinstance(
+            fault_controller, FaultInjectionController
+        ):
+            raise TypeError("fault_controller 必须是 FaultInjectionController 或 None")
         if (
             isinstance(planning_timeout_seconds, bool)
             or not isinstance(planning_timeout_seconds, (int, float))
@@ -304,6 +318,7 @@ class RunCoordinator:
         self._step_result_per_result_chars = step_result_per_result_chars
         self._step_result_run_total_chars = step_result_run_total_chars
         self._step_result_max_entries = step_result_max_entries
+        self._fault_controller = fault_controller
         return self
 
     def _initialize_base(
@@ -359,6 +374,7 @@ class RunCoordinator:
         self._planning_request = None
         self._execution_factory = None
         self._planning_timeout_seconds = 0.0
+        self._fault_controller = None
 
         self._start_lock = threading.Lock()
         self._started = False
@@ -454,6 +470,7 @@ class RunCoordinator:
             per_result_chars=self._step_result_per_result_chars,
             run_total_chars=self._step_result_run_total_chars,
             max_entries=self._step_result_max_entries,
+            fault_controller=self._fault_controller,
         )
         gate = OutputGate(
             plan=plan,
@@ -464,6 +481,7 @@ class RunCoordinator:
             in {RunStatus.CREATED, RunStatus.RUNNING},
             span_recorder=self.span_recorder,
             metrics_recorder=self._metrics_recorder,
+            fault_controller=self._fault_controller,
         )
         memory_writer: RunFinalMemoryWriter | None = None
         if self._planning_request is not None:
@@ -577,6 +595,13 @@ class RunCoordinator:
         planning_started = time.monotonic()
         try:
             try:
+                evaluate_sync_fault(
+                    self._fault_controller,
+                    point=FaultPoint.PLANNING_BEFORE_RESOLVE,
+                    component="run_coordinator",
+                    run_id=self.run_context.run_id,
+                    operation_kind="PLANNING_RESOLVE",
+                )
                 resolved = await asyncio.wait_for(
                     self._plan_resolver.resolve(
                         self._planning_request,
@@ -584,6 +609,11 @@ class RunCoordinator:
                     ),
                     timeout=effective_timeout,
                 )
+            except InjectedFaultError:
+                raise PlanningError(
+                    PlanningErrorCode.PLANNING_MODEL_FAILED,
+                    "Planner 模型调用失败",
+                ) from None
             except TimeoutError:
                 if limited_by_run_deadline:
                     raise RunDeadlineExceededError("run deadline exceeded") from None
@@ -607,6 +637,13 @@ class RunCoordinator:
         )
         self.run_context.raise_if_inactive()
         self._freeze_dynamic_plan(resolved)
+        evaluate_sync_fault(
+            self._fault_controller,
+            point=FaultPoint.PLANNING_BEFORE_PLAN_CREATED,
+            component="run_coordinator",
+            run_id=self.run_context.run_id,
+            operation_kind="PLAN_CREATED_EVENT",
+        )
         await self._emit_plan_created(resolved)
         if self.checkpoint_coordinator is not None:
             checkpoint = await self.create_checkpoint(
@@ -614,6 +651,7 @@ class RunCoordinator:
                 checkpoint_kind=CheckpointKind.POST_PLAN_PRE_EXECUTION,
                 timeout=self.run_context.remaining_seconds(),
                 cancellation_token=self.run_context.cancellation_token,
+                fault_controller=self._fault_controller,
             )
             if not checkpoint.persisted:
                 self.run_context.raise_if_inactive()
