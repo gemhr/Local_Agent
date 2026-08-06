@@ -429,7 +429,7 @@ WP3 尚未完成：
 - 用户可见多 Agent final（WP4 OutputGate/DeliveryStatus）；
 - partial publication 序列修复与最终回答写 Memory；
 - Store/Bindings 持久化或 dynamic resume；
-- 完整“specialist 不读取 Memory”边界（WP5 范围；当前沿用 `complete_single_agent` 按 Agent scope 读取历史的既有行为）。
+- specialist/synthesis 已通过 `HistoryPolicy.NONE` 关闭 Memory 历史读取；Legacy/direct 路径保持 `AGENT_SCOPE` 原行为。
 
 P2 已知容量风险：Planning 与 specialist 执行共享同一 bounded executor（4 workers / 8 pending），`PLANNING_MODEL` 无独立保底容量，阻塞的 specialist 任务可能让 Planning 排队；已有 `runtime_blocking_executor_pending` gauge 与 `runtime_blocking_executor_wait_seconds` histogram 可观测，Planner timeout 已包含排队时间；按 WP3 边界未新建第二线程池。
 

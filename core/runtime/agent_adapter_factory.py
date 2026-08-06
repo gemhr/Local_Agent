@@ -20,6 +20,7 @@ from core.runtime.budget import BudgetExceededError
 from core.runtime.cancellation import RunCancelledError
 from core.runtime.context import RunContext, RunDeadlineExceededError
 from core.runtime.event_emitter import StepEventEmitter
+from core.runtime.history_policy import HistoryPolicy
 from core.runtime.planning import ExecutionKind, TaskCapabilityRequirements
 from core.runtime.step_result import ResultContentType, StepResult
 from core.runtime.step_result_store import DependencyResultView
@@ -326,6 +327,7 @@ class AgentRouterSingleAgentAdapter:
                 run_context=run_context,
                 capability_requirements=request.capability_requirements,
                 persist=False,
+                history_policy=HistoryPolicy.NONE,
                 event_emitter=request.event_emitter,
                 fault_controller=request.fault_controller,
             )

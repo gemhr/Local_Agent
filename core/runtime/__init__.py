@@ -593,6 +593,7 @@ from core.runtime.step_result import (
     StepResultError,
     StepResultErrorCode,
 )
+from core.runtime.history_policy import HistoryPolicy
 from core.runtime.step_result_store import (
     DependencyResultEntry,
     DependencyResultView,
@@ -630,6 +631,7 @@ from core.runtime.synthesis import (
 
 __all__ += [
     "ResultContentType",
+    "HistoryPolicy",
     "StepResult",
     "StepResultError",
     "StepResultErrorCode",

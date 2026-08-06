@@ -325,7 +325,7 @@ No deviations from the Stage 2.5 architecture consensus were introduced in WP3.
 - 多 Step Run 暂时以 `FINAL_OUTPUT_PIPELINE_NOT_READY` 失败（WP4 前施工边界，不是最终共识中的正式业务错误）。
 - 无 OutputGate、无 DeliveryStatus、无 partial publication 处理；final Memory 未写。
 - Store/Bindings 不恢复；进程中断后动态 Run fail closed。
-- specialist 调用沿用 `complete_single_agent` 的 history 加载行为（按 Agent scope 读取各自历史），完整“specialist 不读取 Memory”边界属于 WP5 范围。
+- 内部 specialist/synthesis 调用通过 `HistoryPolicy.NONE` 显式关闭 Memory 历史读取与滚动摘要维护（见 `stage2_5_wp3_acceptance_supplement.md`）；Legacy/direct 路径保持默认 `AGENT_SCOPE` 行为。
 - P2/已知容量风险：Planning 与 specialist 执行共享同一 bounded executor（4 workers/8 pending），`PLANNING_MODEL` 无独立或保底容量；阻塞的 specialist 任务可能耗尽 worker 使 Planning 排队。已有可观测证据：`runtime_blocking_executor_pending` gauge 与 `runtime_blocking_executor_wait_seconds` histogram；Planner timeout 已包含排队时间。按 WP3 边界未新建第二线程池。
 - 不能宣称 Stage 2.5 完成。
 
