@@ -33,12 +33,18 @@
 | Exactly-once | NOT_IMPLEMENTED | 否 | 无系统级 owner | 局部 idempotency/journal evidence | 仅局部去重与保守失败 | 无跨进程 reconcile executor | 否 | idempotency/event consumer tests | 局部 at-most-once/幂等证据不能提升为全系统 guarantee |
 | Automatic compensation | NOT_IMPLEMENTED | 否 | 无自动编排 owner | 仅 compensation evidence | 不自动触发补偿 | 只报告/评估 | 否 | tool contract/fault invariant | adapter 可报告结果，但 Runtime 不自动执行策略 |
 | Step result rehydration | NOT_IMPLEMENTED | 否 | 无 | Snapshot 只保存 TextSummary/digest | 缺正文时保持 unavailable | `output_reconstruction_supported=false` | 否 | snapshot/recovery capability tests | 不从当前 Registry/Memory 回填历史正文 |
+| Multi-process server | NOT_IMPLEMENTED | 否 | 无 | 无 | 不支持 multi-worker/多进程部署 | 无 | 否 | deployment contract tests | Win 部署合同强制 exactly one server application process；禁止 `--workers N`、gunicorn、multi-process Runtime |
+| Windows Service wrapper | NOT_IMPLEMENTED | 否 | 无 | 无 | 不提供 service wrapper/NSSM/WinSW/Task Scheduler 集成代码 | 无 | 否 | deployment contract tests | 正式部署合同是 single foreground process，由 operator/企业内部环境托管 |
+| Docker / Compose | NOT_IMPLEMENTED | 否 | 无 | Windows filesystem persistence | 不支持 Docker/Compose 部署 | 无 | 否 | deployment contract tests | Windows Native = Stage 3 唯一 certified target；Docker/Compose 不属于当前完成标准 |
+| Health / Readiness endpoint | NOT_IMPLEMENTED | 否 | 无 | 无 | `/health`、`/readyz`、READY_DEGRADED projection 未实现 | 无 | 否 | deployment contract tests | DEFER TO WP1-C；WP1-B 只记录 deployment order，不实现 readiness |
+| Startup handshake / retry | NOT_IMPLEMENTED | 否 | 无 | 无 | client 无 wait-ready、无启动重试、无 version handshake | 无 | 否 | deployment contract tests | DEFER TO WP1-C |
+| Client HTTP Proxy Governance | SUPPORTED | 是 | Settings + main.py client sessions（聊天/历史/搜索/取消）+ ui/chat_panel.py plumbing + ui/memory_dialog.py memory session | 无 | 显式 `session.trust_env = settings.client_trust_env`（main.py）与 constructor 透传 `client_trust_env`（ui/）；非法显式值 fail closed | 无 | 否 | deployment contract/client proxy tests（4 Session inventory + 行为证据） | `LOCAL_AGENT_CLIENT_TRUST_ENV` 控制 Desktop Client → LocalAgent Server 全部 4 个 Session；与 `LOCAL_AGENT_REMOTE_TRUST_ENV` 完全独立 |
 
 ## Status summary
 
 - SUPPORTED：Coordinated、显式 Legacy、Parallel engine、Budget、Retry、Model fallback、Circuit breaker、Tool contract/evidence/lease、Retrieval、Streaming、Journal-first、Observability、Trace、Disconnect、Worker tracking、Graceful shutdown、确定性 Fault Injection 测试能力。
 - PARTIALLY_SUPPORTED：Snapshot、Recovery validation（均为 opt-in/validation-only）。
 - CONTRACT_ONLY：能力级无；个别 FaultPoint 可在 `FaultPointSupportReport` 中标为 CONTRACT_ONLY。
-- NOT_IMPLEMENTED：Recovery execution、Replay、Production Fault Enablement、Random / Probabilistic Chaos、Cross-process Registry、Exactly-once、Automatic compensation、Step result rehydration。
+- NOT_IMPLEMENTED：Recovery execution、Replay、Production Fault Enablement、Random / Probabilistic Chaos、Cross-process Registry、Exactly-once、Automatic compensation、Step result rehydration、Multi-process server、Windows Service wrapper、Docker / Compose、Health / Readiness endpoint、Startup handshake / retry。
 - LEGACY_ONLY：当前矩阵没有仅 Legacy 拥有且 Coordinated 缺失的目标能力。
 - DEPRECATED：能力级无；兼容字段见架构文档的 Deprecated / Compatibility Matrix。

@@ -97,6 +97,7 @@ class ApiWorker(QThread):
         try:
             self.protocol_buffer = ""
             with requests.Session() as session:
+                session.trust_env = settings.client_trust_env
                 self._session = session
                 self._response = session.post(
                     self.api_url,
@@ -208,6 +209,7 @@ class MainController(QObject):
         self.api_base_url = settings.api_base_url
         self.chat_api_url = f"{self.api_base_url}/api/chat"
         self.http = requests.Session()
+        self.http.trust_env = settings.client_trust_env
 
         self.worker = ApiWorker(self.chat_api_url)
         self.worker.chunk_signal.connect(self._on_worker_chunk)
@@ -228,7 +230,10 @@ class MainController(QObject):
             drag_img_path=os.path.join(self.asset_dir, "drag.png"),
             initial_opacity=0.9,
         )
-        self.chat_panel = ChatPanel(api_base_url=self.api_base_url)
+        self.chat_panel = ChatPanel(
+            api_base_url=self.api_base_url,
+            client_trust_env=settings.client_trust_env,
+        )
 
         self._connect_signals()
         self._fetch_and_load_history(self.chat_panel.current_agent_id)
@@ -311,6 +316,7 @@ class MainController(QObject):
             """执行一次分页历史请求。"""
             try:
                 with requests.Session() as http:
+                    http.trust_env = settings.client_trust_env
                     response = http.get(
                         f"{self.api_base_url}/api/history/{agent_id}",
                         params={"limit": limit, "offset": offset},

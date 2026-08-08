@@ -364,6 +364,7 @@ class Settings:
     remote_timeout_seconds: int
     remote_verify_tls: bool
     remote_trust_env: bool
+    client_trust_env: bool
     remote_enable_thinking: bool
     remote_context_window: int
     local_fixed_call_cost_units: int
@@ -499,6 +500,13 @@ class Settings:
             "LOCAL_AGENT_REMOTE_TRUST_ENV",
             _PROFILE_TRUST_ENV_DEFAULT[environment_profile.value],
         )
+        # Client HTTP Proxy 治理：控制 Desktop Client → LocalAgent Server
+        # 传输是否继承进程系统代理。与 remote_trust_env 完全独立，属于两个
+        # 不同 transport scope。默认 True 保持 requests 既有行为；不随
+        # Environment Profile 改变默认值。
+        client_trust_env = _env_strict_bool(
+            "LOCAL_AGENT_CLIENT_TRUST_ENV", True
+        )
         knowledge_base_required = _env_strict_bool(
             "LOCAL_AGENT_KB_REQUIRED",
             _PROFILE_KB_REQUIRED_DEFAULT[environment_profile.value],
@@ -562,6 +570,7 @@ class Settings:
             ),
             remote_verify_tls=remote_verify_tls,
             remote_trust_env=remote_trust_env,
+            client_trust_env=client_trust_env,
             remote_enable_thinking=_env_strict_bool(
                 "LOCAL_AGENT_REMOTE_ENABLE_THINKING", False
             ),

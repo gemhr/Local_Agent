@@ -2,7 +2,7 @@
 
 ## Configuration Source
 
-唯一项目级来源是 `core.settings.Settings.load()`；仓库当前没有独立 `.env.example`。环境变量在 `server.py`/`main.py` import/进程启动时读取，运行中的请求不动态重载，因此下表均为 `restart_required=yes`。
+唯一项目级来源是 `core.settings.Settings.load()`。仓库根目录提供 `.env.example` 作为配置名称/模板文档，**Application 不自动加载该文件**（不存在 dotenv loader）；operator 可将其内容复制为 PowerShell 环境变量模板。环境变量在 `server.py`/`main.py` import/进程启动时读取，运行中的请求不动态重载，因此下表均为 `restart_required=yes`。
 
 配置解析统一严格：显式 bool 只接受大小写无关的 `1/0/true/false`；显式 int/float 严格词法解析并要求有限值；显式 enum/profile/backend 未知或空值直接失败。数值字段在 Settings Semantic Validation 中按真实 consumer contract 校验 range（timeout/capacity/窗口/计数类 ≥1，cost 类 ≥0，GPU layers ≥-1（`-1`=全部层 offload、`0`=CPU、正整数=指定 offload 层数），port 1..65535）。非法显式值不再静默变 False、clamp 或回落到默认，全部 fail closed；只有缺失 env 才应用默认值。`SettingsValidationError` 是唯一 Settings 级异常类型（`ValueError` 子类），只保存安全码、env 名与 reason code。
 
@@ -37,7 +37,8 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_REMOTE_API_KEY` | RemoteLLMEngine | string | empty | provider credential | provider-dependent | APPLICATION_SCOPE | yes | secret | authentication/provider failure | `<secret-store-reference>` |
 | `LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS` | HTTP transport | int seconds | `120` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值在 Settings 期 fail closed（不进入 requests） | `120` |
 | `LOCAL_AGENT_REMOTE_VERIFY_TLS` | HTTP transport | strict bool | profile-derived：LOCAL=`0`、TEST=`1`、PRODUCTION=`1` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；PRODUCTION 显式关闭为 security policy failure | `1` |
-| `LOCAL_AGENT_REMOTE_TRUST_ENV` | HTTP transport | strict bool | profile-derived：LOCAL=`1`、TEST=`0`、PRODUCTION=`0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；决定 Session 是否继承系统 proxy | `0` |
+| `LOCAL_AGENT_REMOTE_TRUST_ENV` | HTTP transport | strict bool | profile-derived：LOCAL=`1`、TEST=`0`、PRODUCTION=`0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；决定 Server → Remote LLM Session 是否继承系统 proxy | `0` |
+| `LOCAL_AGENT_CLIENT_TRUST_ENV` | HTTP transport | strict bool | `1`（所有 Profile 一致） | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；决定 Desktop Client → LocalAgent Server Session 是否继承系统 proxy；与 `LOCAL_AGENT_REMOTE_TRUST_ENV` 完全独立 | `1` |
 | `LOCAL_AGENT_REMOTE_ENABLE_THINKING` | HTTP payload | strict bool | `0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | internal config | 非法显式值 fail closed | `0` |
 | `LOCAL_AGENT_REMOTE_CONTEXT_WINDOW` | model profile | int | `32768` | positive practical window | no | APPLICATION_SCOPE | yes | internal config | routing/capacity mismatch | `32768` |
 | `LOCAL_AGENT_LOCAL_FIXED_CALL_COST_UNITS` | ModelCostProfile | int | `1` | integer ≥0 | no | APPLICATION_SCOPE | yes | public-safe count | 越界显式值 fail closed | `1` |
@@ -98,6 +99,7 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 |---|---:|---:|---:|
 | `LOCAL_AGENT_REMOTE_VERIFY_TLS` | `0` | `1` | `1`（不可显式关闭） |
 | `LOCAL_AGENT_REMOTE_TRUST_ENV` | `1` | `0` | `0`（可显式 `true`） |
+| `LOCAL_AGENT_CLIENT_TRUST_ENV` | `1` | `1` | `1`（可显式 `0`/`false`） |
 | `LOCAL_AGENT_KB_REQUIRED` | `0` | `0` | `1` |
 | `LOCAL_AGENT_ENVIRONMENT_ID` | `local` | `test` | 无默认，必须显式提供 |
 
@@ -120,6 +122,10 @@ Server 不因缺少 client cookie 失败；Client 不因缺少 remote model endp
 ## Model Configuration
 
 Model routing/retry/fallback 属于 Runtime policy；HTTP transport、本地模型加载和共享 Session 并发属于 adapter/application resource。Remote 引擎将 requests/urllib3 自动 retry 显式设为 0，由 RetryExecutor 统一拥有重试。`LOCAL_AGENT_REMOTE_TRUST_ENV` 显式控制 `requests.Session.trust_env`：为 True 时继承进程系统 proxy（operator 显式选择，不记录 proxy URL/credential）；Test/Production 默认 False 不继承宿主 proxy。
+
+### Client HTTP Proxy Governance
+
+`LOCAL_AGENT_CLIENT_TRUST_ENV` 显式控制 **Desktop Client → LocalAgent Server 的所有 Client HTTP Session** 的 `requests.Session.trust_env`，覆盖聊天（`/api/chat`）、历史分页（`/api/history`）、搜索（`/api/search`）、取消（`/api/runtime/runs/{run_id}/cancel`）与记忆管理（`/api/memory`）五类传输。它属于 Client process 的 Application Scope 配置，由 `main.py` 在进程启动时通过唯一一次 `Settings.load()` 快照消费；消费链为 `Settings → main.py startup snapshot → ChatPanel plumbing → MemoryManagerDialog → Session.trust_env`，全部 Session 显式使用已解析值，不重新读 env。默认 `True` 保持 requests 既有行为；与 `LOCAL_AGENT_REMOTE_TRUST_ENV` 完全独立，修改其中一个不得改变另一个（两个 transport scope：Server → Remote LLM 与 Desktop Client → LocalAgent Server）。
 
 默认 Coordinated factory 的 Parallel policy 为 `max_concurrency=2`（当前 typed multi-step 真实全局并发上限；`ParallelExecutor` 构造默认值 `1` 在生产调用链中被 policy 覆盖，属于 WP2 命名清理范围）。Blocking executor 容量由 `LOCAL_AGENT_BLOCKING_MAX_WORKERS`/`LOCAL_AGENT_BLOCKING_MAX_PENDING_TASKS` 配置，三个 lifespan executor 统一使用同一 application 默认值。
 

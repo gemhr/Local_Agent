@@ -141,6 +141,10 @@ uv run python main.py
 uv run uvicorn server:app --host 127.0.0.1 --port 8000
 ```
 
+### 4.5 部署边界
+
+当前唯一 certified 部署目标为 **Windows Native**（Windows 11 / Windows Server + Python 3.12 + uv），正式 server 入口是 `uv run python server.py`，每个部署实例**只能有一个 server application process**。禁止 `uvicorn --workers N`、gunicorn、multi-process Runtime。不支持 Docker / Compose / WSL2 部署。完整 Windows 部署、单进程合同、持久化数据、Secret、Proxy、Shutdown 与 Rollback 见 `docs/runtime/runtime_deployment_runbook.md`。
+
 ## 5. 关键配置
 
 下表只列常用入口；完整字段、默认值、类型、安全分类和 failure behavior 以 `docs/runtime/runtime_configuration_reference.md` 为准。
@@ -158,6 +162,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_REMOTE_PROVIDER_KIND` | `openai_compatible` | 显式选择远程 payload 合同 |
 | `LOCAL_AGENT_REMOTE_VERIFY_TLS` | Profile 默认：`LOCAL=0`、`TEST=1`、`PRODUCTION=1` | 严格布尔（`1`/`0`/`true`/`false`）；PRODUCTION 不可显式关闭 |
 | `LOCAL_AGENT_REMOTE_TRUST_ENV` | Profile 默认：`LOCAL=1`、`TEST=0`、`PRODUCTION=0` | 严格布尔；是否让远程 model Session 继承系统 proxy |
+| `LOCAL_AGENT_CLIENT_TRUST_ENV` | `1`（所有 Profile 一致） | 严格布尔；是否让 Desktop Client → LocalAgent Server Session 继承系统 proxy；与 `LOCAL_AGENT_REMOTE_TRUST_ENV` 独立 |
 | `LOCAL_AGENT_EVENT_JOURNAL_DB_PATH` | `data/database/runtime_event_journal.db` | Coordinated Runtime SQLite Journal |
 | `LOCAL_AGENT_SNAPSHOT_ENABLED` | `false` | 严格布尔值；启用 Snapshot 与 Recovery validation |
 | `LOCAL_AGENT_MEMORY_DB_PATH` | `data/database/agent_memory.db` | 业务 Memory SQLite 路径 |
@@ -170,7 +175,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `RUNTIME_DISCONNECT_GRACE_SECONDS` | `0.75` | 客户端断连后的有界 drain 时间 |
 | `RUNTIME_SHUTDOWN_GRACE_SECONDS` | `5.0` | shutdown Run drain 时间 |
 
-远程 HTTP 的 `requests.Session` 由 `LOCAL_AGENT_REMOTE_TRUST_ENV` 显式控制是否继承进程系统 proxy：为 True 时使用 operator 批准的受控代理，Test/Production 默认 False 不继承宿主 proxy；项目不记录 proxy URL 或凭据。`LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS` 已标记 DEPRECATED（无行为），replacement 为 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。
+远程 HTTP 的 `requests.Session` 由 `LOCAL_AGENT_REMOTE_TRUST_ENV` 显式控制是否继承进程系统 proxy：为 True 时使用 operator 批准的受控代理，Test/Production 默认 False 不继承宿主 proxy；项目不记录 proxy URL 或凭据。Desktop Client 的 `requests.Session` 由 `LOCAL_AGENT_CLIENT_TRUST_ENV` 独立控制（默认 `True` 继承系统 proxy，保持既有行为）；两个 transport scope 完全分离。`LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS` 已标记 DEPRECATED（无行为），replacement 为 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。
 
 ## 6. API 速查
 
@@ -286,5 +291,6 @@ Release Gate 必须由当前测试和 `tests/_runtime_release_gate.py` 重新派
 - 安全边界：`docs/runtime/runtime_security_boundary.md`
 - 错误码：`docs/runtime/runtime_error_code_catalog.md`
 - 运维与恢复：`docs/runtime/runtime_operations_runbook.md`、`docs/runtime/runtime_recovery_runbook.md`
+- 部署：`docs/runtime/runtime_deployment_runbook.md`（Windows Native 单进程部署合同）
 - Release Gate：`docs/runtime/runtime_release_gate.md`、`docs/runtime/runtime_release_checklist.md`
 - 已知限制：`docs/runtime/stage2_known_limitations_and_next_stage.md`

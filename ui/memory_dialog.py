@@ -25,16 +25,19 @@ class MemoryManagerDialog(QDialog):
 
     memory_changed = pyqtSignal(list, bool)
 
-    def __init__(self, api_endpoint: str, parent=None) -> None:
+    def __init__(self, api_endpoint: str, parent=None, client_trust_env: bool = True) -> None:
         """初始化记忆管理弹窗。
 
         Args:
             api_endpoint: 后端记忆管理接口地址。
             parent: Qt 父组件。
+            client_trust_env: 是否让本弹窗的 HTTP Session 继承系统 proxy；
+                由 ChatPanel 从 main.py 启动期 Settings 快照透传，不做第二配置读取。
         """
         super().__init__(parent)
         self.api_endpoint = api_endpoint
         self.http = requests.Session()
+        self.http.trust_env = client_trust_env
         self.setWindowTitle("Memory")
         self.resize(980, 680)
         self._init_ui()
