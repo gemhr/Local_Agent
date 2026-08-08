@@ -2,16 +2,17 @@
 
 ## Startup Runbook
 
-1. 用 `Settings.load()` 校验配置；非法 mode、数字、严格布尔或必填 remote endpoint 必须 fail closed。
-2. 校验本地 Model、Memory/Journal/Snapshot/Observability store 路径存在性、父目录权限与磁盘空间；不要在日志输出绝对路径或凭据。
-3. 启动 FastAPI lifespan，等待 lifecycle 从 `STARTING` 到 `READY`。
-4. 确认 `ApplicationRuntimeServices`、model/router、Journal、dispatcher、registry、factory、ChatService 与 shutdown coordinator 仅装配一次。
-5. 确认 admission 为 `ACCEPTING`，module compatibility handle 与 `app.state` identity 一致。
-6. 执行 Offline Fake 或已批准的安全 smoke test；本地 RC smoke 不要求访问生产外部服务。
-7. 检查 Journal 可追加/读取、Observability health、Trace health 与进程内 gauges。
-8. 确认默认 Runtime 为 `COORDINATED`，请求只读取一次 mode。
+1. 用 `Settings.load()` 完成 Settings Parse（所有显式 bool/int/float/enum 严格解析，非法值 fail closed）与 Semantic Validation（range/finite/cross-field/Profile/backend/metadata identifier）。
+2. entrypoint（server/client）执行 Process-role Startup Validation：SERVER role 要求 remote/hybrid backend 具备 endpoint，PRODUCTION 要求 HTTPS 与 `remote_verify_tls=True`；CLIENT role 不要求 server-only 字段。
+3. 启动 FastAPI lifespan，等待 lifecycle 从 `STARTING` 到 `READY`；所有 Parse/Semantic/Role failure 发生在首个 Application Resource 构造之前。
+4. 资源 availability 由真实 Resource Constructor 验证（`RuntimeInitializationStack`）：Memory、Model engine、Journal、checkpoint stores 失败 fail fast 并逆序 rollback（`RUNTIME_INITIALIZATION_FAILED`）。VectorDB 是唯一 allowlisted optional degradation：Local/Test 默认可 degraded，PRODUCTION 默认 `LOCAL_AGENT_KB_REQUIRED=true` 使 KB 失败阻止 READY，显式 `false` 才允许 degraded startup。
+5. 确认 `ApplicationRuntimeServices`、model/router、Journal、dispatcher、registry、factory、ChatService 与 shutdown coordinator 仅装配一次；三个 `BoundedBlockingExecutor` 统一使用 `LOCAL_AGENT_BLOCKING_MAX_WORKERS`/`LOCAL_AGENT_BLOCKING_MAX_PENDING_TASKS`。
+6. 确认 admission 为 `ACCEPTING`，module compatibility handle 与 `app.state` identity 一致；`app.state.application_metadata` 已发布（environment profile/id、service version、per-process instance id）。
+7. 执行 Offline Fake 或已批准的安全 smoke test；本地 RC smoke 不要求访问生产外部服务。
+8. 检查 Journal 可追加/读取、Observability health、Trace health 与进程内 gauges。
+9. 确认默认 Runtime 为 `COORDINATED`，请求只读取一次 mode。
 
-启动失败时禁止切换 Runtime 后重跑同一请求。配置异常保持固定安全错误/类型化启动失败，不输出原始路径或密钥。Legacy rollback 是修改 `CHAT_RUNTIME_MODE` 后重启并只影响新请求，不是某次失败后的动态动作。
+启动失败时禁止切换 Runtime 后重跑同一请求。配置异常保持 `SettingsValidationError` 固定安全码（`SETTINGS_PARSE_ERROR`/`SETTINGS_VALIDATION_ERROR`/`SETTINGS_SECURITY_POLICY_ERROR`/`STARTUP_CONFIGURATION_ERROR`），资源失败保持 `RUNTIME_INITIALIZATION_FAILED`；错误对象和日志不输出原始路径、密钥或 Provider URL。Legacy rollback 是修改 `CHAT_RUNTIME_MODE` 后重启并只影响新请求，不是某次失败后的动态动作。
 
 ## Health / Metrics / Trace
 
@@ -149,15 +150,15 @@
 ### 10. Runtime Configuration Error
 
 - 症状：Settings load 或 lifespan startup fail closed。
-- 权威事实源：Settings 字段验证与初始化 stack 的固定组件结果。
-- 可能原因：非法 mode/数字/布尔、缺少 remote endpoint、路径/权限错误。
-- 禁止操作：自动切 Legacy、输出密钥/绝对路径、对同一请求重跑。
+- 权威事实源：`SettingsValidationError`（安全码 + env 名 + reason code）与初始化 stack 的固定组件结果。
+- 可能原因：非法 bool/int/float、NaN/Inf、越界、未知 Environment/Model Profile/backend、cross-field 冲突、PRODUCTION 缺 environment_id 或 remote 非 HTTPS/verify_tls 关闭、SERVER role 缺 remote endpoint、路径/权限错误。
+- 禁止操作：自动切 Legacy、输出密钥/URL/绝对路径/raw value、对同一请求重跑。
 - 诊断步骤：对照 configuration reference 逐项离线校验；只记录字段名与安全分类。
 - 安全处置：修正配置并重启，再执行新身份 smoke test。
 - 恢复条件：lifespan READY、admission ACCEPTING、health 正常。
 - 需要人工升级的条件：权限、模型加载或持久化损坏无法安全解决。
-- 相关错误码：`RUNTIME_CONFIGURATION_ERROR` 只覆盖 ChatService/Coordinated factory 缺失的局部配置失败；Settings/startup 全域尚无统一 taxonomy，不得扩大解释或发明代码。
-- 相关测试：`test_settings.py`、`test_runtime_lifespan.py`。
+- 相关错误码：`SETTINGS_PARSE_ERROR`、`SETTINGS_VALIDATION_ERROR`、`SETTINGS_SECURITY_POLICY_ERROR`、`STARTUP_CONFIGURATION_ERROR`、`RUNTIME_INITIALIZATION_FAILED`；`RUNTIME_CONFIGURATION_ERROR` 只覆盖 ChatService/Coordinated factory 缺失的局部配置失败，不得扩大解释。
+- 相关测试：`test_settings_validation.py`、`test_environment_profile.py`、`test_startup_configuration.py`、`test_runtime_lifespan.py`。
 
 ## Legacy Rollback Runbook
 

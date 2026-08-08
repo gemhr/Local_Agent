@@ -18,7 +18,8 @@ import requests
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
-from core.settings import Settings
+from core.settings import CLIENT_ROLE, Settings, validate_role_configuration
+from core.application_metadata import create_application_metadata
 from core.cancellation_client import request_run_cancellation
 from core.runtime.multi_agent_status import format_frontend_status
 from ui.chat_panel import ChatPanel
@@ -34,6 +35,10 @@ except Exception:  # pragma: no cover
 
 settings = Settings.load()
 # 全局配置在进程启动时只解析一次，避免各组件重复读取环境变量。
+# client role validation 只校验本进程消费的必填字段；不因缺少 server 侧
+# model endpoint 或 secret 而失败，也不触发运行时 reload。
+validate_role_configuration(settings, role=CLIENT_ROLE)
+application_metadata = create_application_metadata(settings)
 
 ORCHESTRATION_EVENT_PREFIX = "[[ORCH]]"
 _crash_log_dir = os.path.join(settings.project_root, "data", "logs")

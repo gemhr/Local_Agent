@@ -30,4 +30,4 @@ def test_final_documents_keep_security_and_semantic_boundaries() -> None:
     preservation = next(line for line in recovery.splitlines() if "不得改写原始 JournalRecord" in line)
     assert all(phrase in preservation for phrase in ("已有 RunSnapshot", "历史 AgentState", "不得补造", "TOOL_COMPLETED"))
     error_catalog = (ROOT / "docs/runtime/runtime_error_code_catalog.md").read_text(encoding="utf-8")
-    assert "RUNTIME_CONFIGURATION_ERROR" in error_catalog and "尚未完整建立" in error_catalog
+    assert "RUNTIME_CONFIGURATION_ERROR" in error_catalog and "不得扩大为 Settings 全域错误" in error_catalog

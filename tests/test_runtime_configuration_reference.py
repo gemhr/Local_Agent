@@ -46,7 +46,10 @@ def test_configuration_reference_freezes_runtime_and_fault_boundaries() -> None:
     assert "Snapshot 默认关闭" in text
     assert "生产配置入口：无" in text
     assert "默认 `controller=None`" in text
-    assert "没有项目级 trust-environment/proxy Settings 开关" in text
+    # WP1-A：proxy/trust-env 现在由项目显式控制；默认矩阵与 Production 不变量冻结。
+    assert "LOCAL_AGENT_REMOTE_TRUST_ENV" in text
+    assert "LOCAL_AGENT_ENVIRONMENT_PROFILE" in text
+    assert "SETTINGS_SECURITY_POLICY_ERROR" in text
     assert "不得手工编辑 SQLite" in text
 
 
@@ -55,4 +58,30 @@ def test_configuration_examples_contain_no_real_absolute_path_or_provider_url() 
     assert re.search(r"[A-Za-z]:\\", text) is None
     assert "api.deepseek" not in text.lower()
     assert "Bearer " not in text
+
+
+def test_gpu_layers_contract_is_consistent_between_rules_and_table() -> None:
+    """冻结 GPU layers 合同事实：总则与字段表、Settings 必须一致为 >=-1。
+
+    防止未来总则退回 `GPU layers >=0`，或字段表/总则再次漂移。只锁定必要
+    合同事实，不做整篇文档字符串快照。
+    """
+    text = DOC.read_text(encoding="utf-8")
+    rules_line = next(
+        line for line in text.splitlines() if "GPU layers" in line
+    )
+    table_row = next(
+        line
+        for line in text.splitlines()
+        if line.startswith("| `LOCAL_AGENT_MODEL_GPU_LAYERS`")
+    )
+    # 总则必须与字段表/实现一致：>= -1，且不得退回 >=0。
+    assert "GPU layers ≥-1" in rules_line
+    assert "GPU layers ≥0" not in rules_line
+    # 字段表必须保持 backend 合同语义。
+    assert "integer ≥-1" in table_row
+    assert "`-1`=全部层 offload" in table_row
+    assert "`0`=CPU" in table_row
+    assert "指定 offload 层数" in table_row
+    assert "≥0" not in table_row
 

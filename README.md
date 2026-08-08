@@ -75,7 +75,7 @@ uv sync
 
 ## 4. 启动
 
-环境变量由不可变 `Settings.load()` 在进程启动时读取；修改后必须重启。仓库没有自动加载 `.env` 的独立配置层。
+环境变量由不可变 `Settings.load()` 在进程启动时读取；修改后必须重启（无运行时 reload，也无需 `.env` 文件）。所有显式配置严格解析：非法 bool/int/float、未知 Profile/backend 在启动前 fail closed，不会静默纠正。解析与校验只由 `core/settings.py` 执行。
 
 ### 4.1 远程 OpenAI-compatible 后端
 
@@ -148,23 +148,29 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `CHAT_RUNTIME_MODE` | `COORDINATED` | 可选 `COORDINATED` / `LEGACY`；非法值启动失败 |
-| `LOCAL_AGENT_LLM_BACKEND` | `remote` | 可选 `local` / `remote` / `hybrid` |
-| `LOCAL_AGENT_MODEL_PROFILE` | `balanced` | `fast` / `balanced` / `deep`；未知值回到 `balanced` |
+| `LOCAL_AGENT_ENVIRONMENT_PROFILE` | `LOCAL` | 可选 `LOCAL` / `TEST` / `PRODUCTION`；未知或空显式值启动失败 |
+| `LOCAL_AGENT_LLM_BACKEND` | `remote` | 可选 `local` / `remote` / `hybrid`；未知值启动失败 |
+| `LOCAL_AGENT_MODEL_PROFILE` | `balanced` | `fast` / `balanced` / `deep`；未知值启动失败 |
 | `LOCAL_AGENT_API_HOST` / `LOCAL_AGENT_API_PORT` | `127.0.0.1` / `8000` | 后端监听地址与端口 |
-| `LOCAL_AGENT_API_BASE_URL` | 由 host/port 派生 | 桌面端访问后端的根地址 |
-| `LOCAL_AGENT_REMOTE_API_BASE_URL` | 空 | `remote` / `hybrid` 必填；缺失时启动失败 |
+| `LOCAL_AGENT_API_BASE_URL` | 由 host/port 派生 | 桌面端访问后端的根地址（client-only） |
+| `LOCAL_AGENT_REMOTE_API_BASE_URL` | 空 | `remote` / `hybrid` 的 SERVER role 必填；PRODUCTION 必须 HTTPS |
 | `LOCAL_AGENT_REMOTE_API_KEY` | 空 | 仅在非空时发送 Bearer Authorization |
 | `LOCAL_AGENT_REMOTE_PROVIDER_KIND` | `openai_compatible` | 显式选择远程 payload 合同 |
-| `LOCAL_AGENT_REMOTE_VERIFY_TLS` | `0` | HTTPS 部署应设为 `1` |
+| `LOCAL_AGENT_REMOTE_VERIFY_TLS` | Profile 默认：`LOCAL=0`、`TEST=1`、`PRODUCTION=1` | 严格布尔（`1`/`0`/`true`/`false`）；PRODUCTION 不可显式关闭 |
+| `LOCAL_AGENT_REMOTE_TRUST_ENV` | Profile 默认：`LOCAL=1`、`TEST=0`、`PRODUCTION=0` | 严格布尔；是否让远程 model Session 继承系统 proxy |
 | `LOCAL_AGENT_EVENT_JOURNAL_DB_PATH` | `data/database/runtime_event_journal.db` | Coordinated Runtime SQLite Journal |
 | `LOCAL_AGENT_SNAPSHOT_ENABLED` | `false` | 严格布尔值；启用 Snapshot 与 Recovery validation |
 | `LOCAL_AGENT_MEMORY_DB_PATH` | `data/database/agent_memory.db` | 业务 Memory SQLite 路径 |
 | `LOCAL_AGENT_CHROMA_DIR` | `chroma_db` | Chroma 持久化目录 |
+| `LOCAL_AGENT_KB_REQUIRED` | Profile 默认：`LOCAL=0`、`TEST=0`、`PRODUCTION=1` | PRODUCTION 默认 KB 失败阻止启动；显式 `false` 才允许 degraded |
 | `LOCAL_AGENT_EMBEDDING_MODEL_PATH` | `data/models/bge-large-zh-v1.5` | 本地 embedding 模型目录 |
+| `LOCAL_AGENT_BLOCKING_MAX_WORKERS` / `LOCAL_AGENT_BLOCKING_MAX_PENDING_TASKS` | `4` / `8` | 三个 lifespan 有界 executor 的统一容量 |
+| `LOCAL_AGENT_EVENT_CHANNEL_CAPACITY` | `32` | per-run RuntimeEventChannel 容量 |
+| `LOCAL_AGENT_PLANNING_TIMEOUT_SECONDS` | `15.0` | planner 独立超时 |
 | `RUNTIME_DISCONNECT_GRACE_SECONDS` | `0.75` | 客户端断连后的有界 drain 时间 |
 | `RUNTIME_SHUTDOWN_GRACE_SECONDS` | `5.0` | shutdown Run drain 时间 |
 
-远程 HTTP 使用的 `requests.Session` 没有项目级 proxy/trust-environment 开关，可能继承进程环境中的代理设置；部署时需要审计外部环境。
+远程 HTTP 的 `requests.Session` 由 `LOCAL_AGENT_REMOTE_TRUST_ENV` 显式控制是否继承进程系统 proxy：为 True 时使用 operator 批准的受控代理，Test/Production 默认 False 不继承宿主 proxy；项目不记录 proxy URL 或凭据。`LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS` 已标记 DEPRECATED（无行为），replacement 为 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。
 
 ## 6. API 速查
 

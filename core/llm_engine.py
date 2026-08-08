@@ -144,6 +144,7 @@ class RemoteLLMEngine:
         enable_thinking: bool = False,
         provider_kind: str = "openai_compatible",
         session: requests.Session | None = None,
+        trust_env: bool = True,
     ) -> None:
         self.api_base_url = api_base_url.rstrip("/")
         self.model_name = model_name
@@ -152,8 +153,12 @@ class RemoteLLMEngine:
         self.verify_tls = verify_tls
         self.enable_thinking = enable_thinking
         self.provider_kind = provider_kind
+        # trust_env 由 Settings 解析后显式注入：决定是否继承进程系统代理。
+        # 默认 True 保持 requests 既有行为；生产由 Settings 提供已解析值。
+        self.trust_env = trust_env
         # 统一 Invocation 本日不允许 Retry；显式覆盖 requests/urllib3 重试配置。
         self._session = session or requests.Session()
+        self._session.trust_env = trust_env
         self._session_lock = threading.Lock()
         self._closed = False
         no_retry_adapter = requests.adapters.HTTPAdapter(max_retries=0)
