@@ -23,3 +23,6 @@ data/logs/*.log
 
 # Local Python wheel packages
 *.whl
+
+# 多 Agent 交互工作流
+.ai/
