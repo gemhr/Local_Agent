@@ -39,14 +39,17 @@ class ChatPanel(QWidget):
     agent_switched_signal = pyqtSignal(str)
     memory_changed_signal = pyqtSignal(list, bool)
 
-    def __init__(self, api_base_url: str) -> None:
+    def __init__(self, api_base_url: str, client_trust_env: bool = True) -> None:
         """初始化聊天主面板。
 
         Args:
             api_base_url: 后端 API 基础地址。
+            client_trust_env: 是否让本面板创建的 HTTP Session 继承系统
+                proxy；由 main.py 启动期 Settings 快照传入，不做第二配置读取。
         """
         super().__init__()
         self.api_base_url = api_base_url
+        self.client_trust_env = client_trust_env
         self.current_agent_id = "core_router"
         self.attached_file_path = ""
         self._is_tracking = False
@@ -437,7 +440,11 @@ class ChatPanel(QWidget):
         """打开消息管理弹窗。"""
         if event is not None and event.button() != Qt.MouseButton.LeftButton:
             return
-        dialog = MemoryManagerDialog(f"{self.api_base_url}/api/memory", parent=self)
+        dialog = MemoryManagerDialog(
+            f"{self.api_base_url}/api/memory",
+            parent=self,
+            client_trust_env=self.client_trust_env,
+        )
         dialog.memory_changed.connect(self.memory_changed_signal.emit)
         dialog.exec()
         if event is not None:

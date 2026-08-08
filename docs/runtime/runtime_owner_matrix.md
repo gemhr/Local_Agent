@@ -38,6 +38,9 @@
 | shutdown orchestration | GracefulShutdownCoordinator | lifespan、tests | Coordinator 单次受锁 `shutdown()` | ShutdownReport 仅派生，不持久化 | OPERATION_SCOPE under APPLICATION | ShutdownReport、Run facade、component close callback |
 | component close result | ApplicationRuntimeServices close ledger；Coordinator 聚合 | ShutdownReport、logs | ApplicationRuntimeServices bounded close | 进程内 RuntimeComponentResult | APPLICATION_SCOPE shutdown operation | component alias、Report、Run scope |
 | fault match/hit count | FaultInjectionController | Fault reports、tests | Controller.evaluate under lock | FaultControllerSnapshot；不进生产 Journal/Wire | OPERATION_SCOPE + TEST_SCOPE | RetryExecutor、Application services、Fault report |
+| client http session trust_env | Settings.client_trust_env（唯一解析快照） | main.py client sessions（聊天/历史/搜索/取消）+ ui/chat_panel.py plumbing + ui/memory_dialog.py memory session | `session.trust_env = settings.client_trust_env`（main.py 直接消费）；`ChatPanel` 仅透传快照值，`MemoryManagerDialog.http.trust_env = client_trust_env`（ui/ 不读 env） | Settings 进程内值；不持久化 | APPLICATION_SCOPE | Server 侧 Remote LLM Session、requests 默认行为、脚本 |
+| server process topology | 部署合同：exactly one LocalAgent server application process per deployment instance | operator、deployment runbook、capability matrix | 运维以 `uv run python server.py` 启动；禁止 `--workers N`/gunicorn/multi-process | 无 | APPLICATION_SCOPE | Windows Service wrapper、Docker/Compose、multi-process Runtime |
+| deployment rollback identity | 人工 Deployment Rollback（known-good artifact/env + persistence compatibility + smoke） | operator、deployment runbook | 人工执行；不提供 automatic rollback | 无 | OPERATION_SCOPE（运维流程） | `CHAT_RUNTIME_MODE=legacy` Runtime Legacy Rollback、automatic recovery |
 
 ## Duplicate-owner audit
 
