@@ -47,7 +47,10 @@ def test_catalog_covers_critical_domains_without_universal_retry_advice() -> Non
     assert all(domain in text for domain in domains)
     assert "`RUNTIME_CONFIGURATION_ERROR` 是真实固定码" in text
     assert "仅覆盖 ChatService 缺少 Coordinated factory" in text
-    assert "尚未完整建立统一 Settings Validation Error Taxonomy" in text
+    # WP1-A 已建立独立 Settings/startup taxonomy；RUNTIME_CONFIGURATION_ERROR 保持局部语义。
+    assert "`SettingsValidationError`" in text
+    assert "SETTINGS_PARSE_ERROR" in text
+    assert "不得扩大为 Settings 全域错误" in text
     assert "不 universally retryable" not in text
     assert "no automatic Tool call" in text
     assert "do not repeat search automatically" in text

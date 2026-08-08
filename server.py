@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from core.agent_router import AgentRouter
+from core.application_metadata import create_application_metadata
 from core.chat_service import ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
@@ -32,6 +33,7 @@ from core.runtime import (
     ModelProfileId,
     ModelResolver,
     RecoveryValidator,
+    RuntimeInitializationError,
     RuntimeInitializationStack,
     RunRegistry,
     RunCancelledError,
@@ -60,7 +62,7 @@ from core.runtime.structured_logging import (
     JsonStructuredRuntimeLogger,
     StructuredLogProjector,
 )
-from core.settings import Settings
+from core.settings import SERVER_ROLE, Settings, validate_role_configuration
 from tools.registry import register_all_tools
 
 
@@ -215,6 +217,11 @@ async def lifespan(app: FastAPI):
     """
     global application_runtime_services, chat_service
 
+    # 配置 Parse / Semantic / Role failure 必须发生在首个 Application Resource
+    # 构造之前；role validation 不做任何 I/O。
+    validate_role_configuration(settings, role=SERVER_ROLE)
+    app.state.application_metadata = create_application_metadata(settings)
+
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.STARTING
     initialization_stack = RuntimeInitializationStack()
 
@@ -224,20 +231,27 @@ async def lifespan(app: FastAPI):
     )
     blocking_executor = await initialization_stack.create(
         "blocking_executor",
-        BoundedBlockingExecutor,
+        lambda: BoundedBlockingExecutor(
+            max_workers=settings.blocking_max_workers,
+            max_pending_tasks=settings.blocking_max_pending_tasks,
+        ),
         close_operation="shutdown",
     )
     coordinated_step_executor = await initialization_stack.create(
         "coordinated_step_executor",
         lambda: BoundedBlockingExecutor(
-            thread_name_prefix="coordinated-step"
+            thread_name_prefix="coordinated-step",
+            max_workers=settings.blocking_max_workers,
+            max_pending_tasks=settings.blocking_max_pending_tasks,
         ),
         close_operation="shutdown",
     )
     legacy_step_executor = await initialization_stack.create(
         "legacy_step_executor",
         lambda: BoundedBlockingExecutor(
-            thread_name_prefix="legacy-step"
+            thread_name_prefix="legacy-step",
+            max_workers=settings.blocking_max_workers,
+            max_pending_tasks=settings.blocking_max_pending_tasks,
         ),
         close_operation="shutdown",
     )
@@ -269,6 +283,10 @@ async def lifespan(app: FastAPI):
             )
         except Exception:
             knowledge_base_error = "KNOWLEDGE_BASE_INITIALIZATION_FAILED"
+            if settings.knowledge_base_required:
+                await initialization_stack.fail(
+                    RuntimeInitializationError("knowledge_base")
+                )
             logger.warning(
                 "Knowledge base runtime initialization failed safely",
                 extra={
@@ -282,6 +300,10 @@ async def lifespan(app: FastAPI):
             )
     else:
         knowledge_base_error = "KNOWLEDGE_BASE_IMPORT_FAILED"
+        if settings.knowledge_base_required:
+            await initialization_stack.fail(
+                RuntimeInitializationError("knowledge_base")
+            )
         logger.warning(
             "Knowledge base runtime import failed safely",
             extra={
@@ -331,12 +353,6 @@ async def lifespan(app: FastAPI):
             )
         )
     if settings.llm_backend in {"remote", "hybrid"}:
-        if not settings.remote_api_base_url:
-            await initialization_stack.fail(
-                RuntimeError(
-                    "启用远程模型时必须配置 LOCAL_AGENT_REMOTE_API_BASE_URL"
-                )
-            )
         remote_engine = await initialization_stack.create(
             "remote_model_engine",
             lambda: RemoteLLMEngine(
@@ -347,6 +363,7 @@ async def lifespan(app: FastAPI):
                 verify_tls=settings.remote_verify_tls,
                 enable_thinking=settings.remote_enable_thinking,
                 provider_kind=settings.remote_provider_kind,
+                trust_env=settings.remote_trust_env,
             ),
         )
         engines[ModelProfileId.REMOTE_ADVANCED] = remote_engine
@@ -525,6 +542,11 @@ async def lifespan(app: FastAPI):
         lambda: CoordinatedRuntimeFactory(
             router,
             application_runtime_services,
+            event_channel_capacity=settings.event_channel_capacity,
+            planning_timeout_seconds=settings.planning_timeout_seconds,
+            step_result_per_result_chars=settings.step_result_per_result_chars,
+            step_result_run_total_chars=settings.step_result_run_total_chars,
+            step_result_max_entries=settings.step_result_max_entries,
         ),
     )
     chat_service = await initialization_stack.create(

@@ -4,9 +4,9 @@
 
 | capability | status | default_path | owner | persistence | failure_behavior | recovery_behavior | legacy_support | tests | known_limitations |
 |---|---|---|---|---|---|---|---|---|---|
-| Coordinated Runtime | SUPPORTED | 是 | ChatRuntimeSelector + CoordinatedRuntimeFactory + RunCoordinator | Journal；Snapshot opt-in | 所选路径内安全失败并发 terminal | 仅可做 validation | 否 | runtime full e2e/default entry | 当前 `/api/chat` 为单 Agent、max concurrency 1 装配 |
+| Coordinated Runtime | SUPPORTED | 是 | ChatRuntimeSelector + CoordinatedRuntimeFactory + RunCoordinator | Journal；Snapshot opt-in | 所选路径内安全失败并发 terminal | 仅可做 validation | 否 | runtime full e2e/default entry | 当前 `/api/chat` 为单 Agent；typed multi-step 真实默认并发上限为 2 |
 | Legacy rollback | SUPPORTED | 否，显式 `LEGACY` | ChatService Legacy AgentLoop | 既有 Memory；无完整 Runtime Journal/Snapshot | Legacy 内失败并安全映射 | 无 Runtime recovery | 是 | runtime legacy boundary/mode e2e | 仅兼容回滚路径，不宣称完整 Coordinated 能力 |
-| Parallel execution | SUPPORTED | 默认单 Agent 路径不并行 | ParallelExecutor + Scheduler | Runtime events/state | 单 step 失败按现有 policy 收口 | 无自动恢复 | 部分/非统一 | parallel execution/scheduler | 默认 factory policy `max_concurrency=1` |
+| Parallel execution | SUPPORTED | 默认单 Agent 路径不并行 | ParallelExecutor + Scheduler | Runtime events/state | 单 step 失败按现有 policy 收口 | 无自动恢复 | 部分/非统一 | parallel execution/scheduler | 默认 factory policy `max_concurrency=2`（真实 effective 全局并发上限）；`ParallelExecutor` 构造默认 1 被 policy 覆盖，命名清理属 WP2 |
 | Budget | SUPPORTED | 是 | BudgetLedger | Snapshot budget projection；event counts | 超限 fail closed | Snapshot 仅供 validation | Legacy 有基础 Run budget | budget/runtime e2e | 进程内 ledger，不是跨进程配额 |
 | Retry | SUPPORTED | 是 | RetryExecutor + policy | attempt index/evidence，不持久化 policy state | 按类型、幂等与预算判断 | 不自动重放历史 attempt | 既有调用链部分支持 | retry model/tool tests | 不提供跨进程 retry continuation |
 | Fallback | SUPPORTED | Model routing 内 | ModelInvocationRouter + ModelRoutingPolicy | Model event 安全事实 | candidates 耗尽后类型化失败 | 不切换 Runtime | Model 层可用 | model routing/invocation | 仅 Model candidate fallback，不是 Runtime fallback |

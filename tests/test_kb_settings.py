@@ -1,4 +1,12 @@
-from core.settings import Settings
+from __future__ import annotations
+
+import pytest
+
+from core.settings import (
+    SETTINGS_VALIDATION_ERROR,
+    Settings,
+    SettingsValidationError,
+)
 
 
 def test_collection_environment_override(monkeypatch) -> None:
@@ -17,10 +25,14 @@ def test_embedding_settings_environment_override(monkeypatch) -> None:
     assert settings.embedding_query_prompt_name == "query"
 
 
-def test_embedding_batch_size_is_at_least_one(monkeypatch) -> None:
+def test_embedding_batch_size_below_minimum_fails_closed(monkeypatch) -> None:
     monkeypatch.setenv("LOCAL_AGENT_EMBEDDING_BATCH_SIZE", "0")
 
-    assert Settings.load().embedding_batch_size == 1
+    with pytest.raises(SettingsValidationError) as captured:
+        Settings.load()
+
+    assert captured.value.safe_error_code == SETTINGS_VALIDATION_ERROR
+    assert captured.value.field == "LOCAL_AGENT_EMBEDDING_BATCH_SIZE"
 
 
 def test_default_collection_is_valid(monkeypatch) -> None:
@@ -35,7 +47,11 @@ def test_rag_min_score_environment_override(monkeypatch) -> None:
     assert Settings.load().rag_min_score == 0.72
 
 
-def test_rag_min_score_is_clamped(monkeypatch) -> None:
+def test_rag_min_score_out_of_range_fails_closed(monkeypatch) -> None:
     monkeypatch.setenv("LOCAL_AGENT_RAG_MIN_SCORE", "1.5")
 
-    assert Settings.load().rag_min_score == 1.0
+    with pytest.raises(SettingsValidationError) as captured:
+        Settings.load()
+
+    assert captured.value.safe_error_code == SETTINGS_VALIDATION_ERROR
+    assert captured.value.field == "LOCAL_AGENT_RAG_MIN_SCORE"

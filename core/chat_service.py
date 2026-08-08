@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 import math
 import threading
+import warnings
 from typing import Any, Generator, Optional
 
 from core.agent_router import AgentRouter
@@ -77,12 +78,23 @@ class ChatService:
         """
         self.router = router
         self._state_observer = state_observer
+        # DEPRECATED ignored constructor shim（Stage 3 WP1-A）：真实 per-run
+        # channel capacity 的 Owner 是 Settings -> CoordinatedRuntimeFactory ->
+        # RuntimeEventChannel。本参数只为 source 兼容而保留，明确不消费、不得
+        # 接线成第二 capacity Owner。
         if (
             isinstance(event_channel_capacity, bool)
             or not isinstance(event_channel_capacity, int)
             or event_channel_capacity <= 0
         ):
             raise ValueError("event_channel_capacity 必须是正整数")
+        if event_channel_capacity != 32:
+            warnings.warn(
+                "ChatService event_channel_capacity is deprecated and ignored; "
+                "configure capacity via LOCAL_AGENT_EVENT_CHANNEL_CAPACITY",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._event_channel_capacity = event_channel_capacity
         self._event_journal = event_journal
         self._observability_dispatcher = observability_dispatcher
