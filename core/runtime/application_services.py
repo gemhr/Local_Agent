@@ -40,6 +40,21 @@ class RuntimeLifecycleState(str, Enum):
     CLOSED = "CLOSED"
 
 
+@dataclass(frozen=True, slots=True)
+class StartupDependencySnapshot:
+    """Application-scope 启动依赖的 immutable safe snapshot。
+
+    第一版只保存 allowlisted startup degradation 事实：
+    knowledge_base_degraded（默认 False）。
+
+    由 server.py::lifespan() 根据同一次真实 KB 初始化结果构造一次；
+    运行中不修改、不持久化、不包含 raw exception / KB path / error text。
+    本对象是 Diagnostic Authority 的输入，不是 dependency health manager。
+    """
+
+    knowledge_base_degraded: bool = False
+
+
 class RuntimeInitializationError(RuntimeError):
     """Path-free startup failure projected to a fixed safe error code."""
 
@@ -188,6 +203,9 @@ class ApplicationRuntimeServices:
         RuntimeActivityTracker
     )
     extra_closeables: tuple[tuple[str, object], ...] = ()
+    startup_dependency_snapshot: StartupDependencySnapshot = field(
+        default_factory=StartupDependencySnapshot
+    )
     _lifecycle: _LifecycleControl = field(
         default_factory=_LifecycleControl,
         init=False,
@@ -208,6 +226,12 @@ class ApplicationRuntimeServices:
             raise TypeError("activity_tracker_factory must be callable")
         if not isinstance(self.admission_gate, RuntimeAdmissionGate):
             raise TypeError("admission_gate must be RuntimeAdmissionGate")
+        if not isinstance(
+            self.startup_dependency_snapshot, StartupDependencySnapshot
+        ):
+            raise TypeError(
+                "startup_dependency_snapshot must be StartupDependencySnapshot"
+            )
         for value in (
             self.event_journal,
             self.observability_dispatcher,
@@ -738,5 +762,6 @@ __all__ = [
     "RuntimeComponentResult",
     "RuntimeLifecycleReport",
     "RuntimeLifecycleState",
+    "StartupDependencySnapshot",
     "SAFE_RUNTIME_ASSEMBLY_VERSION",
 ]

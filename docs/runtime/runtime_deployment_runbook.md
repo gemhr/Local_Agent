@@ -58,7 +58,7 @@ uv run python server.py
 
 明确**单进程**：本命令启动且只启动一个 server application process。
 
-> 当前没有 automated wait-ready 机制。Server 启动完成以 lifespan READY 为界；operator 手动确认。
+> Server 就绪以 lifespan READY 为界；`GET /readyz` 返回 200（`READY` / `READY_DEGRADED`）即可被 Client startup handshake 视为 ready。Server 本身无 continuous monitoring。
 
 可选替代启动（同样单进程）：
 
@@ -68,15 +68,32 @@ uv run uvicorn server:app
 
 ## 5. Client Startup
 
-Server 应先启动，再执行：
+Server 应优先启动（Server preferred first），再执行：
 
 ```powershell
 uv run python main.py
 ```
 
-Client 启动链：`Settings.load()` → `validate_role_configuration(CLIENT_ROLE)` → UI 装配 → 发起 `/api/history` 请求。
+Client 启动链：`Settings.load()` → `validate_role_configuration(CLIENT_ROLE)` → UI 装配 → 启动一次 background `ReadinessWorker(QThread)` 做 bounded `GET /readyz` probe。
 
-> 当前 **没有 automated wait-ready**：Client 启动时若 Server 未就绪，历史请求仅打印失败信息，聊天请求单次失败即提示错误；无自动重试、无版本握手。这是 deployment order 建议，不是 readiness 能力。Health/Readiness/handshake 均 **DEFER TO WP1-C**。
+**Startup readiness handshake = SUPPORTED**：
+
+```text
+Client 构造 UI（不阻塞 Qt event loop）
+→ background QThread 执行 bounded /readyz probe（request timeout 1.0s /
+  total deadline 30.0s / retry interval 0.5s / jitter=none）
+→ ready（HTTP 200 + typed four-field body + status ∈ {READY, READY_DEGRADED}）
+   → 只触发一次首屏 history fetch
+→ unavailable（deadline 耗尽 / 404 / malformed body / 200 + non-ready status）
+   → 追加一次固定 safe 系统消息，worker 退出
+```
+
+- 成功与失败均为 terminal：worker 一次 probe 后退出，不做 continuous monitoring、不做 auto reconnect、不提供 manual readiness button。
+- 每次 request timeout = `min(1.0s, remaining_deadline)`；sleep 也不跨过 deadline。客户端进程退出时 `requestInterruption()` + bounded wait。
+- Worker Session 显式使用 `settings.client_trust_env`（与聊天/历史/搜索/取消/记忆 Session 一致），不重新读取 env。
+- 版本兼容 / fingerprint：**NOT_IMPLEMENTED（DEFER_TO_WP4）**；WP1-C handshake 只有 `GET /readyz`，没有 `/metadata` / `/version`。
+
+> Client 启动时若 Server 尚未就绪：UI 照常可用，首屏 history 不启动，聊天请求沿用既有单次失败提示。部署建议仍是 Server 先启动。
 
 ## 6. Configuration Injection
 
@@ -248,8 +265,8 @@ known-good code/artifact
 | Docker Compose | NOT_IMPLEMENTED（与 Docker 同步撤销） |
 | Multi-worker / multi-process | NOT_IMPLEMENTED（单进程合同） |
 | Windows Service wrapper | NOT_IMPLEMENTED（NSSM/WinSW/Task Scheduler 集成代码不提供） |
-| Health / Readiness endpoint | DEFER TO WP1-C（`/health`、`/readyz`、READY_DEGRADED projection 不实现） |
-| startup handshake / retry | DEFER TO WP1-C（wait-ready、version handshake 不实现） |
+| Continuous Health/Readiness monitoring | NOT_IMPLEMENTED（Health / Readiness endpoint 与 startup readiness handshake 已 SUPPORTED，但无连续轮询 / auto reconnect / manual readiness button） |
+| version compatibility / fingerprint | NOT_IMPLEMENTED（DEFER_TO_WP4；无 `/metadata` / `/version`，无 version compatibility contract） |
 | Automatic backup | DEFER TO WP1-D（只定义 boundary） |
 | Migration runner / schema migration | DEFER TO WP1-D |
 
@@ -259,8 +276,8 @@ known-good code/artifact
 - single server process only。
 - 无 Docker / Compose。
 - 无 Windows Service wrapper。
-- 无 Health / Readiness。
-- 无 startup handshake / retry。
+- Continuous Health/Readiness monitoring NOT_IMPLEMENTED（Health / Readiness endpoint 与 startup handshake 为 SUPPORTED，但仅 startup-only，无连续轮询）。
+- version compatibility / fingerprint NOT_IMPLEMENTED（DEFER_TO_WP4）。
 - 无 automatic backup / restore。
 - 无 migration runner。
 - 无 automatic deployment rollback。

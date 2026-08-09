@@ -463,11 +463,41 @@ def test_deployment_docs_core_facts_present() -> None:
         "single server process only",
         "persistent",
         "fully_closed",
-        "DEFER TO WP1-C",
         "DEFER TO WP1-D",
         "backup",
     ):
         assert required in text, f"deployment runbook missing fact: {required}"
+
+
+# ---------------------------------------------------------------------------
+# WP1-C Health / Readiness / Startup handshake 合同 guard
+# ---------------------------------------------------------------------------
+
+
+def test_deployment_runbook_documents_health_readiness_supported() -> None:
+    """Deployment Runbook 必须把 Health/Readiness 与 Startup handshake 标记为
+    SUPPORTED，并继续锁 continuous monitoring / version compatibility 为
+    NOT_IMPLEMENTED / WP4。"""
+    text = (ROOT / "docs/runtime/runtime_deployment_runbook.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Health / Readiness" in text and "SUPPORTED" in text
+    assert "Startup readiness handshake" in text and "SUPPORTED" in text
+    assert "continuous monitoring" in text and "NOT_IMPLEMENTED" in text
+    assert "version compatibility" in text and "NOT_IMPLEMENTED" in text
+
+
+def test_capability_matrix_health_readiness_supported() -> None:
+    """Capability Matrix 必须把 Health/Readiness endpoint 与 Startup handshake
+    更新为 SUPPORTED，并保留 deferred 限制。"""
+    text = (ROOT / "docs/runtime/runtime_capability_matrix.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Health / Readiness endpoint" in text and "SUPPORTED" in text
+    assert "Startup readiness handshake" in text and "SUPPORTED" in text
+    assert "continuous monitoring" in text and "NOT_IMPLEMENTED" in text
+    assert "version compatibility" in text and "NOT_IMPLEMENTED" in text
+    assert "post-start dependency aggregate health" in text and "NOT_IMPLEMENTED" in text
 
 
 def test_deployment_runbook_marks_windows_only_and_no_docker() -> None:

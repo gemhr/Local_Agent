@@ -876,6 +876,7 @@ from core.runtime.application_services import (
     RuntimeLifecycleReport,
     RuntimeLifecycleState,
     RuntimeComponentResult,
+    StartupDependencySnapshot,
 )
 from core.runtime.shutdown import GracefulShutdownCoordinator, ShutdownReport
 from core.runtime.runtime_factory import (
@@ -901,6 +902,7 @@ __all__ += [
     "RuntimeLifecycleReport",
     "RuntimeLifecycleState",
     "RuntimeComponentResult",
+    "StartupDependencySnapshot",
     "GracefulShutdownCoordinator",
     "ShutdownReport",
     "SAFE_RUNTIME_ASSEMBLY_VERSION",
