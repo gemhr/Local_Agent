@@ -6,7 +6,7 @@
 - **Single-process contract**：每个部署实例必须且只能有一个 LocalAgent server application process（`uv run python server.py`）。禁止 `uvicorn --workers N`、gunicorn、multi-process Runtime。多进程会破坏 RunRegistry 取消、OutputGate terminal 唯一性、StepResultStore 可见性、并发配额与 Shutdown 编排（这些 Owner 全部 process-local）。
 - 无 Docker / Compose / WSL2 依赖；无 Windows Service wrapper（operator/企业内部环境可托管 foreground process，LocalAgent 不提供 wrapper）。
 - 完整 Windows 部署、Rollback、持久化数据、Secret、Proxy 与 Shutdown 运维参见 `runtime_deployment_runbook.md`。
-- Health / Readiness / startup handshake / retry：**DEFER TO WP1-C**，当前不实现。
+- Health / Readiness：`GET /health` 与 `GET /readyz`（SUPPORTED）；状态矩阵见下方「Health / Readiness」章节。Continuous monitoring / version compatibility：NOT_IMPLEMENTED。
 
 ## Startup Runbook
 
@@ -29,6 +29,37 @@
 - Runtime gauges：`runtime_active_runs`、`runtime_active_steps`、`runtime_detached_tool_workers`、`runtime_detached_retrieval_workers`、`runtime_blocking_executor_active`、`runtime_blocking_executor_pending`、`runtime_event_channel_buffered`、`runtime_circuit_breakers_open`。
 - Reservation/permit、pending disconnect watcher、request producer 与 channel ownership 目前主要由 owner snapshot/专项不变量测试读取，不虚构 Metric 名。
 - 当前为进程内快照/记录能力，不等于已接 Prometheus/Grafana。高基数或敏感 label 禁止；Tool name 仅由配置 allowlist 放行。
+
+## Health / Readiness
+
+Health 只证明当前可达的 Server Application 尚未进入 terminal CLOSED / fatal unavailable；**不证明**可以接受新 Run、所有依赖健康、所有 endpoint 可用或 Model Circuit 正常。
+
+Readiness 证明可以安全尝试接受一个新的 Run：`ApplicationRuntimeServices` 可用 + lifecycle `READY` + admission `ACCEPTING`。唯一 allowlisted startup degradation 是 `knowledge_base_required=false` + KB 初始化/import 失败（此时 readiness 仍 200，diagnostic status = `READY_DEGRADED`）。
+
+```text
+GET /health    # 200 表示 application 尚未 terminal CLOSED / fatal unavailable
+GET /readyz    # 200 表示可以安全尝试接受新的 Run
+```
+
+状态矩阵（两个 endpoint 返回同一四字段 body，仅 HTTP 判定语义不同）：
+
+| Source facts | Diagnostic `status` | `/health` | `/readyz` |
+|---|---|---|---|
+| services 尚未构造，fallback `STARTING` | `STARTING` | 200 | 503 |
+| lifecycle=`READY`，admission=`ACCEPTING`，KB 正常 | `READY` | 200 | 200 |
+| lifecycle=`READY`，admission=`ACCEPTING`，allowed KB degraded | `READY_DEGRADED` | 200 | 200 |
+| lifecycle=`READY`，admission=`DRAINING` | `DRAINING` | 200 | 503 |
+| lifecycle=`SHUTTING_DOWN`，admission=`DRAINING` | `DRAINING` | 200 | 503 |
+| lifecycle=`CLOSED`，admission=`CLOSED` | `CLOSED` | 503 | 503 |
+| 无法安全确认（inconsistent / unknown / 无 fallback） | `UNAVAILABLE` | 503 | 503 |
+
+响应 body 固定四字段：`{"status": "...", "lifecycle": "...", "admission": "...", "degraded": false}`。body 不含 error / reason / error_code / path / URL / exception / version / environment / instance / 时间戳。
+
+特别说明：
+
+- **DRAINING 窗口**：`/health = 200` 且 `/readyz = 503`。application 仍足以完成有界关闭，但不再接受新 Run；不得把两者都变成 503。
+- **STARTING / CLOSED 网络可观察窗口不保证**：矩阵定义的是 pure projection / 已接受请求语义，不承诺 lifespan startup window 或 shutdown 完成后一定能从网络请求到 `/health`。
+- Endpoint 是只读投影，不修改 lifecycle / admission / dependency，不触发 recovery/retry。无法安全确认的事实 fail closed 为 `UNAVAILABLE` / 503，不使用 500。
 
 ## Shutdown Runbook
 

@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox
 from core.settings import CLIENT_ROLE, Settings, validate_role_configuration
 from core.application_metadata import create_application_metadata
 from core.cancellation_client import request_run_cancellation
+from core.client_readiness import ReadinessWorker
 from core.runtime.multi_agent_status import format_frontend_status
 from ui.chat_panel import ChatPanel
 from ui.desktop_pet import DesktopPet
@@ -236,7 +237,7 @@ class MainController(QObject):
         )
 
         self._connect_signals()
-        self._fetch_and_load_history(self.chat_panel.current_agent_id)
+        self._start_readiness_probe()
         self._start_daily_sync_task()
         self.pet.show()
 
@@ -257,6 +258,35 @@ class MainController(QObject):
 
         self.search_shortcut = QShortcut(QKeySequence("Ctrl+F"), self.chat_panel)
         self.search_shortcut.activated.connect(self._open_search_dialog)
+
+    def _start_readiness_probe(self) -> None:
+        """启动一次 Client startup readiness probe（QThread，不阻塞 UI）。
+
+        ready → 触发首屏 history fetch（只启动一次）；
+        unavailable → 显示一次固定 safe 系统消息并结束 worker。
+        """
+        self.readiness_worker = ReadinessWorker(
+            self.api_base_url,
+            settings.client_trust_env,
+        )
+        self.readiness_worker.ready_signal.connect(
+            self._on_readiness_ready
+        )
+        self.readiness_worker.unavailable_signal.connect(
+            self._on_readiness_unavailable
+        )
+        self.readiness_worker.start()
+
+    def _on_readiness_ready(self) -> None:
+        """readiness 成功后只触发一次首屏 history fetch。"""
+        self._fetch_and_load_history(self.chat_panel.current_agent_id)
+
+    def _on_readiness_unavailable(self) -> None:
+        """readiness 失败：显示一次固定 safe 系统消息，不启动 history fetch。"""
+        self.chat_panel.append_system_msg(
+            "Server unavailable; retry later.",
+            target_agent_id=self.chat_panel.current_agent_id,
+        )
 
     def _start_daily_sync_task(self) -> None:
         """在配置开启时启动知识库定时同步任务。"""
@@ -463,6 +493,9 @@ class MainController(QObject):
         if self.worker.isRunning():
             self.worker.cancel()
             self.worker.wait(2000)
+        if hasattr(self, "readiness_worker") and self.readiness_worker.isRunning():
+            self.readiness_worker.requestInterruption()
+            self.readiness_worker.wait(2000)
         if hasattr(self, "scheduler"):
             self.scheduler.shutdown(wait=False)
         self.chat_panel.close()

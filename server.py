@@ -10,7 +10,7 @@ from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from core.agent_router import AgentRouter
@@ -45,8 +45,14 @@ from core.runtime import (
     BlockingExecutorAdmissionTimeout,
     BlockingExecutorClosedError,
     BlockingTaskKind,
+    StartupDependencySnapshot,
     process_legacy_step_executor,
     process_run_registry,
+)
+from core.runtime.health import (
+    health_http_status,
+    readiness_http_status,
+    resolve_application_diagnostic,
 )
 from core.runtime.blocking_executor import BoundedBlockingExecutor
 from core.runtime.metrics import (
@@ -520,6 +526,9 @@ async def lifespan(app: FastAPI):
             legacy_step_executor=legacy_step_executor,
             snapshot_enabled=settings.snapshot_store_enabled,
             recovery_enabled=settings.snapshot_store_enabled,
+            startup_dependency_snapshot=StartupDependencySnapshot(
+                knowledge_base_degraded=knowledge_base_error is not None
+            ),
             extra_closeables=(
                 ("logger_checkpoint_store", logger_checkpoints),
                 ("metrics_checkpoint_store", metrics_checkpoints),
@@ -679,6 +688,43 @@ def _submit_legacy_stream_step(service, stream, run_id: str):
         run_id=run_id,
         operation_id="legacy_stream_next",
         cancellation_check=lambda: None,
+    )
+
+
+@app.get("/health")
+async def health_endpoint():
+    """Health 只证明 application 尚未进入 terminal CLOSED / fatal unavailable。
+
+    不证明可以接受新 Run、所有依赖健康或所有 endpoint 可用。
+    """
+    snapshot = resolve_application_diagnostic(
+        application_runtime_services,
+        fallback_lifecycle=getattr(
+            app.state, "runtime_lifecycle_state", None
+        ),
+    )
+    return JSONResponse(
+        content=snapshot.to_safe_dict(),
+        status_code=health_http_status(snapshot),
+    )
+
+
+@app.get("/readyz")
+async def readiness_endpoint():
+    """Readiness 证明可以安全尝试接受一个新的 Run。
+
+    条件：services 可用 + lifecycle READY + admission ACCEPTING；
+    唯一 allowlisted KB degradation 不阻止该结论。
+    """
+    snapshot = resolve_application_diagnostic(
+        application_runtime_services,
+        fallback_lifecycle=getattr(
+            app.state, "runtime_lifecycle_state", None
+        ),
+    )
+    return JSONResponse(
+        content=snapshot.to_safe_dict(),
+        status_code=readiness_http_status(snapshot),
     )
 
 

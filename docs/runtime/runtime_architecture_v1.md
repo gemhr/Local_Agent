@@ -84,6 +84,8 @@ Observability、Trace、Report、RecoveryValidator 不反向修改 AgentState、
 | Retrieval Stage | INVOCATION_SCOPE | RetrievalExecutionService | invocation 调用栈 | 成为 Application 状态 |
 | ToolResourceLease | ATTEMPT_SCOPE / COMPONENT_SCOPE | ToolConcurrencyController | ToolAttemptExecutor；detached 时 callback 延后释放 | 在 worker 结束前提前释放 |
 | Worker Handle | INVOCATION_SCOPE / ATTEMPT_SCOPE | bounded/tool executor | 对应 worker owner | 被 Report 持有 |
+| StartupDependencySnapshot | APPLICATION_SCOPE | `server.py::lifespan()` 从同一次真实 KB 初始化结果构造一次 | 不可变（frozen）；无显式 close | 被运行时修改、持久化或升级为 dependency health manager |
+| ApplicationDiagnosticSnapshot | APPLICATION_SCOPE（projection） | `core/runtime/health.py` resolver | 无（derived value，不缓存） | 被 endpoint / Client 当作 writable state 或 Authority |
 
 共享对象按 Python identity 去重关闭一次。Run scope 只关闭 request-owned Channel、Task、Registry registration 与 Gauge registration；Application resource 只能由 ApplicationRuntimeServices/GracefulShutdownCoordinator 关闭。
 
@@ -180,7 +182,64 @@ Fault seam 通过显式参数存在于 Runtime 组件，只有测试使用 `Faul
 | 旧 `.event` publication error access | 当前 `EventPublicationError` 暴露冻结 `evidence`，不持有 RuntimeEvent | `error.evidence` | 兼容调用方存在期间 | 调用方迁移且安全审计通过 | event fault tests |
 | 旧 constructor positional arguments | 已有 dataclass/handle 的位置参数保持兼容 | 新调用优先关键字参数 | 当前调用方存在期间 | 全部调用点迁移并有 deprecation 周期 | contract/run registry tests |
 
-## 9. Frozen Invariants
+## 9. Health / Readiness Diagnostic Projection
+
+WP1-C 冻结的 Health / Readiness 是**纯只读诊断投影**，不是 Runtime Authority，也不是 Lifecycle / Admission 的第二个 owner。
+
+```text
+Diagnostic Projection != Lifecycle Authority
+```
+
+职责边界：
+
+| 对象 | Owner / 角色 |
+|---|---|
+| Lifecycle Authority | `ApplicationRuntimeServices._LifecycleControl`（只经 `begin_shutdown()` / `close()` 写） |
+| Admission Authority | `ApplicationRuntimeServices.admission_gate`（`RuntimeAdmissionGate`） |
+| Startup Dependency Snapshot | `ApplicationRuntimeServices.startup_dependency_snapshot`（frozen `StartupDependencySnapshot`；lifespan 构造一次，运行中不修改、不持久化） |
+| Diagnostic Projector | `core/runtime/health.py`（`resolve_application_diagnostic` + `ApplicationDiagnosticSnapshot` + `DiagnosticStatus`） |
+| Endpoint | FastAPI `GET /health`、`GET /readyz` = Reader |
+| Client probe | `core/client_readiness.py::ReadinessWorker`（QThread，经 HTTP `GET /readyz`）= Reader |
+
+- Endpoint 与 Client probe 只读不写：不修改 lifecycle、admission、dependency 或 Run state，不触发 recovery/retry，不缓存诊断结果。
+- Resolver 只读取既有事实；services 尚不存在时，仅允许 `app.state.runtime_lifecycle_state` 作为有限 fallback（pre-services `STARTING` / shutdown / closed 纯投影视图），不写回 services / app.state。
+- `DiagnosticStatus` 是派生状态（`STARTING` / `READY` / `READY_DEGRADED` / `DRAINING` / `CLOSED` / `UNAVAILABLE`），不得与 `RuntimeLifecycleState`（仍恰为 `STARTING` / `READY` / `SHUTTING_DOWN` / `CLOSED` 四值）混淆；`READY_DEGRADED` 不进入 RuntimeFactory / AdmissionGate 消费。
+
+HTTP 状态矩阵（两个 endpoint 返回同一四字段 body，仅 HTTP 判定语义不同）：
+
+| Source facts | Diagnostic `status` | `/health` | `/readyz` |
+|---|---|---|---|
+| services 尚未构造，fallback `STARTING` | `STARTING` | 200 | 503 |
+| lifecycle=`READY`，admission=`ACCEPTING`，KB 正常 | `READY` | 200 | 200 |
+| lifecycle=`READY`，admission=`ACCEPTING`，allowed KB degraded | `READY_DEGRADED` | 200 | 200 |
+| lifecycle=`READY`，admission=`DRAINING` | `DRAINING` | 200 | 503 |
+| lifecycle=`SHUTTING_DOWN`，admission=`DRAINING` | `DRAINING` | 200 | 503 |
+| lifecycle=`CLOSED`，admission=`CLOSED` | `CLOSED` | 503 | 503 |
+| 无法安全确认（inconsistent / unknown / 无 fallback） | `UNAVAILABLE` | 503 | 503 |
+
+响应 body 固定四字段：
+
+```json
+{
+  "status": "...",
+  "lifecycle": "...",
+  "admission": "...",
+  "degraded": false
+}
+```
+
+安全边界：body 不含 error / reason / error_code / path / URL / exception / version / environment / instance / run count / timestamp；序列化字段顺序固定，不使用 `vars` / `__dict__` / raw Enum repr。
+
+KB degraded 语义：`knowledge_base_required=false` 且 KB 初始化/import 失败 → `knowledge_base_degraded=true`（lifespan 从同一次真实 KB 初始化结果构造 snapshot）；`knowledge_base_required=true` 的 KB 失败在 lifespan fail fast，不到达 READY。不得把 `AgentRouter.knowledge_base_error` 升级为 diagnostic Authority。
+
+第一版边界：
+
+- startup-only；无 continuous monitoring、无 auto reconnect、无 manual readiness button；
+- 无 post-start dependency aggregate health（Model circuit、Journal append failure、Observability consumer、Executor saturation 均不参与动态诊断）；
+- 无 version compatibility / fingerprint（DEFER_TO_WP4）；
+- STARTING / CLOSED / draining 的完整 HTTP 网络可观察窗口不保证（矩阵定义 pure projection / 已接受请求语义）。
+
+## 10. Frozen Invariants
 
 - PlanStep 不保存 runtime status；AgentState 是运行状态 owner。
 - RetryExecutor/ModelInvocationRouter/ToolExecutionService 拥有 retry；Fault controller 只注入结果，不决定策略。
@@ -191,3 +250,7 @@ Fault seam 通过显式参数存在于 Runtime 组件，只有测试使用 `Faul
 - GracefulShutdownCoordinator 是 shutdown orchestration owner；ShutdownReport 只是派生报告。
 - FaultInjectionController 是 match/hit counter owner，但只存在于显式测试/operation scope。
 - Application resource 按 identity 关闭一次；Run scope 不关闭 Application resource。
+- `RuntimeLifecycleState` 恰为 `STARTING`/`READY`/`SHUTTING_DOWN`/`CLOSED` 四值；`DiagnosticStatus` 是派生只读状态，不得成为 writable lifecycle。
+- `StartupDependencySnapshot` 是 frozen、application-scope、lifespan 构造一次的 immutable 启动事实；运行中不修改、不持久化。
+- Health / Readiness endpoint 与 Client readiness probe 只读投影；不得写回 lifecycle / admission / snapshot，不触发 recovery/retry。
+- `/readyz` 的 readiness 结论必须与 `/api/chat` 消费的同一 `ApplicationRuntimeServices.admission_gate` identity 一致。
