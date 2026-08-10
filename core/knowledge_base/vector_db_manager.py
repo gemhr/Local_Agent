@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -9,13 +10,31 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+from core.knowledge_base.document_loader import SCHEMA_VERSION as KB_CHUNK_SCHEMA_VERSION
 from core.knowledge_base.vector_scores import (
     VectorScoreSemantics,
     normalize_vector_score,
 )
+from core.persistence_migration import (
+    PERSISTENCE_PREFLIGHT_FAILED,
+    MigrationAction,
+    PersistencePreflightResult,
+    PreflightStatus,
+    StoreId,
+)
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
+
+
+MARKER_COLLECTION_CONTRACT_VERSION = 1
+_MARKER_KEYS = (
+    "localagent_collection_contract_version",
+    "chunk_schema_version",
+    "embedding_compatibility_digest",
+    "embedding_dimension",
+)
+_EMBEDDING_DIMENSION_PROBE_TEXT = "localagent-embedding-dimension-probe"
 
 
 class VectorDBManager:
@@ -58,6 +77,7 @@ class VectorDBManager:
         if query_prompt_name:
             query_encode_kwargs["prompt_name"] = query_prompt_name
 
+        self._query_prompt_name = query_prompt_name
         self.embeddings = HuggingFaceEmbeddings(
             model_name=local_model_path or "BAAI/bge-large-zh-v1.5",
             model_kwargs=model_kwargs,
@@ -74,6 +94,142 @@ class VectorDBManager:
         # Query 调用，避免未知模型线程安全行为和并发查询状态交叉。
         self._embedding_query_lock = threading.Lock()
         self._vector_query_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # WP1-D Chroma LocalAgent collection marker（third-party boundary）
+    # ------------------------------------------------------------------
+
+    def _embedding_compatibility_descriptor(self) -> Dict[str, Any]:
+        """确定性的 canonical safe descriptor；只用于计算 digest，不持久化。
+
+        覆盖当前真实影响 embedding vector semantics 的配置事实：
+        configured embedding identity、normalization、query/document prompt。
+        """
+        return {
+            "embedding_identity": self.embedding_model_id,
+            "normalize_embeddings": True,
+            "query_prompt_name": self._query_prompt_name or None,
+        }
+
+    def embedding_compatibility_digest(self) -> str:
+        """sha256(canonical JSON descriptor)。这是 configured compatibility
+        descriptor digest，不是 model artifact 的 cryptographic attestation。"""
+        canonical = json.dumps(
+            self._embedding_compatibility_descriptor(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def embedding_dimension(self) -> int:
+        """固定内部 probe 文本探测 embedding 维度；不写入 durable documents，
+        不引入远程网络依赖。"""
+        with self._embedding_query_lock:
+            vector = self.embeddings.embed_query(_EMBEDDING_DIMENSION_PROBE_TEXT)
+        dimension = len(vector)
+        if not isinstance(dimension, int) or dimension <= 0:
+            raise ValueError("embedding dimension must be a positive integer")
+        return dimension
+
+    def expected_collection_marker(self) -> Dict[str, Any]:
+        return {
+            "localagent_collection_contract_version": (
+                MARKER_COLLECTION_CONTRACT_VERSION
+            ),
+            "chunk_schema_version": KB_CHUNK_SCHEMA_VERSION,
+            "embedding_compatibility_digest": self.embedding_compatibility_digest(),
+            "embedding_dimension": self.embedding_dimension(),
+        }
+
+    def read_collection_marker(self) -> Dict[str, Any]:
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None:
+            return {}
+        metadata = dict(collection.metadata or {})
+        return {
+            key: metadata[key] for key in _MARKER_KEYS if key in metadata
+        }
+
+    def publish_collection_marker(self) -> None:
+        """整体 metadata replace（read-modify-merge）：保留非 LocalAgent 元数据，
+        只写入本 WP 的 marker 字段。"""
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None:
+            raise RuntimeError("collection unavailable")
+        existing = dict(collection.metadata or {})
+        merged = {key: value for key, value in existing.items() if key not in _MARKER_KEYS}
+        merged.update(self.expected_collection_marker())
+        collection.modify(metadata=merged)
+
+    def remove_collection_marker(self) -> None:
+        """只移除 LocalAgent marker 字段，保留其他元数据。
+
+        Chroma 不允许空 metadata dict；若移除后 metadata 为空，写入 sentinel
+        invalid marker，保证 collection 不再“看起来有效”（后续 preflight 判定
+        mismatch → REBUILD_REQUIRED，绝不当作 CURRENT）。
+        """
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None:
+            return
+        existing = dict(collection.metadata or {})
+        merged = {
+            key: value for key, value in existing.items() if key not in _MARKER_KEYS
+        }
+        if not merged:
+            collection.modify(
+                metadata={"localagent_collection_contract_version": -1}
+            )
+            return
+        collection.modify(metadata=merged)
+
+    def collection_preflight(self) -> PersistencePreflightResult:
+        """Startup marker validation。空 collection 允许初始化 marker；
+        非空缺 marker / mismatch → REBUILD_REQUIRED；匹配 → CURRENT。"""
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None:
+            return PersistencePreflightResult(
+                store_id=StoreId.CHROMA,
+                status=PreflightStatus.FAILED,
+                action=MigrationAction.NONE,
+                detected_version="unknown",
+                safe_error_code=PERSISTENCE_PREFLIGHT_FAILED,
+            )
+        count = collection.count()
+        if count == 0:
+            return PersistencePreflightResult(
+                store_id=StoreId.CHROMA,
+                status=PreflightStatus.NEW,
+                action=MigrationAction.INITIALIZE,
+                detected_version="empty",
+                target_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+            )
+        marker = self.read_collection_marker()
+        if not marker:
+            return PersistencePreflightResult(
+                store_id=StoreId.CHROMA,
+                status=PreflightStatus.REBUILD_REQUIRED,
+                action=MigrationAction.REBUILD,
+                detected_version="unmarked",
+                target_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+            )
+        expected = self.expected_collection_marker()
+        if marker != expected:
+            return PersistencePreflightResult(
+                store_id=StoreId.CHROMA,
+                status=PreflightStatus.REBUILD_REQUIRED,
+                action=MigrationAction.REBUILD,
+                detected_version="mismatch",
+                target_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+            )
+        return PersistencePreflightResult(
+            store_id=StoreId.CHROMA,
+            status=PreflightStatus.CURRENT,
+            action=MigrationAction.NONE,
+            detected_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+            target_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+        )
 
     @staticmethod
     def _sanitize_metadata_value(value: Any) -> Any:

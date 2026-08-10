@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import sqlite3
 import threading
 from collections.abc import Awaitable, Callable
@@ -15,6 +16,17 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from core.persistence_migration import (
+    PERSISTENCE_MIGRATION_FAILED,
+    PERSISTENCE_PREFLIGHT_FAILED,
+    MigrationAction,
+    PersistenceError,
+    PersistencePreflightResult,
+    PreflightStatus,
+    StoreId,
+    open_read_only,
+    sqlite_quick_check,
+)
 from core.runtime.event_journal import JournalRecord
 
 
@@ -391,3 +403,124 @@ class IdempotentEventConsumer:
                 )
             )
             return EventConsumptionStatus.PROCESSED
+
+
+# ---------------------------------------------------------------------------
+# WP1-D Checkpoint Preflight / Recreate（Store-owned，Coordinator 编排）
+# ---------------------------------------------------------------------------
+
+_CHECKPOINT_CURRENT_COLUMNS = frozenset(
+    {"consumer_id", "event_id", "run_id", "sequence", "processed_at"}
+)
+
+
+def _detect_checkpoint_shape(conn: sqlite3.Connection) -> str:
+    """返回 current / unknown；以真实列集合与 PK/UNIQUE 约束为准。"""
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "event_consumption_checkpoint" not in tables:
+        return "unknown"
+    cols = frozenset(
+        row[1] for row in conn.execute("PRAGMA table_info(event_consumption_checkpoint)")
+    )
+    if cols != _CHECKPOINT_CURRENT_COLUMNS:
+        return "unknown"
+    origins = {
+        row[3]
+        for row in conn.execute("PRAGMA index_list(event_consumption_checkpoint)")
+    }
+    if origins != {"pk", "u"}:
+        return "unknown"
+    return "current"
+
+
+def _checkpoint_failed_result() -> PersistencePreflightResult:
+    return PersistencePreflightResult(
+        store_id=StoreId.OBSERVABILITY_CHECKPOINT,
+        status=PreflightStatus.FAILED,
+        action=MigrationAction.NONE,
+        detected_version="unknown",
+        safe_error_code=PERSISTENCE_PREFLIGHT_FAILED,
+    )
+
+
+def checkpoint_preflight(db_path: str) -> PersistencePreflightResult:
+    """Read-only checkpoint preflight；不兼容 → MIGRATION_REQUIRED / RECREATE。"""
+    if not os.path.exists(db_path):
+        return PersistencePreflightResult(
+            store_id=StoreId.OBSERVABILITY_CHECKPOINT,
+            status=PreflightStatus.NEW,
+            action=MigrationAction.INITIALIZE,
+            detected_version="absent",
+            target_version="current",
+        )
+    try:
+        sqlite_quick_check(db_path)
+    except PersistenceError:
+        return _checkpoint_failed_result()
+    try:
+        conn = open_read_only(db_path)
+    except PersistenceError:
+        return _checkpoint_failed_result()
+    try:
+        shape = _detect_checkpoint_shape(conn)
+    except sqlite3.Error:
+        return _checkpoint_failed_result()
+    finally:
+        conn.close()
+    if shape == "current":
+        return PersistencePreflightResult(
+            store_id=StoreId.OBSERVABILITY_CHECKPOINT,
+            status=PreflightStatus.CURRENT,
+            action=MigrationAction.NONE,
+            detected_version="current",
+            target_version="current",
+        )
+    return PersistencePreflightResult(
+        store_id=StoreId.OBSERVABILITY_CHECKPOINT,
+        status=PreflightStatus.MIGRATION_REQUIRED,
+        action=MigrationAction.RECREATE,
+        detected_version="incompatible",
+        target_version="current",
+    )
+
+
+def checkpoint_recreate(db_path: str) -> None:
+    """显式 recreate：单 transaction 内 drop/recreate checkpoint table。
+
+    这是 derived-state recreation（丢弃历史消费 offset），不是 row migration。
+    已 current shape 时按幂等 no-op 成功返回；绝不修改其他 Store。
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if _detect_checkpoint_shape(conn) == "current":
+            conn.execute("COMMIT")
+            return
+        conn.execute("DROP TABLE IF EXISTS event_consumption_checkpoint")
+        conn.execute(
+            """
+            CREATE TABLE event_consumption_checkpoint (
+                consumer_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                processed_at TEXT NOT NULL,
+                PRIMARY KEY (consumer_id, event_id),
+                UNIQUE (consumer_id, run_id, sequence)
+            )
+            """
+        )
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise PersistenceError(PERSISTENCE_MIGRATION_FAILED) from None
+    finally:
+        conn.close()

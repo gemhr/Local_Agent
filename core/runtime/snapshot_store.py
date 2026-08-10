@@ -4,12 +4,25 @@
 
 from __future__ import annotations
 
+import os
 from enum import Enum
 from pathlib import Path
 import sqlite3
 import threading
 from typing import Protocol
 
+from core.persistence_migration import (
+    PERSISTENCE_PREFLIGHT_FAILED,
+    PERSISTENCE_SCHEMA_UNSUPPORTED,
+    MigrationAction,
+    PersistenceError,
+    PersistencePreflightResult,
+    PreflightMode,
+    PreflightStatus,
+    StoreId,
+    open_read_only,
+    sqlite_quick_check,
+)
 from core.runtime.snapshot_contract import (
     RunSnapshot,
     UnsupportedSnapshotSchemaError,
@@ -302,30 +315,7 @@ class SQLiteSnapshotStore:
                 return
 
     def _snapshot_from_row(self, row: sqlite3.Row) -> RunSnapshot:
-        try:
-            version = row["snapshot_schema_version"]
-            if isinstance(version, bool) or not isinstance(version, int):
-                raise ValueError("invalid schema version")
-            snapshot = snapshot_from_json(str(row["payload_json"]))
-            if (
-                snapshot.snapshot_schema_version != version
-                or snapshot.snapshot_id != str(row["snapshot_id"])
-                or snapshot.run_id != str(row["run_id"])
-                or snapshot.created_at.isoformat() != str(row["created_at"])
-                or snapshot.payload_digest != str(row["payload_digest"])
-            ):
-                raise ValueError("row envelope mismatch")
-            return snapshot
-        except UnsupportedSnapshotSchemaError:
-            raise SnapshotStoreError(
-                SnapshotErrorCode.SNAPSHOT_SCHEMA_UNSUPPORTED
-            ) from None
-        except SnapshotStoreError:
-            raise
-        except Exception:
-            raise SnapshotStoreError(
-                SnapshotErrorCode.SNAPSHOT_CORRUPTED
-            ) from None
+        return _snapshot_row_to_value(row)
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -336,6 +326,314 @@ class SQLiteSnapshotStore:
             self._connection.execute("ROLLBACK")
         except sqlite3.Error:
             return
+
+
+# ---------------------------------------------------------------------------
+# WP1-D Snapshot Preflight（validation-only；无 migration / writeback / adoption）
+# ---------------------------------------------------------------------------
+
+# 每个条目 = (name, declared_type, notnull, dflt_value, pk_position)。
+_SNAPSHOT_CURRENT_COLUMNS = (
+    ("snapshot_schema_version", "INTEGER", 1, None, 0),
+    ("snapshot_id", "TEXT", 1, None, 1),
+    ("run_id", "TEXT", 1, None, 0),
+    ("created_at", "TEXT", 1, None, 0),
+    ("payload_json", "TEXT", 1, None, 0),
+    ("payload_digest", "TEXT", 1, None, 0),
+)
+_SNAPSHOT_RUN_CREATED_INDEX = (
+    "idx_runtime_snapshots_run_created",
+    (0, 0, ("run_id", "created_at")),
+)
+_SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS = frozenset({1})
+
+
+def _norm_type(value) -> str:
+    return str(value).upper()
+
+
+def _norm_default(value) -> object:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1]
+    return text.lower()
+
+
+def _snapshot_shape_current(conn: sqlite3.Connection) -> bool:
+    """deterministic exact current physical signature：列/类型/NOT NULL/
+    snapshot_id PRIMARY KEY/required index 定义全部精确匹配。"""
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "runtime_snapshots" not in tables:
+        return False
+    try:
+        actual = conn.execute("PRAGMA table_info(runtime_snapshots)").fetchall()
+    except sqlite3.Error:
+        return False
+    if len(actual) != len(_SNAPSHOT_CURRENT_COLUMNS):
+        return False
+    actual_by_name = {row[1]: row for row in actual}
+    for name, type_, notnull, dflt, pk in _SNAPSHOT_CURRENT_COLUMNS:
+        row = actual_by_name.get(name)
+        if row is None:
+            return False
+        if _norm_type(row[2]) != _norm_type(type_):
+            return False
+        if int(row[3]) != int(notnull):
+            return False
+        if _norm_default(row[4]) != _norm_default(dflt):
+            return False
+        if int(row[5]) != int(pk):
+            return False
+    index_name, (unique, partial, columns) = _SNAPSHOT_RUN_CREATED_INDEX
+    try:
+        rows = conn.execute("PRAGMA index_list(runtime_snapshots)").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        if row[1] != index_name:
+            continue
+        if int(row[2]) != unique or int(row[4]) != partial:
+            return False
+        try:
+            actual_columns = tuple(
+                r[2] for r in conn.execute(f"PRAGMA index_info({index_name})")
+            )
+        except sqlite3.Error:
+            return False
+        return actual_columns == columns
+    return False
+
+
+def _snapshot_unique_constraint_set(
+    conn: sqlite3.Connection,
+) -> frozenset[tuple[str, ...]]:
+    """table-level UNIQUE constraint（origin='u'）列元组集合；current contract
+    必须为空。额外 UNIQUE(run_id) 会阻止同一 Run 保存多个 Snapshot → 拒绝。"""
+    result: set[tuple[str, ...]] = set()
+    try:
+        rows = conn.execute("PRAGMA index_list(runtime_snapshots)").fetchall()
+    except sqlite3.Error:
+        return frozenset()
+    for row in rows:
+        if row[3] == "u":
+            try:
+                result.add(
+                    tuple(
+                        r[2]
+                        for r in conn.execute(f"PRAGMA index_info({row[1]})")
+                    )
+                )
+            except sqlite3.Error:
+                return frozenset()
+    return frozenset(result)
+
+
+def _snapshot_unique_named_indexes(conn: sqlite3.Connection) -> frozenset[str]:
+    """unique named index（origin='c'，unique=1）名称集合；current contract 必须为空。"""
+    try:
+        return frozenset(
+            row[1]
+            for row in conn.execute("PRAGMA index_list(runtime_snapshots)").fetchall()
+            if row[3] == "c" and int(row[2]) == 1
+        )
+    except sqlite3.Error:
+        return frozenset()
+
+
+def _snapshot_shape_current(conn: sqlite3.Connection) -> bool:
+    """deterministic exact current physical signature：列/类型/NOT NULL/
+    snapshot_id PRIMARY KEY/required index 定义/UNIQUE semantic set exact
+    全部精确匹配。"""
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "runtime_snapshots" not in tables:
+        return False
+    if _snapshot_unique_constraint_set(conn) != frozenset():
+        return False
+    if _snapshot_unique_named_indexes(conn) != frozenset():
+        return False
+    try:
+        actual = conn.execute("PRAGMA table_info(runtime_snapshots)").fetchall()
+    except sqlite3.Error:
+        return False
+    if len(actual) != len(_SNAPSHOT_CURRENT_COLUMNS):
+        return False
+    actual_by_name = {row[1]: row for row in actual}
+    for name, type_, notnull, dflt, pk in _SNAPSHOT_CURRENT_COLUMNS:
+        row = actual_by_name.get(name)
+        if row is None:
+            return False
+        if _norm_type(row[2]) != _norm_type(type_):
+            return False
+        if int(row[3]) != int(notnull):
+            return False
+        if _norm_default(row[4]) != _norm_default(dflt):
+            return False
+        if int(row[5]) != int(pk):
+            return False
+    index_name, (unique, partial, columns) = _SNAPSHOT_RUN_CREATED_INDEX
+    try:
+        rows = conn.execute("PRAGMA index_list(runtime_snapshots)").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        if row[1] != index_name:
+            continue
+        if int(row[2]) != unique or int(row[4]) != partial:
+            return False
+        try:
+            actual_columns = tuple(
+                r[2] for r in conn.execute(f"PRAGMA index_info({index_name})")
+            )
+        except sqlite3.Error:
+            return False
+        return actual_columns == columns
+    return False
+
+
+def _snapshot_row_to_value(row: sqlite3.Row) -> RunSnapshot:
+    """Module-level row → RunSnapshot；与实例方法同构，供只读 full preflight。"""
+    try:
+        version = row["snapshot_schema_version"]
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError("invalid schema version")
+        snapshot = snapshot_from_json(str(row["payload_json"]))
+        if (
+            snapshot.snapshot_schema_version != version
+            or snapshot.snapshot_id != str(row["snapshot_id"])
+            or snapshot.run_id != str(row["run_id"])
+            or snapshot.created_at.isoformat() != str(row["created_at"])
+            or snapshot.payload_digest != str(row["payload_digest"])
+        ):
+            raise ValueError("row envelope mismatch")
+        return snapshot
+    except UnsupportedSnapshotSchemaError:
+        raise SnapshotStoreError(
+            SnapshotErrorCode.SNAPSHOT_SCHEMA_UNSUPPORTED
+        ) from None
+    except SnapshotStoreError:
+        raise
+    except Exception:
+        raise SnapshotStoreError(
+            SnapshotErrorCode.SNAPSHOT_CORRUPTED
+        ) from None
+
+
+def _snapshot_row_versions_supported(conn: sqlite3.Connection) -> bool:
+    try:
+        versions = {
+            int(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT snapshot_schema_version FROM runtime_snapshots"
+            )
+        }
+    except sqlite3.Error:
+        return False
+    return versions <= _SUPPORTED_SNAPSHOT_SCHEMA_VERSIONS
+
+
+def snapshot_preflight(
+    db_path: str, *, mode: PreflightMode = PreflightMode.STARTUP
+) -> PersistencePreflightResult:
+    """Read-only Snapshot preflight（仅在 enabled 时由 Coordinator 调用）。
+
+    无 migration；未知版本 / 未知 shape fail closed；FULL 模式逐 row 校验
+    v1 envelope/digest。绝不写回、绝不创建 v0、绝不触发 Recovery execution。
+    """
+    if not os.path.exists(db_path):
+        return PersistencePreflightResult(
+            store_id=StoreId.SNAPSHOT,
+            status=PreflightStatus.NEW,
+            action=MigrationAction.INITIALIZE,
+            detected_version="absent",
+            target_version="1",
+        )
+    try:
+        sqlite_quick_check(db_path)
+    except PersistenceError:
+        return PersistencePreflightResult(
+            store_id=StoreId.SNAPSHOT,
+            status=PreflightStatus.FAILED,
+            action=MigrationAction.NONE,
+            detected_version="unknown",
+            safe_error_code=PERSISTENCE_PREFLIGHT_FAILED,
+        )
+    try:
+        conn = open_read_only(db_path)
+    except PersistenceError:
+        return PersistencePreflightResult(
+            store_id=StoreId.SNAPSHOT,
+            status=PreflightStatus.FAILED,
+            action=MigrationAction.NONE,
+            detected_version="unknown",
+            safe_error_code=PERSISTENCE_PREFLIGHT_FAILED,
+        )
+    try:
+        if not _snapshot_shape_current(conn):
+            return PersistencePreflightResult(
+                store_id=StoreId.SNAPSHOT,
+                status=PreflightStatus.UNSUPPORTED,
+                action=MigrationAction.NONE,
+                detected_version="unknown",
+                target_version="1",
+                safe_error_code=PERSISTENCE_SCHEMA_UNSUPPORTED,
+            )
+        if not _snapshot_row_versions_supported(conn):
+            return PersistencePreflightResult(
+                store_id=StoreId.SNAPSHOT,
+                status=PreflightStatus.UNSUPPORTED,
+                action=MigrationAction.NONE,
+                detected_version="unsupported-version",
+                target_version="1",
+                safe_error_code=PERSISTENCE_SCHEMA_UNSUPPORTED,
+            )
+        if mode is PreflightMode.FULL:
+            rows = conn.execute(
+                "SELECT * FROM runtime_snapshots"
+            ).fetchall()
+            for row in rows:
+                _snapshot_row_to_value(row)
+        return PersistencePreflightResult(
+            store_id=StoreId.SNAPSHOT,
+            status=PreflightStatus.CURRENT,
+            action=MigrationAction.NONE,
+            detected_version="1",
+            target_version="1",
+        )
+    except SnapshotStoreError as exc:
+        if exc.error_code is SnapshotErrorCode.SNAPSHOT_SCHEMA_UNSUPPORTED:
+            return PersistencePreflightResult(
+                store_id=StoreId.SNAPSHOT,
+                status=PreflightStatus.UNSUPPORTED,
+                action=MigrationAction.NONE,
+                detected_version="unsupported-version",
+                target_version="1",
+                safe_error_code=PERSISTENCE_SCHEMA_UNSUPPORTED,
+            )
+        return PersistencePreflightResult(
+            store_id=StoreId.SNAPSHOT,
+            status=PreflightStatus.FAILED,
+            action=MigrationAction.NONE,
+            detected_version="1",
+            safe_error_code=PERSISTENCE_PREFLIGHT_FAILED,
+        )
+    except sqlite3.Error:
+        return PersistencePreflightResult(
+            store_id=StoreId.SNAPSHOT,
+            status=PreflightStatus.FAILED,
+            action=MigrationAction.NONE,
+            detected_version="unknown",
+            safe_error_code=PERSISTENCE_PREFLIGHT_FAILED,
+        )
+    finally:
+        conn.close()
 
 
 __all__ = [

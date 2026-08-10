@@ -18,6 +18,15 @@ from core.application_metadata import create_application_metadata
 from core.chat_service import ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
+from core.persistence_migration import (
+    PERSISTENCE_PREFLIGHT_FAILED,
+    PersistenceError,
+    PersistencePaths,
+    PreflightMode,
+    PreflightStatus,
+    preflight_blocks_startup,
+    run_persistence_preflight,
+)
 from core.runtime import (
     ApplicationRuntimeServices,
     ChatRuntimeMode,
@@ -193,6 +202,10 @@ async def _stop_disconnect_watcher(
     await asyncio.gather(watcher, return_exceptions=True)
 
 
+class _ChromaRebuildRequiredError(RuntimeError):
+    """内部信号：Chroma collection 缺 marker 或 marker mismatch，需 operator rebuild。"""
+
+
 def _publish_compatibility_handles(app: FastAPI, service, services) -> None:
     """Publish identical application-scope compatibility handles."""
     global application_runtime_services, chat_service
@@ -200,7 +213,6 @@ def _publish_compatibility_handles(app: FastAPI, service, services) -> None:
     application_runtime_services = services
     app.state.chat_service = service
     app.state.runtime_services = services
-
 
 def _clear_compatibility_handles(app: FastAPI) -> None:
     """Invalidate both compatibility views after application shutdown."""
@@ -230,6 +242,55 @@ async def lifespan(app: FastAPI):
 
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.STARTING
     initialization_stack = RuntimeInitializationStack()
+
+    # WP1-D：自动 SQLite persistence preflight（READ ONLY + quick_check）。
+    # 必须在任何持久 Store constructor 之前执行；migration-required /
+    # unsupported / failed 都阻止 READY。Preflight 不创建、不修改任何 DB 文件。
+    persistence_paths = PersistencePaths(
+        memory_db_path=settings.memory_db_path,
+        event_journal_db_path=settings.event_journal_db_path,
+        observability_checkpoint_db_path=settings.observability_checkpoint_db_path,
+        snapshot_store_db_path=(
+            settings.snapshot_store_db_path
+            if settings.snapshot_store_enabled
+            else None
+        ),
+    )
+    try:
+        persistence_preflight_results = run_persistence_preflight(
+            persistence_paths, mode=PreflightMode.STARTUP
+        )
+    except PersistenceError as exc:
+        logger.warning(
+            "Persistence preflight failed",
+            extra={
+                "safe_error_code": exc.error_code,
+                "component": "persistence_preflight",
+                "phase": "initialization",
+                "status": "FAILED",
+            },
+        )
+        await initialization_stack.fail(
+            RuntimeInitializationError("persistence_preflight")
+        )
+    blocking_preflight = preflight_blocks_startup(persistence_preflight_results)
+    if blocking_preflight:
+        for result in blocking_preflight:
+            logger.warning(
+                "Persistence preflight blocked startup",
+                extra={
+                    "safe_error_code": (
+                        result.safe_error_code or PERSISTENCE_PREFLIGHT_FAILED
+                    ),
+                    "component": "persistence_preflight",
+                    "phase": "initialization",
+                    "status": result.status.value,
+                    "store_id": result.store_id.value,
+                },
+            )
+        await initialization_stack.fail(
+            RuntimeInitializationError("persistence_preflight")
+        )
 
     memory_manager = await initialization_stack.create(
         "memory_manager",
@@ -276,6 +337,15 @@ async def lifespan(app: FastAPI):
                 embedding_batch_size=settings.embedding_batch_size,
                 query_prompt_name=settings.embedding_query_prompt_name or None,
             )
+            # WP1-D：Chroma LocalAgent collection marker validation。空 collection
+            # 允许 startup marker initialization；非空不匹配/缺 marker →
+            # REBUILD_REQUIRED（required KB 阻止 READY，optional KB 走 degraded）。
+            # startup 绝不自动 clear / rebuild。
+            chroma_preflight = db_manager.collection_preflight()
+            if chroma_preflight.status is PreflightStatus.NEW:
+                db_manager.publish_collection_marker()
+            elif chroma_preflight.status is PreflightStatus.REBUILD_REQUIRED:
+                raise _ChromaRebuildRequiredError()
             logger.info(
                 "Knowledge base runtime initialized",
                 extra={
@@ -285,6 +355,24 @@ async def lifespan(app: FastAPI):
                     "configured": True,
                     "storage_type": "chroma",
                     "document_count": db_manager.count(),
+                    "collection_status": chroma_preflight.status.value,
+                },
+            )
+        except _ChromaRebuildRequiredError:
+            knowledge_base_error = "KNOWLEDGE_BASE_REBUILD_REQUIRED"
+            if settings.knowledge_base_required:
+                await initialization_stack.fail(
+                    RuntimeInitializationError("knowledge_base")
+                )
+            logger.warning(
+                "Knowledge base collection rebuild required",
+                extra={
+                    "safe_error_code": knowledge_base_error,
+                    "component": "knowledge_base",
+                    "phase": "initialization",
+                    "status": "FAILED",
+                    "configured": True,
+                    "storage_type": "chroma",
                 },
             )
         except Exception:

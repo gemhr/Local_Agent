@@ -108,7 +108,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             query_prompt_name=settings.embedding_query_prompt_name or None,
         )
         if args.rebuild:
-            print(f"[KB] 已清空 Collection，删除 Chunk: {manager.clear_collection()}")
+            # WP1-D：destructive rebuild 必须先使旧 marker 失效/移除，再清空，
+            # 成功后最后发布新 marker。任何失败都不得保留“看似有效”的旧 marker。
+            manager.remove_collection_marker()
+            print(f"[KB] 已移除 LocalAgent Collection marker，删除 Chunk: {manager.clear_collection()}")
 
     batch_id = datetime.now(timezone.utc).isoformat()
     pending_chunks: list[dict] = []
@@ -172,12 +175,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[KB] 解析单元: {parsed_units}")
     print(f"[KB] 生成 Chunk: {total_chunks}")
     print(f"[KB] 实际写入 Chunk: {written_chunks}")
+    marker_publish_failed = False
     if manager is not None:
         print(f"[KB] Collection 当前总量: {manager.count()}")
         print(f"[KB] Chroma 路径: {settings.chroma_dir}")
+        if failed_files == 0 and written_chunks > 0:
+            # WP1-D：完整 source ingest 成功后才发布匹配 marker（最后一步）。
+            try:
+                manager.publish_collection_marker()
+                print("[KB] 已发布 LocalAgent Collection marker")
+            except Exception as exc:
+                marker_publish_failed = True
+                print(f"[KB] LocalAgent Collection marker 发布失败（collection 保持 unmarked）: {exc}")
+        elif failed_files:
+            print("[KB] 存在失败文件，不发布 Collection marker（保持 unmarked/mismatched）")
+        else:
+            print("[KB] 没有写入任何 Chunk，不发布 Collection marker")
     for source, error in failures:
         print(f"[KB] 失败明细: {source}: {error}")
-    return 1 if failed_files else 0
+    return 1 if (failed_files or marker_publish_failed) else 0
 
 
 if __name__ == "__main__":

@@ -254,3 +254,78 @@ KB degraded 语义：`knowledge_base_required=false` 且 KB 初始化/import 失
 - `StartupDependencySnapshot` 是 frozen、application-scope、lifespan 构造一次的 immutable 启动事实；运行中不修改、不持久化。
 - Health / Readiness endpoint 与 Client readiness probe 只读投影；不得写回 lifecycle / admission / snapshot，不触发 recovery/retry。
 - `/readyz` 的 readiness 结论必须与 `/api/chat` 消费的同一 `ApplicationRuntimeServices.admission_gate` identity 一致。
+
+## 11. Persistence / Migration / Operations Closure（WP1-D）
+
+### 11.1 Persistent Store Inventory
+
+| Store | Logical role | Physical unit | Classification | LocalAgent schema owner? | Rebuildable? |
+| --- | --- | --- | --- | --- | --- |
+| Memory | 业务对话、摘要、delivered-only exchange | `agent_memory.db` | DURABLE_APPLICATION_STATE | YES，`MemoryManager` | NO |
+| Runtime Event Journal | append-only Runtime 安全事实、sequence、terminal evidence | `runtime_event_journal.db` | DURABLE_APPLICATION_STATE | YES，`SQLiteRunEventJournal` + `JournalRecord` | NO |
+| Snapshot | opt-in 历史 `RunSnapshot` v1 | `runtime_snapshots.db`（仅 enabled） | DURABLE_APPLICATION_STATE_OPT_IN | YES，`SQLiteSnapshotStore` + Snapshot contract | NO（历史 snapshot） |
+| Observability Checkpoint | logger/metrics 幂等消费 offset | `runtime_observability_checkpoint.db` | REBUILDABLE_DERIVED_STATE | YES，`SQLiteEventConsumptionCheckpointStore` | YES（缺口可接受） |
+| Chroma collection | KB 派生向量索引 | `chroma_db/` | REBUILDABLE_DERIVED_STATE | Chroma internal = NO；LocalAgent collection/chunk contract = YES | YES（需 KB source + 匹配 embedding artifact） |
+| KB source | Chroma rebuild 的业务源 | `data/knowledge_base/` | SOURCE_DATA | 文件/loader contract 由 LocalAgent 管理 | 不应假设可从其他 Store 重建 |
+| GGUF / Embedding model | 生成/向量语义依赖 | `data/models/` | DEPLOYMENT_ARTIFACT | NO | 由已批准 artifact 重新部署 |
+
+逻辑 Store 数 = 5，物理 backup 单元 = 5（Memory、Journal、Snapshot、Checkpoint、Chroma）。
+
+### 11.2 Schema / Version / Migration Policy
+
+| Store | Version mechanism | Migration | Historical rewrite |
+| --- | --- | --- | --- |
+| Memory | `PRAGMA user_version=1`（SQLite physical marker） | 显式 SCRIPT_ROLE：current-unversioned → metadata adoption；唯一 allowlisted pre-additive legacy → additive columns + backfill + tables/indexes/FTS/triggers | 不修改业务 row 正文；version 与 schema change 同事务原子提交 |
+| Journal | exact physical signature（无 DB-level version）；row v1/v2 | 显式 SCRIPT_ROLE：仅允许缺 nullable `span_id`/`parent_span_id` 的 legacy → 单事务 ADD 两列 + index | **FORBIDDEN**（不 UPDATE/DELETE/rewrite 历史 row、version、digest、sequence、terminal ordering） |
+| Snapshot | row/payload v1（`snapshot_schema_version=1`）；exact table shape | 无 migration | FORBIDDEN（v0 不存在；未知版本 fail closed；不写回） |
+| Checkpoint | exact table shape（无版本） | 显式 SCRIPT_ROLE：不兼容 → 单事务 drop/recreate derived table | 可丢弃整个 derived Store（历史 offset 丢弃，不改变业务 Authority） |
+| Chroma | LocalAgent collection metadata marker（`localagent_collection_contract_version=1` + `chunk_schema_version=kb_chunk_schema_v2` + `embedding_compatibility_digest` + `embedding_dimension`） | marker validation + operator rebuild；不碰 Chroma internal SQLite | 不做 internal row migration |
+
+`record/payload schema version != SQLite physical schema version`。`journal_schema_version=2` 只说明 record digest/payload contract，不是 DB physical version；Memory 的 `PRAGMA user_version=1` 才是 physical marker。
+
+### 11.3 Migration Boundary（frozen）
+
+```text
+Migration Runner = Minimal Persistence Migration Coordinator（core/persistence_migration.py）
+Server startup   = automatic READ-ONLY preflight（PRAGMA quick_check + physical shape + 版本事实）
+Existing-data migration = explicit SCRIPT_ROLE command only（manage_persistence.py migrate --backup-confirmed）
+Backup           = manual stopped-server only（.db + 任何 -wal 为同一 unit；-shm 不要求）
+Restore          = manual stopped-server set replacement + explicit full preflight
+Downgrade        = NOT_IMPLEMENTED（forward-only）
+Rollback after schema mutation = restore matching pre-migration backup（binary-only rollback NOT ASSUMED）
+```
+
+- Coordinator 只做 preflight orchestration、migration ordering、safe result aggregation、safe error/result model；
+  不得成为 Memory/Journal/Checkpoint/Chroma schema owner。Store-specific SQL/transaction 保留在对应 Store module。
+- 每个支持 mutation 的 SQLite Store 使用独立单 Store transaction（`BEGIN IMMEDIATE → revalidate from-state → change → version marker（Memory）→ COMMIT`；失败 ROLLBACK）。
+- 无 cross-store atomic transaction / distributed transaction / two-phase commit。多个 Store 部分 commit 后失败：overall FAIL + partial committed facts；rerun 从实际 facts 继续（idempotent / safely re-runnable，不宣称 exactly-once）。
+- Migration 是 forward-only：schema-changing migration 提交后 old binary compatibility NOT ASSUMED。无 reverse SQL / downgrade。
+- Server startup 绝不自动迁移已有数据；preflight 发现 MIGRATION_REQUIRED / UNSUPPORTED / FAILED → `never READY`。
+- 三个新增 safe error code：`PERSISTENCE_SCHEMA_UNSUPPORTED`、`PERSISTENCE_PREFLIGHT_FAILED`、`PERSISTENCE_MIGRATION_FAILED`。
+
+### 11.4 Chroma Third-Party Boundary
+
+```text
+Chroma internal schema migration = NOT_LOCAL_SCHEMA_OWNER
+```
+
+LocalAgent 不读取/不修改 Chroma internal SQLite schema。LocalAgent 拥有 collection/chunk/embedding compatibility contract：
+空 collection 可初始化 marker；非空缺 marker / digest / dimension mismatch → REBUILD_REQUIRED（required KB 阻止 READY，显式 optional KB 允许 READY_DEGRADED）。Startup 绝不自动 clear/rebuild。
+`bootstrap_local_kb.py --rebuild` 是唯一 operator-triggered destructive rebuild：invalidate/remove marker → destructive clear → ingest complete source → verify → **最后发布匹配 marker**；任何失败不得保留“看似有效”的旧 marker。
+`embedding_compatibility_digest` 是 configured compatibility descriptor digest（embedding identity / normalization / query prompt 的 canonical JSON → SHA-256），不是 model artifact 的 cryptographic attestation；raw path 不持久化。
+
+### 11.5 Backup / Restore / Rollback Contract
+
+- MUST_BACKUP（同一 Server-stopped backup epoch）：Memory DB、Journal DB、Snapshot DB（仅 enabled/存在）、KB source、known-good config reference。
+- OPTIONAL_BACKUP：Chroma directory（可加速 restore，correctness 依赖 source + matching embedding artifact rebuild）。
+- BACKUP_OPTIONAL / RECREATE：Observability checkpoint（derived，startup 仍 required）。
+- Restore success 至少要求：显式 full preflight PASS、Server `READY`（或 allowlisted `READY_DEGRADED`）、required durable Stores 可读、health/readiness smoke PASS。
+- 代码回滚与数据回滚是两件事；`CHAT_RUNTIME_MODE=legacy` 不能替代 data rollback。
+
+### 11.6 Migration vs Recovery
+
+```text
+Deployment Migration != Runtime Recovery Validation
+```
+
+Migration 处理 deployment upgrade 中的 Store schema/compatibility（显式 SCRIPT_ROLE，Server stopped）。Recovery 仍为 validation-only：`RecoveryValidator` 只读 Snapshot + Journal 返回 immutable `RecoveryAssessment`；不写 AgentState、不启动 replay/resume、不从 Registry/Memory/adapter 回填历史事实。Migration/backup/restore 均不是 Runtime Recovery，也不改变其 validation-only 边界。
