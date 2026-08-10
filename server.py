@@ -78,6 +78,12 @@ from core.runtime.structured_logging import (
     StructuredLogProjector,
 )
 from core.runtime.tool_registry import ToolRegistry
+from core.runtime.tool_governance import (
+    ToolGovernanceService,
+    ToolPolicyCatalog,
+    register_default_tool_policies,
+)
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from core.settings import SERVER_ROLE, Settings, validate_role_configuration
 from tools.registry import register_all_tools
 
@@ -171,6 +177,21 @@ def _populate_tool_registry() -> ToolRegistry:
     register_all_tools(registry)
     registry.freeze()
     return registry
+
+
+def _build_tool_governance(tool_registry: ToolRegistry) -> ToolGovernanceService:
+    """构造/校验/冻结 ToolPolicyCatalog 并创建唯一 ToolGovernanceService。
+
+    任一 missing/duplicate/unknown policy 引用、unknown/disabled Agent 引用、
+    非法 risk fact / approval rule 都使 startup fail closed（never READY）。
+    """
+    catalog = ToolPolicyCatalog(
+        tool_registry=tool_registry,
+        agent_registry=DEFAULT_AGENT_REGISTRY,
+    )
+    register_default_tool_policies(catalog)
+    catalog.freeze()
+    return ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
 
 
 async def _watch_request_disconnect(
@@ -510,6 +531,12 @@ async def lifespan(app: FastAPI):
         _populate_tool_registry,
         component="tool_registry",
     )
+    # WP2-B Tool Governance：Registry freeze 后构造/校验/冻结 ToolPolicyCatalog
+    # 并创建唯一 Service；任一 policy 校验失败 -> startup fail（never READY）。
+    tool_governance_service = await initialization_stack.run(
+        lambda: _build_tool_governance(tool_registry),
+        component="tool_governance",
+    )
     router = await initialization_stack.create(
         "agent_router",
         lambda: AgentRouter(
@@ -535,6 +562,7 @@ async def lifespan(app: FastAPI):
             span_recorder=span_recorder,
             blocking_executor=blocking_executor,
             tool_registry=tool_registry,
+            tool_governance_service=tool_governance_service,
         ),
     )
     runtime_metrics = InMemoryMetricsRecorder(

@@ -13,6 +13,15 @@ from typing import TYPE_CHECKING, Callable, Generator, Mapping, Optional
 from core.memory_manager import MemoryManager
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from core.runtime.tool_registry import ToolRegistry
+from core.runtime.tool_governance import (
+    ToolGovernanceContext,
+    ToolGovernanceError,
+    ToolGovernanceErrorCode,
+    ToolGovernanceOutcome,
+    ToolGovernanceService,
+    ToolPolicyCatalog,
+    governance_denial_message,
+)
 from core.runtime import (
     ContextBuildRequest, ContextBuilder, ContextBudgetExceededError, ContextItem, ContextSourceType, ContextTrustLevel,
     DeterministicTokenEstimator, ModelContextRequirements, ModelCostProfile, ModelPreference, ModelProfile,
@@ -97,6 +106,7 @@ class AgentRouter:
         span_recorder=None,
         blocking_executor=None,
         tool_registry: ToolRegistry | None = None,
+        tool_governance_service: ToolGovernanceService | None = None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -200,6 +210,15 @@ class AgentRouter:
         if not tool_registry.frozen:
             raise RuntimeError("ToolRegistry 必须在注入 AgentRouter 前冻结")
         self.tool_registry = tool_registry
+        # WP2-B Tool Governance：生产 Composition Root 必须显式注入；未注入时
+        # 使用冻结空 policy 的 deterministic deny-all 兼容 Service（非生产使用，
+        # 不隐含 allow-all，无 module-global mutable authority）。任何 Tool 执行
+        # 都必须经过此 Authority。
+        if tool_governance_service is None:
+            tool_governance_service = self._default_governance_service()
+        elif not isinstance(tool_governance_service, ToolGovernanceService):
+            raise TypeError("tool_governance_service 必须是 ToolGovernanceService")
+        self.tool_governance_service = tool_governance_service
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256
         self.knowledge_rewrite_max_tokens = 128
@@ -207,6 +226,23 @@ class AgentRouter:
         # 路由、执行或 fallback 行为。
         self.agents_config = DEFAULT_AGENT_REGISTRY.legacy_display_config()
         self.delegate_agent_ids = list(DEFAULT_AGENT_REGISTRY.delegated_specialist_ids())
+
+    @staticmethod
+    def _default_governance_service() -> ToolGovernanceService:
+        """无注入时的 deterministic deny-all 兼容 Service（测试/无 Tool 装配 seam）。
+
+        冻结空 ToolPolicyCatalog（0 Tool / 0 policy 通过 coverage 校验）；任何
+        Tool 执行都会得到 ``TOOL_GOVERNANCE_POLICY_MISSING`` fail closed，不会
+        隐式放行。生产路径由 server.py 显式注入真实 Catalog + Service。
+        """
+        empty_registry = ToolRegistry()
+        empty_registry.freeze()
+        catalog = ToolPolicyCatalog(
+            tool_registry=empty_registry,
+            agent_registry=DEFAULT_AGENT_REGISTRY,
+        )
+        catalog.freeze()
+        return ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
 
     @property
     def tools(self) -> Mapping[str, Mapping[str, object]]:
@@ -1153,6 +1189,23 @@ class AgentRouter:
         if active_context is None:
             active_context = RunContext.create(entry_agent_id=agent_id)
             active_context.attach_budget_ledger(BudgetLedger(RunBudget()))
+        step_id = (
+            event_emitter.step_id if event_emitter is not None else "legacy-tool"
+        )
+        # ---- WP2-B Tool Governance 两级 Gate（静态 Permission -> invocation Risk/Approval）----
+        governance_context = ToolGovernanceContext(
+            principal_agent_id=agent_id,
+            run_id=active_context.run_id,
+            step_id=step_id,
+        )
+        auth_decision = self.tool_governance_service.authorize_tool(
+            governance_context, registration
+        )
+        if auth_decision.outcome is not ToolGovernanceOutcome.ALLOW:
+            raise ToolGovernanceError(
+                ToolGovernanceErrorCode(auth_decision.safe_error_code),
+                governance_denial_message(auth_decision.safe_error_code),
+            )
         try:
             invocation = adapter.build_invocation(tool_args)
         except ToolAdapterInvocationError as exc:
@@ -1172,11 +1225,51 @@ class AgentRouter:
                     retry_disposition=RetryDisposition.UNSAFE,
                 )
             ) from None
+        try:
+            execution_spec = adapter.spec_for(invocation)
+        except ToolAdapterInvocationError as exc:
+            raise ToolExecutionFailed(
+                ToolExecutionError(
+                    invocation_id=invocation.invocation_id,
+                    attempt_id=None,
+                    tool_name=invocation.tool_name,
+                    category=exc.category,
+                    safe_error_code=exc.safe_error_code,
+                    safe_message=exc.safe_message,
+                    phase=exc.phase,
+                    provider_started=False,
+                    side_effect_state=ToolSideEffectState.NOT_STARTED,
+                    retry_disposition=RetryDisposition.UNSAFE,
+                )
+            ) from None
+        except (TypeError, ValueError):
+            raise ToolExecutionFailed(
+                ToolExecutionError(
+                    invocation_id=invocation.invocation_id,
+                    attempt_id=None,
+                    tool_name=invocation.tool_name,
+                    category=ToolErrorCategory.VALIDATION,
+                    safe_error_code="TOOL_CONTRACT_VALIDATION_FAILED",
+                    safe_message="Tool contract validation failed.",
+                    phase=ToolExecutionPhase.VALIDATION,
+                    provider_started=False,
+                    side_effect_state=ToolSideEffectState.NOT_STARTED,
+                    retry_disposition=RetryDisposition.UNSAFE,
+                )
+            ) from None
+        invocation_decision = self.tool_governance_service.evaluate_invocation(
+            governance_context, registration, invocation, execution_spec
+        )
+        if invocation_decision.outcome is not ToolGovernanceOutcome.ALLOW:
+            raise ToolGovernanceError(
+                ToolGovernanceErrorCode(invocation_decision.safe_error_code),
+                governance_denial_message(invocation_decision.safe_error_code),
+            )
         outcome = self.tool_execution_service.execute_sync(
             invocation=invocation,
             adapter=adapter,
             run_context=active_context,
-            step_id=event_emitter.step_id if event_emitter is not None else "legacy-tool",
+            step_id=step_id,
             event_emitter=event_emitter,
             fault_controller=fault_controller,
         )
@@ -1205,13 +1298,19 @@ class AgentRouter:
     ) -> Generator[str, None, str]:
         """流式生成最终可见回答。"""
         context_requirements_out: list[ModelContextRequirements] = []
-        messages = self._prepare_answer_messages(
-            agent_id=agent_id,
-            user_query=user_query,
-            history_scope=history_scope,
-            run_context=run_context,
-            context_requirements_out=context_requirements_out,
-        )
+        try:
+            messages = self._prepare_answer_messages(
+                agent_id=agent_id,
+                user_query=user_query,
+                history_scope=history_scope,
+                run_context=run_context,
+                context_requirements_out=context_requirements_out,
+            )
+        except ToolGovernanceError as denied:
+            # WP2-B：governance non-ALLOW 直接输出固定 safe denial；不调用
+            # final-answer model，不重试 planner，不换 Tool，不伪装 Tool 不可用。
+            yield denied.safe_message
+            return denied.safe_message
         if run_context is not None:
             run_context.raise_if_inactive()
         final_response = ""
@@ -1248,16 +1347,22 @@ class AgentRouter:
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
-        messages = self._prepare_answer_messages(
-            agent_id=agent_id,
-            user_query=user_query,
-            history_scope=history_scope,
-            history_policy=history_policy,
-            run_context=run_context,
-            context_requirements_out=context_requirements_out,
-            event_emitter=event_emitter,
-            fault_controller=fault_controller,
-        )
+        try:
+            messages = self._prepare_answer_messages(
+                agent_id=agent_id,
+                user_query=user_query,
+                history_scope=history_scope,
+                history_policy=history_policy,
+                run_context=run_context,
+                context_requirements_out=context_requirements_out,
+                event_emitter=event_emitter,
+                fault_controller=fault_controller,
+            )
+        except ToolGovernanceError as denied:
+            # WP2-B：governance non-ALLOW 直接返回固定 safe denial 作为本步业务
+            # 结果（COORDINATED specialist 结果如实进入既有 synthesis）；不调用
+            # final-answer model，不重试 planner，不换 Tool。
+            return denied.safe_message
         if run_context is not None:
             run_context.raise_if_inactive()
         selection_args = (

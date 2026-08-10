@@ -32,3 +32,22 @@ Prompt、Model output、Tool arguments/output、RAG chunks、Memory 正文、本
 
 密钥只通过受控 secret mechanism 注入，不提交到仓库。文档示例使用相对占位路径、回环 API 地址或 `<redacted>`；远程 Provider endpoint 不在正式结果/报告中回显。错误处理输出字段名和固定码，不输出配置值。
 
+## Tool Governance Security（WP2-B）
+
+`ToolGovernanceService` / `ToolPolicyCatalog` 只处理 Agent ID、canonical Tool name、固定枚举/code、risk classification 与内部 run/step scope。
+
+```text
+允许的 governance safe facts  = risk level（LOW/MEDIUM/HIGH）、risk fact enum、
+                               outcome（ALLOW/DENY/APPROVAL_REQUIRED）、
+                               固定 safe error code、固定中文 safe denial 文本
+禁止进入任何 Event/Journal/Snapshot/Report/Metric/Span/log =
+                               raw Tool arguments、path、prompt、Tool output、
+                               policy allowlist（allowed Agent 集合）、approval evidence、
+                               raw principal（denial 文本不得含执行 Agent ID）
+```
+
+- governance non-ALLOW 不产生 `TOOL_STARTED`/`TOOL_COMPLETED` 或任何 Tool evidence；denial 是直接安全 Wire 文本，不伪造 execution facts。
+- `ToolPermission != filesystem/path authorization`；WP3 sandbox / workspace root / path traversal / secret isolation 仍未实现。
+- `ToolSideEffectKind.NONE` 不表示 permission-free；approval 不是 sandbox。approval evidence、durable pause/resume、human approval workflow 均未实现。
+- **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent / governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后，不为此新增 RuntimeEvent / Journal schema。
+

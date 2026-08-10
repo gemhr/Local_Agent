@@ -10,6 +10,8 @@
 Settings.load()
 -> lifespan() 创建 Application 资源
    -> ToolRegistry：construct -> register_all_tools -> freeze -> 注入 AgentRouter
+   -> ToolPolicyCatalog：construct -> register_default_tool_policies -> validate -> freeze
+   -> ToolGovernanceService：唯一 invocation-time Authority -> 注入 AgentRouter
 -> ApplicationRuntimeServices 收拢依赖与 close ownership
 -> CoordinatedRuntimeFactory 创建每请求 CoordinatedRunScope
 -> ChatService 持有不可变 Runtime selector 与两条显式入口
@@ -33,6 +35,8 @@ Settings.load()
 | 测试 Fixture 进入生产装配 | 否；`ToolCompletionGapFixture` 已移到 `tests/_tool_completion_gap_fixtures.py` |
 | 生产 FaultPlan 入口 | 无 Settings、环境变量、HTTP header/body、Prompt、Tool arguments 入口 |
 | Tool 身份/描述/枚举/绑定来源 | `ToolRegistry`（APPLICATION_SCOPE；lifespan 内 populate + freeze 后注入 AgentRouter，运行期只读） |
+| Tool 静态 policy 来源 | `ToolPolicyCatalog`（APPLICATION_SCOPE；lifespan 内 register_default_tool_policies + validate + freeze；任一校验失败 -> startup fail，never READY） |
+| Tool governance authority | `ToolGovernanceService`（唯一 invocation-time Authority；仅解释 Catalog 与 `ToolExecutionSpec`；AgentRouter 只调用它） |
 | Shutdown owner | `GracefulShutdownCoordinator` |
 
 依赖方向固定为：
@@ -62,6 +66,8 @@ Observability、Trace、Report、RecoveryValidator 不反向修改 AgentState、
 | RetrievalExecutionService | APPLICATION_SCOPE | AgentRouter 装配 | ApplicationRuntimeServices | 缓存 Run/Fault controller |
 | ToolExecutionService | APPLICATION_SCOPE | AgentRouter 装配 | ApplicationRuntimeServices | 缓存 invocation/attempt |
 | ToolRegistry | APPLICATION_SCOPE | `server.py::lifespan()`（populate + freeze） | ApplicationRuntimeServices（随 application 释放） | 运行期注册/变更；暴露内部 mutable mapping；进入 Run 状态 |
+| ToolPolicyCatalog | APPLICATION_SCOPE | `server.py::lifespan()`（register + validate + freeze） | ApplicationRuntimeServices（随 application 释放） | 运行期 register/mutation/hot reload；成为第二 ToolRegistry；保存 execution spec 字段 |
+| ToolGovernanceService | APPLICATION_SCOPE | `server.py::lifespan()` | ApplicationRuntimeServices（随 application 释放） | 成为第二 ToolRegistry / Agent capability owner；保存 raw arguments/path |
 | EventJournal | APPLICATION_SCOPE | lifespan | ApplicationRuntimeServices | 创建 Runtime sequence |
 | SnapshotStore | APPLICATION_SCOPE | lifespan，显式 opt-in | ApplicationRuntimeServices | 推断当前 Registry 为历史事实 |
 | ObservabilityDispatcher | APPLICATION_SCOPE | lifespan | ApplicationRuntimeServices | 修改 Journal/AgentState |
@@ -108,6 +114,32 @@ construct -> register（4 个 ToolRegistration）-> freeze -> 注入 AgentRouter
 - `AgentRouter.tools` 降级为只读兼容视图（由 frozen Registry 派生），不再是 mutable 注册事实源；不提供动态注册 / hot reload / `/api/tools` / 跨进程 Registry。
 - risk / permission / approval 属 WP2-B，不进 Descriptor。
 
+### 2.2 Tool Governance v1（WP2-B，INTERNAL_RC）
+
+`ToolPolicyCatalog` 是静态 Tool governance policy facts 的唯一事实源（APPLICATION_SCOPE / process-local）。生命周期固定：`construct -> register_default_tool_policies（4 条）-> validate（对 frozen ToolRegistry 与 DEFAULT_AGENT_REGISTRY 只读校验）-> freeze -> 运行期只读`。freeze 幂等；freeze 前 read fail closed（`TOOL_GOVERNANCE_NOT_FROZEN`）；freeze 后 register fail closed（`TOOL_GOVERNANCE_FROZEN`）；重复 Tool policy fail closed（`TOOL_GOVERNANCE_DUPLICATE`）。任一 registered Tool 缺 policy、policy 引用未知 Tool / 未知或未启用 Agent、allowed set 为空、risk fact / approval rule 非法 -> `TOOL_GOVERNANCE_INVALID` 使 startup fail（never READY）。
+
+`ToolGovernanceService` 是唯一 invocation-time Authority，只解释 frozen Catalog 与已解析 `ToolExecutionSpec`，不保存 execution spec 字段（不复制 side-effect / idempotency / timeout / concurrency）。
+
+- **Principal**：`actual executing agent_id`（AgentRouter 执行参数）；`RunContext.entry_agent_id` 不被重解释为 execution principal；无 user/tenant IAM。
+- **两级 Gate**（`AgentRouter._prepare_answer_messages`，唯一 production Tool execution seam，覆盖 LEGACY 与 COORDINATED）：
+  ```text
+  ToolRegistry.require(tool_name)
+  -> ToolGovernanceService.authorize_tool(context, registration)   # 静态 Permission：ALLOW / DENY
+  -> adapter.build_invocation(tool_args)
+  -> adapter.spec_for(invocation)
+  -> ToolGovernanceService.evaluate_invocation(context, registration, invocation, execution_spec)  # Risk/Approval
+  -> 仅 ALLOW 调用 ToolExecutionService.execute_sync(...)
+  ```
+  任一阶段非 `ALLOW` 立即以固定 safe denial 终止当前 Tool attempt；两类 non-ALLOW 的 build/spec 事实不同：
+  - 静态 Permission non-ALLOW（`authorize_tool` 返回 DENY）：`build_invocation = NOT CALLED`、`spec_for = NOT CALLED`；
+  - 动态 governance non-ALLOW（`evaluate_invocation` 返回 `APPROVAL_REQUIRED` / `TOOL_RISK_UNCLASSIFIED`）：发生于 build/spec 之后，`build_invocation = ALREADY CALLED`、`spec_for = ALREADY CALLED`。
+  两类均保证：`execute_sync = NOT CALLED`、`invoke_once = NOT CALLED`、`TOOL_STARTED = 0`、`TOOL_COMPLETED = 0`、不重试 planner、不换 Tool、不调用 final-answer model、不跨 Runtime fallback。
+- **Permission**：per-Tool explicit allowed Agent IDs（当前 4 Tool × 5 Agent = 20 条显式授权关系，无 implicit default allow）；未知 principal / missing policy / explicit deny 均 fail closed。
+- **Risk**：只按 Architecture Decision 冻结的 exact full-combination allowlist 分类。完整 key = `(frozenset(static_risk_facts), side_effect_kind, idempotency)`，只有 5 个唯一组合被批准：`{ARBITRARY_LOCAL_FILESYSTEM_READ}+NONE+READ_ONLY -> MEDIUM`、`{SYSTEM_INFORMATION_READ}+NONE+READ_ONLY -> LOW`、`{}+NONE+READ_ONLY -> LOW`、`{}+LOCAL_STATE_MUTATION+IDEMPOTENT_WITH_KEY -> MEDIUM`、`{}+LOCAL_STATE_MUTATION+NON_IDEMPOTENT -> HIGH`。任何其它完整组合（含 static/dynamic 各自已知但组合未冻结、multiple static facts、未知 dynamic enum）一律 `TOOL_RISK_UNCLASSIFIED` fail closed；不实现通用 risk algebra（不取 max、不按 baseline 推断）。`ToolExecutionSpec` 仍是 side_effect_kind / idempotency 唯一 source of truth。
+- **Approval**：effective risk >= policy threshold（HIGH）-> `APPROVAL_REQUIRED`；v1 无 approval evidence capability，因此是 terminal pre-execution safe denial（不是可恢复 PENDING）。无 human approval workflow、无 durable pause/resume、无 approval endpoint。
+- **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent 或 governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后（WP4 候选），不为此新增 RuntimeEvent / Journal schema。
+- **Boundary**：`ToolExecutionService` 仍是 sole actual execution owner（non-ALLOW 时绝不调用）；`ToolRegistry` 仍只回答“What Tools exist?”；`AgentRegistry` capability 不变成 authorization；governance 不是 filesystem sandbox / path authorization（WP3）。
+
 ## 3. Contract Classification
 
 | Contract | Classification | 说明 |
@@ -127,6 +159,13 @@ construct -> register（4 个 ToolRegistration）-> freeze -> 注入 AgentRouter
 | ToolRegistry | INTERNAL_RC | 进程级 Tool 身份/描述/枚举/绑定唯一事实源；startup 冻结后只读 |
 | ToolDescriptor | INTERNAL_RC | 不可变 name + description；不承载执行状态 |
 | ToolRegistration | INTERNAL_RC | 不可变 Descriptor + ToolAdapter 绑定 |
+| ToolPolicy | INTERNAL_RC | 静态 per-Tool policy（explicit allowed Agent IDs + risk facts + approval threshold）；frozen |
+| ToolPolicyCatalog | INTERNAL_RC | 静态 policy facts 唯一事实源；startup 冻结后只读 |
+| ToolGovernanceContext | INTERNAL_RC | frozen；principal_agent_id + run_id + step_id；不保存正文 |
+| ToolGovernanceDecision | INTERNAL_RC | frozen；outcome + risk_level + risk_facts + safe_error_code |
+| ToolGovernanceService | INTERNAL_RC | 唯一 invocation-time Authority；两级 Gate |
+| ToolRiskFact / ToolRiskLevel / ToolGovernanceOutcome | INTERNAL_RC | 固定治理枚举 |
+| ToolGovernanceError / ErrorCode | INTERNAL_RC | 固定 code + fixed safe message；pre-execution governance failure |
 | RetrievalExecutionResult | PUBLIC_STABLE | invocation 结果；不持久化正文 |
 | ModelInvocationResult | PUBLIC_STABLE | routing/retry 结果；不拥有 retry policy |
 | RecoveryAssessment | INTERNAL_STABLE | 只读派生评估；不执行 recovery/replay |

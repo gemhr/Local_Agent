@@ -29,6 +29,14 @@ from core.runtime.tool_registry import (
     ToolRegistryError,
     ToolRegistryErrorCode,
 )
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
+from core.runtime.tool_governance import (
+    PRODUCTION_AGENT_IDS,
+    ToolGovernanceService,
+    ToolPolicy,
+    ToolPolicyCatalog,
+    ToolRiskLevel,
+)
 from core.agent_router import AgentRouter
 from tools.complex_workflow_simulator import InMemoryWorkflowStateStore
 from tools.registry import register_all_tools
@@ -331,8 +339,24 @@ def make_router_for_tool_path(
         )
     )
     registry.freeze()
+    # WP2-B：测试桩注入确定性 governance（5 个 production Agent 对该测试 Tool
+    # explicit ALLOW），使测试 Tool 走与生产一致的两级 Gate。
+    catalog = ToolPolicyCatalog(
+        tool_registry=registry,
+        agent_registry=DEFAULT_AGENT_REGISTRY,
+    )
+    catalog.register(
+        ToolPolicy(
+            tool_name=safe_name,
+            allowed_agent_ids=frozenset(PRODUCTION_AGENT_IDS),
+            approval_required_threshold=ToolRiskLevel.HIGH,
+        )
+    )
+    catalog.freeze()
+    governance_service = ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
     router = AgentRouter.__new__(AgentRouter)
     router.tool_registry = registry
+    router.tool_governance_service = governance_service
     router.tool_execution_service = service or ToolExecutionService()
     router._build_messages = lambda **_: [
         {"role": "system", "content": "system"},
