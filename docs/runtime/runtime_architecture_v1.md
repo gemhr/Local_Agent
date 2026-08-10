@@ -9,6 +9,7 @@
 ```text
 Settings.load()
 -> lifespan() 创建 Application 资源
+   -> ToolRegistry：construct -> register_all_tools -> freeze -> 注入 AgentRouter
 -> ApplicationRuntimeServices 收拢依赖与 close ownership
 -> CoordinatedRuntimeFactory 创建每请求 CoordinatedRunScope
 -> ChatService 持有不可变 Runtime selector 与两条显式入口
@@ -31,6 +32,7 @@ Settings.load()
 | 模块级 current service | `server.py` 保留 `chat_service` 与 `application_runtime_services` 两个 lifespan 兼容句柄；不保存 Run/Controller，生命周期真值同时发布到 `app.state` |
 | 测试 Fixture 进入生产装配 | 否；`ToolCompletionGapFixture` 已移到 `tests/_tool_completion_gap_fixtures.py` |
 | 生产 FaultPlan 入口 | 无 Settings、环境变量、HTTP header/body、Prompt、Tool arguments 入口 |
+| Tool 身份/描述/枚举/绑定来源 | `ToolRegistry`（APPLICATION_SCOPE；lifespan 内 populate + freeze 后注入 AgentRouter，运行期只读） |
 | Shutdown owner | `GracefulShutdownCoordinator` |
 
 依赖方向固定为：
@@ -59,6 +61,7 @@ Observability、Trace、Report、RecoveryValidator 不反向修改 AgentState、
 | Model Adapter | APPLICATION_SCOPE / COMPONENT_SCOPE | model resolver 装配 | ApplicationRuntimeServices | 关闭 Run 资源 |
 | RetrievalExecutionService | APPLICATION_SCOPE | AgentRouter 装配 | ApplicationRuntimeServices | 缓存 Run/Fault controller |
 | ToolExecutionService | APPLICATION_SCOPE | AgentRouter 装配 | ApplicationRuntimeServices | 缓存 invocation/attempt |
+| ToolRegistry | APPLICATION_SCOPE | `server.py::lifespan()`（populate + freeze） | ApplicationRuntimeServices（随 application 释放） | 运行期注册/变更；暴露内部 mutable mapping；进入 Run 状态 |
 | EventJournal | APPLICATION_SCOPE | lifespan | ApplicationRuntimeServices | 创建 Runtime sequence |
 | SnapshotStore | APPLICATION_SCOPE | lifespan，显式 opt-in | ApplicationRuntimeServices | 推断当前 Registry 为历史事实 |
 | ObservabilityDispatcher | APPLICATION_SCOPE | lifespan | ApplicationRuntimeServices | 修改 Journal/AgentState |
@@ -89,6 +92,22 @@ Observability、Trace、Report、RecoveryValidator 不反向修改 AgentState、
 
 共享对象按 Python identity 去重关闭一次。Run scope 只关闭 request-owned Channel、Task、Registry registration 与 Gauge registration；Application resource 只能由 ApplicationRuntimeServices/GracefulShutdownCoordinator 关闭。
 
+### 2.1 Tool Registry / Descriptor（WP2-A，INTERNAL_RC）
+
+`ToolRegistry` 是进程级（APPLICATION_SCOPE）Tool 身份、描述、枚举与执行绑定的唯一事实源。生命周期固定为静态 startup 注册：
+
+```text
+construct -> register（4 个 ToolRegistration）-> freeze -> 注入 AgentRouter -> 运行期只读
+```
+
+- `ToolDescriptor`（frozen）只含 `name` + `description`；name 必须匹配 `^[a-z][a-z0-9_]{0,63}$`（case-sensitive）；description 为 trim 后非空、无控制字符的安全字符串。Descriptor 不复制 `ToolExecutionSpec` 任何字段。
+- `ToolRegistration`（frozen）只含 `descriptor` + `adapter`；注册时校验 `descriptor.name == adapter.spec.tool_name`（invocation-independent identity，以 `ToolExecutionSpec` 为准）。
+- `freeze()` 幂等；freeze 前 read API fail closed（`TOOL_REGISTRY_NOT_FROZEN`）；freeze 后 `register()` fail closed（`TOOL_REGISTRY_FROZEN`）；重复 canonical name fail closed（`TOOL_REGISTRY_DUPLICATE`，保留 original binding，无 last-write-wins）。
+- **Tool resolution owner**：`AgentRouter`（untrusted planner 输出经 `resolve()` 拒绝为 no-tool；trusted internal 经 `require()` fail closed）。**Tool execution owner**：`ToolExecutionService`（生产四个 Tool 全部经 `ToolAdapter -> ToolExecutionService`，为 sole production execution owner；不做 name 解析，handler 由调用方传入）。
+- `ComplexWorkflowToolAdapter.spec_for(invocation)` 保留按 invocation 动态派生 side-effect/idempotency 执行 truth；Descriptor 不固化动态执行语义。
+- `AgentRouter.tools` 降级为只读兼容视图（由 frozen Registry 派生），不再是 mutable 注册事实源；不提供动态注册 / hot reload / `/api/tools` / 跨进程 Registry。
+- risk / permission / approval 属 WP2-B，不进 Descriptor。
+
 ## 3. Contract Classification
 
 | Contract | Classification | 说明 |
@@ -105,6 +124,9 @@ Observability、Trace、Report、RecoveryValidator 不反向修改 AgentState、
 | ToolInvocation | PUBLIC_STABLE | 调用边界，原始 arguments 不进入 Journal/Wire |
 | ToolExecutionResult / ToolExecutionError | PUBLIC_STABLE | 强类型执行结果；不是 state owner |
 | ToolCompletedPayload | PUBLIC_VERSIONED | Event 内嵌 evidence v1；旧缺失字段保持 Unknown |
+| ToolRegistry | INTERNAL_RC | 进程级 Tool 身份/描述/枚举/绑定唯一事实源；startup 冻结后只读 |
+| ToolDescriptor | INTERNAL_RC | 不可变 name + description；不承载执行状态 |
+| ToolRegistration | INTERNAL_RC | 不可变 Descriptor + ToolAdapter 绑定 |
 | RetrievalExecutionResult | PUBLIC_STABLE | invocation 结果；不持久化正文 |
 | ModelInvocationResult | PUBLIC_STABLE | routing/retry 结果；不拥有 retry policy |
 | RecoveryAssessment | INTERNAL_STABLE | 只读派生评估；不执行 recovery/replay |
