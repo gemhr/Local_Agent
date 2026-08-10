@@ -463,8 +463,8 @@ def test_deployment_docs_core_facts_present() -> None:
         "single server process only",
         "persistent",
         "fully_closed",
-        "DEFER TO WP1-D",
         "backup",
+        "MUST_BACKUP",
     ):
         assert required in text, f"deployment runbook missing fact: {required}"
 
@@ -565,3 +565,104 @@ def test_owner_matrix_client_proxy_readers_include_ui_plumbing() -> None:
     # ChatPanel 只是值传递，不得写成第二 Configuration Owner。
     assert "ChatPanel" in row
     assert "Settings.client_trust_env（唯一解析快照）" in row
+
+# ---------------------------------------------------------------------------
+# WP1-D Persistence / Migration / Backup / Restore documentation guards
+# ---------------------------------------------------------------------------
+
+
+def test_deployment_runbook_locks_manual_stopped_server_backup() -> None:
+    """Deployment Runbook 必须把 backup 锁为 manual stopped-server；live raw
+    copy unsupported；WAL unit（.db + -wal）；MUST_BACKUP set 必须出现。"""
+    text = (ROOT / "docs/runtime/runtime_deployment_runbook.md").read_text(encoding="utf-8")
+    assert "manual stopped-server" in text
+    assert "live raw copy" in text and "unsupported" in text
+    assert "MUST_BACKUP" in text
+    assert "-wal" in text
+    assert "automatic backup" in text and "NOT_IMPLEMENTED" in text
+
+
+def test_deployment_runbook_locks_restore_validation() -> None:
+    """Restore 必须锁为 stopped-server set replacement + explicit full preflight。"""
+    text = (ROOT / "docs/runtime/runtime_deployment_runbook.md").read_text(encoding="utf-8")
+    assert "files copied != restore validated" in text
+    assert "full preflight" in text
+    assert "automatic restore" in text and "NOT_IMPLEMENTED" in text
+
+
+def test_deployment_runbook_locks_forward_only_rollback_truth() -> None:
+    """Rollback 必须区分 code/artifact vs persistent-data；binary-only rollback
+    NOT ASSUMED；无 downgrade。"""
+    text = (ROOT / "docs/runtime/runtime_deployment_runbook.md").read_text(encoding="utf-8")
+    assert "old binary compatibility NOT ASSUMED" in text
+    assert "binary-only rollback UNSAFE" in text or "binary-only rollback" in text
+    assert "downgrade migration" in text and "NOT_IMPLEMENTED" in text
+    assert "automatic deployment rollback" in text and "NOT_IMPLEMENTED" in text
+
+
+def test_deployment_runbook_no_longer_defers_migration_to_wp1_d() -> None:
+    """WP1-D 实现后不得再保留 `DEFER TO WP1-D` 的 migration/backup 声明。"""
+    text = (ROOT / "docs/runtime/runtime_deployment_runbook.md").read_text(encoding="utf-8")
+    assert "DEFER TO WP1-D" not in text
+
+
+def test_capability_matrix_wp1_d_statuses() -> None:
+    """Capability Matrix 必须把 preflight/migration/marker 标为 SUPPORTED，
+    automatic backup/restore/rollback/downgrade/online 标为 NOT_IMPLEMENTED，
+    Chroma internal schema migration 标为 NOT_LOCAL_SCHEMA_OWNER。"""
+    text = (ROOT / "docs/runtime/runtime_capability_matrix.md").read_text(encoding="utf-8")
+    for capability in (
+        "Persistence preflight",
+        "Explicit SQLite migration",
+        "Memory versioned migration",
+        "Journal known physical migration",
+        "Checkpoint explicit recreate",
+        "Chroma compatibility marker",
+    ):
+        assert capability in text and "SUPPORTED" in text
+    for capability in (
+        "Automatic backup",
+        "Automatic restore",
+        "Automatic deployment rollback",
+        "Downgrade migration",
+        "Online backup",
+    ):
+        assert capability in text and "NOT_IMPLEMENTED" in text
+    assert "Chroma internal schema migration" in text
+    assert "NOT_LOCAL_SCHEMA_OWNER" in text
+
+
+def test_error_catalog_wp1_d_safe_codes() -> None:
+    """Error Catalog 必须含三个新增 safe persistence code。"""
+    text = (ROOT / "docs/runtime/runtime_error_code_catalog.md").read_text(encoding="utf-8")
+    for code in (
+        "PERSISTENCE_SCHEMA_UNSUPPORTED",
+        "PERSISTENCE_PREFLIGHT_FAILED",
+        "PERSISTENCE_MIGRATION_FAILED",
+    ):
+        assert code in text
+
+
+def test_architecture_doc_locks_migration_vs_recovery() -> None:
+    """Architecture 文档必须显式 Deployment Migration != Runtime Recovery
+    Validation，并锁 forward-only / no downgrade。"""
+    text = (ROOT / "docs/runtime/runtime_architecture_v1.md").read_text(encoding="utf-8")
+    assert "Deployment Migration != Runtime Recovery Validation" in text
+    assert "NOT_IMPLEMENTED" in text and "downgrade" in text
+    assert "PERSISTENCE_SCHEMA_UNSUPPORTED" in text
+
+
+def test_operations_runbook_has_actionable_backup_restore_rollback() -> None:
+    """Operations Runbook 必须给 Operator 可执行的 upgrade/backup/restore/
+    rollback 流程，并锁 forward-only。"""
+    text = (ROOT / "docs/runtime/runtime_operations_runbook.md").read_text(encoding="utf-8")
+    for section in (
+        "## Backup Runbook",
+        "## Restore Runbook",
+        "## Rollback Runbook",
+        "## Migration vs Recovery",
+    ):
+        assert section in text
+    assert "old binary compatibility NOT ASSUMED" in text
+    assert "binary-only rollback" in text and "UNSAFE" in text
+    assert "migrate --backup-confirmed" in text

@@ -204,3 +204,108 @@ GET /readyz    # 200 表示可以安全尝试接受新的 Run
 适合：Coordinated 默认入口存在启动/兼容问题、目标请求尚未开始、且已确认 Legacy 覆盖基础场景。不适合：非幂等副作用后重跑、需要 Snapshot/Recovery evidence、修复 Journal 损坏、绕过 Budget/Cancellation/安全策略。
 
 流程：停止接收新请求→等待/处置现有 Run→修改真实 `CHAT_RUNTIME_MODE` 为 `LEGACY`→重启→请求前确认 mode→执行安全 smoke test。回滚后使用新 RunContext/AgentState；不能对已开始或失败的 Coordinated 请求动态切换，不能宣称 Legacy 拥有完整 Journal/Snapshot/Recovery。共享 Application resource 仍按 identity close once。恢复 Coordinated 时执行同样的请求前配置、重启与 smoke test。
+
+## Persistence Preflight / Migration
+
+### Startup automatic preflight（READ ONLY）
+
+Server 每次 startup 在任何持久 Store constructor 之前自动执行只读 preflight：
+
+```text
+Settings Parse / Semantic Validation
+→ SERVER_ROLE Validation
+→ lifecycle STARTING
+→ automatic SQLite persistence preflight（PRAGMA quick_check + physical shape + 版本事实；不创建/不修改 DB）
+→ required Resource Construction → Chroma open + marker validation → 其余构造 → READY
+```
+
+- 任何 required Store 为 `MIGRATION_REQUIRED` / `UNSUPPORTED` / `FAILED` → startup fail，`never READY`；
+  safe code：`PERSISTENCE_SCHEMA_UNSUPPORTED` / `PERSISTENCE_PREFLIGHT_FAILED`，由 `RUNTIME_INITIALIZATION_FAILED` 边界包装。
+- Chroma marker mismatch → required KB 阻止 READY；显式 optional KB → `READY_DEGRADED`。Startup 绝不自动 clear/rebuild/migrate。
+- `/health`、`/readyz` 保持只读投影，不触发 preflight/migration/repair/restore/rebuild。
+
+### Explicit migration（SCRIPT_ROLE，Server stopped）
+
+```powershell
+uv run python scripts/manage_persistence.py preflight
+uv run python scripts/manage_persistence.py migrate --backup-confirmed
+```
+
+- `preflight`：只读全 Store 检测，输出 `NEW / CURRENT / MIGRATION_REQUIRED / REBUILD_REQUIRED / UNSUPPORTED / FAILED`；非全部 `NEW/CURRENT` 返回 non-zero。
+- `migrate`：先全 Store preflight；任何 UNSUPPORTED/FAILED 或已有数据需要 mutation 时缺少 `--backup-confirmed` → non-zero 且零 mutation。
+- 每 Store 独立单事务：Memory additive migration + `user_version=1` 同事务原子提交；Journal 只加 nullable span 列绝不 rewrite 历史 row；Checkpoint 只 drop/recreate derived table（历史 offset 丢弃，不影响业务 Authority）。
+- 部分 Store commit 后后续失败 → overall FAIL、partial committed facts 如实报告；rerun 从实际 facts 继续（idempotent / safely re-runnable，不宣称 exactly-once）。
+- Migration 是 forward-only：提交后 old binary compatibility NOT ASSUMED；无 downgrade migration。
+
+### Upgrade Flow（Operator）
+
+```text
+1. graceful stop Server（确认进程退出；force-kill 不算可信前置）
+2. 复制 MUST_BACKUP set 到同一 backup epoch（Memory/Journal/Snapshot if enabled 的 .db + 任何 -wal；KB source；known-good config reference）
+3. 对备份副本执行显式 full preflight（只有 PASS 才允许 migrate）
+4. deploy code/artifacts/config
+5. 执行 preflight
+6. 如需要：migrate --backup-confirmed
+7. 如 Chroma marker mismatch：bootstrap_local_kb.py --rebuild（Server stopped、source 可用、embedding 可用）
+8. 再次 preflight
+9. 启动 Server → /health + /readyz + 功能 smoke
+```
+
+## Backup Runbook（manual stopped-server）
+
+```text
+计划升级 → graceful stop Server → 确认 process exited / shutdown truth 可接受
+→ 复制 MUST_BACKUP set 到同一 backup epoch
+  （Memory DB、Journal DB、Snapshot DB if enabled/存在、KB source、known-good config reference；
+   每个 SQLite unit = 主 .db + 任何存在的 -wal；-shm 不要求）
+→ 记录对应 known-good code/config/artifact identity（不记录 secret 明文）
+→ 对备份副本执行显式 full preflight → 只有 PASS 才允许 migrate
+```
+
+```text
+live raw copy               = unsupported（Server 运行中复制 .db 是非一致快照）
+automatic backup            = NOT_IMPLEMENTED
+automatic/scheduled/cloud   = NOT_IMPLEMENTED
+```
+
+## Restore Runbook（manual stopped-server）
+
+```text
+1. stop Server 并确认进程退出；Client 不得打开 Store
+2. 把当前失败/待调查数据整体移动到隔离位置（禁止直接覆盖后丢失证据）
+3. restore target 为空或已完成整组替换（禁止 SQLite/Chroma 目录内混合覆盖）
+4. 从同一 backup epoch 恢复 Memory / Journal / Snapshot（if enabled）/ KB source
+5. Chroma：整体恢复并验证 marker，否则隔离现有 Chroma，用匹配 embedding artifact 从 source 显式 rebuild
+6. Checkpoint 默认 recreate；即使恢复旧 checkpoint 也必须通过 exact-shape preflight
+7. 显式 full preflight（Server 启动前；不兼容则不启动）
+8. 启动 known-compatible code/config/artifact → /health + /readyz + Memory/Journal/KB 功能 smoke
+```
+
+`files copied != restore validated`。任一步失败都停止；不对备份原件执行修复/迁移。Restore success 至少要求：显式 full preflight PASS、Server `READY`（或 allowlisted `READY_DEGRADED`）、required durable Stores 可读、health/readiness smoke PASS；若 KB 为 required，Chroma 不得以 degraded 代替 restore 成功。
+
+## Rollback Runbook（manual）
+
+```text
+Upgrade before migration：take + validate backup
+Upgrade fails before any data migration commit：只回滚 code/artifact/config（数据未变，可安全保留）
+Any schema migration committed：old binary compatibility NOT ASSUMED
+  → stop Server
+  → 保留当前 migrated data
+  → 恢复 matching pre-migration MUST_BACKUP set
+  → 恢复 known-good code/config/artifacts
+  → preflight → start → health/readiness + functional smoke
+```
+
+```text
+binary-only rollback after schema migration = UNSAFE / NOT ASSUMED
+downgrade migration                         = NOT_IMPLEMENTED
+automatic deployment rollback               = NOT_IMPLEMENTED
+```
+
+## Migration vs Recovery
+
+```text
+Deployment Migration != Runtime Recovery Validation
+```
+
+Migration 处理 deployment upgrade 中的 Store schema/compatibility（显式 SCRIPT_ROLE，Server stopped）。Runtime Recovery 仍为 validation-only：`RecoveryValidator` 只读 Snapshot + Journal 返回 immutable assessment；不写 AgentState、不启动 replay/resume、不回填历史事实。不得把备份/恢复说成 Runtime Recovery。

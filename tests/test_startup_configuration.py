@@ -405,3 +405,326 @@ def test_chat_service_does_not_expose_second_capacity_owner() -> None:
 def test_settings_still_have_no_fault_surface() -> None:
     fields = {field.name.lower() for field in Settings.__dataclass_fields__.values()}
     assert not any("fault" in name or "chaos" in name for name in fields)
+
+
+# ---- WP1-D persistence preflight startup integration ----
+
+def test_persistence_preflight_precedes_memory_constructor() -> None:
+    source = inspect.getsource(server.lifespan)
+    preflight_call = source.index("run_persistence_preflight")
+    memory_call = source.index("MemoryManager(")
+    assert preflight_call < memory_call
+    # preflight 在首个 resource 构造之前（role validation 之后）
+    assert source.index("RuntimeInitializationStack()") < preflight_call
+
+
+def _memory_legacy_sql(db_path: Path) -> None:
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                metadata TEXT
+            );
+            CREATE TABLE conversation_summaries (
+                agent_id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL,
+                last_message_id INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX idx_messages_agent_time
+                ON messages(agent_id, timestamp DESC, id DESC);
+            CREATE INDEX idx_messages_timestamp
+                ON messages(timestamp DESC, id DESC);
+            """
+        )
+
+
+def _memory_columns(db_path: Path) -> frozenset[str]:
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        return frozenset(
+            row[1] for row in conn.execute("PRAGMA table_info(messages)")
+        )
+
+
+@pytest.mark.asyncio
+async def test_memory_migration_required_blocks_ready(monkeypatch, tmp_path) -> None:
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    db_path = Path(settings.memory_db_path)
+    _memory_legacy_sql(db_path)
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+    # constructor 未执行 mutation：legacy 保持 legacy（列未被补加）
+    assert "memory_scope" not in _memory_columns(db_path)
+
+
+@pytest.mark.asyncio
+async def test_memory_unsupported_blocks_ready(monkeypatch, tmp_path) -> None:
+    import sqlite3
+
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    db_path = Path(settings.memory_db_path)
+    from core.memory_manager import MemoryManager
+
+    manager = MemoryManager(db_path=str(db_path))
+    manager.add_message("a", "user", "hello")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 2")
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+
+
+@pytest.mark.asyncio
+async def test_journal_migration_required_blocks_ready(monkeypatch, tmp_path) -> None:
+    import sqlite3
+
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    journal_path = Path(settings.event_journal_db_path)
+    with sqlite3.connect(journal_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE runtime_event_journal (
+                journal_schema_version INTEGER NOT NULL,
+                event_schema_version INTEGER NOT NULL,
+                event_id TEXT NOT NULL UNIQUE,
+                run_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                emitted_at TEXT NOT NULL,
+                journaled_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                component TEXT NOT NULL,
+                step_id TEXT,
+                step_sequence INTEGER,
+                safe_payload TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                event_digest TEXT NOT NULL,
+                PRIMARY KEY (run_id, sequence)
+            );
+            CREATE INDEX idx_runtime_event_journal_run_type
+                ON runtime_event_journal(run_id, event_type);
+            """
+        )
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_incompatible_blocks_ready(monkeypatch, tmp_path) -> None:
+    import sqlite3
+
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    checkpoint_path = Path(settings.observability_checkpoint_db_path)
+    with sqlite3.connect(checkpoint_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE event_consumption_checkpoint (
+                consumer_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                processed_at TEXT NOT NULL
+            )
+            """
+        )
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+
+
+@pytest.mark.asyncio
+async def test_quick_check_failed_blocks_ready(monkeypatch, tmp_path) -> None:
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    db_path = Path(settings.memory_db_path)
+    db_path.write_bytes(b"NOT A SQLITE DATABASE" * 8)
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+
+
+@pytest.mark.asyncio
+async def test_all_current_preflight_reaches_ready_and_sets_memory_v1(
+    monkeypatch, tmp_path
+) -> None:
+    """happy path：全新/current persistence → READY，且 constructor 新建 v1。"""
+    import sqlite3
+
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    async with server.lifespan(app):
+        assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.READY
+        assert (
+            app.state.runtime_services.startup_dependency_snapshot
+            .knowledge_base_degraded
+            is True
+        )
+    with sqlite3.connect(settings.memory_db_path) as conn:
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 1
+
+
+# ---- WP1-D P1 remediation：malformed physical signature startup fail-closed ----
+
+def _malformed_memory_bytes(path: Path) -> bytes:
+    import sqlite3
+
+    with sqlite3.connect(path) as conn:
+        return conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'"
+        ).fetchone()[0].encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_malformed_memory_blocks_ready_and_not_repaired(
+    monkeypatch, tmp_path
+) -> None:
+    from test_persistence_preflight import _memory_malformed_constraints
+
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    db_path = Path(settings.memory_db_path)
+    _memory_malformed_constraints(db_path)
+    before = _malformed_memory_bytes(db_path)
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+    # constructor 未修复：messages 表 SQL 保持不变
+    assert _malformed_memory_bytes(db_path) == before
+
+
+@pytest.mark.asyncio
+async def test_malformed_journal_blocks_ready(monkeypatch, tmp_path) -> None:
+    from test_persistence_preflight import _journal_malformed
+
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    journal_path = Path(settings.event_journal_db_path)
+    _journal_malformed(journal_path)
+    before = journal_path.read_bytes()
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+    assert journal_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_malformed_snapshot_enabled_blocks_ready(monkeypatch, tmp_path) -> None:
+    from test_persistence_preflight import _snapshot_malformed
+
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    monkeypatch.setenv("LOCAL_AGENT_SNAPSHOT_ENABLED", "true")
+    settings = Settings.load()
+    snapshot_path = Path(settings.snapshot_store_db_path)
+    _snapshot_malformed(snapshot_path)
+    before = snapshot_path.read_bytes()
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+    assert snapshot_path.read_bytes() == before
+
+
+# ---- WP1-D second P1 remediation：semantic UNIQUE startup fail-closed ----
+
+@pytest.mark.asyncio
+async def test_memory_missing_run_id_unique_blocks_ready(monkeypatch, tmp_path) -> None:
+    """Re-Gate reproduction：message_exchanges.run_id 缺 UNIQUE → preflight
+    UNSUPPORTED → never READY → DB 保持未修改。"""
+    from test_persistence_preflight import _memory_missing_run_id_unique
+
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    db_path = Path(settings.memory_db_path)
+    _memory_missing_run_id_unique(db_path)
+    before = db_path.read_bytes()
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+    assert db_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_journal_extra_unique_blocks_ready(monkeypatch, tmp_path) -> None:
+    """Journal 额外 UNIQUE(trace_id) → preflight UNSUPPORTED → never READY。"""
+    import sqlite3
+
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    journal_path = Path(settings.event_journal_db_path)
+    with sqlite3.connect(journal_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE runtime_event_journal (
+                journal_schema_version INTEGER NOT NULL,
+                event_schema_version INTEGER NOT NULL,
+                event_id TEXT NOT NULL UNIQUE,
+                run_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                emitted_at TEXT NOT NULL,
+                journaled_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                component TEXT NOT NULL,
+                step_id TEXT,
+                step_sequence INTEGER,
+                span_id TEXT,
+                parent_span_id TEXT,
+                safe_payload TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                event_digest TEXT NOT NULL,
+                PRIMARY KEY (run_id, sequence)
+            );
+            CREATE INDEX idx_runtime_event_journal_run_type
+                ON runtime_event_journal(run_id, event_type);
+            CREATE UNIQUE INDEX j_extra_trace ON runtime_event_journal(trace_id);
+            """
+        )
+    before = journal_path.read_bytes()
+    monkeypatch.setattr(server, "settings", settings)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "persistence_preflight"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+    assert journal_path.read_bytes() == before

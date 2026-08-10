@@ -5,22 +5,41 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
+from core.persistence_migration import (
+    PERSISTENCE_MIGRATION_FAILED,
+    PERSISTENCE_PREFLIGHT_FAILED,
+    PERSISTENCE_SCHEMA_UNSUPPORTED,
+    MigrationAction,
+    PersistenceError,
+    PersistencePreflightResult,
+    PreflightMode,
+    PreflightStatus,
+    StoreId,
+    open_read_only,
+    sqlite_quick_check,
+)
 from core.runtime.event_journal import (
     JOURNAL_SCHEMA_VERSION,
     JournalAppendStatus,
     JournalError,
     JournalErrorCode,
     JournalRecord,
+    SUPPORTED_JOURNAL_SCHEMA_VERSIONS,
     canonical_json,
     validate_read_arguments,
 )
-from core.runtime.events import RuntimeEvent, RuntimeEventType
+from core.runtime.events import (
+    RUNTIME_EVENT_SCHEMA_VERSION,
+    RuntimeEvent,
+    RuntimeEventType,
+)
 from core.runtime.observability import (
     NoopRuntimeInfrastructureMetricsHook,
     RuntimeInfrastructureMetricsHook,
@@ -255,10 +274,9 @@ class SQLiteRunEventJournal:
                 )
                 """
             )
-            columns = {row[1] for row in self._connection.execute("PRAGMA table_info(runtime_event_journal)")}
-            for column in ("span_id", "parent_span_id"):
-                if column not in columns:
-                    self._connection.execute(f"ALTER TABLE runtime_event_journal ADD COLUMN {column} TEXT")
+            # WP1-D：constructor 不再对 existing legacy（缺 span 列）DB 隐式
+            # ALTER；legacy physical shape 由 startup preflight 拦截为
+            # MIGRATION_REQUIRED，只能由显式 SCRIPT_ROLE migrate 命令迁移。
             self._connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS
@@ -487,41 +505,7 @@ class SQLiteRunEventJournal:
         return self._connection.execute(statement, parameters).fetchone()
 
     def _record_from_row(self, row: sqlite3.Row) -> JournalRecord:
-        try:
-            record = JournalRecord(
-                journal_schema_version=int(row["journal_schema_version"]),
-                event_schema_version=int(row["event_schema_version"]),
-                event_id=str(row["event_id"]),
-                run_id=str(row["run_id"]),
-                trace_id=str(row["trace_id"]),
-                sequence=int(row["sequence"]),
-                emitted_at=datetime.fromisoformat(str(row["emitted_at"])),
-                journaled_at=datetime.fromisoformat(str(row["journaled_at"])),
-                event_type=RuntimeEventType(str(row["event_type"])),
-                component=str(row["component"]),
-                step_id=(
-                    str(row["step_id"]) if row["step_id"] is not None else None
-                ),
-                step_sequence=(
-                    int(row["step_sequence"])
-                    if row["step_sequence"] is not None
-                    else None
-                ),
-                span_id=(str(row["span_id"]) if row["span_id"] is not None else None),
-                parent_span_id=(str(row["parent_span_id"]) if row["parent_span_id"] is not None else None),
-                safe_payload=json.loads(str(row["safe_payload"])),
-                payload_digest=str(row["payload_digest"]),
-                event_digest=str(row["event_digest"]),
-            )
-            record.verify()
-            return record
-        except JournalError:
-            raise
-        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-            raise JournalError(
-                JournalErrorCode.JOURNAL_CORRUPTED,
-                "SQLite Journal 记录结构损坏",
-            ) from exc
+        return _journal_record_from_row(row)
 
     def _verify_terminal_invariant(self, run_id: str) -> None:
         rows = self._connection.execute(
@@ -566,3 +550,421 @@ class SQLiteRunEventJournal:
             self._connection.execute("ROLLBACK")
         except sqlite3.Error:
             return
+
+
+# ---------------------------------------------------------------------------
+# WP1-D Journal Physical Preflight / Migration（Store-owned，Coordinator 编排）
+# ---------------------------------------------------------------------------
+
+# 每个条目 = (name, declared_type, notnull, dflt_value, pk_position)。
+_JOURNAL_CURRENT_COLUMNS = (
+    ("journal_schema_version", "INTEGER", 1, None, 0),
+    ("event_schema_version", "INTEGER", 1, None, 0),
+    ("event_id", "TEXT", 1, None, 0),
+    ("run_id", "TEXT", 1, None, 1),
+    ("trace_id", "TEXT", 1, None, 0),
+    ("sequence", "INTEGER", 1, None, 2),
+    ("emitted_at", "TEXT", 1, None, 0),
+    ("journaled_at", "TEXT", 1, None, 0),
+    ("event_type", "TEXT", 1, None, 0),
+    ("component", "TEXT", 1, None, 0),
+    ("step_id", "TEXT", 0, None, 0),
+    ("step_sequence", "INTEGER", 0, None, 0),
+    ("span_id", "TEXT", 0, None, 0),
+    ("parent_span_id", "TEXT", 0, None, 0),
+    ("safe_payload", "TEXT", 1, None, 0),
+    ("payload_digest", "TEXT", 1, None, 0),
+    ("event_digest", "TEXT", 1, None, 0),
+)
+_JOURNAL_LEGACY_COLUMNS = tuple(
+    entry for entry in _JOURNAL_CURRENT_COLUMNS
+    if entry[0] not in {"span_id", "parent_span_id"}
+)
+_JOURNAL_RUN_TYPE_INDEX = ("idx_runtime_event_journal_run_type", (0, 0, ("run_id", "event_type")))
+_SUPPORTED_EVENT_SCHEMA_VERSIONS = frozenset(
+    {1, RUNTIME_EVENT_SCHEMA_VERSION}
+)
+
+
+def _norm_type(value) -> str:
+    return str(value).upper()
+
+
+def _norm_default(value) -> object:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1]
+    return text.lower()
+
+
+def _journal_table_columns_match(
+    conn: sqlite3.Connection, expected: tuple
+) -> bool:
+    """按列名匹配（非物理顺序）：ALTER ADD COLUMN 追加列到表尾，物理顺序
+    不是语义合同；类型/NOT NULL/DEFAULT/PK 位置按列名精确比较。"""
+    try:
+        actual = conn.execute(
+            "PRAGMA table_info(runtime_event_journal)"
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    if len(actual) != len(expected):
+        return False
+    actual_by_name = {row[1]: row for row in actual}
+    for name, type_, notnull, dflt, pk in expected:
+        row = actual_by_name.get(name)
+        if row is None:
+            return False
+        if _norm_type(row[2]) != _norm_type(type_):
+            return False
+        if int(row[3]) != int(notnull):
+            return False
+        if _norm_default(row[4]) != _norm_default(dflt):
+            return False
+        if int(row[5]) != int(pk):
+            return False
+    return True
+
+
+def _journal_index_columns(conn: sqlite3.Connection, index_name: str) -> tuple:
+    try:
+        return tuple(
+            r[2] for r in conn.execute(f"PRAGMA index_info({index_name})")
+        )
+    except sqlite3.Error:
+        return ()
+
+
+def _journal_pk_matches(conn: sqlite3.Connection) -> bool:
+    """PRIMARY KEY(run_id, sequence) 必须是 origin='pk' 的 unique autoindex，
+    且列序为 (run_id, sequence)。"""
+    try:
+        rows = conn.execute("PRAGMA index_list(runtime_event_journal)").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        # (seq, name, unique, origin, partial)
+        if row[3] == "pk" and int(row[2]) == 1:
+            if _journal_index_columns(conn, row[1]) == ("run_id", "sequence"):
+                return True
+    return False
+
+
+def _journal_event_id_unique_matches(conn: sqlite3.Connection) -> bool:
+    """event_id UNIQUE 必须是 origin='u' 的 unique autoindex，列为 (event_id)。"""
+    try:
+        rows = conn.execute("PRAGMA index_list(runtime_event_journal)").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        if row[3] == "u" and int(row[2]) == 1:
+            if _journal_index_columns(conn, row[1]) == ("event_id",):
+                return True
+    return False
+
+
+def _journal_run_type_index_matches(conn: sqlite3.Connection) -> bool:
+    index_name, (unique, partial, columns) = _JOURNAL_RUN_TYPE_INDEX
+    try:
+        rows = conn.execute("PRAGMA index_list(runtime_event_journal)").fetchall()
+    except sqlite3.Error:
+        return False
+    for row in rows:
+        if row[1] != index_name:
+            continue
+        if int(row[2]) != unique or int(row[4]) != partial:
+            return False
+        return _journal_index_columns(conn, index_name) == columns
+    return False
+
+
+def _journal_unique_constraint_set(conn: sqlite3.Connection) -> frozenset[tuple[str, ...]]:
+    """table-level UNIQUE constraint（origin='u'）列元组集合；不含 PK/named index。
+    current contract 必须恰为 {("event_id",)}；额外 UNIQUE（如 trace_id）
+    会改变合法 append 语义 → 拒绝。"""
+    result: set[tuple[str, ...]] = set()
+    try:
+        rows = conn.execute("PRAGMA index_list(runtime_event_journal)").fetchall()
+    except sqlite3.Error:
+        return frozenset()
+    for row in rows:
+        if row[3] == "u":
+            result.add(_journal_index_columns(conn, row[1]))
+    return frozenset(result)
+
+
+def _journal_unique_named_indexes(conn: sqlite3.Connection) -> frozenset[str]:
+    """unique named index（origin='c'，unique=1）名称集合；current contract 必须为空。"""
+    try:
+        return frozenset(
+            row[1]
+            for row in conn.execute("PRAGMA index_list(runtime_event_journal)").fetchall()
+            if row[3] == "c" and int(row[2]) == 1
+        )
+    except sqlite3.Error:
+        return frozenset()
+
+
+def _detect_journal_shape(conn: sqlite3.Connection) -> str:
+    """返回 current / legacy / unknown；基于 deterministic exact physical
+    signature：列/类型/NOT NULL/PK(run_id, sequence)/event_id UNIQUE/
+    required index/UNIQUE semantic set exact 全部精确匹配。malformed（列名对
+    但约束错或存在额外 UNIQUE）→ unknown → UNSUPPORTED（fail closed）。"""
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "runtime_event_journal" not in tables:
+        return "unknown"
+    if (
+        _journal_table_columns_match(conn, _JOURNAL_CURRENT_COLUMNS)
+        and _journal_pk_matches(conn)
+        and _journal_event_id_unique_matches(conn)
+        and _journal_run_type_index_matches(conn)
+        and _journal_unique_constraint_set(conn) == frozenset({("event_id",)})
+        and _journal_unique_named_indexes(conn) == frozenset()
+    ):
+        return "current"
+    if (
+        _journal_table_columns_match(conn, _JOURNAL_LEGACY_COLUMNS)
+        and _journal_pk_matches(conn)
+        and _journal_event_id_unique_matches(conn)
+        and _journal_run_type_index_matches(conn)
+        and _journal_unique_constraint_set(conn) == frozenset({("event_id",)})
+        and _journal_unique_named_indexes(conn) == frozenset()
+    ):
+        return "legacy"
+    return "unknown"
+
+
+def _journal_record_from_row(row: sqlite3.Row) -> JournalRecord:
+    """Module-level row → JournalRecord；与实例方法同构，供只读 full preflight。"""
+    try:
+        record = JournalRecord(
+            journal_schema_version=int(row["journal_schema_version"]),
+            event_schema_version=int(row["event_schema_version"]),
+            event_id=str(row["event_id"]),
+            run_id=str(row["run_id"]),
+            trace_id=str(row["trace_id"]),
+            sequence=int(row["sequence"]),
+            emitted_at=datetime.fromisoformat(str(row["emitted_at"])),
+            journaled_at=datetime.fromisoformat(str(row["journaled_at"])),
+            event_type=RuntimeEventType(str(row["event_type"])),
+            component=str(row["component"]),
+            step_id=(
+                str(row["step_id"]) if row["step_id"] is not None else None
+            ),
+            step_sequence=(
+                int(row["step_sequence"])
+                if row["step_sequence"] is not None
+                else None
+            ),
+            span_id=(str(row["span_id"]) if row["span_id"] is not None else None),
+            parent_span_id=(
+                str(row["parent_span_id"]) if row["parent_span_id"] is not None else None
+            ),
+            safe_payload=json.loads(str(row["safe_payload"])),
+            payload_digest=str(row["payload_digest"]),
+            event_digest=str(row["event_digest"]),
+        )
+        record.verify()
+        return record
+    except JournalError:
+        raise
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise JournalError(
+            JournalErrorCode.JOURNAL_CORRUPTED,
+            "SQLite Journal 记录结构损坏",
+        ) from exc
+
+
+def _journal_row_versions_supported(conn: sqlite3.Connection) -> bool:
+    """Distinct record versions 必须 ⊆ 支持集合（journal 1/2，event 1/2）。"""
+    try:
+        journal_versions = {
+            int(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT journal_schema_version FROM runtime_event_journal"
+            )
+        }
+        event_versions = {
+            int(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT event_schema_version FROM runtime_event_journal"
+            )
+        }
+    except sqlite3.Error:
+        return False
+    return (
+        journal_versions <= set(SUPPORTED_JOURNAL_SCHEMA_VERSIONS)
+        and event_versions <= _SUPPORTED_EVENT_SCHEMA_VERSIONS
+    )
+
+
+def _journal_verify_all_records_readonly(conn: sqlite3.Connection) -> None:
+    """FULL 模式：逐 row 构造 JournalRecord 并 verify digest；校验 per-run
+    terminal invariant（至多一个 terminal 且为最后 sequence）。只读。"""
+    rows = conn.execute(
+        "SELECT * FROM runtime_event_journal ORDER BY run_id, sequence"
+    ).fetchall()
+    run_sequences: dict[str, list[tuple[int, RuntimeEventType]]] = {}
+    for row in rows:
+        record = _journal_record_from_row(row)
+        run_sequences.setdefault(record.run_id, []).append(
+            (record.sequence, record.event_type)
+        )
+    for run_id, entries in run_sequences.items():
+        terminals = [
+            sequence
+            for sequence, event_type in entries
+            if event_type is _TERMINAL_EVENT_TYPE
+        ]
+        if len(terminals) > 1 or (
+            terminals and terminals[0] != max(sequence for sequence, _ in entries)
+        ):
+            raise PersistenceError(
+                PERSISTENCE_PREFLIGHT_FAILED,
+                "Journal Run 终态不变量被破坏",
+            )
+
+
+def _journal_failed_result() -> PersistencePreflightResult:
+    return PersistencePreflightResult(
+        store_id=StoreId.EVENT_JOURNAL,
+        status=PreflightStatus.FAILED,
+        action=MigrationAction.NONE,
+        detected_version="unknown",
+        safe_error_code=PERSISTENCE_PREFLIGHT_FAILED,
+    )
+
+
+def journal_preflight(
+    db_path: str, *, mode: PreflightMode = PreflightMode.STARTUP
+) -> PersistencePreflightResult:
+    """Read-only Journal preflight；绝不在 preflight 中创建或修改 DB。"""
+    if not os.path.exists(db_path):
+        return PersistencePreflightResult(
+            store_id=StoreId.EVENT_JOURNAL,
+            status=PreflightStatus.NEW,
+            action=MigrationAction.INITIALIZE,
+            detected_version="absent",
+            target_version="current",
+        )
+    try:
+        sqlite_quick_check(db_path)
+    except PersistenceError:
+        return _journal_failed_result()
+    try:
+        conn = open_read_only(db_path)
+    except PersistenceError:
+        return _journal_failed_result()
+    try:
+        shape = _detect_journal_shape(conn)
+        versions_supported = _journal_row_versions_supported(conn)
+        if shape == "current":
+            if not versions_supported:
+                return PersistencePreflightResult(
+                    store_id=StoreId.EVENT_JOURNAL,
+                    status=PreflightStatus.UNSUPPORTED,
+                    action=MigrationAction.NONE,
+                    detected_version="current",
+                    target_version="current",
+                    safe_error_code=PERSISTENCE_SCHEMA_UNSUPPORTED,
+                )
+            if mode is PreflightMode.FULL:
+                _journal_verify_all_records_readonly(conn)
+            return PersistencePreflightResult(
+                store_id=StoreId.EVENT_JOURNAL,
+                status=PreflightStatus.CURRENT,
+                action=MigrationAction.NONE,
+                detected_version="current",
+                target_version="current",
+            )
+        if shape == "legacy":
+            if not versions_supported:
+                return PersistencePreflightResult(
+                    store_id=StoreId.EVENT_JOURNAL,
+                    status=PreflightStatus.UNSUPPORTED,
+                    action=MigrationAction.NONE,
+                    detected_version="legacy",
+                    target_version="current",
+                    safe_error_code=PERSISTENCE_SCHEMA_UNSUPPORTED,
+                )
+            return PersistencePreflightResult(
+                store_id=StoreId.EVENT_JOURNAL,
+                status=PreflightStatus.MIGRATION_REQUIRED,
+                action=MigrationAction.MIGRATE,
+                detected_version="legacy",
+                target_version="current",
+            )
+        return PersistencePreflightResult(
+            store_id=StoreId.EVENT_JOURNAL,
+            status=PreflightStatus.UNSUPPORTED,
+            action=MigrationAction.NONE,
+            detected_version="unknown",
+            target_version="current",
+            safe_error_code=PERSISTENCE_SCHEMA_UNSUPPORTED,
+        )
+    except PersistenceError:
+        return _journal_failed_result()
+    except (JournalError, sqlite3.Error, ValueError, TypeError, json.JSONDecodeError):
+        return _journal_failed_result()
+    finally:
+        conn.close()
+
+
+def journal_migrate(db_path: str) -> None:
+    """显式 Journal migration：单 transaction 内 revalidate exact legacy shape，
+    ADD 两个 nullable span 列 + 确保 index；绝不 UPDATE/DELETE 历史 row，
+    绝不重写 version / digest / payload。"""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=FULL")
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        shape = _detect_journal_shape(conn)
+        if shape != "legacy":
+            raise PersistenceError(
+                PERSISTENCE_MIGRATION_FAILED,
+                "Journal 迁移前置校验未通过：只接受 exact legacy（缺 span 列）shape",
+            )
+        if not _journal_row_versions_supported(conn):
+            raise PersistenceError(
+                PERSISTENCE_MIGRATION_FAILED,
+                "Journal 历史 row 版本不受支持，拒绝迁移",
+            )
+        conn.execute("ALTER TABLE runtime_event_journal ADD COLUMN span_id TEXT")
+        conn.execute(
+            "ALTER TABLE runtime_event_journal ADD COLUMN parent_span_id TEXT"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runtime_event_journal_run_type "
+            "ON runtime_event_journal(run_id, event_type)"
+        )
+        # §23：COMMIT 前必须通过 strict current physical validation；
+        # 失败 ROLLBACK，绝不提交非 exact current shape。
+        if _detect_journal_shape(conn) != "current":
+            raise PersistenceError(
+                PERSISTENCE_MIGRATION_FAILED,
+                "Journal 迁移后 physical signature 校验未通过，拒绝提交",
+            )
+        conn.execute("COMMIT")
+    except PersistenceError:
+        _journal_migrate_rollback(conn)
+        raise
+    except sqlite3.Error:
+        _journal_migrate_rollback(conn)
+        raise PersistenceError(PERSISTENCE_MIGRATION_FAILED) from None
+    finally:
+        conn.close()
+
+
+def _journal_migrate_rollback(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("ROLLBACK")
+    except sqlite3.Error:
+        pass

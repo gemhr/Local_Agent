@@ -140,14 +140,14 @@ $env:LOCAL_AGENT_WIKI_COOKIE="<secret-store-reference>"
 
 ### Durable State（Windows 持久化路径）
 
-| 数据 | 默认路径 | 分类 | 说明 |
-| --- | --- | --- | --- |
-| Memory DB | `data/database/agent_memory.db` | Durable State（required） | 业务 Memory；初始化失败 fail fast |
-| Runtime Event Journal | `data/database/runtime_event_journal.db` | Durable State（required） | append-only；损坏/追加失败 fail closed |
-| Observability checkpoint | `data/database/runtime_observability_checkpoint.db` | Durable State（required） | consumer checkpoint store |
-| Snapshot DB | `data/database/runtime_snapshots.db` | Durable State（opt-in） | 仅 `LOCAL_AGENT_SNAPSHOT_ENABLED=true` 时装配 |
-| Chroma | `chroma_db/` | Durable State | KB 配置相关；缺失时走 allowlisted degradation（PRODUCTION 默认 required） |
-| Knowledge Base | `data/knowledge_base/` | Durable State | 业务 KB；脚本/同步写入 |
+| 数据 | 默认路径 | 分类 | Schema/version | 说明 |
+| --- | --- | --- | --- | --- |
+| Memory DB | `data/database/agent_memory.db` | Durable State（required） | Memory SQLite `PRAGMA user_version=1` | 业务 Memory；startup preflight 通过后才构造；初始化失败 fail fast |
+| Runtime Event Journal | `data/database/runtime_event_journal.db` | Durable State（required） | Journal exact physical signature（无 DB-level version）；row v1/v2 | append-only；损坏/追加失败 fail closed；legacy 缺 span 列需显式 migrate |
+| Observability checkpoint | `data/database/runtime_observability_checkpoint.db` | Rebuildable derived state（startup required） | Checkpoint exact table shape（无版本） | 不兼容时显式 recreate；backup optional |
+| Snapshot DB | `data/database/runtime_snapshots.db` | Durable State（opt-in） | Snapshot v1（`snapshot_schema_version=1`） | 仅 `LOCAL_AGENT_SNAPSHOT_ENABLED=true` 时装配；无 migration |
+| Chroma | `chroma_db/` | Rebuildable derived state（startup required 视 KB_REQUIRED） | LocalAgent collection marker（`localagent_collection_contract_version=1` + `chunk_schema_version=kb_chunk_schema_v2` + embedding digest/dimension） | 缺失时 allowlisted degradation（PRODUCTION 默认 required）；marker mismatch → REBUILD_REQUIRED |
+| Knowledge Base | `data/knowledge_base/` | SOURCE_DATA（MUST_BACKUP） | 文件/loader contract（chunk `schema_version=kb_chunk_schema_v2`） | 业务 KB source；Chroma rebuild 的唯一业务输入 |
 
 ### Deployment Artifact（非 Runtime durable state）
 
@@ -167,11 +167,49 @@ $env:LOCAL_AGENT_WIKI_COOKIE="<secret-store-reference>"
 ### 边界（禁止声称）
 
 ```text
-backup implemented            → NOT_IMPLEMENTED
-restore implemented           → NOT_IMPLEMENTED
+automatic backup              → NOT_IMPLEMENTED（manual stopped-server only）
+automatic restore             → NOT_IMPLEMENTED（manual stopped-server set replacement + validation）
+automatic deployment rollback → NOT_IMPLEMENTED（code/artifact rollback 需匹配 pre-migration data restore）
+downgrade migration           → NOT_IMPLEMENTED
+online backup                 → NOT_IMPLEMENTED（live raw copy unsupported）
 automatic recovery            → NOT_IMPLEMENTED
 disaster recovery             → NOT_IMPLEMENTED
+Chroma internal schema migration → NOT_LOCAL_SCHEMA_OWNER（LocalAgent 不修改 Chroma internal SQLite）
 ```
+
+## 8b. Persistence Preflight / Migration
+
+### Server startup preflight（automatic，READ ONLY）
+
+每次 Server 启动、在任何持久 Store constructor 之前自动执行 SQLite preflight：
+
+```text
+Settings Parse / Semantic Validation → SERVER_ROLE Validation → lifecycle STARTING
+→ automatic SQLite persistence preflight（PRAGMA quick_check + physical shape + 版本事实；不创建/不修改任何 DB 文件）
+→ required Resource Construction → Chroma open + marker validation → 其余构造 → READY
+```
+
+- Memory `MIGRATION_REQUIRED` / `UNSUPPORTED` / `FAILED`，或 Journal legacy `MIGRATION_REQUIRED`，
+  或 Checkpoint 不兼容，或 Snapshot（enabled）unsupported，或 `PRAGMA quick_check` 非 `ok`：
+  startup fail，`never READY`，safe code `PERSISTENCE_*` 由 startup failure boundary 包装。
+- Chroma marker mismatch：`knowledge_base_required=true` → 阻止 READY；显式 `false` → `READY_DEGRADED`。
+  Startup 绝不自动 clear / rebuild Chroma，绝不自动迁移已有数据。
+- `/health`、`/readyz` 不执行 preflight / migration / repair / restore / rebuild（保持只读投影）。
+
+### Explicit migration（SCRIPT_ROLE only，Server stopped）
+
+```powershell
+uv run python scripts/manage_persistence.py preflight
+uv run python scripts/manage_persistence.py migrate --backup-confirmed
+```
+
+- `preflight`：只读；输出每 Store `NEW / CURRENT / MIGRATION_REQUIRED / REBUILD_REQUIRED / UNSUPPORTED / FAILED`。
+- `migrate`：先全 Store preflight；任何 UNSUPPORTED/FAILED 或缺少 `--backup-confirmed`（已有数据需要 mutation 时）
+  都 non-zero 且零 mutation。每 Store 独立单事务（Memory `user_version=1` 与 schema change 同事务原子提交；
+  Journal 只加 nullable span 列绝不 rewrite 历史 row；Checkpoint 只 drop/recreate derived table）。
+- `--backup-confirmed` 只是 Operator acknowledgement，不证明备份内容正确；备份正确性由副本 preflight 验证。
+- Migration 是 forward-only：迁移提交后 `old binary compatibility NOT ASSUMED`。无 downgrade migration。
+- Client 进程绝不打开 / preflight / migrate Server persistence。
 
 持久化目录存在**不等于** Runtime Recovery 或 automatic resume。
 
@@ -234,16 +272,54 @@ LocalAgent 当前**不提供** Windows Service wrapper，也不引入第三方 w
 
 ## 12. Backup / Restore Boundary
 
-Backup/restore 只是 **operational boundary**，不是 automatic recovery：
+Backup/restore 是 **manual stopped-server operational contract**，不是 automatic recovery。
 
-- 应备份的数据：Memory DB、Journal、Snapshot DB、Chroma DB、Business KB、Observability checkpoint。
-- SQLite 文件建议在 stopped/quiesced 状态备份，或使用 SQLite backup API。
-- 本阶段**不提供**自动备份/恢复脚本。
-- 禁止把复制 SQLite 文件说成 Runtime Recovery；禁止把 Snapshot DB 说成 automatic resume。
+### MUST_BACKUP（correctness，必须来自同一次 Server-stopped backup epoch）
+
+1. Memory DB（`data/database/agent_memory.db` + 任何存在的 `-wal`）；
+2. Event Journal DB（`data/database/runtime_event_journal.db` + 任何存在的 `-wal`）；
+3. Snapshot DB（仅 enabled/存在时：`data/database/runtime_snapshots.db` + `-wal`）；
+4. KB source data（`data/knowledge_base/`）；
+5. 同一次 deployment 的 known-good environment configuration reference（不记录 secret 明文到报告/仓库）。
+
+Memory / Journal / Snapshot 必须来自同一 backup epoch；Journal 与 Snapshot 不得分别从两个不同时间点恢复后宣称 recovery evidence 一致。
+
+### OPTIONAL_BACKUP
+
+- Chroma directory：可加速 restore，但 correctness 可由 KB source + matching embedding artifact rebuild。
+
+### BACKUP_OPTIONAL / RECREATE
+
+- Observability checkpoint：derived，可 recreate；不是 correctness backup requirement。
+
+### WAL Contract
+
+```text
+live raw copy                = unsupported（Server 运行中复制 .db 是非一致快照）
+stopped-server backup unit   = 主 .db + 任何存在的 -wal 一起复制
+-shm                         = 可重建 coordination sidecar，不作为 correctness 必需文件
+backup 文件创建成功          != 备份可恢复；副本必须通过显式 full preflight 才算门禁通过
+```
+
+### Restore（manual）
+
+```text
+stop Server（确认进程退出；force-kill 不算可信前置）
+→ 把当前失败/待调查数据整体移动到隔离位置（不直接覆盖）
+→ restore target 为空或已完成整组替换（禁止目录内混合覆盖）
+→ 从同一 backup epoch 恢复 Memory / Journal / Snapshot（if enabled）/ KB source
+→ 恢复兼容 Chroma（整体恢复并验证 marker）或使用匹配 embedding artifact 从 source 显式 rebuild
+→ checkpoint 默认 recreate（即使恢复旧 checkpoint 也必须通过 exact-shape preflight）
+→ 显式 full preflight（Server 启动前；不兼容则不启动）
+→ 启动 known-compatible code/config/artifact
+→ /health + /readyz + Memory/Journal/KB safe functional smoke
+```
+
+任一步失败都停止；不对备份原件执行修复/迁移。`files copied != restore validated`。
 
 ## 13. Deployment Rollback
 
-Deployment Rollback 是**人工操作边界**：
+Deployment Rollback 是**人工操作边界**，且必须区分 **code/artifact rollback** 与 **persistent-data rollback**：
 
 ```text
 known-good code/artifact
@@ -252,7 +328,18 @@ known-good code/artifact
 + smoke validation（新 identity 请求）
 ```
 
-与 `CHAT_RUNTIME_MODE=legacy` 的 **Runtime Legacy Rollback** 严格区分：后者是 emergency control，只影响新请求，需要修改 runtime mode 后重启。两者不得混为一谈。
+**Forward-only migration 数据安全合同：**
+
+```text
+schema-changing migration committed
+→ old binary compatibility NOT ASSUMED
+→ binary-only rollback UNSAFE / NOT ASSUMED
+→ code rollback 必须同时恢复 matching pre-migration MUST_BACKUP set
+```
+
+- 任何 schema migration 提交前必须已取并验证 backup；migration 失败（在任何 commit 前）可只回滚 code/artifact/config。
+- 不实现 downgrade migration / reverse SQL；需要回滚旧 binary 时恢复 pre-migration backup set。
+- 与 `CHAT_RUNTIME_MODE=legacy` 的 **Runtime Legacy Rollback** 严格区分：后者是 emergency control，只影响新请求，需要修改 runtime mode 后重启；它不能替代 data rollback。两者不得混为一谈。
 
 **不实现 automatic deployment rollback。**
 
@@ -267,8 +354,12 @@ known-good code/artifact
 | Windows Service wrapper | NOT_IMPLEMENTED（NSSM/WinSW/Task Scheduler 集成代码不提供） |
 | Continuous Health/Readiness monitoring | NOT_IMPLEMENTED（Health / Readiness endpoint 与 startup readiness handshake 已 SUPPORTED，但无连续轮询 / auto reconnect / manual readiness button） |
 | version compatibility / fingerprint | NOT_IMPLEMENTED（DEFER_TO_WP4；无 `/metadata` / `/version`，无 version compatibility contract） |
-| Automatic backup | DEFER TO WP1-D（只定义 boundary） |
-| Migration runner / schema migration | DEFER TO WP1-D |
+| Automatic backup | NOT_IMPLEMENTED（manual stopped-server only；见 §12） |
+| Automatic restore | NOT_IMPLEMENTED（manual stopped-server set replacement + full preflight；见 §12） |
+| Automatic deployment rollback | NOT_IMPLEMENTED（见 §13） |
+| Downgrade migration | NOT_IMPLEMENTED（forward-only） |
+| Online backup | NOT_IMPLEMENTED（live raw copy unsupported） |
+| Chroma internal schema migration | NOT_LOCAL_SCHEMA_OWNER（LocalAgent 不修改 Chroma internal SQLite；operator rebuild） |
 
 ## 15. Known Limitations
 
@@ -278,8 +369,7 @@ known-good code/artifact
 - 无 Windows Service wrapper。
 - Continuous Health/Readiness monitoring NOT_IMPLEMENTED（Health / Readiness endpoint 与 startup handshake 为 SUPPORTED，但仅 startup-only，无连续轮询）。
 - version compatibility / fingerprint NOT_IMPLEMENTED（DEFER_TO_WP4）。
-- 无 automatic backup / restore。
-- 无 migration runner。
-- 无 automatic deployment rollback。
+- 无 automatic backup / restore（manual stopped-server only）。
+- 无 automatic deployment rollback；无 downgrade migration。
 - force kill（`taskkill /F`、`Stop-Process -Force`）绕过 graceful shutdown。
 - Planning executor starvation remains accepted P2。

@@ -27,6 +27,8 @@ from core.runtime import (
     SQLiteRunEventJournal,
     ToolCompletedPayload,
 )
+from core.persistence_migration import PreflightStatus
+from core.runtime.event_journal_store import journal_migrate, journal_preflight
 
 
 def event(
@@ -273,6 +275,10 @@ def test_real_v1_sqlite_fixture_keeps_legacy_digest_and_nullable_span(tmp_path: 
             """
         )
         connection.execute(
+            "CREATE INDEX idx_runtime_event_journal_run_type "
+            "ON runtime_event_journal(run_id, event_type)"
+        )
+        connection.execute(
             """
             INSERT INTO runtime_event_journal VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
@@ -296,6 +302,30 @@ def test_real_v1_sqlite_fixture_keeps_legacy_digest_and_nullable_span(tmp_path: 
                 digest(legacy_source),
             ),
         )
+
+    # WP1-D：constructor 不再隐式 ALTER legacy（缺 span 列）DB；legacy 必须
+    # 由显式 SCRIPT_ROLE migrate 迁移后才可被普通 constructor 打开。
+    def table_columns(db_path: Path) -> frozenset[str]:
+        with sqlite3.connect(db_path) as connection:
+            return frozenset(
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(runtime_event_journal)"
+                )
+            )
+
+    columns_before = table_columns(path)
+    unmodified = SQLiteRunEventJournal(str(path))
+    unmodified.close()
+    assert table_columns(path) == columns_before
+
+    preflight = journal_preflight(str(path))
+    assert preflight.status is PreflightStatus.MIGRATION_REQUIRED
+
+    journal_migrate(str(path))
+    columns_after = table_columns(path)
+    assert "span_id" in columns_after
+    assert "parent_span_id" in columns_after
 
     journal = SQLiteRunEventJournal(str(path))
     try:

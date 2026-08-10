@@ -46,6 +46,13 @@
 | startup dependency snapshot | `ApplicationRuntimeServices.startup_dependency_snapshot`（frozen `StartupDependencySnapshot`） | diagnostic resolver | `server.py::lifespan()` 从同一次真实 KB 初始化结果构造一次 | 进程内 immutable；不持久化 | APPLICATION_SCOPE | AgentRouter.knowledge_base_error、endpoint、Client probe、dependency health manager |
 | diagnostic projection | `core/runtime/health.py`（`resolve_application_diagnostic` / `ApplicationDiagnosticSnapshot` / `DiagnosticStatus`） | FastAPI `/health`、`/readyz` endpoint、Client readiness probe（经 HTTP）、tests | 无（只读投影；不写回 lifecycle/admission/snapshot） | 无；response 是 derived value，不缓存 | APPLICATION_SCOPE（projection） | Runtime lifecycle、Admission、StartupDependencySnapshot、Run state |
 | client readiness worker | `core/client_readiness.py`（`ReadinessWorker(QThread)`，一次 startup probe；Owner = MainController） | MainController、ChatPanel（经 signal） | `requestInterruption()`；terminal 后自动退出 | 无 | APPLICATION_SCOPE，active lifetime 仅一次 probe | Server lifecycle、Admission、continuous monitor、manual readiness button |
+| Memory schema/version truth | `MemoryManager` Store-owned（`memory_preflight`/`memory_migrate`，`PRAGMA user_version=1`） | Persistence Migration Coordinator、startup preflight | 显式 `memory_migrate`（SCRIPT_ROLE） | Memory SQLite（physical schema marker） | APPLICATION_SCOPE | Coordinator 内嵌 Memory SQL、第二 schema owner、constructor 隐式 ALTER |
+| Journal physical shape | `SQLiteRunEventJournal` Store-owned（`journal_preflight`/`journal_migrate`，exact physical signature） | Persistence Migration Coordinator、startup preflight | 显式 `journal_migrate`（SCRIPT_ROLE，只加 nullable span 列） | Journal SQLite（无 DB-level version） | APPLICATION_SCOPE | Coordinator 内嵌 Journal SQL、历史 row rewrite、用 row version 冒充 DB version |
+| Snapshot schema/digest | Snapshot contract + `SQLiteSnapshotStore`（validation-only） | RecoveryValidator、startup preflight（read-only） | 无（migration/writeback/adoption 禁止） | Snapshot SQLite v1 | APPLICATION_SCOPE（opt-in） | snapshot migration、写回、v0 创建 |
+| Checkpoint shape | `SQLiteEventConsumptionCheckpointStore` Store-owned（`checkpoint_preflight`/`checkpoint_recreate`） | Persistence Migration Coordinator、startup preflight | 显式 `checkpoint_recreate`（SCRIPT_ROLE，drop/recreate derived table） | Checkpoint SQLite（无版本） | APPLICATION_SCOPE | row migration、startup 自动 delete、把 derived store 当 correctness backup |
+| Chroma collection/chunk/embedding compatibility | `VectorDBManager` + `document_loader.SCHEMA_VERSION`（marker 读写/校验） | server startup（marker validation）、operator preflight | `publish_collection_marker`/`remove_collection_marker`（rebuild 流程最后/最先）；marker 由 `VectorDBManager` 维护 | Chroma collection metadata marker | APPLICATION_SCOPE | Chroma internal SQLite 修改、startup 自动 clear/rebuild、未验证 marker 就当作兼容 |
+| persistence migration orchestration | Persistence Migration Coordinator（`core/persistence_migration.py`） | server startup preflight（只读）、CLI `manage_persistence.py` | preflight 只读；`migrate` 显式 SCRIPT_ROLE 调用 Store migration function | safe report/result（不持久化） | OPERATION_SCOPE under APPLICATION | 成为 Memory/Journal/Checkpoint schema owner、内嵌 Store SQL、创建第二 schema truth |
+| backup / restore / rollback | Operator runbook（manual stopped-server） | operator | 人工复制 MUST_BACKUP set / restore set / code+data rollback | backup set（文件；不进入 Runtime Authority） | OPERATION_SCOPE（运维流程） | automatic backup/restore、把 Snapshot 当 backup、online raw copy、downgrade migration |
 
 ## Duplicate-owner audit
 
@@ -61,5 +68,9 @@
 | ShutdownReport 修改 Lifecycle | 未发现；Report 是 immutable derived value |
 | Run facade 关闭 Application Recorder | 未发现；Scope 只收口 request-owned 资源 |
 | Application Service 缓存 current Run Controller | 未发现；容器字段和 factory slots 均无 current scope/controller |
+| Persistence Coordinator 成为 Store schema owner | 未发现；Coordinator 不内嵌 Store SQL，Store-specific signature/version/transaction 保留在 Store module |
+| Migration 创建第二 Memory/Journal/Checkpoint owner | 未发现；startup preflight 只读，mutation 只经显式 SCRIPT_ROLE store function |
+| 备份/恢复混淆为 Runtime Recovery | 已禁止；Migration/backup/restore 与 Recovery validation-only 是两个独立概念 |
+| Chroma internal SQLite 被修改 | 已禁止；LocalAgent 只经公开 metadata API 维护 marker，绝不 UPDATE Chroma internal tables |
 | 未执行 Scope 正常 close 遗留 Registry handle | 审计中真实发现并修复；`_finish_close()` 按 handle identity 注销 |
 | 同一共享资源由不同名字关闭两次 | identity 去重；契约测试覆盖 alias close once |
