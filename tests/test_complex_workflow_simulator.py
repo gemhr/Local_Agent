@@ -13,6 +13,8 @@ import threading
 import unittest
 
 from core.agent_router import AgentRouter
+from core.runtime.tool_adapters import ComplexWorkflowToolAdapter
+from core.runtime.tool_registry import ToolRegistry
 from tools.complex_workflow_simulator import (
     ComplexWorkflowRequest,
     ComplexWorkflowSimulationTool,
@@ -460,21 +462,23 @@ class ComplexWorkflowSimulationToolTests(unittest.TestCase):
         self.assertEqual(invalid["safe_error_code"], "TOOL_VALIDATION_ERROR")
 
     def test_registry_exposes_legacy_tool_name(self) -> None:
-        class Router:
-            def __init__(self) -> None:
-                self.tools = {}
-
-            def register_tool(self, name, func, description) -> None:
-                self.tools[name] = (func, description)
-
-        router = Router()
-        register_all_tools(router)
-        self.assertIn("complex_workflow_simulator", router.tools)
-        self.assertIs(router.tools["complex_workflow_simulator"][0], complex_workflow_simulator)
+        registry = ToolRegistry()
+        register_all_tools(registry)
+        registry.freeze()
+        registration = registry.require("complex_workflow_simulator")
+        self.assertEqual(registration.descriptor.name, "complex_workflow_simulator")
+        self.assertIsInstance(registration.adapter, ComplexWorkflowToolAdapter)
+        self.assertEqual(
+            registration.adapter.spec.tool_name,
+            "complex_workflow_simulator",
+        )
 
     def test_agent_router_can_select_and_parse_the_legacy_tool_protocol(self) -> None:
+        registry = ToolRegistry()
+        register_all_tools(registry)
+        registry.freeze()
         router = AgentRouter.__new__(AgentRouter)
-        router.tools = {"complex_workflow_simulator": {"func": complex_workflow_simulator}}
+        router.tool_registry = registry
         self.assertTrue(router._tool_intent_likely("run the complex workflow simulator"))
         parsed = router._parse_tool_call(
             'CALL: complex_workflow_simulator({"operation_id":"operation-1"})'

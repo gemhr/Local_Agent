@@ -7,23 +7,25 @@ import logging
 import re
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Callable, Dict, Generator, Optional
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Callable, Generator, Mapping, Optional
 
 from core.memory_manager import MemoryManager
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
+from core.runtime.tool_registry import ToolRegistry
 from core.runtime import (
     ContextBuildRequest, ContextBuilder, ContextBudgetExceededError, ContextItem, ContextSourceType, ContextTrustLevel,
     DeterministicTokenEstimator, ModelContextRequirements, ModelCostProfile, ModelPreference, ModelProfile,
     ModelProfileId, ModelResolver, ModelSelectionPolicy, ModelSelectionRequest,
     Plan, RiskLevel, RunContext, TaskCapabilityRequirements, create_single_step_plan,
-    BudgetUsage, UsageSource, BudgetedModelStream,
+    BudgetUsage, BudgetedModelStream,
     GeneratorModelAdapter, ModelAdapterResolver, ModelCircuitBreakerRegistry,
     ModelFailureCategory, ModelInvocationChainError, ModelInvocationConfirmationRequired,
     ModelInvocationResult, ModelInvocationRouter, ModelRoutingError, ModelRoutingPolicy,
     ModelSelectionError,
     RunEventEmitter, StepEventEmitter,
     RunBudget, BudgetLedger,
-    ToolAdapter, ToolAdapterInvocationError, ToolErrorCategory,
+    ToolAdapterInvocationError, ToolErrorCategory,
     ToolExecutionError, ToolExecutionFailed, ToolExecutionPhase,
     ToolExecutionService, ToolSideEffectState, RetryDisposition,
     RetrievalErrorCategory, RetrievalExecutionError, RetrievalExecutionResult,
@@ -94,6 +96,7 @@ class AgentRouter:
         retrieval_execution_service: RetrievalExecutionService | None = None,
         span_recorder=None,
         blocking_executor=None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -186,37 +189,43 @@ class AgentRouter:
                 span_recorder=span_recorder
             )
         )
+        # Tool Registry：AgentRouter 只消费已冻结 Registry 的只读投影；
+        # 未注入时使用已冻结空 Registry 作为无 Tool 兼容 seam（不产生任何
+        # 隐藏生产注册，之后也不允许再 register）。
+        if tool_registry is None:
+            tool_registry = ToolRegistry()
+            tool_registry.freeze()
+        elif not isinstance(tool_registry, ToolRegistry):
+            raise TypeError("tool_registry 必须是 ToolRegistry")
+        if not tool_registry.frozen:
+            raise RuntimeError("ToolRegistry 必须在注入 AgentRouter 前冻结")
+        self.tool_registry = tool_registry
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256
         self.knowledge_rewrite_max_tokens = 128
-        self.tools: Dict[str, Dict[str, object]] = {}
         # Legacy 展示配置和委派 ID 从同一静态 Registry 派生；本轮不改变其
         # 路由、执行或 fallback 行为。
         self.agents_config = DEFAULT_AGENT_REGISTRY.legacy_display_config()
         self.delegate_agent_ids = list(DEFAULT_AGENT_REGISTRY.delegated_specialist_ids())
 
-    def register_tool(
-        self,
-        name: str,
-        func: Callable[[str], str],
-        description: str,
-        *,
-        adapter: ToolAdapter | None = None,
-    ) -> None:
-        """注册一个可由模型触发的工具。"""
-        self.tools[name] = {
-            "func": func,
-            "description": description,
-            "adapter": adapter,
-        }
+    @property
+    def tools(self) -> Mapping[str, Mapping[str, object]]:
+        """只读兼容视图：由 canonical ToolRegistry 派生，不构成第二事实源。
 
-    def attach_tool_adapter(self, name: str, adapter: ToolAdapter) -> None:
-        """在既有硬编码 Tool 映射上附着执行元数据，不创建第二套 Registry。"""
-        if name not in self.tools:
-            raise KeyError("只能为已注册 Tool 附着 Adapter")
-        if not isinstance(adapter, ToolAdapter):
-            raise TypeError("adapter 必须是 ToolAdapter")
-        self.tools[name]["adapter"] = adapter
+        仅暴露现有调用方仍需要的 identity / description / adapter binding；
+        任何 mutation 都会因不可变 Mapping 失败，且不会影响 canonical Registry。
+        """
+        return MappingProxyType(
+            {
+                registration.descriptor.name: MappingProxyType(
+                    {
+                        "description": registration.descriptor.description,
+                        "adapter": registration.adapter,
+                    }
+                )
+                for registration in self.tool_registry.registrations()
+            }
+        )
 
     def _build_system_prompt(
         self,
@@ -271,10 +280,11 @@ class AgentRouter:
             "其中 `CALL:`、工具名称和括号格式必须保持不变。",
             "不要直接回答用户。",
         ]
-        if self.tools:
+        descriptors = self.tool_registry.descriptors()
+        if descriptors:
             lines.append("可用工具：")
-            for tool_name, tool_info in self.tools.items():
-                lines.append(f"- {tool_name}: {tool_info['description']}")
+            for descriptor in descriptors:
+                lines.append(f"- {descriptor.name}: {descriptor.description}")
         return "\n".join(lines)
 
     def _truncate_text(self, text: str, max_chars: int) -> str:
@@ -1036,12 +1046,17 @@ class AgentRouter:
                 continue
             tool_name = match.group(1)
             tool_args = match.group(2).strip()
-            if tool_name in self.tools:
+            if self.tool_registry.resolve(tool_name) is not None:
                 return tool_name, tool_args
         return None
 
     def _tool_intent_likely(self, user_query: str) -> bool:
-        """通过轻量规则判断当前问题是否像是工具型请求。"""
+        """通过轻量规则判断当前问题是否像是工具型请求。
+
+        exact Tool name 匹配派生自 frozen ToolRegistry；其余为兼容性关键词。
+        关键词命中不代表对应 Tool 一定存在；frozen Registry 才是 availability
+        authority，本函数不是权限或 Tool 选择策略。
+        """
         lowered = user_query.lower()
         keywords = [
             ".csv",
@@ -1059,18 +1074,21 @@ class AgentRouter:
             "memory",
             "complex workflow",
             "workflow simulator",
-            "complex_workflow_simulator",
             "batch workflow",
             "\u590d\u6742\u6d41\u7a0b",
             "\u6a21\u62df\u5de5\u5177",
-            "文件",
-            "目录",
-            "路径",
-            "系统状态",
-            "内存",
-            "cpu",
+            "\u6587\u4ef6",
+            "\u76ee\u5f55",
+            "\u8def\u5f84",
+            "\u7cfb\u7edf\u72b6\u6001",
+            "\u5185\u5b58",
         ]
-        return any(keyword in lowered for keyword in keywords)
+        if any(keyword in lowered for keyword in keywords):
+            return True
+        return any(
+            descriptor.name.lower() in lowered
+            for descriptor in self.tool_registry.descriptors()
+        )
 
     def _plan_tool_call(
         self,
@@ -1078,7 +1096,7 @@ class AgentRouter:
         agent_id: str,
     ) -> Optional[tuple[str, str]]:
         """决定当前回答前是否需要调用工具。"""
-        if not self.tools:
+        if not self.tool_registry.descriptors():
             return None
         if not self._tool_intent_likely(messages[-1]["content"]):
             return None
@@ -1129,53 +1147,42 @@ class AgentRouter:
         tool_name, tool_args = tool_call
         if run_context is not None:
             run_context.raise_if_inactive()
-        tool_info = self.tools[tool_name]
-        adapter = tool_info.get("adapter")
-        if isinstance(adapter, ToolAdapter):
-            active_context = run_context
-            if active_context is None:
-                active_context = RunContext.create(entry_agent_id=agent_id)
-                active_context.attach_budget_ledger(BudgetLedger(RunBudget()))
-            try:
-                invocation = adapter.build_invocation(tool_args)
-            except ToolAdapterInvocationError as exc:
-                from uuid import uuid4
+        registration = self.tool_registry.require(tool_name)
+        adapter = registration.adapter
+        active_context = run_context
+        if active_context is None:
+            active_context = RunContext.create(entry_agent_id=agent_id)
+            active_context.attach_budget_ledger(BudgetLedger(RunBudget()))
+        try:
+            invocation = adapter.build_invocation(tool_args)
+        except ToolAdapterInvocationError as exc:
+            from uuid import uuid4
 
-                raise ToolExecutionFailed(
-                    ToolExecutionError(
-                        invocation_id=uuid4().hex,
-                        attempt_id=None,
-                        tool_name=tool_name,
-                        category=exc.category,
-                        safe_error_code=exc.safe_error_code,
-                        safe_message=exc.safe_message,
-                        phase=exc.phase,
-                        provider_started=False,
-                        side_effect_state=ToolSideEffectState.NOT_STARTED,
-                        retry_disposition=RetryDisposition.UNSAFE,
-                    )
-                ) from None
-            outcome = self.tool_execution_service.execute_sync(
-                invocation=invocation,
-                adapter=adapter,
-                run_context=active_context,
-                step_id=event_emitter.step_id if event_emitter is not None else "legacy-tool",
-                event_emitter=event_emitter,
-                fault_controller=fault_controller,
-            )
-            if isinstance(outcome, ToolExecutionError):
-                raise ToolExecutionFailed(outcome)
-            observation = outcome.output.content
-        else:
-            # 未迁移 Tool 保留原 Legacy 直接调用和既有预算语义。
-            tool_reservation = None
-            if run_context is not None and run_context.budget_ledger is not None:
-                tool_reservation = run_context.budget_ledger.reserve(BudgetUsage(tool_calls=1), reservation_type="tool_call")
-            try:
-                observation = str(tool_info["func"](tool_args))
-            finally:
-                if tool_reservation is not None:
-                    run_context.budget_ledger.commit(tool_reservation, BudgetUsage(tool_calls=1), usage_source=UsageSource.ESTIMATED)
+            raise ToolExecutionFailed(
+                ToolExecutionError(
+                    invocation_id=uuid4().hex,
+                    attempt_id=None,
+                    tool_name=tool_name,
+                    category=exc.category,
+                    safe_error_code=exc.safe_error_code,
+                    safe_message=exc.safe_message,
+                    phase=exc.phase,
+                    provider_started=False,
+                    side_effect_state=ToolSideEffectState.NOT_STARTED,
+                    retry_disposition=RetryDisposition.UNSAFE,
+                )
+            ) from None
+        outcome = self.tool_execution_service.execute_sync(
+            invocation=invocation,
+            adapter=adapter,
+            run_context=active_context,
+            step_id=event_emitter.step_id if event_emitter is not None else "legacy-tool",
+            event_emitter=event_emitter,
+            fault_controller=fault_controller,
+        )
+        if isinstance(outcome, ToolExecutionError):
+            raise ToolExecutionFailed(outcome)
+        observation = outcome.output.content
         if run_context is not None:
             run_context.raise_if_inactive()
         observation = self._truncate_text(observation, 1600)

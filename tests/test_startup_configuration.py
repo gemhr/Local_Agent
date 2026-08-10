@@ -31,6 +31,7 @@ from core.settings import (
     SettingsValidationError,
     validate_role_configuration,
 )
+from tools.registry import register_all_tools
 
 
 def _load(monkeypatch, **env):
@@ -323,6 +324,70 @@ async def test_production_composition_root_single_admission_gate(
         # 恢复模块级 app.state，避免 lifespan 残留（CLOSED 等）污染后续测试。
         app.state._state.clear()
         app.state._state.update(state_backup)
+
+
+# ---- WP2-A ToolRegistry 生产装配 ----
+
+@pytest.mark.asyncio
+async def test_lifespan_injects_populated_frozen_tool_registry(
+    monkeypatch, tmp_path
+) -> None:
+    """真实 server.py::lifespan() 必须注入 populated + frozen ToolRegistry。
+
+    只替换 KB 为确定性失败 fixture（ToolRegistry 装配与 KB 状态无关）。
+    """
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    monkeypatch.setattr(server, "settings", settings)
+    monkeypatch.setattr(server, "VectorDBManager", _RaisingVectorDB)
+    app = FastAPI()
+    async with server.lifespan(app):
+        router = app.state.chat_service.router
+        registry = router.tool_registry
+        assert registry.frozen is True
+        assert tuple(
+            registration.descriptor.name
+            for registration in registry.registrations()
+        ) == (
+            "list_files",
+            "analyze_excel",
+            "get_system_status",
+            "complex_workflow_simulator",
+        )
+        # 全部四个注册都是 adapter-backed，且 Descriptor/Adapter identity 一致
+        for registration in registry.registrations():
+            assert (
+                registration.adapter.spec.tool_name
+                == registration.descriptor.name
+            )
+        # 兼容视图只读且派生自 Registry
+        with pytest.raises(TypeError):
+            router.tools["list_files"] = {}
+        # planner prompt 只派生自 frozen Registry descriptors
+        prompt = router._build_tool_planner_prompt("core_router")
+        assert "list_files: List files in a local directory." in prompt
+        assert "complex_workflow_simulator" in prompt
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_duplicate_blocks_startup(
+    monkeypatch, tmp_path
+) -> None:
+    """Registry 构造失败（duplicate）必须 startup fail，never READY。"""
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    monkeypatch.setattr(server, "settings", settings)
+    monkeypatch.setattr(server, "VectorDBManager", _RaisingVectorDB)
+
+    def duplicate_populator(tool_registry) -> None:
+        register_all_tools(tool_registry)
+        register_all_tools(tool_registry)  # 第二次注册同 canonical name → DUPLICATE
+
+    monkeypatch.setattr(server, "register_all_tools", duplicate_populator)
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "tool_registry"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
 
 
 # ---- Runtime knob wiring（结构回归）----

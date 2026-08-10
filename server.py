@@ -77,6 +77,7 @@ from core.runtime.structured_logging import (
     JsonStructuredRuntimeLogger,
     StructuredLogProjector,
 )
+from core.runtime.tool_registry import ToolRegistry
 from core.settings import SERVER_ROLE, Settings, validate_role_configuration
 from tools.registry import register_all_tools
 
@@ -162,6 +163,14 @@ def _close_model_engines(engines: dict) -> tuple[str, ...]:
                 },
             )
     return tuple(error_codes)
+
+
+def _populate_tool_registry() -> ToolRegistry:
+    """构造并冻结生产 ToolRegistry；非法/重复注册在此 fail closed。"""
+    registry = ToolRegistry()
+    register_all_tools(registry)
+    registry.freeze()
+    return registry
 
 
 async def _watch_request_disconnect(
@@ -497,6 +506,10 @@ async def lifespan(app: FastAPI):
             count_rate_limited=settings.model_breaker_count_rate_limited,
         )
     )
+    tool_registry = await initialization_stack.run(
+        _populate_tool_registry,
+        component="tool_registry",
+    )
     router = await initialization_stack.create(
         "agent_router",
         lambda: AgentRouter(
@@ -521,11 +534,8 @@ async def lifespan(app: FastAPI):
             circuit_breaker_registry=breaker_registry,
             span_recorder=span_recorder,
             blocking_executor=blocking_executor,
+            tool_registry=tool_registry,
         ),
-    )
-    await initialization_stack.run(
-        lambda: register_all_tools(router),
-        component="tool_registry",
     )
     runtime_metrics = InMemoryMetricsRecorder(
         label_policy=MetricLabelPolicy(
