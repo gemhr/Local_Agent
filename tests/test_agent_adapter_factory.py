@@ -10,8 +10,16 @@ from core.runtime import (
     AgentAdapterError,
     AgentAdapterErrorCode,
     AgentAdapterFactory,
+    AgentAdapterResult,
+    AgentExecutionRequest,
     AgentRouterSingleAgentAdapter,
+    BudgetLedger,
+    ExecutionKind,
+    LegacyStringToolAdapter,
+    RunBudget,
     SynthesisAgentAdapter,
+    TaskCapabilityRequirements,
+    create_run_context,
 )
 from core.runtime.agent_registry import (
     AgentRegistration,
@@ -19,7 +27,18 @@ from core.runtime.agent_registry import (
     DEFAULT_AGENT_REGISTRY,
     ResultContentType,
 )
+from core.agent_router import AgentRouter
 from core.runtime.planning import OutputPolicy
+from core.runtime.tool_governance import (
+    ToolGovernanceService,
+    ToolPolicy,
+    ToolPolicyCatalog,
+)
+from core.runtime.tool_registry import (
+    ToolDescriptor,
+    ToolRegistration,
+    ToolRegistry,
+)
 
 
 def default_adapter_map():
@@ -152,3 +171,62 @@ def test_driver_has_no_agent_specific_branching_evidence() -> None:
         assert pattern not in source, (
             f"MultiAgentDriver 不应包含按 Agent 名称的分支: {pattern}"
         )
+
+
+def _deny_router(tool_name: str = "alpha_tool") -> AgentRouter:
+    """构建 governance DENY 的最小真实 Router 桩（权限 gate 在 build 前拒绝）。"""
+    adapter = LegacyStringToolAdapter(
+        tool_name=tool_name, function=lambda _: "unexpected-call"
+    )
+    registry = ToolRegistry()
+    registry.register(
+        ToolRegistration(
+            descriptor=ToolDescriptor(
+                name=tool_name, description=f"test {tool_name}"
+            ),
+            adapter=adapter,
+        )
+    )
+    registry.freeze()
+    catalog = ToolPolicyCatalog(
+        tool_registry=registry,
+        agent_registry=DEFAULT_AGENT_REGISTRY,
+    )
+    catalog.register(
+        ToolPolicy(
+            tool_name=tool_name,
+            allowed_agent_ids=frozenset({"data_analyst"}),
+        )
+    )
+    catalog.freeze()
+    router = AgentRouter.__new__(AgentRouter)
+    router.tool_registry = registry
+    router.tool_governance_service = ToolGovernanceService(
+        catalog, DEFAULT_AGENT_REGISTRY
+    )
+    router._build_messages = lambda **_: [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "q"},
+    ]
+    router._plan_tool_call = lambda _m, _a: (tool_name, "x")
+    return router
+
+
+def test_governance_denial_flows_through_single_agent_adapter_as_safe_result() -> None:
+    """COORDINATED-facing internal path：denial 是安全业务结果，不是 CALL_FAILED。"""
+    adapter = AgentRouterSingleAgentAdapter(_deny_router())
+    context, _ = create_run_context(entry_agent_id="core_router")
+    context.attach_budget_ledger(BudgetLedger(RunBudget()))
+    request = AgentExecutionRequest(
+        step_id="step-1",
+        agent_id="core_router",
+        instruction="analyze a file",
+        execution_kind=ExecutionKind.AGENT,
+        input_type="text",
+        capability_requirements=TaskCapabilityRequirements(),
+    )
+    result = adapter.execute(request, context)
+    assert isinstance(result, AgentAdapterResult)
+    assert result.complete is True
+    assert "无权限" in result.content
+    assert "TOOL_PERMISSION_DENIED" in result.content

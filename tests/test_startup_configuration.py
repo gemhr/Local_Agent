@@ -24,6 +24,14 @@ from core.runtime import (
 )
 from core.runtime.admission import RuntimeAdmissionState
 from core.runtime.application_services import RuntimeLifecycleState
+from core.runtime.tool_governance import (
+    PRODUCTION_AGENT_IDS,
+    ToolGovernanceContext,
+    ToolGovernanceOutcome,
+    ToolGovernanceService,
+    ToolPolicy,
+    ToolPolicyCatalog,
+)
 from core.settings import (
     SETTINGS_SECURITY_POLICY_ERROR,
     STARTUP_CONFIGURATION_ERROR,
@@ -390,6 +398,74 @@ async def test_tool_registry_duplicate_blocks_startup(
     assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
 
 
+# ---- WP2-B Tool Governance 生产装配 ----
+
+@pytest.mark.asyncio
+async def test_lifespan_injects_governance_into_production_router(
+    monkeypatch, tmp_path
+) -> None:
+    """真实 lifespan：冻结 Catalog（4 policies）、5×4 explicit permission、
+    ToolGovernanceService 注入同一生产 AgentRouter，startup 成功 READY。"""
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    monkeypatch.setattr(server, "settings", settings)
+    monkeypatch.setattr(server, "VectorDBManager", _RaisingVectorDB)
+    app = FastAPI()
+    async with server.lifespan(app):
+        router = app.state.chat_service.router
+        service = router.tool_governance_service
+        assert isinstance(service, ToolGovernanceService)
+        catalog = service._catalog  # 测试 seam；Service 不暴露 catalog 是契约行为
+        assert catalog.frozen is True
+        assert len(catalog.policies()) == 4
+        # 5×4 explicit ALLOW
+        for registration in router.tool_registry.registrations():
+            for agent_id in PRODUCTION_AGENT_IDS:
+                decision = service.authorize_tool(
+                    ToolGovernanceContext(agent_id, "run", "step"),
+                    registration,
+                )
+                assert decision.outcome is ToolGovernanceOutcome.ALLOW, (
+                    registration.descriptor.name,
+                    agent_id,
+                    decision,
+                )
+        assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.READY
+
+
+@pytest.mark.asyncio
+async def test_governance_missing_policy_blocks_startup(
+    monkeypatch, tmp_path
+) -> None:
+    """任一生产 Tool 缺 policy -> Catalog freeze 失败 -> startup fail，never READY。"""
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    monkeypatch.setattr(server, "settings", settings)
+    monkeypatch.setattr(server, "VectorDBManager", _RaisingVectorDB)
+
+    def partial_policies(catalog: ToolPolicyCatalog) -> None:
+        # 只注册 3 条 policy，缺 complex_workflow_simulator -> freeze fail。
+        for tool_name in (
+            "list_files",
+            "analyze_excel",
+            "get_system_status",
+        ):
+            catalog.register(
+                ToolPolicy(
+                    tool_name=tool_name,
+                    allowed_agent_ids=frozenset(PRODUCTION_AGENT_IDS),
+                )
+            )
+
+    monkeypatch.setattr(
+        server, "register_default_tool_policies", partial_policies
+    )
+    app = FastAPI()
+    with pytest.raises(RuntimeInitializationError) as captured:
+        async with server.lifespan(app):
+            pass
+    assert captured.value.component == "tool_governance"
+    assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
+
+
 # ---- Runtime knob wiring（结构回归）----
 
 def test_lifespan_wires_approved_knobs_from_settings() -> None:
@@ -733,11 +809,17 @@ async def test_malformed_snapshot_enabled_blocks_ready(monkeypatch, tmp_path) ->
 async def test_memory_missing_run_id_unique_blocks_ready(monkeypatch, tmp_path) -> None:
     """Re-Gate reproduction：message_exchanges.run_id 缺 UNIQUE → preflight
     UNSUPPORTED → never READY → DB 保持未修改。"""
+    import gc
+
     from test_persistence_preflight import _memory_missing_run_id_unique
 
     settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
     db_path = Path(settings.memory_db_path)
     _memory_missing_run_id_unique(db_path)
+    # Test isolation 加固：helper 内 `with sqlite3.connect(...)` 不关闭连接，
+    # WAL 帧只有在连接被 GC 时才 checkpoint 进主文件。快照前强制 collect，
+    # 使 before/after 字节比较确定，不受套件 GC 时序影响（不弱化断言）。
+    gc.collect()
     before = db_path.read_bytes()
     monkeypatch.setattr(server, "settings", settings)
     app = FastAPI()
