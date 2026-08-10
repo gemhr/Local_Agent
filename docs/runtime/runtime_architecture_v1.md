@@ -140,6 +140,33 @@ construct -> register（4 个 ToolRegistration）-> freeze -> 注入 AgentRouter
 - **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent 或 governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后（WP4 候选），不为此新增 RuntimeEvent / Journal schema。
 - **Boundary**：`ToolExecutionService` 仍是 sole actual execution owner（non-ALLOW 时绝不调用）；`ToolRegistry` 仍只回答“What Tools exist?”；`AgentRegistry` capability 不变成 authorization；governance 不是 filesystem sandbox / path authorization（WP3）。
 
+### 2.3 WP2 Tool Platform Integration Gate（offline deterministic E2E）
+
+production Tool chain 在本 Gate 前已经实现；WP2-C 不新增 production integration 或第二套装配，只以 `tests/test_stage3_wp2_tool_e2e.py` 增加确定性全链验证。当前被测试的 topology 为：
+
+```text
+server.app（POST /api/chat）
+-> server.py::lifespan() production composition root
+-> default COORDINATED ChatService
+-> dynamic PlanResolver / StrictPlanningDecisionParser / PlanCompiler
+-> RunCoordinator / Scheduler / ParallelExecutor / MultiAgentDriver
+-> AgentRouterSingleAgentAdapter / AgentRouter
+-> frozen production ToolRegistry
+-> frozen ToolPolicyCatalog / ToolGovernanceService
+-> ToolExecutionService / ToolAdapter / production Tool
+-> StepResultStore / StepResultCommitter
+-> OutputGate / RunFinalMemoryWriter
+-> RuntimeEventChannel + SQLite Journal
+-> ChatStreamCompatibilityAdapter
+-> user-visible text/plain TEXT
+```
+
+- success 场景由 `core_router` 动态规划到单步回答，真实执行 `list_files`；临时目录中的已知文件名先出现在 production Tool observation，再进入 final-answer model 和唯一用户 TEXT。`TOOL_STARTED` / `TOOL_COMPLETED`、Journal、delivered-only Memory 与唯一 `OUTPUT_DELTA` 同时提供证据。
+- governance 场景由同一路径规划 `complex_workflow_simulator` 的 `NON_IDEMPOTENT_SIMULATION`；production exact-combination risk 判定为 `HIGH / APPROVAL_REQUIRED`，以固定 safe denial 正常交付，且 Tool events、Journal Tool facts、Tool state mutation 和 final-answer model invocation 均为零。
+- 测试只在既有 `server.LocalLLMEngine` constructor seam 注入按 prompt 语义响应的 FakeModel；Router、Planner、Registry、Governance、execution service、adapter、Tool、OutputGate、Memory 与 Journal 均为 production 对象。每个场景使用独立临时持久化路径，不访问 Internet、remote LLM、外部服务或真实开发数据库。
+- `OUTPUT_DELTA` 在 Journal 中保留安全事实，经 `ChatStreamCompatibilityAdapter` 转换为 TEXT；它不是 `[[ORCH]]` CONTROL chunk。测试保留原始 ASGI body message 边界并消费至 `more_body=false`，据此验证 CONTROL 与用户 TEXT 分离。
+- 该测试证据不改变现有 Owner、contract classification 或安全能力，也不代表 human approval、approval evidence、durable approval resume、filesystem/path authorization、sandbox 或 dedicated governance event 已实现。
+
 ## 3. Contract Classification
 
 | Contract | Classification | 说明 |
