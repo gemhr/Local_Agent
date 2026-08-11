@@ -1,5 +1,15 @@
 # Runtime Error Code Catalog
 
+## Stage 3 WP3 Security Codes
+
+| Code | Domain | Phase | Owner | Trigger | Retry | Side effect | User/log projection | Operator action | Evidence | Tests |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `TOOL_RESOURCE_DENIED` | Tool Resource Authorization | pre-execution | ResourceAuthorizationService -> AgentRouter | File Tool resource invalid、outside roots、nonexistent或kind mismatch | no planner retry/fallback | not started；TES/Adapter/business I/O=0 | 固定 `Tool 调用未执行：请求的资源不在允许访问范围内（TOOL_RESOURCE_DENIED）`；无raw path/root/reason | 修正startup roots或请求resource后发起新请求 | safe output + zero Tool events | WP3 baseline + full HTTP E2E |
+| `WIKI_REMOTE_FILENAME_INVALID` | Wiki output security | pre-write | WikiCrawler | remote `sn` 不是安全单一Windows leaf | skip item | no write | fixed low-card log code；无raw sn/title/path | 修正upstream metadata | outside marker absent | WP3 Wiki regression |
+| `WIKI_OUTPUT_PATH_DENIED` | Wiki output security | pre-write | WikiCrawler | final `.md/.pdf` target canonical containment失败 | skip item | no outside write | fixed low-card log code；无raw path | 修正configured output root / filesystem links | outside marker absent | WP3 Wiki regression |
+
+`SETTINGS_SECURITY_POLICY_ERROR` 现同时覆盖 `LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS` 的缺失/空/非法root，以及PRODUCTION local API host/base URL非numeric loopback安全策略；异常仅含env name与固定reason code。
+
 本目录只收录源码枚举或固定字符串。它不保存原始异常、业务正文、路径、Provider URL、Fault Rule ID、Tool argument/output。`RUNTIME_CONFIGURATION_ERROR` 是真实固定码，但仅覆盖 ChatService 缺少 Coordinated factory 的局部 Runtime/Chat configuration failure，不得扩大为 Settings 全域错误。
 
 Settings/startup 错误使用独立 taxonomy：`SettingsValidationError`（`ValueError` 子类）只保存 `safe_error_code`、env/field 名与 `reason_code`，不保存 raw value、secret、Provider URL 或绝对路径。Parse/Semantic/Role failure 均发生在首个 Application Resource 构造前。资源构造与 rollback 继续由 `RuntimeInitializationError` 与 `RuntimeInitializationStack` 固定码覆盖。

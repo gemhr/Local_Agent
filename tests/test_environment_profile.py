@@ -7,6 +7,7 @@ Model Profile 字段集合不重叠、TLS/trust_env/KB required 默认值。
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +23,7 @@ from core.settings import (
 
 _PROFILE_ENV = "LOCAL_AGENT_ENVIRONMENT_PROFILE"
 _PROFILE_GOAL = "LOCAL_AGENT_MODEL_PROFILE"
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Environment Profile 只管理这些字段；Model Profile 只管理这些资源字段。
 _ENVIRONMENT_PROFILE_ENVS = {
@@ -52,6 +54,7 @@ def _load(monkeypatch, **env):
         "LOCAL_AGENT_REMOTE_TRUST_ENV": None,
         "LOCAL_AGENT_KB_REQUIRED": None,
         "LOCAL_AGENT_ENVIRONMENT_ID": None,
+        "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS": None,
     }.items():
         if value is None:
             monkeypatch.delenv(key, raising=False)
@@ -63,11 +66,16 @@ def _load(monkeypatch, **env):
         else:
             monkeypatch.setenv(key, value)
     # PRODUCTION 必须显式 environment_id；未提供时用测试占位。
-    if (
-        os.getenv(_PROFILE_ENV, "").strip().upper() == "PRODUCTION"
-        and "LOCAL_AGENT_ENVIRONMENT_ID" not in env
-    ):
+    effective_profile = EnvironmentProfile.parse(os.getenv(_PROFILE_ENV))
+    if effective_profile is EnvironmentProfile.PRODUCTION and "LOCAL_AGENT_ENVIRONMENT_ID" not in env:
         monkeypatch.setenv("LOCAL_AGENT_ENVIRONMENT_ID", "prod-test-placeholder")
+    if (
+        effective_profile is EnvironmentProfile.PRODUCTION
+        and "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS" not in env
+    ):
+        monkeypatch.setenv(
+            "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS", str(_PROJECT_ROOT.resolve())
+        )
     return Settings.load()
 
 

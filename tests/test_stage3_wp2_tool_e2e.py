@@ -165,6 +165,7 @@ def _isolated_settings(tmp_path: Path):
         chroma_dir=str(tmp_path / "chroma"),
         embedding_model_path=str(tmp_path / "missing-embedding-model"),
         knowledge_base_required=False,
+        tool_allowed_read_roots=(str(tmp_path.resolve()),),
     )
 
 

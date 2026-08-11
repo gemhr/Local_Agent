@@ -7,16 +7,32 @@ import os
 import pandas as pd
 
 
-def _clean_path(value: str) -> str:
-    """清理模型生成的路径参数。
+def parse_filesystem_argument(value: str) -> str:
+    """以唯一规则解析模型生成的文件系统参数。
 
     Args:
         value: 原始路径字符串。
 
     Returns:
-        str: 去除首尾空格和引号后的路径。
+        str: 去除首尾空格及一对 matching outer quotes 后的路径。
+
+    Raises:
+        ValueError: 参数为空、含 NUL 或 quote wrapper 不明确。
     """
-    return value.strip().strip("'\"")
+    if not isinstance(value, str):
+        raise ValueError("filesystem argument must be a string")
+    parsed = value.strip()
+    if not parsed or "\x00" in parsed:
+        raise ValueError("filesystem argument is invalid")
+    starts_quote = parsed[0] in "'\""
+    ends_quote = parsed[-1] in "'\""
+    if starts_quote or ends_quote:
+        if len(parsed) < 2 or parsed[0] != parsed[-1] or not starts_quote:
+            raise ValueError("filesystem argument wrapper is invalid")
+        parsed = parsed[1:-1].strip()
+    if not parsed or "\x00" in parsed or "'" in parsed or '"' in parsed:
+        raise ValueError("filesystem argument is ambiguous")
+    return parsed
 
 
 def list_files_in_dir(directory: str) -> str:
@@ -29,7 +45,7 @@ def list_files_in_dir(directory: str) -> str:
         str: 文件列表或错误信息。
     """
     try:
-        directory = _clean_path(directory)
+        directory = parse_filesystem_argument(directory)
         if not os.path.exists(directory):
             return f"Path does not exist: {directory}"
         return f"Files in {directory}:\n" + "\n".join(os.listdir(directory))
@@ -47,7 +63,7 @@ def analyze_excel_data(file_path: str) -> str:
         str: 分析摘要或错误信息。
     """
     try:
-        file_path = _clean_path(file_path)
+        file_path = parse_filesystem_argument(file_path)
         if not os.path.exists(file_path):
             return f"File not found: {file_path}"
 

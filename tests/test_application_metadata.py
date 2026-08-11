@@ -8,6 +8,7 @@ Production environment_id required。
 from __future__ import annotations
 
 import re
+import os
 import tomllib
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from core.application_metadata import (
     ApplicationMetadata,
     create_application_metadata,
 )
-from core.settings import Settings, SettingsValidationError
+from core.settings import EnvironmentProfile, Settings, SettingsValidationError
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,6 +33,7 @@ def _load(monkeypatch, **env):
     for key, value in {
         "LOCAL_AGENT_ENVIRONMENT_PROFILE": None,
         "LOCAL_AGENT_ENVIRONMENT_ID": None,
+        "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS": None,
     }.items():
         if value is None:
             monkeypatch.delenv(key, raising=False)
@@ -42,6 +44,14 @@ def _load(monkeypatch, **env):
             monkeypatch.delenv(key, raising=False)
         else:
             monkeypatch.setenv(key, value)
+    if (
+        EnvironmentProfile.parse(os.getenv("LOCAL_AGENT_ENVIRONMENT_PROFILE"))
+        is EnvironmentProfile.PRODUCTION
+        and "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS" not in env
+    ):
+        monkeypatch.setenv(
+            "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS", str(_PROJECT_ROOT.resolve())
+        )
     return Settings.load()
 
 

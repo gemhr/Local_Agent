@@ -1,11 +1,21 @@
 """Wiki 内容抓取与落盘模块。"""
 
 import os
+import logging
+import ntpath
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List
 
 import requests
+
+
+logger = logging.getLogger(__name__)
+_WINDOWS_RESERVED_BASENAMES = {
+    "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 class WikiCrawler:
@@ -24,6 +34,10 @@ class WikiCrawler:
         """
         self.output_base_dir = output_base_dir
         os.makedirs(self.output_base_dir, exist_ok=True)
+        output_root = Path(self.output_base_dir).resolve(strict=True)
+        if not output_root.is_dir():
+            raise ValueError("Wiki output root 必须是 existing directory")
+        self._output_root = output_root
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -102,7 +116,11 @@ class WikiCrawler:
             title: 文章标题。
             save_dir: 当前空间对应的保存目录。
         """
-        payload = {"sn": sn}
+        safe_sn = self._validate_remote_leaf(sn)
+        if safe_sn is None:
+            self._log_security_skip("WIKI_REMOTE_FILENAME_INVALID")
+            return
+        payload = {"sn": safe_sn}
         safe_title = self._sanitize_filename(title)
         response = self.session.post(self.CONTENT_API, json=payload, timeout=10)
         response.raise_for_status()
@@ -119,11 +137,21 @@ class WikiCrawler:
         if match:
             pdf_relative_url = match.group(1)
             pdf_full_url = f"{self.BASE_URL}{pdf_relative_url}"
-            file_path = os.path.join(save_dir, f"{sn}_{safe_title}.pdf")
-            self._download_binary_file(pdf_full_url, file_path)
+            file_path = self._contained_output_path(
+                save_dir, f"{safe_sn}_{safe_title}.pdf"
+            )
+            if file_path is None:
+                self._log_security_skip("WIKI_OUTPUT_PATH_DENIED")
+                return
+            self._download_binary_file(pdf_full_url, str(file_path))
             return
 
-        file_path = os.path.join(save_dir, f"{sn}_{safe_title}.md")
+        file_path = self._contained_output_path(
+            save_dir, f"{safe_sn}_{safe_title}.md"
+        )
+        if file_path is None:
+            self._log_security_skip("WIKI_OUTPUT_PATH_DENIED")
+            return
         with open(file_path, "w", encoding="utf-8") as file_obj:
             file_obj.write(content_text)
 
@@ -150,6 +178,52 @@ class WikiCrawler:
         Returns:
             str: 可安全写入文件系统的文件名。
         """
-        invalid_chars = r'[\\/:*?"<>|]'
-        safe_name = re.sub(invalid_chars, "_", filename)
-        return safe_name.strip()[:100]
+        invalid_chars = r'[\\/:*?"<>|\x00-\x1f]'
+        safe_name = re.sub(invalid_chars, "_", str(filename))
+        safe_name = safe_name.strip().rstrip(". ")[:100].rstrip(". ")
+        if not safe_name or safe_name in {".", ".."}:
+            return "untitled"
+        return safe_name
+
+    @staticmethod
+    def _validate_remote_leaf(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        leaf = value.strip()
+        if (
+            not leaf
+            or leaf in {".", ".."}
+            or leaf.endswith((".", " "))
+            or any(ord(char) < 32 for char in leaf)
+            or any(char in '<>:"/\\|?*' for char in leaf)
+        ):
+            return None
+        basename = leaf.split(".", 1)[0].upper()
+        if basename in _WINDOWS_RESERVED_BASENAMES:
+            return None
+        return leaf
+
+    def _contained_output_path(self, save_dir: str, filename: str) -> Path | None:
+        try:
+            candidate = (Path(save_dir) / filename).resolve(strict=False)
+            normalized_root = ntpath.normcase(ntpath.normpath(str(self._output_root)))
+            normalized_candidate = ntpath.normcase(ntpath.normpath(str(candidate)))
+            if ntpath.commonpath((normalized_root, normalized_candidate)) != normalized_root:
+                return None
+            if candidate.exists():
+                resolved_existing = candidate.resolve(strict=True)
+                normalized_existing = ntpath.normcase(
+                    ntpath.normpath(str(resolved_existing))
+                )
+                if ntpath.commonpath((normalized_root, normalized_existing)) != normalized_root:
+                    return None
+            return candidate
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    @staticmethod
+    def _log_security_skip(code: str) -> None:
+        logger.warning(
+            "Wiki article skipped by output security policy",
+            extra={"safe_error_code": code, "component": "wiki_crawler"},
+        )

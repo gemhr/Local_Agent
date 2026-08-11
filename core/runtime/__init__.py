@@ -886,6 +886,20 @@ from core.runtime.runtime_factory import (
     ResolvedSingleStepDriver,
 )
 from core.runtime.planning_model_adapter import UnifiedPlanningModelAdapter
+from core.runtime.resource_authorization import (
+    FilesystemResourcePolicy,
+    RESOURCE_DENIAL_MESSAGE,
+    ResourceAccessRequest,
+    ResourceAuthorizationDecision,
+    ResourceAuthorizationError,
+    ResourceAuthorizationErrorCode,
+    ResourceAuthorizationOutcome,
+    ResourceAuthorizationService,
+    ResourceKind,
+    ResourceOperation,
+    ToolResourceExtractorCatalog,
+    ToolResourceExtractorDescriptor,
+)
 
 __all__ += [
     "ApplicationRuntimeServices",
@@ -906,6 +920,18 @@ __all__ += [
     "GracefulShutdownCoordinator",
     "ShutdownReport",
     "SAFE_RUNTIME_ASSEMBLY_VERSION",
+    "FilesystemResourcePolicy",
+    "RESOURCE_DENIAL_MESSAGE",
+    "ResourceAccessRequest",
+    "ResourceAuthorizationDecision",
+    "ResourceAuthorizationError",
+    "ResourceAuthorizationErrorCode",
+    "ResourceAuthorizationOutcome",
+    "ResourceAuthorizationService",
+    "ResourceKind",
+    "ResourceOperation",
+    "ToolResourceExtractorCatalog",
+    "ToolResourceExtractorDescriptor",
 ]
 
 from core.runtime.fault_injection_contract import (

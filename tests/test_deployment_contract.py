@@ -36,6 +36,7 @@ def _load(monkeypatch, **env) -> Settings:
         "LOCAL_AGENT_ENVIRONMENT_PROFILE",
         "LOCAL_AGENT_ENVIRONMENT_ID",
         "LOCAL_AGENT_REMOTE_API_BASE_URL",
+        "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS",
     ):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
@@ -46,12 +47,18 @@ def _load(monkeypatch, **env) -> Settings:
     # PRODUCTION 必须显式 environment_id；仅在最终 profile 为 PRODUCTION 且
     # 未由调用方提供时补测试占位。本测试不调用 SERVER role validation，
     # 因此不要求 remote endpoint。
-    effective_profile = None
-    for key, value in env.items():
-        if key == "LOCAL_AGENT_ENVIRONMENT_PROFILE" and value is not None:
-            effective_profile = str(value).strip().upper()
-    if effective_profile == "PRODUCTION" and "LOCAL_AGENT_ENVIRONMENT_ID" not in env:
+    effective_profile = EnvironmentProfile.parse(
+        env.get("LOCAL_AGENT_ENVIRONMENT_PROFILE")
+    )
+    if effective_profile is EnvironmentProfile.PRODUCTION and "LOCAL_AGENT_ENVIRONMENT_ID" not in env:
         monkeypatch.setenv("LOCAL_AGENT_ENVIRONMENT_ID", "prod-test-placeholder")
+    if (
+        effective_profile is EnvironmentProfile.PRODUCTION
+        and "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS" not in env
+    ):
+        monkeypatch.setenv(
+            "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS", str(ROOT.resolve())
+        )
     return Settings.load()
 
 

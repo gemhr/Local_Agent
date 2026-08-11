@@ -7,7 +7,12 @@ from core.runtime.tool_adapters import (
     LegacyStringToolAdapter,
 )
 from core.runtime.tool_registry import ToolDescriptor, ToolRegistration
-from tools.local_tools import analyze_excel_data, get_system_status, list_files_in_dir
+from tools.local_tools import (
+    analyze_excel_data,
+    get_system_status,
+    list_files_in_dir,
+    parse_filesystem_argument,
+)
 
 
 def register_all_tools(tool_registry) -> None:
@@ -26,6 +31,7 @@ def register_all_tools(tool_registry) -> None:
                 tool_name="list_files",
                 function=list_files_in_dir,
                 error_prefixes=("Path does not exist:", "List files failed:"),
+                argument_parser=parse_filesystem_argument,
             ),
         )
     )
@@ -39,6 +45,7 @@ def register_all_tools(tool_registry) -> None:
                 tool_name="analyze_excel",
                 function=analyze_excel_data,
                 error_prefixes=("File not found:", "Excel analysis failed:"),
+                argument_parser=parse_filesystem_argument,
             ),
         )
     )

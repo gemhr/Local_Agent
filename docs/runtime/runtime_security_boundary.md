@@ -1,5 +1,15 @@
 # Runtime Security Boundary
 
+## Stage 3 WP3 Resource / Deployment Boundary
+
+`Tool Permission != Resource Authorization != Sandbox`。File Tool 的真实链为 `ToolRegistry -> ToolGovernanceService -> ResourceAuthorizationService -> ToolExecutionService -> Adapter -> Tool -> Windows filesystem/ACL`。`list_files` 与 `analyze_excel` 使用同一 frozen application-wide read roots；relative、drive-relative、UNC、device/extended path、outside/traversal/prefix collision、nonexistent、wrong type及resolved link escape均在业务I/O前拒绝。固定拒绝不包含path/root/OSError，不产生 `TOOL_STARTED` / `TOOL_COMPLETED`，不调用final-answer model；RuntimeEvent和Journal schema未扩展。
+
+Wiki write不复用Tool read Authority；`WikiCrawler`校验remote `sn` 为单一Windows leaf，并对最终`.md/.pdf` candidate执行configured-output-root containment。拒绝只记录 `WIKI_REMOTE_FILENAME_INVALID` / `WIKI_OUTPUT_PATH_DENIED`，不记录raw metadata/path。
+
+`Settings.remote_api_key` 与 `Settings.wiki_cookie` 使用 `repr=False`，只解决这两个credential的dataclass `repr/str` 暴露。PRODUCTION local API仅允许numeric loopback HTTP；这不是human authentication或inbound TLS。
+
+Known Limitations：无authenticated human IAM、inbound TLS、request-size limit、full Sandbox/OS isolation、handle-based TOCTOU elimination、generic DLP、egress sandbox、approval evidence/HITL；authorized business content/path仍可进入正常Wire/Memory；UI/script raw logs与hardcoded Wiki endpoint仍是配置/日志债务；UNC不支持；real reparse测试可能受环境权限阻止；Resource contracts仍为INTERNAL_RC；Recovery仍validation-only、部署仍single-process Windows Native。
+
 ## Sensitive Data Types
 
 Prompt、Model output、Tool arguments/output、RAG chunks、Memory 正文、本地路径、Provider error/endpoint、API key/token、idempotency/resource key 均为敏感数据。Run id、session id、trace id、Tool name 在特定输出面也可能形成高基数或关联风险。

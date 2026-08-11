@@ -43,6 +43,9 @@ from core.runtime import (
     RetrievalStageStatus, RuntimeKnowledgeRetrievalAdapter,
     RunCancelledError, FaultInjectionController,
     HistoryPolicy,
+    FilesystemResourcePolicy, ResourceAuthorizationError,
+    ResourceAuthorizationService, ResourceKind, ResourceOperation,
+    ToolResourceExtractorCatalog, ToolResourceExtractorDescriptor,
 )
 
 if TYPE_CHECKING:
@@ -107,6 +110,7 @@ class AgentRouter:
         blocking_executor=None,
         tool_registry: ToolRegistry | None = None,
         tool_governance_service: ToolGovernanceService | None = None,
+        resource_authorization_service: ResourceAuthorizationService | None = None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -219,6 +223,20 @@ class AgentRouter:
         elif not isinstance(tool_governance_service, ToolGovernanceService):
             raise TypeError("tool_governance_service 必须是 ToolGovernanceService")
         self.tool_governance_service = tool_governance_service
+        # Resource Authorization 与 Tool Governance 分属两个 Authority。生产
+        # Composition Root 显式注入；兼容构造路径使用相同 descriptor + deny-all
+        # roots，绝不退化为 unrestricted。
+        if resource_authorization_service is None:
+            resource_authorization_service = self._default_resource_authorization_service(
+                tool_registry
+            )
+        elif not isinstance(
+            resource_authorization_service, ResourceAuthorizationService
+        ):
+            raise TypeError(
+                "resource_authorization_service 必须是 ResourceAuthorizationService"
+            )
+        self.resource_authorization_service = resource_authorization_service
         self.tool_plan_max_tokens = 48
         self.summary_plan_max_tokens = 256
         self.knowledge_rewrite_max_tokens = 128
@@ -243,6 +261,26 @@ class AgentRouter:
         )
         catalog.freeze()
         return ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
+
+    @staticmethod
+    def _default_resource_authorization_service(
+        tool_registry: ToolRegistry,
+    ) -> ResourceAuthorizationService:
+        catalog = ToolResourceExtractorCatalog()
+        if tool_registry.contains("list_files") or tool_registry.contains("analyze_excel"):
+            catalog.register(
+                ToolResourceExtractorDescriptor(
+                    "list_files", "argument_text", ResourceKind.DIRECTORY, ResourceOperation.READ
+                )
+            )
+            catalog.register(
+                ToolResourceExtractorDescriptor(
+                    "analyze_excel", "argument_text", ResourceKind.FILE, ResourceOperation.READ
+                )
+            )
+            catalog.validate(tool_registry)
+        catalog.freeze()
+        return ResourceAuthorizationService(FilesystemResourcePolicy(()), catalog)
 
     @property
     def tools(self) -> Mapping[str, Mapping[str, object]]:
@@ -1265,6 +1303,13 @@ class AgentRouter:
                 ToolGovernanceErrorCode(invocation_decision.safe_error_code),
                 governance_denial_message(invocation_decision.safe_error_code),
             )
+        # 既有 WP2 单元测试使用 ``__new__`` 构造最小 Router 桩；真实构造器与
+        # production lifespan 始终注入该 Authority。缺失属性仅兼容该历史桩。
+        resource_service = getattr(self, "resource_authorization_service", None)
+        if resource_service is not None:
+            resource_request = resource_service.extract(invocation)
+            if resource_request is not None:
+                resource_service.require_authorized(resource_request)
         outcome = self.tool_execution_service.execute_sync(
             invocation=invocation,
             adapter=adapter,
@@ -1306,7 +1351,7 @@ class AgentRouter:
                 run_context=run_context,
                 context_requirements_out=context_requirements_out,
             )
-        except ToolGovernanceError as denied:
+        except (ToolGovernanceError, ResourceAuthorizationError) as denied:
             # WP2-B：governance non-ALLOW 直接输出固定 safe denial；不调用
             # final-answer model，不重试 planner，不换 Tool，不伪装 Tool 不可用。
             yield denied.safe_message
@@ -1358,7 +1403,7 @@ class AgentRouter:
                 event_emitter=event_emitter,
                 fault_controller=fault_controller,
             )
-        except ToolGovernanceError as denied:
+        except (ToolGovernanceError, ResourceAuthorizationError) as denied:
             # WP2-B：governance non-ALLOW 直接返回固定 safe denial 作为本步业务
             # 结果（COORDINATED specialist 结果如实进入既有 synthesis）；不调用
             # final-answer model，不重试 planner，不换 Tool。

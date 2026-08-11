@@ -10,13 +10,17 @@
 """
 
 import importlib.metadata
+import ipaddress
 import math
+import ntpath
 import os
 import re
 import tomllib
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from core.runtime.runtime_mode import ChatRuntimeMode
 
@@ -246,6 +250,143 @@ def _project_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _strip_matching_outer_quotes(value: str, *, env_name: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    starts_quote = stripped[0] in "'\""
+    ends_quote = stripped[-1] in "'\""
+    if starts_quote or ends_quote:
+        if len(stripped) < 2 or stripped[0] != stripped[-1] or not starts_quote:
+            raise SettingsValidationError(
+                SETTINGS_SECURITY_POLICY_ERROR, env_name, "invalid_root_syntax"
+            )
+        stripped = stripped[1:-1].strip()
+    if not stripped or "\x00" in stripped or "'" in stripped or '"' in stripped:
+        raise SettingsValidationError(
+            SETTINGS_SECURITY_POLICY_ERROR, env_name, "invalid_root_syntax"
+        )
+    return stripped
+
+
+def _is_drive_qualified_local_path(value: str) -> bool:
+    normalized = value.replace("/", "\\")
+    if normalized.lower().startswith(("\\\\", "\\?\\", "\\.\\")):
+        return False
+    drive, tail = ntpath.splitdrive(normalized)
+    return bool(
+        re.fullmatch(r"[A-Za-z]:", drive)
+        and tail.startswith("\\")
+        and not tail.startswith("\\\\")
+    )
+
+
+def _tool_allowed_read_roots(
+    profile: EnvironmentProfile, project_root: str
+) -> tuple[str, ...]:
+    env_name = "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS"
+    raw = os.getenv(env_name)
+    if raw is None:
+        if profile is EnvironmentProfile.LOCAL:
+            values = (project_root,)
+        elif profile is EnvironmentProfile.TEST:
+            values = ()
+        else:
+            raise SettingsValidationError(
+                SETTINGS_SECURITY_POLICY_ERROR,
+                env_name,
+                "required_for_production",
+            )
+    elif not raw.strip():
+        values = ()
+    else:
+        segments = raw.split(";")
+        if any(not segment.strip() for segment in segments):
+            raise SettingsValidationError(
+                SETTINGS_SECURITY_POLICY_ERROR, env_name, "empty_root_segment"
+            )
+        values = tuple(
+            _strip_matching_outer_quotes(segment, env_name=env_name)
+            for segment in segments
+        )
+    if profile is EnvironmentProfile.PRODUCTION and not values:
+        raise SettingsValidationError(
+            SETTINGS_SECURITY_POLICY_ERROR, env_name, "required_for_production"
+        )
+
+    canonical: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not _is_drive_qualified_local_path(value):
+            raise SettingsValidationError(
+                SETTINGS_SECURITY_POLICY_ERROR, env_name, "invalid_local_root"
+            )
+        try:
+            resolved = Path(value).resolve(strict=True)
+            is_directory = resolved.is_dir()
+        except (OSError, RuntimeError, ValueError):
+            raise SettingsValidationError(
+                SETTINGS_SECURITY_POLICY_ERROR, env_name, "root_unavailable"
+            ) from None
+        if not is_directory:
+            raise SettingsValidationError(
+                SETTINGS_SECURITY_POLICY_ERROR, env_name, "root_not_directory"
+            )
+        canonical_value = str(resolved)
+        comparison_key = ntpath.normcase(ntpath.normpath(canonical_value))
+        if comparison_key not in seen:
+            seen.add(comparison_key)
+            canonical.append(canonical_value)
+    return tuple(canonical)
+
+
+def _validate_production_local_api(
+    profile: EnvironmentProfile, api_host: str, api_base_url: str
+) -> None:
+    if profile is not EnvironmentProfile.PRODUCTION:
+        return
+    try:
+        host_ip = ipaddress.ip_address(api_host)
+    except ValueError:
+        raise SettingsValidationError(
+            SETTINGS_SECURITY_POLICY_ERROR,
+            "LOCAL_AGENT_API_HOST",
+            "production_requires_numeric_loopback",
+        ) from None
+    if not host_ip.is_loopback:
+        raise SettingsValidationError(
+            SETTINGS_SECURITY_POLICY_ERROR,
+            "LOCAL_AGENT_API_HOST",
+            "production_requires_loopback",
+        )
+    try:
+        parsed = urlsplit(api_base_url)
+        base_host = parsed.hostname
+        base_ip = ipaddress.ip_address(base_host or "")
+        _ = parsed.port
+    except (ValueError, TypeError):
+        raise SettingsValidationError(
+            SETTINGS_SECURITY_POLICY_ERROR,
+            "LOCAL_AGENT_API_BASE_URL",
+            "production_requires_loopback_http_url",
+        ) from None
+    if (
+        parsed.scheme.lower() != "http"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or not base_ip.is_loopback
+    ):
+        raise SettingsValidationError(
+            SETTINGS_SECURITY_POLICY_ERROR,
+            "LOCAL_AGENT_API_BASE_URL",
+            "production_requires_loopback_http_url",
+        )
+
+
 def _read_project_metadata() -> tuple[str | None, str | None]:
     """读取仓库 pyproject.toml 的 [project] name/version（source checkout 事实）。"""
     path = os.path.join(_project_root(), "pyproject.toml")
@@ -360,7 +501,7 @@ class Settings:
     remote_model_name: str
     remote_provider_kind: str
     remote_api_base_url: str
-    remote_api_key: str
+    remote_api_key: str = field(repr=False)
     remote_timeout_seconds: int
     remote_verify_tls: bool
     remote_trust_env: bool
@@ -410,7 +551,7 @@ class Settings:
     orchestration_enabled: bool
     orchestration_max_agents: int
     sync_enabled: bool
-    wiki_cookie: str
+    wiki_cookie: str = field(repr=False)
     local_knowledge_base_dir: str
     knowledge_base_required: bool
     environment_id: str
@@ -422,6 +563,7 @@ class Settings:
     step_result_per_result_chars: int
     step_result_run_total_chars: int
     step_result_max_entries: int
+    tool_allowed_read_roots: tuple[str, ...] = ()
 
     @classmethod
     def load(cls) -> "Settings":
@@ -435,12 +577,17 @@ class Settings:
         environment_profile = EnvironmentProfile.parse(
             os.getenv("LOCAL_AGENT_ENVIRONMENT_PROFILE")
         )
-        api_host = os.getenv("LOCAL_AGENT_API_HOST", "127.0.0.1")
+        api_host = os.getenv("LOCAL_AGENT_API_HOST", "127.0.0.1").strip()
         api_port = _env_strict_int(
             "LOCAL_AGENT_API_PORT", 8000, minimum=1, maximum=65535
         )
+        derived_api_host = f"[{api_host}]" if ":" in api_host else api_host
         api_base_url = os.getenv(
-            "LOCAL_AGENT_API_BASE_URL", f"http://{api_host}:{api_port}"
+            "LOCAL_AGENT_API_BASE_URL", f"http://{derived_api_host}:{api_port}"
+        ).strip()
+        _validate_production_local_api(environment_profile, api_host, api_base_url)
+        tool_allowed_read_roots = _tool_allowed_read_roots(
+            environment_profile, project_root
         )
         chat_runtime_mode = _env_runtime_mode()
 
@@ -747,4 +894,5 @@ class Settings:
             step_result_per_result_chars=step_result_per_result_chars,
             step_result_run_total_chars=step_result_run_total_chars,
             step_result_max_entries=step_result_max_entries,
+            tool_allowed_read_roots=tool_allowed_read_roots,
         )
