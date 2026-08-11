@@ -8,6 +8,14 @@
 
 Tool Governance 仍拥有 Agent→Tool Permission/Risk/Approval，`ToolExecutionService` 仍拥有实际执行；Resource Authorization 不成为第二 ToolRegistry，也不修改 `ToolInvocation` / `ToolExecutionSpec` / RuntimeEvent / Journal。
 
+## Stage 3 WP3-B HTTP Payload Owners
+
+| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
+| --- | --- | --- | --- | --- | --- | --- |
+| 冻结 payload limits（含 history `limit` default `10` / range `1..100` 与 `offset` default `0` / range `0..100000`） | `RequestPayloadPolicy` / `REQUEST_PAYLOAD_POLICY`（APPLICATION_SCOPE，唯一 numeric facts Owner） | `RequestBodyLimitMiddleware`、`server.py` FastAPI/Pydantic schema | import 时构造一次；所有值必须等于冻结默认值；route 只引用 policy facts | 无 | route 复制 numeric default；Settings/env/request 覆盖；Runtime Budget 反向拥有 HTTP limit | INTERNAL_RC |
+| raw HTTP body bytes 与 `Content-Length` 合法性 | `RequestBodyLimitMiddleware`（REQUEST boundary） | 下游 ASGI app 仅接收校验后 replay | 对单请求完整缓冲、计数、拒绝或原序 replay | 无；不进入 Event/Journal/Log | 只信声明长度；超限后调用 endpoint；记录 raw body/header | INTERNAL_RC |
+| endpoint 字段长度/数量/范围 | FastAPI/Pydantic schema（REQUEST boundary） | endpoint / ChatService / MemoryManager | request validation；成功后只传已校验模型/参数 | 仅既有业务路径；校验失败无 mutation | 把字段 Gate 当 Tool authorization、human IAM、DLP 或 Runtime Budget | INTERNAL_RC |
+
 本矩阵冻结 Runtime 事实的唯一权威 owner。`readers` 可以投影事实，`writers` 只能通过 owner 的受控 API 修改；Report、Evidence 与测试 Oracle 均不得升级为 owner。
 
 | fact | authoritative_owner | readers | writers | persistence_location | lifecycle_scope | must_not_own |

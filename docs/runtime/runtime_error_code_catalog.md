@@ -8,6 +8,16 @@
 | `WIKI_REMOTE_FILENAME_INVALID` | Wiki output security | pre-write | WikiCrawler | remote `sn` 不是安全单一Windows leaf | skip item | no write | fixed low-card log code；无raw sn/title/path | 修正upstream metadata | outside marker absent | WP3 Wiki regression |
 | `WIKI_OUTPUT_PATH_DENIED` | Wiki output security | pre-write | WikiCrawler | final `.md/.pdf` target canonical containment失败 | skip item | no outside write | fixed low-card log code；无raw path | 修正configured output root / filesystem links | outside marker absent | WP3 Wiki regression |
 
+### HTTP pre-Run rejection（不是 Runtime error code）
+
+| HTTP | Fixed detail / owner | Trigger | Run / side effect | Retry semantics | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| 400 | `Invalid Content-Length` / `RequestBodyLimitMiddleware` | 重复、空或非十进制ASCII digit的 `Content-Length` | endpoint、Run、RuntimeEvent、Journal、Memory均未启动 | 修正请求后发起新请求 | `tests/test_stage3_wp3b_payload_e2e.py` |
+| 413 | `Payload Too Large` / `RequestBodyLimitMiddleware` | 声明或实际ASGI body超过1,048,576 bytes | endpoint、Run、RuntimeEvent、Journal、Memory均未启动 | 缩小请求后发起新请求 | payload E2E |
+| 422 | FastAPI/Pydantic validation detail | endpoint字段chars/count/range不满足冻结policy | service/Run未启动；Memory无mutation | 修正字段后发起新请求 | payload policy + E2E |
+
+400/413 使用固定 JSON detail 且不回显 header/body；422 保留现有 FastAPI 默认投影，可能包含被拒绝输入，属于已知 WP3-C 候选，不得宣称为通用 DLP。HTTP payload Gate 与 Runtime Budget、Provider错误、Tool权限错误是不同 Owner 和阶段。
+
 `SETTINGS_SECURITY_POLICY_ERROR` 现同时覆盖 `LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS` 的缺失/空/非法root，以及PRODUCTION local API host/base URL非numeric loopback安全策略；异常仅含env name与固定reason code。
 
 本目录只收录源码枚举或固定字符串。它不保存原始异常、业务正文、路径、Provider URL、Fault Rule ID、Tool argument/output。`RUNTIME_CONFIGURATION_ERROR` 是真实固定码，但仅覆盖 ChatService 缺少 Coordinated factory 的局部 Runtime/Chat configuration failure，不得扩大为 Settings 全域错误。

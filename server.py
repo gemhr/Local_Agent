@@ -6,10 +6,10 @@ from contextlib import asynccontextmanager
 import asyncio
 import logging
 import uuid
-from typing import Optional
+from typing import Annotated, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,10 @@ from core.application_metadata import create_application_metadata
 from core.chat_service import ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
+from core.request_payload import (
+    REQUEST_PAYLOAD_POLICY,
+    RequestBodyLimitMiddleware,
+)
 from core.persistence_migration import (
     PERSISTENCE_PREFLIGHT_FAILED,
     PersistenceError,
@@ -793,21 +797,46 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    policy=REQUEST_PAYLOAD_POLICY,
+)
 
 
 class ChatRequest(BaseModel):
     """聊天流式接口的请求体。"""
 
-    agent_id: str
-    query: str
-    file_path: str = ""
-    run_id: str | None = None
+    agent_id: Annotated[
+        str, Field(max_length=REQUEST_PAYLOAD_POLICY.AGENT_ID_MAX_CHARS)
+    ]
+    query: Annotated[
+        str, Field(max_length=REQUEST_PAYLOAD_POLICY.CHAT_QUERY_MAX_CHARS)
+    ]
+    file_path: Annotated[
+        str,
+        Field(max_length=REQUEST_PAYLOAD_POLICY.CHAT_FILE_PATH_MAX_CHARS),
+    ] = ""
+    run_id: Annotated[
+        str, Field(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
+    ] | None = None
+
+
+MessageId = Annotated[
+    int,
+    Field(
+        ge=REQUEST_PAYLOAD_POLICY.MESSAGE_ID_MIN,
+        le=REQUEST_PAYLOAD_POLICY.MESSAGE_ID_MAX,
+    ),
+]
 
 
 class DeleteMemoryRequest(BaseModel):
     """删除记忆接口的请求体。"""
 
-    message_ids: list[int] = Field(default_factory=list)
+    message_ids: list[MessageId] = Field(
+        default_factory=list,
+        max_length=REQUEST_PAYLOAD_POLICY.DELETE_MESSAGE_IDS_MAX_COUNT,
+    )
     delete_all: bool = False
 
 
@@ -1070,7 +1099,11 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
 
 
 @app.post("/api/runtime/runs/{run_id}/cancel")
-async def cancel_run_endpoint(run_id: str):
+async def cancel_run_endpoint(
+    run_id: Annotated[
+        str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
+    ],
+):
     """客户端只能请求用户主动取消，重复请求保持幂等。"""
     try:
         uuid.UUID(run_id)
@@ -1086,14 +1119,37 @@ async def cancel_run_endpoint(run_id: str):
 
 
 @app.get("/api/history/{agent_id}")
-async def get_history_endpoint(agent_id: str, limit: int = 10, offset: int = 0):
+async def get_history_endpoint(
+    agent_id: Annotated[
+        str, Path(max_length=REQUEST_PAYLOAD_POLICY.AGENT_ID_MAX_CHARS)
+    ],
+    limit: Annotated[
+        int,
+        Query(
+            ge=REQUEST_PAYLOAD_POLICY.HISTORY_LIMIT_MIN,
+            le=REQUEST_PAYLOAD_POLICY.HISTORY_LIMIT_MAX,
+        ),
+    ] = REQUEST_PAYLOAD_POLICY.HISTORY_LIMIT_DEFAULT,
+    offset: Annotated[
+        int,
+        Query(
+            ge=REQUEST_PAYLOAD_POLICY.HISTORY_OFFSET_MIN,
+            le=REQUEST_PAYLOAD_POLICY.HISTORY_OFFSET_MAX,
+        ),
+    ] = REQUEST_PAYLOAD_POLICY.HISTORY_OFFSET_DEFAULT,
+):
     """按页返回某个智能体的历史消息。"""
     service = require_service()
     return {"messages": service.get_history(agent_id=agent_id, limit=limit, offset=offset)}
 
 
 @app.get("/api/search")
-async def search_endpoint(keyword: str):
+async def search_endpoint(
+    keyword: Annotated[
+        str,
+        Query(max_length=REQUEST_PAYLOAD_POLICY.SEARCH_KEYWORD_MAX_CHARS),
+    ],
+):
     """根据关键词搜索持久化消息。"""
     service = require_service()
     return {"results": service.search_memory(keyword)}

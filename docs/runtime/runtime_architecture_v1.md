@@ -150,7 +150,25 @@ construct -> register（4 个 ToolRegistration）-> freeze -> 注入 AgentRouter
 
 Windows 判定在 I/O 前拒绝 relative、drive-relative、UNC、device/extended namespace；existing candidate 经 `Path.resolve(strict=True)` 后按 kind 校验，并以 `ntpath.normcase/normpath + commonpath` 对多个 canonical roots 做 component-aware containment。此边界不是 OS Sandbox，仍保留 authorization-to-open TOCTOU 限制。
 
-### 2.4 WP2 Tool Platform Integration Gate（offline deterministic E2E）
+### 2.4 HTTP Request Payload Boundary（Stage 3 WP3-B，INTERNAL_RC）
+
+生产入口链冻结为：
+
+```text
+HTTP request
+-> RequestBodyLimitMiddleware（raw ASGI body，实际 bytes，application-wide）
+-> FastAPI / Pydantic（endpoint 字段语义与 chars/count/range）
+-> endpoint / ChatService / MemoryManager
+-> Coordinated Runtime（仅在前置校验成功后创建 Run）
+```
+
+`RequestPayloadPolicy` 是不可变的 APPLICATION_SCOPE 常量 Authority，不读取 Settings、环境变量、header 或 body，也不允许构造时覆盖冻结值。`RequestBodyLimitMiddleware` 在下游执行前完整缓冲并按实际 body bytes 计数；`Content-Length` 只用于提前拒绝，缺失、前导零、低报或等于上限均不绕过实际计数。重复或非法 `Content-Length` 固定返回 HTTP 400 `{"detail":"Invalid Content-Length"}`；声明值或实际值超过 `1,048,576` bytes 固定返回 HTTP 413 `{"detail":"Payload Too Large"}`。disconnect 或非 `http.request` 消息停止下游调用且不记录正文。
+
+字段边界由 FastAPI/Pydantic 在 endpoint 前执行：`query=32,768` chars、`file_path=4,096` chars、`agent_id=64` chars、`run_id=45` chars、`keyword=1,024` chars；历史分页 `limit=1..100`（default `10`）、`offset=0..100000`（default `0`）；删除 ID 集合最多 `1,000` 个且每个 ID 为 `1..2^63-1`。所有数值（包括两个 history defaults）均只由 `RequestPayloadPolicy` 拥有，route 只消费 policy facts。字符上限使用 Python 字符长度，与 UTF-8 byte 上限相互独立。既有 empty/whitespace/NUL、UUID 解析、unknown-field ignore 和 `delete_all` 语义未被扩大修改。
+
+HTTP payload Gate 是 pre-Run transport/application validation，不是 Runtime Budget、Tool Permission、Resource Authorization、Rate Limit 或 DLP。被 HTTP 400/413/422 拒绝的请求不创建 Run，不产生 RuntimeEvent/Journal/Memory mutation；HTTP 422 仍采用 FastAPI 默认 validation detail，当前会回显被拒绝字段输入，是已记录的 WP3-C 候选边界。
+
+### 2.5 WP2 Tool Platform Integration Gate（offline deterministic E2E）
 
 production Tool chain 在本 Gate 前已经实现；WP2-C 不新增 production integration 或第二套装配，只以 `tests/test_stage3_wp2_tool_e2e.py` 增加确定性全链验证。当前被测试的 topology 为：
 
