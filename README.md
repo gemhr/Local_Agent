@@ -189,6 +189,8 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `GET` | `/api/memory` | 获取 Memory 管理数据 |
 | `DELETE` | `/api/memory` | 删除指定 `message_ids` 或使用 `delete_all` 清空 |
 
+所有 HTTP 请求体先经过 application-wide raw-body Gate：按实际 ASGI body bytes 计算，上限为 `1,048,576` bytes；重复或非法 `Content-Length` 返回固定 HTTP 400，声明值或实际值超限返回固定 HTTP 413。随后由 FastAPI/Pydantic 执行字段级限制：`query` 32,768 chars、`file_path` 4,096 chars、`agent_id` 64 chars、`run_id` 45 chars、搜索 `keyword` 1,024 chars；历史分页 `limit=1..100`、`offset=0..100000`；单次删除最多 1,000 个 `message_ids`，每个 ID 为 `1..9223372036854775807`。字符限制按 Python Unicode code point 计数，不按 UTF-8 bytes 计数。
+
 聊天请求示例：
 
 ```powershell
@@ -242,7 +244,7 @@ uv run python scripts/query_local_kb.py "检索问题"
 - 不得手工修改 Runtime SQLite row、digest、event sequence 或 terminal 事实。
 - Fault Injection 只能从测试或显式 operation seam 注入，生产配置和 API 没有启用入口。
 - File Tool 调用按 `Tool Governance -> ResourceAuthorizationService -> ToolExecutionService` 顺序执行；相对路径、UNC、device/extended path、越界、nonexistent 与类型不匹配均在业务访问前拒绝。
-- `PRODUCTION` 仅认证同机 loopback Desktop Client + Server：`LOCAL_AGENT_API_HOST` 与 `LOCAL_AGENT_API_BASE_URL` 必须使用 numeric loopback（IPv4 loopback 或 `::1`）。当前无 authenticated human IAM、inbound TLS、request-size limit 或完整 Sandbox；LOCAL/TEST 的非 loopback 配置只属于开发边界。
+- `PRODUCTION` 仅认证同机 loopback Desktop Client + Server：`LOCAL_AGENT_API_HOST` 与 `LOCAL_AGENT_API_BASE_URL` 必须使用 numeric loopback（IPv4 loopback 或 `::1`）。HTTP raw-body 与字段级 payload Gate 已启用，但它们不是 authenticated human IAM、inbound TLS、Rate Limit、DLP 或完整 Sandbox；LOCAL/TEST 的非 loopback 配置只属于开发边界。
 
 ## 9. 测试与验证
 

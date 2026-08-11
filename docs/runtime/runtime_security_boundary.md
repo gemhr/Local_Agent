@@ -6,9 +6,37 @@
 
 Wiki write不复用Tool read Authority；`WikiCrawler`校验remote `sn` 为单一Windows leaf，并对最终`.md/.pdf` candidate执行configured-output-root containment。拒绝只记录 `WIKI_REMOTE_FILENAME_INVALID` / `WIKI_OUTPUT_PATH_DENIED`，不记录raw metadata/path。
 
-`Settings.remote_api_key` 与 `Settings.wiki_cookie` 使用 `repr=False`，只解决这两个credential的dataclass `repr/str` 暴露。PRODUCTION local API仅允许numeric loopback HTTP；这不是human authentication或inbound TLS。
+`Settings.remote_api_key` 与 `Settings.wiki_cookie` 使用 `repr=False`，只解决这两个credential的dataclass `repr/str` 暴露。Provider 401/403/timeout/5xx/malformed response 继续只投影固定 safe facts，不允许 Authorization marker 进入异常、Event、Journal、结构化日志、Metric、Span、Wire 或 Health。PRODUCTION local API仅允许numeric loopback HTTP；这不是human authentication或inbound TLS。
 
-Known Limitations：无authenticated human IAM、inbound TLS、request-size limit、full Sandbox/OS isolation、handle-based TOCTOU elimination、generic DLP、egress sandbox、approval evidence/HITL；authorized business content/path仍可进入正常Wire/Memory；UI/script raw logs与hardcoded Wiki endpoint仍是配置/日志债务；UNC不支持；real reparse测试可能受环境权限阻止；Resource contracts仍为INTERNAL_RC；Recovery仍validation-only、部署仍single-process Windows Native。
+HTTP request 已有 application-wide 1 MiB actual-byte Gate 和 endpoint 字段级 chars/count/range Gate。它们是 pre-Run 输入约束，不是 Runtime Budget、Tool Permission、Resource Authorization、human IAM、Rate Limit 或 DLP；400/413/422 拒绝不产生 Run、RuntimeEvent、Journal 或业务 mutation。
+
+Known Limitations：无authenticated human IAM、inbound TLS、Rate Limit、full Sandbox/OS isolation、handle-based TOCTOU elimination、generic DLP、egress sandbox、approval evidence/HITL；FastAPI 默认422 detail可能回显被拒绝输入，留给WP3-C；authorized business content/path仍可进入正常Wire/Memory；UI/script raw logs与hardcoded Wiki endpoint仍是配置/日志债务；UNC不支持；real reparse测试可能受环境权限阻止；Resource contracts与payload contracts仍为INTERNAL_RC；Recovery仍validation-only、部署仍single-process Windows Native。
+
+## Security Non-capabilities / Deferred Scope
+
+| Security capability | Current status | Boundary / future scope |
+| --- | --- | --- |
+| WAF / generic abuse protection | `NOT_IMPLEMENTED` | WP3-B 的 fixed raw-body/semantic payload bounds 不是 Web Application Firewall（WAF）；当前没有 generic abuse detection、bot detection、distributed request filtering、per-user/per-principal traffic policy 或 WAF-style rule engine。 |
+| Prompt Injection protection | `NOT_IMPLEMENTED` | `DEFERRED_TO_WP3_C`。Stage 3 WP3-C 计划处理 User Prompt Injection、RAG instruction injection、Tool-result instruction injection、Memory/History instruction injection、Model self-authorization 与 Instruction/Data authority separation；这些能力当前均未实现。 |
+| Human IAM | `NOT_IMPLEMENTED` | numeric loopback、`agent_id` 和 Tool principal 均不是 authenticated human identity、RBAC/ABAC 或 tenant isolation。 |
+| Inbound Local API TLS | `NOT_IMPLEMENTED` | 当前 certified boundary 仍是 numeric-loopback HTTP。 |
+| Inbound API rate limit | `NOT_IMPLEMENTED` | payload bounds、Runtime admission/concurrency 与 Provider rate handling 均不等于 caller rate limit；distributed/per-principal策略 defer to WAF/deployment edge。 |
+| Generic DLP | `NOT_IMPLEMENTED` | fixed safe projection与credential-specific controls不等于通用内容/PII分类和输出扫描。 |
+| Full Sandbox | `NOT_IMPLEMENTED` | File Tool resource authorization不等于OS isolation或handle-based TOCTOU elimination。 |
+
+现有 Tool Permission、Risk/Approval、Resource Authorization 与 Payload Bounds 是code-owned deterministic security controls；Model/User text不能直接重配置或关闭这些policy。该事实不等价于完整Prompt Injection防护，也不表示RAG、Tool result或Memory中的instruction/data trust boundary已经建立。
+
+## HTTP Payload Boundary（WP3-B）
+
+| Surface | Frozen limit | Failure |
+| --- | --- | --- |
+| raw ASGI request body | `1,048,576` actual bytes | invalid/duplicate `Content-Length` -> 400；declared/actual over limit -> 413 |
+| chat `query` / `file_path` / `agent_id` / `run_id` | `32,768` / `4,096` / `64` / `45` Python chars | FastAPI 422，service未调用 |
+| search `keyword` | `1,024` Python chars | FastAPI 422 |
+| history `limit` / `offset` | `1..100` / `0..100000` | FastAPI 422 |
+| delete `message_ids` | 最多 `1,000`；每项 `1..2^63-1` | FastAPI 422，Memory未修改 |
+
+raw-body Gate 在解析 JSON 前完整缓冲并按实际 bytes 计数；缺失、前导零、低报或等于上限的 `Content-Length` 都不能绕过实际计数。字段长度按 Python Unicode code point 计数，所以 astral 字符仍按一个 char 计。拒绝体是固定 JSON（400/413）或框架 validation detail（422），middleware 不记录 raw header/body。
 
 ## Sensitive Data Types
 
@@ -57,7 +85,7 @@ Prompt、Model output、Tool arguments/output、RAG chunks、Memory 正文、本
 ```
 
 - governance non-ALLOW 不产生 `TOOL_STARTED`/`TOOL_COMPLETED` 或任何 Tool evidence；denial 是直接安全 Wire 文本，不伪造 execution facts。
-- `ToolPermission != filesystem/path authorization`；WP3 sandbox / workspace root / path traversal / secret isolation 仍未实现。
+- `ToolPermission != filesystem/path authorization`；WP3-A 已实现 frozen workspace read-root/path containment，仍不等于 OS Sandbox 或 TOCTOU elimination。两个 Settings credential 的 `repr=False` 与 Provider safe projection 已覆盖，但 generic secret isolation / DLP 仍未实现。
 - `ToolSideEffectKind.NONE` 不表示 permission-free；approval 不是 sandbox。approval evidence、durable pause/resume、human approval workflow 均未实现。
 - **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent / governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后，不为此新增 RuntimeEvent / Journal schema。
 
