@@ -156,6 +156,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_LLM_BACKEND` | `remote` | 可选 `local` / `remote` / `hybrid`；未知值启动失败 |
 | `LOCAL_AGENT_MODEL_PROFILE` | `balanced` | `fast` / `balanced` / `deep`；未知值启动失败 |
 | `LOCAL_AGENT_API_HOST` / `LOCAL_AGENT_API_PORT` | `127.0.0.1` / `8000` | 后端监听地址与端口 |
+| `LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS` | `LOCAL`=项目根；`TEST`=空；`PRODUCTION`=必填 | `;` 分隔的 existing Windows 本地目录；`list_files` / `analyze_excel` 只允许读取 canonical root 内资源 |
 | `LOCAL_AGENT_API_BASE_URL` | 由 host/port 派生 | 桌面端访问后端的根地址（client-only） |
 | `LOCAL_AGENT_REMOTE_API_BASE_URL` | 空 | `remote` / `hybrid` 的 SERVER role 必填；PRODUCTION 必须 HTTPS |
 | `LOCAL_AGENT_REMOTE_API_KEY` | 空 | 仅在非空时发送 Bearer Authorization |
@@ -240,6 +241,8 @@ uv run python scripts/query_local_kb.py "检索问题"
 - 正常聊天 Wire 会承载面向用户的输出，Memory 和知识库有各自的业务持久化边界；“Runtime 安全投影不保存正文”不等于“任何业务面都不保存正文”。
 - 不得手工修改 Runtime SQLite row、digest、event sequence 或 terminal 事实。
 - Fault Injection 只能从测试或显式 operation seam 注入，生产配置和 API 没有启用入口。
+- File Tool 调用按 `Tool Governance -> ResourceAuthorizationService -> ToolExecutionService` 顺序执行；相对路径、UNC、device/extended path、越界、nonexistent 与类型不匹配均在业务访问前拒绝。
+- `PRODUCTION` 仅认证同机 loopback Desktop Client + Server：`LOCAL_AGENT_API_HOST` 与 `LOCAL_AGENT_API_BASE_URL` 必须使用 numeric loopback（IPv4 loopback 或 `::1`）。当前无 authenticated human IAM、inbound TLS、request-size limit 或完整 Sandbox；LOCAL/TEST 的非 loopback 配置只属于开发边界。
 
 ## 9. 测试与验证
 

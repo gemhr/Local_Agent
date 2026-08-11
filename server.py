@@ -55,6 +55,12 @@ from core.runtime import (
     BlockingExecutorClosedError,
     BlockingTaskKind,
     StartupDependencySnapshot,
+    FilesystemResourcePolicy,
+    ResourceAuthorizationService,
+    ResourceKind,
+    ResourceOperation,
+    ToolResourceExtractorCatalog,
+    ToolResourceExtractorDescriptor,
     process_legacy_step_executor,
     process_run_registry,
 )
@@ -192,6 +198,33 @@ def _build_tool_governance(tool_registry: ToolRegistry) -> ToolGovernanceService
     register_default_tool_policies(catalog)
     catalog.freeze()
     return ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
+
+
+def _build_resource_authorization(
+    tool_registry: ToolRegistry,
+) -> ResourceAuthorizationService:
+    """构造、校验并冻结 application-scoped File Tool read policy。"""
+    catalog = ToolResourceExtractorCatalog()
+    catalog.register(
+        ToolResourceExtractorDescriptor(
+            tool_name="list_files",
+            argument_key="argument_text",
+            resource_kind=ResourceKind.DIRECTORY,
+            operation=ResourceOperation.READ,
+        )
+    )
+    catalog.register(
+        ToolResourceExtractorDescriptor(
+            tool_name="analyze_excel",
+            argument_key="argument_text",
+            resource_kind=ResourceKind.FILE,
+            operation=ResourceOperation.READ,
+        )
+    )
+    catalog.validate(tool_registry)
+    catalog.freeze()
+    policy = FilesystemResourcePolicy(settings.tool_allowed_read_roots)
+    return ResourceAuthorizationService(policy, catalog)
 
 
 async def _watch_request_disconnect(
@@ -537,6 +570,10 @@ async def lifespan(app: FastAPI):
         lambda: _build_tool_governance(tool_registry),
         component="tool_governance",
     )
+    resource_authorization_service = await initialization_stack.run(
+        lambda: _build_resource_authorization(tool_registry),
+        component="resource_authorization",
+    )
     router = await initialization_stack.create(
         "agent_router",
         lambda: AgentRouter(
@@ -563,6 +600,7 @@ async def lifespan(app: FastAPI):
             blocking_executor=blocking_executor,
             tool_registry=tool_registry,
             tool_governance_service=tool_governance_service,
+            resource_authorization_service=resource_authorization_service,
         ),
     )
     runtime_metrics = InMemoryMetricsRecorder(

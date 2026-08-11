@@ -7,6 +7,9 @@ URL/path）。
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from core.settings import (
@@ -23,7 +26,9 @@ from core.settings import (
 _ENV_BASE = {
     "LOCAL_AGENT_ENVIRONMENT_PROFILE": None,
     "LOCAL_AGENT_REMOTE_API_BASE_URL": "https://example.test/v1",
+    "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS": None,
 }
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load(monkeypatch, **env):
@@ -37,6 +42,14 @@ def _load(monkeypatch, **env):
             monkeypatch.delenv(key, raising=False)
         else:
             monkeypatch.setenv(key, value)
+    if (
+        EnvironmentProfile.parse(os.getenv("LOCAL_AGENT_ENVIRONMENT_PROFILE"))
+        is EnvironmentProfile.PRODUCTION
+        and "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS" not in env
+    ):
+        monkeypatch.setenv(
+            "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS", str(_PROJECT_ROOT.resolve())
+        )
     return Settings.load()
 
 

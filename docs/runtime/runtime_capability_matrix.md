@@ -1,5 +1,15 @@
 # Runtime Capability Matrix
 
+## Stage 3 WP3 Security Baseline Capabilities
+
+| Capability | Status | Coordinated | Owner / path | State | Failure behavior | Recovery | Legacy | Evidence | Limitations |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| File Tool application read-root authorization | SUPPORTED | 是 | ResourceAuthorizationService + frozen extractor catalog / multiple canonical roots | 无独立持久化；Settings startup snapshot | outside/invalid/type mismatch 在 ToolExecutionService 前固定 safe denial；Tool events与final model均为0 | 不重试/不 fallback | 同一 AgentRouter Gate | `tests/test_stage3_wp3_security_baseline.py` + `tests/test_stage3_wp3_security_e2e.py` | 仅 `list_files` / `analyze_excel` READ；UNC不支持；不是OS Sandbox；存在TOCTOU limitation |
+| Wiki configured-output containment | SUPPORTED | 不适用 | WikiCrawler component invariant | 本地业务文件 | 非法remote leaf或越界candidate skip item并记录固定低基数code | 不重试被拒绝item | 不适用 | WP3 Wiki deterministic fake-HTTP regression | Wiki endpoint配置化、全仓日志清洗不在本WP |
+| PRODUCTION local API loopback boundary | SUPPORTED | 是 | Settings startup validation | 无 | non-loopback、hostname或非法base URL fail closed | 重启修正 | 同配置 | WP3 Settings security tests | 无authenticated human IAM、无inbound TLS；仅认证同机loopback baseline |
+
+以上是 Phase 3 实现/测试事实，不是 WP3 Final Gate PASS，也不代表 Sandbox、IAM、DLP、egress isolation 或 request-size protection 已实现。
+
 状态词仅允许：`SUPPORTED`、`PARTIALLY_SUPPORTED`、`CONTRACT_ONLY`、`NOT_IMPLEMENTED`、`LEGACY_ONLY`、`DEPRECATED`。存在类型、枚举或测试 seam 不等于生产能力已支持。
 
 | capability | status | default_path | owner | persistence | failure_behavior | recovery_behavior | legacy_support | tests | known_limitations |

@@ -78,6 +78,7 @@ def _tmp_settings(monkeypatch, tmp_path, *, profile="LOCAL", kb_required=None):
     }
     if profile == "PRODUCTION":
         env["LOCAL_AGENT_ENVIRONMENT_ID"] = "prod-integration"
+        env["LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS"] = str(tmp_path.resolve())
     if kb_required is not None:
         env["LOCAL_AGENT_KB_REQUIRED"] = kb_required
     for key, value in env.items():

@@ -305,9 +305,11 @@ class LegacyStringToolAdapter(ToolAdapter):
         max_output_bytes: int = 4096,
         max_concurrency: int = 4,
         error_prefixes: tuple[str, ...] = (),
+        argument_parser: Callable[[str], str] | None = None,
     ) -> None:
         self._function = function
         self._error_prefixes = error_prefixes
+        self._argument_parser = argument_parser
         self.spec = ToolExecutionSpec(
             tool_name=tool_name,
             side_effect_kind=ToolSideEffectKind.NONE,
@@ -328,6 +330,16 @@ class LegacyStringToolAdapter(ToolAdapter):
                 safe_message="Legacy Tool 参数必须是字符串。",
                 phase=ToolExecutionPhase.VALIDATION,
             )
+        if self._argument_parser is not None:
+            try:
+                argument_text = self._argument_parser(argument_text)
+            except (TypeError, ValueError):
+                raise ToolAdapterInvocationError(
+                    category=ToolErrorCategory.VALIDATION,
+                    safe_error_code="TOOL_VALIDATION_ERROR",
+                    safe_message="Legacy Tool 参数无效。",
+                    phase=ToolExecutionPhase.VALIDATION,
+                ) from None
         return ToolInvocation.create(
             tool_name=self.spec.tool_name,
             arguments={"argument_text": argument_text},

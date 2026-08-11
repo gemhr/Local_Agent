@@ -37,6 +37,7 @@ Settings.load()
 | Tool 身份/描述/枚举/绑定来源 | `ToolRegistry`（APPLICATION_SCOPE；lifespan 内 populate + freeze 后注入 AgentRouter，运行期只读） |
 | Tool 静态 policy 来源 | `ToolPolicyCatalog`（APPLICATION_SCOPE；lifespan 内 register_default_tool_policies + validate + freeze；任一校验失败 -> startup fail，never READY） |
 | Tool governance authority | `ToolGovernanceService`（唯一 invocation-time Authority；仅解释 Catalog 与 `ToolExecutionSpec`；AgentRouter 只调用它） |
+| Tool filesystem resource authority | `ResourceAuthorizationService`（APPLICATION_SCOPE；解释 frozen multiple read roots + frozen extractor catalog；仅覆盖 `list_files` / `analyze_excel`） |
 | Shutdown owner | `GracefulShutdownCoordinator` |
 
 依赖方向固定为：
@@ -68,6 +69,7 @@ Observability、Trace、Report、RecoveryValidator 不反向修改 AgentState、
 | ToolRegistry | APPLICATION_SCOPE | `server.py::lifespan()`（populate + freeze） | ApplicationRuntimeServices（随 application 释放） | 运行期注册/变更；暴露内部 mutable mapping；进入 Run 状态 |
 | ToolPolicyCatalog | APPLICATION_SCOPE | `server.py::lifespan()`（register + validate + freeze） | ApplicationRuntimeServices（随 application 释放） | 运行期 register/mutation/hot reload；成为第二 ToolRegistry；保存 execution spec 字段 |
 | ToolGovernanceService | APPLICATION_SCOPE | `server.py::lifespan()` | ApplicationRuntimeServices（随 application 释放） | 成为第二 ToolRegistry / Agent capability owner；保存 raw arguments/path |
+| ResourceAuthorizationService / FilesystemResourcePolicy / ToolResourceExtractorCatalog | APPLICATION_SCOPE | `server.py::lifespan()`（Registry freeze 后 validate + freeze） | ApplicationRuntimeServices（随 application 释放，无独立 close） | 运行期 mutation/hot reload；成为 Tool Permission 或 Tool execution owner；保存 raw path 到安全投影 |
 | EventJournal | APPLICATION_SCOPE | lifespan | ApplicationRuntimeServices | 创建 Runtime sequence |
 | SnapshotStore | APPLICATION_SCOPE | lifespan，显式 opt-in | ApplicationRuntimeServices | 推断当前 Registry 为历史事实 |
 | ObservabilityDispatcher | APPLICATION_SCOPE | lifespan | ApplicationRuntimeServices | 修改 Journal/AgentState |
@@ -140,7 +142,15 @@ construct -> register（4 个 ToolRegistration）-> freeze -> 注入 AgentRouter
 - **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent 或 governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后（WP4 候选），不为此新增 RuntimeEvent / Journal schema。
 - **Boundary**：`ToolExecutionService` 仍是 sole actual execution owner（non-ALLOW 时绝不调用）；`ToolRegistry` 仍只回答“What Tools exist?”；`AgentRegistry` capability 不变成 authorization；governance 不是 filesystem sandbox / path authorization（WP3）。
 
-### 2.3 WP2 Tool Platform Integration Gate（offline deterministic E2E）
+### 2.3 File Tool Resource Authorization（Stage 3 WP3，INTERNAL_RC）
+
+`ResourceAuthorizationService` 是 application-wide filesystem read 的唯一 Authority。启动装配固定为 `frozen ToolRegistry -> construct/register/validate/freeze ToolResourceExtractorCatalog -> FilesystemResourcePolicy -> ResourceAuthorizationService -> AgentRouter`。当前 descriptor 恰好为 `list_files: argument_text/DIRECTORY/READ` 与 `analyze_excel: argument_text/FILE/READ`；非文件 Tool 显式无资源请求。
+
+执行顺序冻结为：`ToolRegistry.require -> ToolGovernanceService.authorize_tool -> adapter.build_invocation -> adapter.spec_for -> ToolGovernanceService.evaluate_invocation -> extractor.extract -> ResourceAuthorizationService.require_authorized -> ToolExecutionService.execute_sync`。`ToolGovernanceService`、`ToolExecutionService`、`ToolInvocation`、`ToolExecutionSpec`、RuntimeEvent 与 Journal schema 均未改变。拒绝固定为 `TOOL_RESOURCE_DENIED`，不产生 Tool events、不调用 final-answer model，并按既有 OutputGate / delivered-only Memory 语义交付安全文本。
+
+Windows 判定在 I/O 前拒绝 relative、drive-relative、UNC、device/extended namespace；existing candidate 经 `Path.resolve(strict=True)` 后按 kind 校验，并以 `ntpath.normcase/normpath + commonpath` 对多个 canonical roots 做 component-aware containment。此边界不是 OS Sandbox，仍保留 authorization-to-open TOCTOU 限制。
+
+### 2.4 WP2 Tool Platform Integration Gate（offline deterministic E2E）
 
 production Tool chain 在本 Gate 前已经实现；WP2-C 不新增 production integration 或第二套装配，只以 `tests/test_stage3_wp2_tool_e2e.py` 增加确定性全链验证。当前被测试的 topology 为：
 

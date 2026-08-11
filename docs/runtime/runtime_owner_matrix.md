@@ -1,5 +1,13 @@
 # Runtime Owner Matrix
 
+## Stage 3 WP3 Resource Authorization Owner
+
+| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
+| --- | --- | --- | --- | --- | --- | --- |
+| File Tool filesystem READ authorization | `ResourceAuthorizationService` + frozen `FilesystemResourcePolicy` / `ToolResourceExtractorCatalog`（APPLICATION_SCOPE） | AgentRouter pre-execution Gate、startup validation、测试 | 仅 `server.py::lifespan()` 从 Settings snapshot 与 frozen ToolRegistry 构造；运行期只读 | 无 | Tool function/Adapter/Governance 自行 allow；请求扩大 roots；raw path 进入安全投影 | INTERNAL_RC |
+
+Tool Governance 仍拥有 Agent→Tool Permission/Risk/Approval，`ToolExecutionService` 仍拥有实际执行；Resource Authorization 不成为第二 ToolRegistry，也不修改 `ToolInvocation` / `ToolExecutionSpec` / RuntimeEvent / Journal。
+
 本矩阵冻结 Runtime 事实的唯一权威 owner。`readers` 可以投影事实，`writers` 只能通过 owner 的受控 API 修改；Report、Evidence 与测试 Oracle 均不得升级为 owner。
 
 | fact | authoritative_owner | readers | writers | persistence_location | lifecycle_scope | must_not_own |
