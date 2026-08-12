@@ -392,8 +392,20 @@ def test_agent_router_adapter_path_executes_and_budgets_once():
     assert calls == {"adapter": 1}
     usage = context.budget_ledger.snapshot().committed_usage
     assert (usage.tool_calls, usage.retries) == (1, 0)
-    assert messages[0]["content"].count("unique-runtime-observation") == 1
-    assert messages[0]["content"].count("已使用工具：get_system_status") == 1
+    system_text = "\n".join(
+        message["content"] for message in messages if message["role"] == "system"
+    )
+    tool_messages = [
+        message["content"]
+        for message in messages
+        if message["role"] == "user"
+        and "unique-runtime-observation" in message["content"]
+    ]
+    assert "unique-runtime-observation" not in system_text
+    assert len(tool_messages) == 1
+    assert tool_messages[0].count("unique-runtime-observation") == 1
+    assert "get_system_status" in tool_messages[0]
+    assert "不可信外部数据" in system_text
 
 
 def test_agent_router_adapter_error_does_not_fall_back_to_legacy_callable():
@@ -464,10 +476,20 @@ def test_agent_router_complex_retry_uses_service_budget_and_injects_once():
     assert len(store.committed_operations) == 1
     usage = context.budget_ledger.snapshot().committed_usage
     assert (usage.tool_calls, usage.retries) == (2, 1)
-    assert messages[0]["content"].count(
-        "已使用工具：complex_workflow_simulator"
-    ) == 1
-    assert messages[0]["content"].count("工具观察结果：") == 1
+    system_text = "\n".join(
+        message["content"] for message in messages if message["role"] == "system"
+    )
+    tool_messages = [
+        message["content"]
+        for message in messages
+        if message["role"] == "user"
+        and "complex_workflow_simulator" in message["content"]
+    ]
+    assert "complex_workflow_simulator" not in system_text
+    assert '"compensation_attempted":false' not in system_text
+    assert len(tool_messages) == 1
+    assert '"compensation_attempted":false' in tool_messages[0]
+    assert "不可信外部数据" in system_text
 
 
 # ---- Legacy Tool 迁移（list_files / analyze_excel）----

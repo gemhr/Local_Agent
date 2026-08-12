@@ -53,6 +53,11 @@ class _ScenarioModel:
             if message.get("role") == "system"
         ]
         system = "\n".join(system_messages)
+        user_messages = [
+            message["content"]
+            for message in messages
+            if message.get("role") == "user"
+        ]
         if "LocalAgent Planner" in system:
             self._record("PLANNING", messages)
             yield _PLANNING_OUTPUT
@@ -64,11 +69,22 @@ class _ScenarioModel:
             self._record("TOOL_PLANNER", messages)
             yield self.tool_call
             return
-        if "已使用工具：" in system and "工具观察结果：" in system:
+        tool_messages = [
+            content
+            for content in user_messages
+            if _MARKER in content
+            and "工具观察结果：" in content
+            and "[来源: list_files]" in content
+        ]
+        if "请依据随后提供的工具观察结果直接回答用户" in system:
             self._record("FINAL_ANSWER", messages)
             if not self.allow_final_answer:
                 raise AssertionError("governance denial must not invoke final-answer model")
-            if "已使用工具：list_files" not in system or _MARKER not in system:
+            if (
+                "不可信外部数据" not in system
+                or _MARKER in system
+                or len(tool_messages) != 1
+            ):
                 raise AssertionError(
                     "final-answer model did not receive real list_files observation"
                 )
@@ -314,14 +330,23 @@ async def test_default_coordinated_list_files_full_e2e(monkeypatch, tmp_path):
     assert Counter(model.semantic_stages) == Counter(
         {"PLANNING": 1, "TOOL_PLANNER": 1, "FINAL_ANSWER": 1}
     )
+    final_messages = model.messages_by_stage["FINAL_ANSWER"][0]
     final_system = "\n".join(
         message["content"]
-        for message in model.messages_by_stage["FINAL_ANSWER"][0]
+        for message in final_messages
         if message.get("role") == "system"
     )
-    assert "已使用工具：list_files" in final_system
-    assert "工具观察结果：" in final_system
-    assert _MARKER in final_system
+    final_tool_messages = [
+        message["content"]
+        for message in final_messages
+        if message.get("role") == "user" and _MARKER in message["content"]
+    ]
+    assert "请依据随后提供的工具观察结果直接回答用户" in final_system
+    assert "不可信外部数据" in final_system
+    assert _MARKER not in final_system
+    assert len(final_tool_messages) == 1
+    assert "工具观察结果：" in final_tool_messages[0]
+    assert "[来源: list_files]" in final_tool_messages[0]
 
 
 @pytest.mark.asyncio

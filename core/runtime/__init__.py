@@ -589,6 +589,8 @@ from core.runtime.retrieval_execution import RetrievalExecutionService
 
 from core.runtime.step_result import (
     ResultContentType,
+    ResultDisposition,
+    SecurityDenialCode,
     StepResult,
     StepResultError,
     StepResultErrorCode,
@@ -641,6 +643,8 @@ from core.runtime.synthesis import (
 
 __all__ += [
     "ResultContentType",
+    "ResultDisposition",
+    "SecurityDenialCode",
     "HistoryPolicy",
     "InvocationRole",
     "DeliveryAttempt",

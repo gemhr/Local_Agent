@@ -12,6 +12,7 @@ from core.runtime.cancellation import CancellationReason
 from core.runtime.checkpoint_contract import CheckpointKind
 from core.runtime.events import RuntimeEventType
 from core.runtime.metrics import InMemoryMetricsRecorder
+from core.runtime.model_context import ContextBuilder
 from core.runtime.parallel_execution import StepExecutionMode
 from core.runtime.run_coordinator import DynamicPlanState, RunCoordinatorError
 from core.runtime.recovery_contract import RecoveryReason, RecoveryStatus
@@ -63,6 +64,8 @@ class RecordingRouter(FakeRouter):
         self.planning_output = planning_output or direct_json()
         self.planning_calls = 0
         self.agent_calls: list[tuple[str, str]] = []
+        self.context_item_calls: list[tuple] = []
+        self.context_message_calls: list[tuple[dict[str, str], ...]] = []
 
     def complete_planning_decision(self, user_request: str, **kwargs) -> str:
         self.planning_calls += 1
@@ -71,6 +74,17 @@ class RecordingRouter(FakeRouter):
     def complete_single_agent(self, agent_id: str, query: str, **kwargs) -> str:
         self.agent_calls.append((agent_id, query))
         return "dynamic-output"
+
+    def complete_context_items(self, agent_id: str, context_items, **kwargs) -> str:
+        items = tuple(context_items)
+        messages = ContextBuilder().bind_messages(
+            items,
+            separate_data_messages=True,
+        )
+        self.context_item_calls.append(items)
+        self.context_message_calls.append(messages)
+        rendered = "\n\n".join(message["content"] for message in messages)
+        return self.complete_single_agent(agent_id, rendered, **kwargs)
 
 
 def event_records(services, run_id: str):

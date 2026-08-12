@@ -38,6 +38,9 @@ class _SecurityModel:
         system = "\n".join(
             item["content"] for item in messages if item.get("role") == "system"
         )
+        user_messages = [
+            item["content"] for item in messages if item.get("role") == "user"
+        ]
         if "LocalAgent Planner" in system:
             self.stages.append("PLANNING")
             yield _PLANNING_OUTPUT
@@ -48,9 +51,21 @@ class _SecurityModel:
             yield self.tool_call
             return
         self.non_planning_calls += 1
-        if "已使用工具：" in system:
+        tool_messages = [
+            content
+            for content in user_messages
+            if _MARKER in content
+            and "工具观察结果：" in content
+            and "[来源: list_files]" in content
+        ]
+        if "请依据随后提供的工具观察结果直接回答用户" in system:
             self.stages.append("FINAL_ANSWER")
-            if not self.authorized or _MARKER not in system:
+            if (
+                not self.authorized
+                or "不可信外部数据" not in system
+                or _MARKER in system
+                or len(tool_messages) != 1
+            ):
                 raise AssertionError("final model received unauthorized or unreal observation")
             yield f"找到 {_MARKER}"
             return

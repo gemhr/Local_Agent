@@ -168,7 +168,34 @@ HTTP request
 
 HTTP payload Gate 是 pre-Run transport/application validation，不是 Runtime Budget、Tool Permission、Resource Authorization、Rate Limit 或 DLP。被 HTTP 400/413/422 拒绝的请求不创建 Run，不产生 RuntimeEvent/Journal/Memory mutation；HTTP 422 仍采用 FastAPI 默认 validation detail，当前会回显被拒绝字段输入，是已记录的 WP3-C 候选边界。
 
-### 2.5 WP2 Tool Platform Integration Gate（offline deterministic E2E）
+### 2.5 Context Trust / Typed Security Denial（Stage 3 WP3-C，INTERNAL_RC）
+
+Model Context的安全边界由typed source/trust而不是正文内容决定。`ContextBuilder`是source/trust到model role的唯一绑定 Owner：只有code-owned `SYSTEM_INSTRUCTION` / `AGENT_INSTRUCTION` + `TRUSTED_INSTRUCTION`进入`system`；User、RAG、Tool、Memory/History、Summary、Plan、Runtime state、current Step与Step Result均为data/proposal并进入data role。raw history只接受`user` / `assistant`，不能创建`system`消息。
+
+关键冻结映射为：
+
+```text
+Tool observation -> TOOL_RESULT / UNTRUSTED_EXTERNAL / user
+Synthesis dependency -> STEP_RESULT / USER_CONTENT / user
+Code-owned Tool/Synthesis control -> SYSTEM_INSTRUCTION / TRUSTED_INSTRUCTION / system
+```
+
+Tool denial integrity链为：
+
+```text
+actual ToolGovernanceError / ResourceAuthorizationError
+-> AgentAdapterResult(ResultDisposition.SECURITY_DENIED, SecurityDenialCode)
+-> StepResult
+-> StepResultStore
+-> DependencyResultView
+-> Synthesis DENIAL_DOMINATES
+```
+
+该链不按正文做string matching、regex或keyword判断。Synthesis在context build、model selection与model invocation前检查typed denial；任一required dependency被拒绝即返回固定safe denial，成功partial result不进入用户可见合成。COORDINATED与explicit LEGACY均不允许denial被后续模型改写成success；OutputGate、RuntimeEvent、Journal与Snapshot合同未修改。
+
+能力状态为`PARTIALLY_SUPPORTED`：模型仍可能受恶意自然语言影响，System Prompt可能被复述/改写，RAG/Memory/Tool/Step data仍可能影响自然语言回答。无generic injection classifier、WAF、generic DLP、Human IAM、full Sandbox或HITL；无dedicated security-denial RuntimeEvent/Journal/Snapshot fact，Recovery不能重建runtime-internal typed denial。Command Injection、SQL Injection与SSRF在当前Tool inventory中为`NOT_APPLICABLE_CURRENT_INVENTORY`。
+
+### 2.6 WP2 Tool Platform Integration Gate（offline deterministic E2E）
 
 production Tool chain 在本 Gate 前已经实现；WP2-C 不新增 production integration 或第二套装配，只以 `tests/test_stage3_wp2_tool_e2e.py` 增加确定性全链验证。当前被测试的 topology 为：
 

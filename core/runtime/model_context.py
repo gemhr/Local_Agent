@@ -18,6 +18,7 @@ class ContextSourceType(str, Enum):
     CURRENT_USER_REQUEST = "current_user_request"
     PLAN = "plan"
     CURRENT_STEP = "current_step"
+    STEP_RESULT = "step_result"
     TOOL_RESULT = "tool_result"
     RAG_DOCUMENT = "rag_document"
     MEMORY_SUMMARY = "memory_summary"
@@ -46,6 +47,18 @@ _MEMORY_SOURCES = frozenset({
     ContextSourceType.MEMORY_SUMMARY,
     ContextSourceType.MEMORY_RETRIEVAL,
     ContextSourceType.CHAT_HISTORY,
+})
+_USER_ROLE_SOURCES = frozenset({
+    ContextSourceType.CURRENT_USER_REQUEST,
+    ContextSourceType.CURRENT_STEP,
+    ContextSourceType.STEP_RESULT,
+    ContextSourceType.TOOL_RESULT,
+    ContextSourceType.RAG_DOCUMENT,
+    ContextSourceType.MEMORY_SUMMARY,
+    ContextSourceType.MEMORY_RETRIEVAL,
+    ContextSourceType.CHAT_HISTORY,
+    ContextSourceType.PLAN,
+    ContextSourceType.RUNTIME_STATE,
 })
 _PRIORITY_MIN, _PRIORITY_MAX = 0, 1000
 _ORCH_MARKER = "[[ORCH]]"
@@ -96,6 +109,7 @@ class ContextItem:
         if self.source_type == ContextSourceType.CURRENT_USER_REQUEST and self.trust_level != ContextTrustLevel.USER_CONTENT: raise ValueError("用户请求必须使用用户内容信任等级")
         if self.source_type in _EXTERNAL_SOURCES and self.trust_level == ContextTrustLevel.TRUSTED_INSTRUCTION: raise ValueError("外部内容不能是可信指令")
         if self.source_type in _MEMORY_SOURCES and self.trust_level != ContextTrustLevel.USER_CONTENT: raise ValueError("Memory 与 Chat History 必须保持 USER_CONTENT")
+        if self.source_type in {ContextSourceType.CURRENT_STEP, ContextSourceType.STEP_RESULT} and self.trust_level != ContextTrustLevel.USER_CONTENT: raise ValueError("Step instruction/result 必须保持 USER_CONTENT")
         if self.source_type in _MEMORY_SOURCES and self.citation_id: raise ValueError("Memory 不得生成或复用 RAG Citation")
         if self.source_ref and (self.source_ref.startswith("/") or re.search(r"(?i)(token|api[_-]?key|https?://[^ ]*(?:internal|localhost))", self.source_ref)): raise ValueError("source_ref 包含敏感定位信息")
         if self.dedup_key and (len(self.dedup_key) > 128 or self.dedup_key == self.content): raise ValueError("dedup_key 必须是短且稳定的标识")
@@ -215,7 +229,8 @@ class ContextBuilder:
     _sections = (
         (ContextSourceType.SYSTEM_INSTRUCTION, "系统指令"), (ContextSourceType.AGENT_INSTRUCTION, "Agent 指令"),
         (ContextSourceType.CURRENT_USER_REQUEST, "当前用户请求"), (ContextSourceType.CURRENT_STEP, "当前步骤 / Runtime Context"),
-        (ContextSourceType.RUNTIME_STATE, "当前步骤 / Runtime Context"), (ContextSourceType.TOOL_RESULT, "Tool Results"),
+        (ContextSourceType.STEP_RESULT, "Specialist / Step Result"),
+        (ContextSourceType.RUNTIME_STATE, "当前步骤 / Runtime Context"), (ContextSourceType.TOOL_RESULT, "工具观察结果："),
         (ContextSourceType.RAG_DOCUMENT, "Retrieved Documents"), (ContextSourceType.MEMORY_SUMMARY, "Relevant Memory"),
         (ContextSourceType.MEMORY_RETRIEVAL, "Relevant Memory"), (ContextSourceType.CHAT_HISTORY, "Recent Conversation"),
     )
@@ -245,7 +260,11 @@ class ContextBuilder:
                 citation = f"\n[引用: {item.citation_id}]" if item.citation_id else ""
                 source_label = (
                     f"[来源: {item.source_ref}]\n"
-                    if source == ContextSourceType.RAG_DOCUMENT and item.source_ref
+                    if source in {
+                        ContextSourceType.RAG_DOCUMENT,
+                        ContextSourceType.TOOL_RESULT,
+                        ContextSourceType.STEP_RESULT,
+                    } and item.source_ref
                     else ""
                 )
                 chunks.append(f"{source_label}{item.content}{citation}")
@@ -310,6 +329,70 @@ class ContextBuilder:
         stats = ContextStats(estimated, input_budget, request.reserved_output_tokens, len(included), len(drops), duplicate_count, sum(x.truncated for x in drops), has_rag, has_memory, has_tool, estimated >= self.long_context_threshold)
         requirements = ModelContextRequirements(estimated, estimated + request.reserved_output_tokens, stats.has_long_context, bool(stats.truncated_item_count), mandatory_tokens >= int(input_budget * .8), len({x.source_type for x in included}), sum(x.source_type == ContextSourceType.RAG_DOCUMENT for x in included), sum(x.source_type == ContextSourceType.TOOL_RESULT for x in included), code, structured, raw_estimated, raw_minimum)
         return ContextBuildResult(rendered, tuple(included), tuple(drops), stats, requirements)
+
+    def bind_messages(
+        self,
+        items: Sequence[ContextItem],
+        *,
+        history: Sequence[dict[str, str]] = (),
+        separate_data_messages: bool = False,
+    ) -> list[dict[str, str]]:
+        """把已预算/筛选的 typed Context 绑定为模型消息角色。
+
+        ``system`` 只接受可信的 System/Agent instruction。历史只保留持久化
+        的 ``user`` / ``assistant`` 原始角色；其它 source 一律作为 user data。
+        本方法不授予 Tool、Approval 或 Resource 权限。
+        """
+        typed_items = tuple(items)
+        if any(not isinstance(item, ContextItem) for item in typed_items):
+            raise TypeError("items 只能包含 ContextItem")
+
+        system_items = [
+            item for item in typed_items if item.source_type in _INSTRUCTION_SOURCES
+        ]
+        data_items = [
+            item for item in typed_items if item.source_type not in _INSTRUCTION_SOURCES
+        ]
+        if any(
+            item.trust_level is not ContextTrustLevel.TRUSTED_INSTRUCTION
+            for item in system_items
+        ):
+            raise ValueError("system role 只允许 TRUSTED_INSTRUCTION")
+        if any(item.source_type not in _USER_ROLE_SOURCES for item in data_items):
+            raise ValueError("Context source 没有批准的模型 role binding")
+
+        messages: list[dict[str, str]] = []
+        if system_items:
+            messages.append(
+                {"role": "system", "content": self._render(system_items)}
+            )
+
+        for record in history:
+            if not isinstance(record, dict):
+                raise TypeError("history entry 必须是 dict")
+            role = record.get("role")
+            content = record.get("content")
+            if role not in {"user", "assistant"}:
+                raise ValueError("持久化 History role 只允许 user/assistant")
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("持久化 History content 必须是非空字符串")
+            messages.append({"role": role, "content": content})
+
+        if data_items and not separate_data_messages:
+            messages.append({"role": "user", "content": self._render(data_items)})
+        elif data_items:
+            section_order = {
+                source: index for index, (source, _title) in enumerate(self._sections)
+            }
+            for item in sorted(
+                data_items,
+                key=lambda value: (
+                    section_order.get(value.source_type, len(section_order)),
+                    self._rank(value),
+                ),
+            ):
+                messages.append({"role": "user", "content": self._render((item,))})
+        return messages
 
     def _truncate_to_fit(self, included: list[ContextItem], item: ContextItem, budget: int) -> ContextItem | None:
         lines = item.content.splitlines(keepends=True)

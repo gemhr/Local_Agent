@@ -23,8 +23,15 @@ from core.runtime.event_emitter import StepEventEmitter
 from core.runtime.history_policy import HistoryPolicy
 from core.runtime.invocation_bindings import InvocationRole
 from core.runtime.planning import ExecutionKind, TaskCapabilityRequirements
-from core.runtime.step_result import ResultContentType, StepResult
+from core.runtime.resource_authorization import ResourceAuthorizationError
+from core.runtime.step_result import (
+    ResultContentType,
+    ResultDisposition,
+    SecurityDenialCode,
+    StepResult,
+)
 from core.runtime.step_result_store import DependencyResultView
+from core.runtime.tool_governance import ToolGovernanceError, ToolGovernanceErrorCode
 
 
 class AgentAdapterErrorCode(str, Enum):
@@ -234,16 +241,40 @@ class AgentExecutionRequest:
         raise TypeError("AgentExecutionRequest 不允许序列化")
 
 
+_GOVERNANCE_DENIAL_CODES = {
+    ToolGovernanceErrorCode.PERMISSION_DENIED:
+        SecurityDenialCode.TOOL_PERMISSION_DENIED,
+    ToolGovernanceErrorCode.APPROVAL_REQUIRED:
+        SecurityDenialCode.TOOL_APPROVAL_REQUIRED,
+    ToolGovernanceErrorCode.UNKNOWN_PRINCIPAL:
+        SecurityDenialCode.TOOL_GOVERNANCE_UNKNOWN_PRINCIPAL,
+    ToolGovernanceErrorCode.POLICY_MISSING:
+        SecurityDenialCode.TOOL_GOVERNANCE_POLICY_MISSING,
+    ToolGovernanceErrorCode.RISK_UNCLASSIFIED:
+        SecurityDenialCode.TOOL_RISK_UNCLASSIFIED,
+}
+
+
 class AgentAdapterResult:
     """Typed adapter result; exists only inside the Driver call stack."""
 
-    __slots__ = ("_content_type", "_content", "_complete", "_locked")
+    __slots__ = (
+        "_content_type",
+        "_content",
+        "_complete",
+        "_result_disposition",
+        "_security_denial_code",
+        "_locked",
+    )
 
     def __init__(
         self,
         content_type: ResultContentType,
         content: str,
         complete: bool = True,
+        *,
+        result_disposition: ResultDisposition = ResultDisposition.NORMAL,
+        security_denial_code: SecurityDenialCode | None = None,
     ) -> None:
         if not isinstance(content_type, ResultContentType):
             raise AgentAdapterError(
@@ -260,9 +291,34 @@ class AgentAdapterResult:
                 AgentAdapterErrorCode.AGENT_ROUTER_RESULT_INVALID,
                 "adapter result complete 必须是 bool",
             )
+        if not isinstance(result_disposition, ResultDisposition):
+            raise AgentAdapterError(
+                AgentAdapterErrorCode.AGENT_ROUTER_RESULT_INVALID,
+                "adapter result disposition 必须合法",
+            )
+        if security_denial_code is not None and not isinstance(
+            security_denial_code, SecurityDenialCode
+        ):
+            raise AgentAdapterError(
+                AgentAdapterErrorCode.AGENT_ROUTER_RESULT_INVALID,
+                "adapter security denial code 必须合法",
+            )
+        if (
+            result_disposition is ResultDisposition.NORMAL
+            and security_denial_code is not None
+        ) or (
+            result_disposition is ResultDisposition.SECURITY_DENIED
+            and security_denial_code is None
+        ):
+            raise AgentAdapterError(
+                AgentAdapterErrorCode.AGENT_ROUTER_RESULT_INVALID,
+                "adapter result disposition 与 security denial code 不一致",
+            )
         object.__setattr__(self, "_content_type", content_type)
         object.__setattr__(self, "_content", content)
         object.__setattr__(self, "_complete", complete)
+        object.__setattr__(self, "_result_disposition", result_disposition)
+        object.__setattr__(self, "_security_denial_code", security_denial_code)
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name, value) -> None:
@@ -282,11 +338,24 @@ class AgentAdapterResult:
     def complete(self) -> bool:
         return self._complete
 
+    @property
+    def result_disposition(self) -> ResultDisposition:
+        return self._result_disposition
+
+    @property
+    def security_denial_code(self) -> SecurityDenialCode | None:
+        return self._security_denial_code
+
     def __repr__(self) -> str:
+        denial_code = (
+            self.security_denial_code.value if self.security_denial_code else None
+        )
         return (
             "AgentAdapterResult("
             f"content_type={self.content_type.value!r}, "
             f"char_count={len(self.content)}, complete={self.complete!r}, "
+            f"result_disposition={self.result_disposition.value!r}, "
+            f"security_denial_code={denial_code!r}, "
             "content=<redacted>)"
         )
 
@@ -305,6 +374,8 @@ class AgentAdapterResult:
             content_type=self.content_type,
             content=self.content,
             complete=self.complete,
+            result_disposition=self.result_disposition,
+            security_denial_code=self.security_denial_code,
         )
 
 
@@ -354,6 +425,7 @@ class AgentRouterSingleAgentAdapter:
                 capability_requirements=request.capability_requirements,
                 persist=False,
                 history_policy=request.history_policy,
+                raise_security_denial=True,
                 event_emitter=request.event_emitter,
                 fault_controller=request.fault_controller,
             )
@@ -364,6 +436,28 @@ class AgentRouterSingleAgentAdapter:
             BudgetExceededError,
         ):
             raise
+        except ToolGovernanceError as denied:
+            denial_code = _GOVERNANCE_DENIAL_CODES.get(denied.error_code)
+            if denial_code is None:
+                raise AgentAdapterError(
+                    AgentAdapterErrorCode.AGENT_ROUTER_CALL_FAILED,
+                    "Governance 返回了非 runtime denial 错误",
+                ) from None
+            return AgentAdapterResult(
+                request.content_type,
+                denied.safe_message,
+                complete=True,
+                result_disposition=ResultDisposition.SECURITY_DENIED,
+                security_denial_code=denial_code,
+            )
+        except ResourceAuthorizationError as denied:
+            return AgentAdapterResult(
+                request.content_type,
+                denied.safe_message,
+                complete=True,
+                result_disposition=ResultDisposition.SECURITY_DENIED,
+                security_denial_code=SecurityDenialCode.TOOL_RESOURCE_DENIED,
+            )
         except Exception:
             raise AgentAdapterError(
                 AgentAdapterErrorCode.AGENT_ROUTER_CALL_FAILED,

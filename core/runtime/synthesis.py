@@ -11,6 +11,7 @@ stated truthfully in the WP3 result document.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from enum import Enum
 
 from core.runtime.agent_adapter_factory import (
@@ -22,8 +23,12 @@ from core.runtime.agent_adapter_factory import (
 from core.runtime.budget import BudgetExceededError
 from core.runtime.cancellation import RunCancelledError
 from core.runtime.context import RunContext, RunDeadlineExceededError
-from core.runtime.history_policy import HistoryPolicy
-from core.runtime.step_result import ResultContentType
+from core.runtime.model_context import (
+    ContextItem,
+    ContextSourceType,
+    ContextTrustLevel,
+)
+from core.runtime.step_result import ResultContentType, ResultDisposition
 from core.runtime.step_result_store import DependencyResultView
 
 
@@ -88,15 +93,30 @@ class SynthesisAgentAdapter:
                 "synthesis 缺少依赖结果视图",
             )
         self._validate_dependencies(view)
-        prompt = self._build_prompt(request.instruction, view)
+        denial = next(
+            (
+                entry
+                for entry in view
+                if entry.result_disposition is ResultDisposition.SECURITY_DENIED
+            ),
+            None,
+        )
+        if denial is not None:
+            return AgentAdapterResult(
+                request.content_type,
+                denial.content,
+                complete=True,
+                result_disposition=ResultDisposition.SECURITY_DENIED,
+                security_denial_code=denial.security_denial_code,
+            )
+        context_items = self._build_context_items(request.instruction, view)
         try:
-            text = self._router.complete_single_agent(
+            text = self._router.complete_context_items(
                 request.agent_id,
-                prompt,
+                context_items,
                 run_context=run_context,
                 capability_requirements=request.capability_requirements,
-                persist=False,
-                history_policy=HistoryPolicy.NONE,
+                user_query=request.instruction,
                 event_emitter=request.event_emitter,
                 fault_controller=request.fault_controller,
             )
@@ -118,6 +138,45 @@ class SynthesisAgentAdapter:
                 "synthesis 返回了非法结果",
             )
         return AgentAdapterResult(request.content_type, text, complete=True)
+
+    @staticmethod
+    def _build_context_items(
+        instruction: str,
+        view: DependencyResultView,
+    ) -> tuple[ContextItem, ...]:
+        now = datetime.now(UTC)
+        items = [
+            ContextItem(
+                "synthesis-system-instruction",
+                ContextSourceType.SYSTEM_INSTRUCTION,
+                ContextTrustLevel.TRUSTED_INSTRUCTION,
+                "\n".join(_SYNTHESIS_SYSTEM_RULES),
+                1000,
+                now,
+            ),
+            ContextItem(
+                "synthesis-current-step",
+                ContextSourceType.CURRENT_STEP,
+                ContextTrustLevel.USER_CONTENT,
+                instruction,
+                900,
+                now,
+            ),
+        ]
+        for index, entry in enumerate(view, start=1):
+            items.append(
+                ContextItem(
+                    f"synthesis-step-result-{index}",
+                    ContextSourceType.STEP_RESULT,
+                    ContextTrustLevel.USER_CONTENT,
+                    entry.content,
+                    max(1, 800 - index),
+                    now,
+                    source_ref=entry.producer_agent_id,
+                    mandatory=True,
+                )
+            )
+        return tuple(items)
 
     def _validate_dependencies(self, view: DependencyResultView) -> None:
         if len(view) == 0:
