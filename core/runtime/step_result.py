@@ -19,12 +19,31 @@ class ResultContentType(str, Enum):
     MARKDOWN = "MARKDOWN"
 
 
+class ResultDisposition(str, Enum):
+    """Result 的确定性处置语义；不从正文推断。"""
+
+    NORMAL = "NORMAL"
+    SECURITY_DENIED = "SECURITY_DENIED"
+
+
+class SecurityDenialCode(str, Enum):
+    """由实际 Governance / Resource Authorization 拒绝产生的固定代码。"""
+
+    TOOL_PERMISSION_DENIED = "TOOL_PERMISSION_DENIED"
+    TOOL_APPROVAL_REQUIRED = "TOOL_APPROVAL_REQUIRED"
+    TOOL_GOVERNANCE_UNKNOWN_PRINCIPAL = "TOOL_GOVERNANCE_UNKNOWN_PRINCIPAL"
+    TOOL_GOVERNANCE_POLICY_MISSING = "TOOL_GOVERNANCE_POLICY_MISSING"
+    TOOL_RISK_UNCLASSIFIED = "TOOL_RISK_UNCLASSIFIED"
+    TOOL_RESOURCE_DENIED = "TOOL_RESOURCE_DENIED"
+
+
 class StepResultErrorCode(str, Enum):
     EMPTY_CONTENT = "EMPTY_CONTENT"
     INVALID_CONTENT = "INVALID_CONTENT"
     INCOMPLETE_RESULT = "INCOMPLETE_RESULT"
     INVALID_IDENTIFIER = "INVALID_IDENTIFIER"
     INVALID_CONTENT_TYPE = "INVALID_CONTENT_TYPE"
+    INVALID_DISPOSITION = "INVALID_DISPOSITION"
     CONTENT_TOO_LARGE = "CONTENT_TOO_LARGE"
 
 
@@ -54,6 +73,8 @@ class StepResult:
         "_content_type",
         "_content",
         "_complete",
+        "_result_disposition",
+        "_security_denial_code",
         "_locked",
     )
 
@@ -65,6 +86,8 @@ class StepResult:
         content: str,
         complete: bool = True,
         *,
+        result_disposition: ResultDisposition = ResultDisposition.NORMAL,
+        security_denial_code: SecurityDenialCode | None = None,
         max_content_chars: int | None = None,
     ) -> None:
         if not isinstance(step_id, str) or not step_id.strip():
@@ -97,6 +120,29 @@ class StepResult:
                 StepResultErrorCode.INCOMPLETE_RESULT,
                 "complete 必须是 bool",
             )
+        if not isinstance(result_disposition, ResultDisposition):
+            raise StepResultError(
+                StepResultErrorCode.INVALID_DISPOSITION,
+                "result_disposition 必须合法",
+            )
+        if security_denial_code is not None and not isinstance(
+            security_denial_code, SecurityDenialCode
+        ):
+            raise StepResultError(
+                StepResultErrorCode.INVALID_DISPOSITION,
+                "security_denial_code 必须合法",
+            )
+        if (
+            result_disposition is ResultDisposition.NORMAL
+            and security_denial_code is not None
+        ) or (
+            result_disposition is ResultDisposition.SECURITY_DENIED
+            and security_denial_code is None
+        ):
+            raise StepResultError(
+                StepResultErrorCode.INVALID_DISPOSITION,
+                "result disposition 与 security denial code 不一致",
+            )
         if max_content_chars is not None and len(content) > max_content_chars:
             raise StepResultError(
                 StepResultErrorCode.CONTENT_TOO_LARGE,
@@ -107,6 +153,8 @@ class StepResult:
         object.__setattr__(self, "_content_type", content_type)
         object.__setattr__(self, "_content", content)
         object.__setattr__(self, "_complete", complete)
+        object.__setattr__(self, "_result_disposition", result_disposition)
+        object.__setattr__(self, "_security_denial_code", security_denial_code)
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name, value) -> None:
@@ -135,17 +183,31 @@ class StepResult:
         return self._complete
 
     @property
+    def result_disposition(self) -> ResultDisposition:
+        return self._result_disposition
+
+    @property
+    def security_denial_code(self) -> SecurityDenialCode | None:
+        return self._security_denial_code
+
+    @property
     def char_count(self) -> int:
         return len(self._content)
 
     def __repr__(self) -> str:
+        denial_code = (
+            self.security_denial_code.value if self.security_denial_code else None
+        )
         return (
             "StepResult("
             f"step_id={self.step_id!r}, "
             f"producer_agent_id={self.producer_agent_id!r}, "
             f"content_type={self.content_type.value!r}, "
             f"char_count={self.char_count}, "
-            f"complete={self.complete!r}, content=<redacted>)"
+            f"complete={self.complete!r}, "
+            f"result_disposition={self.result_disposition.value!r}, "
+            f"security_denial_code={denial_code!r}, "
+            "content=<redacted>)"
         )
 
     def __getstate__(self):
@@ -153,7 +215,9 @@ class StepResult:
 
 
 __all__ = [
+    "ResultDisposition",
     "ResultContentType",
+    "SecurityDenialCode",
     "StepResult",
     "StepResultError",
     "StepResultErrorCode",

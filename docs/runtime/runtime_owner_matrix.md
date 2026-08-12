@@ -16,6 +16,18 @@ Tool Governance 仍拥有 Agent→Tool Permission/Risk/Approval，`ToolExecution
 | raw HTTP body bytes 与 `Content-Length` 合法性 | `RequestBodyLimitMiddleware`（REQUEST boundary） | 下游 ASGI app 仅接收校验后 replay | 对单请求完整缓冲、计数、拒绝或原序 replay | 无；不进入 Event/Journal/Log | 只信声明长度；超限后调用 endpoint；记录 raw body/header | INTERNAL_RC |
 | endpoint 字段长度/数量/范围 | FastAPI/Pydantic schema（REQUEST boundary） | endpoint / ChatService / MemoryManager | request validation；成功后只传已校验模型/参数 | 仅既有业务路径；校验失败无 mutation | 把字段 Gate 当 Tool authorization、human IAM、DLP 或 Runtime Budget | INTERNAL_RC |
 
+## Stage 3 WP3-C Context Trust / Denial Owners
+
+| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
+| --- | --- | --- | --- | --- | --- | --- |
+| Model Context source/trust到role绑定 | `ContextBuilder`（INVOCATION_SCOPE） | AgentRouter、Synthesis adapter、tests | code构造typed `ContextItem`；`bind_messages()`确定role | 无独立持久化 | 调用方自行把data升为system；从正文/label猜authority；raw history注入system | INTERNAL_RC |
+| Tool observation trust | `ContextItem(TOOL_RESULT, UNTRUSTED_EXTERNAL)` | AgentRouter model invocation | Tool执行结果仅作为user/data绑定；code-owned control单独保留system | 仅既有业务Wire/Memory边界；不进入安全投影 | raw Tool Result进入任一system message | INTERNAL_RC |
+| Synthesis dependency trust | `ContextItem(STEP_RESULT, USER_CONTENT)` | `SynthesisAgentAdapter` / `ContextBuilder` | 每个`DependencyResultEntry`独立构造user/data item | StepResultStore仅Run内；Snapshot不rehydrate正文 | Specialist正文成为system instruction或security authority | INTERNAL_RC |
+| Security denial disposition/code | actual `ToolGovernanceError` / `ResourceAuthorizationError`在Agent adapter boundary映射的`ResultDisposition` + `SecurityDenialCode` | StepResult committer/store、DependencyResultView、Synthesis | 只由实际code-owned Gate exception产生并单调传播 | 当前Run内StepResultStore；无dedicated Event/Journal/Snapshot fact | string/regex/keyword matching生成denial；模型或正文清除/覆盖denial | INTERNAL_RC |
+| Denial dominance | `SynthesisAgentAdapter` | RunCoordinator、OutputGate、delivered-only Memory | 在context build/model前检查required dependency disposition；任一denial返回fixed safe result | 仅既有final delivery/Memory；无新schema | post-denial prompt build/model selection/model invocation；mixed success覆盖denial | INTERNAL_RC |
+
+`ContextBuilder`不拥有Tool Permission、Risk/Approval或Resource Authorization；它只拥有role binding。`SynthesisAgentAdapter`不成为新的security Gate，它只消费typed denial事实并执行`DENIAL_DOMINATES`。OutputGate、RuntimeEvent、Journal、Snapshot与Recovery Owner均未改变；Recovery不能从现有持久事实重建runtime-internal typed denial。
+
 本矩阵冻结 Runtime 事实的唯一权威 owner。`readers` 可以投影事实，`writers` 只能通过 owner 的受控 API 修改；Report、Evidence 与测试 Oracle 均不得升级为 owner。
 
 | fact | authoritative_owner | readers | writers | persistence_location | lifecycle_scope | must_not_own |

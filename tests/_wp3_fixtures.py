@@ -6,6 +6,7 @@ import json
 import threading
 import time
 
+from core.runtime import ContextBuilder, HistoryPolicy
 from tests._runtime_assembly_fixtures import FakeRouter, make_services
 
 
@@ -84,6 +85,8 @@ class Wp3RecordingRouter(FakeRouter):
         self.active = 0
         self.max_active = 0
         self.order: list[tuple[str, str]] = []
+        self.context_item_calls: list[tuple[object, ...]] = []
+        self.context_message_calls: list[list[dict[str, str]]] = []
         self._lock = threading.Lock()
 
     def complete_planning_decision(self, user_request: str, **kwargs) -> str:
@@ -117,6 +120,20 @@ class Wp3RecordingRouter(FakeRouter):
                 self.exited[agent_id] = time.monotonic()
                 self.active -= 1
                 self.order.append((agent_id, "exit"))
+
+    def complete_context_items(self, agent_id: str, context_items, **kwargs) -> str:
+        items = tuple(context_items)
+        messages = ContextBuilder().bind_messages(
+            items,
+            separate_data_messages=True,
+        )
+        self.context_item_calls.append(items)
+        self.context_message_calls.append(messages)
+        rendered = "\n\n".join(message["content"] for message in messages)
+        delegated_kwargs = dict(kwargs)
+        delegated_kwargs["persist"] = False
+        delegated_kwargs["history_policy"] = HistoryPolicy.NONE
+        return self.complete_single_agent(agent_id, rendered, **delegated_kwargs)
 
     def calls_for(self, agent_id: str) -> list[tuple[str, str, dict]]:
         return [call for call in self.agent_calls if call[0] == agent_id]

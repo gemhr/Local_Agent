@@ -17,14 +17,28 @@ Known Limitations：无authenticated human IAM、inbound TLS、Rate Limit、full
 | Security capability | Current status | Boundary / future scope |
 | --- | --- | --- |
 | WAF / generic abuse protection | `NOT_IMPLEMENTED` | WP3-B 的 fixed raw-body/semantic payload bounds 不是 Web Application Firewall（WAF）；当前没有 generic abuse detection、bot detection、distributed request filtering、per-user/per-principal traffic policy 或 WAF-style rule engine。 |
-| Prompt Injection protection | `NOT_IMPLEMENTED` | `DEFERRED_TO_WP3_C`。Stage 3 WP3-C 计划处理 User Prompt Injection、RAG instruction injection、Tool-result instruction injection、Memory/History instruction injection、Model self-authorization 与 Instruction/Data authority separation；这些能力当前均未实现。 |
+| Prompt Injection protection | `PARTIALLY_SUPPORTED` | Stage 3 WP3-C 已建立确定性的 instruction/data trust boundary 与 typed security denial integrity：只有 code-owned trusted controls 可绑定 `system` role；User/RAG/Tool/Memory/Step 内容只能作为 data/proposal。它不保证模型不受恶意自然语言影响，也不是 generic injection classifier、WAF 或 DLP。 |
 | Human IAM | `NOT_IMPLEMENTED` | numeric loopback、`agent_id` 和 Tool principal 均不是 authenticated human identity、RBAC/ABAC 或 tenant isolation。 |
 | Inbound Local API TLS | `NOT_IMPLEMENTED` | 当前 certified boundary 仍是 numeric-loopback HTTP。 |
 | Inbound API rate limit | `NOT_IMPLEMENTED` | payload bounds、Runtime admission/concurrency 与 Provider rate handling 均不等于 caller rate limit；distributed/per-principal策略 defer to WAF/deployment edge。 |
 | Generic DLP | `NOT_IMPLEMENTED` | fixed safe projection与credential-specific controls不等于通用内容/PII分类和输出扫描。 |
 | Full Sandbox | `NOT_IMPLEMENTED` | File Tool resource authorization不等于OS isolation或handle-based TOCTOU elimination。 |
 
-现有 Tool Permission、Risk/Approval、Resource Authorization 与 Payload Bounds 是code-owned deterministic security controls；Model/User text不能直接重配置或关闭这些policy。该事实不等价于完整Prompt Injection防护，也不表示RAG、Tool result或Memory中的instruction/data trust boundary已经建立。
+现有 Tool Permission、Risk/Approval、Resource Authorization、Payload Bounds 与 Context trust binding 都是 code-owned deterministic security controls；Model/User text不能直接重配置、关闭这些policy或把自身升级为security Authority。该事实不等价于完整Prompt Injection防护。
+
+## Prompt Injection / Context Trust Boundary（Stage 3 WP3-C）
+
+`ContextBuilder` 是 `ContextSourceType` / `ContextTrustLevel` 到 model role 的唯一绑定 Owner。只有 `SYSTEM_INSTRUCTION` / `AGENT_INSTRUCTION` 且为 `TRUSTED_INSTRUCTION` 的 code-owned control 可以进入 `system` role；User request、RAG、Tool result、Memory/History、Summary、Plan、Runtime state、current Step 与 prior Step result均是 data/proposal，不具有确定性security authority。raw chat history只允许原始 `user` / `assistant` role，不能注入 `system` role。
+
+冻结映射包括：
+
+- raw Tool observation = `TOOL_RESULT / UNTRUSTED_EXTERNAL / user`；code-owned Tool-answer control仍为 `system`，二者不合并为同一authority。
+- Synthesis dependency = `STEP_RESULT / USER_CONTENT / user`，每个dependency独立绑定；current synthesis instruction = `CURRENT_STEP / USER_CONTENT / user`。
+- RAG = `RAG_DOCUMENT / UNTRUSTED_EXTERNAL / user`；Memory retrieval、Summary 与 History均绑定data role，不能成为trusted instruction。
+
+实际 `ToolGovernanceError` / `ResourceAuthorizationError` 会在 adapter boundary映射为 `ResultDisposition.SECURITY_DENIED` + 固定 `SecurityDenialCode`，并经 `AgentAdapterResult -> StepResult -> StepResultStore -> DependencyResultView` 单调传播。Synthesis在任何context build、model selection或model invocation前检查typed disposition；任一required dependency被拒绝时执行 `DENIAL_DOMINATES`，丢弃其它成功partial result并直接交付固定safe denial。此Authority不读取正文，不使用string matching、regex或keyword推断。Permission、Approval与Resource拒绝均发生在Tool execution前，denied case的Tool execution为0。COORDINATED与explicit LEGACY均保持no fake success、delivered-only Memory与既有OutputGate边界。
+
+Known Limitations：F-03保留为P2；F-04为P2 `KNOWN_LIMITATION`。模型仍可能受恶意自然语言影响，并可能复述或改写System Prompt；RAG / Memory / Tool / Step data仍可能影响自然语言答案。当前没有generic injection classifier、WAF、generic DLP、Human IAM、full Sandbox或HITL approval workflow。mixed denial会丢弃成功的partial user-visible result；没有dedicated RuntimeEvent或Journal security-denial fact，Snapshot未新增该事实，Recovery也不能重建runtime-internal typed denial。当前Tool inventory下Command Injection、SQL Injection与SSRF均为 `NOT_APPLICABLE_CURRENT_INVENTORY`，不是已实现通用防护。
 
 ## HTTP Payload Boundary（WP3-B）
 

@@ -21,6 +21,8 @@ from core.runtime import (
     RunStatus,
     RunRegistry,
     StopReason,
+    ContextSourceType,
+    ContextTrustLevel,
 )
 from core.runtime.events import RuntimeEventType
 from tests._wp3_fixtures import (
@@ -98,9 +100,30 @@ async def test_specialist_secrets_never_reach_observable_channels() -> None:
     assert result.error_code is None
 
     # Synthesis model input may contain the raw specialist results.
-    prompt = router.prompts_for("synthesis_agent")[0]
-    assert SECRET in prompt
-    assert SECRET_PATH in prompt
+    synthesis_items = router.context_item_calls[0]
+    synthesis_messages = router.context_message_calls[0]
+    step_results = [
+        item for item in synthesis_items
+        if item.source_type is ContextSourceType.STEP_RESULT
+    ]
+    assert len(step_results) == 2
+    assert all(
+        item.trust_level is ContextTrustLevel.USER_CONTENT for item in step_results
+    )
+    synthesis_system = "\n".join(
+        message["content"]
+        for message in synthesis_messages
+        if message["role"] == "system"
+    )
+    synthesis_users = "\n".join(
+        message["content"]
+        for message in synthesis_messages
+        if message["role"] == "user"
+    )
+    assert SECRET not in synthesis_system
+    assert SECRET_PATH not in synthesis_system
+    assert SECRET in synthesis_users
+    assert SECRET_PATH in synthesis_users
 
     rendered = render_all_channels(services, scope.run_id)
     assert SECRET not in rendered

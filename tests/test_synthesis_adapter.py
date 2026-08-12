@@ -6,6 +6,8 @@ import pytest
 
 from core.runtime import (
     AgentExecutionRequest,
+    ContextSourceType,
+    ContextTrustLevel,
     DependencyResultEntry,
     DependencyResultView,
     ExecutionKind,
@@ -23,8 +25,8 @@ class _RecordingRouter:
         self.calls: list[tuple[str, str, dict]] = []
         self.fail = False
 
-    def complete_single_agent(self, agent_id: str, query: str, **kwargs) -> str:
-        self.calls.append((agent_id, query, kwargs))
+    def complete_context_items(self, agent_id: str, items, **kwargs) -> str:
+        self.calls.append((agent_id, items, kwargs))
         if self.fail:
             raise RuntimeError("simulated synthesis failure")
         return self.output
@@ -77,11 +79,16 @@ def test_prompt_contains_provided_results_in_stable_order() -> None:
         _entry("task-knowledge", "knowledge_expert", "KNOWLEDGE_BODY"),
     )
     adapter.execute(_request(router, view), object())
-    prompt = router.calls[0][1]
-    assert prompt.index("CODE_BODY") < prompt.index("KNOWLEDGE_BODY")
-    assert "code_expert" in prompt
-    assert "knowledge_expert" in prompt
-    assert "Task instruction" in prompt
+    items = router.calls[0][1]
+    results = [
+        item for item in items
+        if item.source_type is ContextSourceType.STEP_RESULT
+    ]
+    assert [item.content for item in results] == ["CODE_BODY", "KNOWLEDGE_BODY"]
+    assert [item.source_ref for item in results] == ["code_expert", "knowledge_expert"]
+    assert all(item.trust_level is ContextTrustLevel.USER_CONTENT for item in results)
+    assert items[0].source_type is ContextSourceType.SYSTEM_INSTRUCTION
+    assert items[0].trust_level is ContextTrustLevel.TRUSTED_INSTRUCTION
 
 
 def test_prompt_never_contains_unlisted_agents() -> None:
@@ -89,9 +96,10 @@ def test_prompt_never_contains_unlisted_agents() -> None:
     adapter = SynthesisAgentAdapter(router)
     view = _view(_entry("task-code", "code_expert", "CODE_BODY"))
     adapter.execute(_request(router, view), object())
-    prompt = router.calls[0][1]
-    assert "data_analyst" not in prompt
-    assert "core_router" not in prompt
+    items = router.calls[0][1]
+    rendered = "\n".join(item.content + item.source_ref for item in items)
+    assert "data_analyst" not in rendered
+    assert "core_router" not in rendered
 
 
 def test_missing_view_means_zero_model_calls() -> None:
@@ -153,13 +161,15 @@ def test_synthesis_failure_has_no_fallback_or_second_call() -> None:
     assert len(router.calls) == 1
 
 
-def test_synthesis_call_uses_persist_false_and_no_memory() -> None:
+def test_synthesis_call_uses_role_aware_context_and_no_memory() -> None:
     router = _RecordingRouter()
     adapter = SynthesisAgentAdapter(router)
     view = _view(_entry("task-code", "code_expert", "code finding"))
     adapter.execute(_request(router, view), object())
     kwargs = router.calls[0][2]
-    assert kwargs["persist"] is False
+    assert "persist" not in kwargs
+    assert "history_policy" not in kwargs
+    assert kwargs["user_query"].startswith("Synthesize")
     assert not hasattr(adapter, "memory_manager")
     assert not hasattr(adapter, "journal")
     assert not hasattr(adapter, "store")

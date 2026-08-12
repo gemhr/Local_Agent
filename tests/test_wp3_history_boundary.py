@@ -60,11 +60,29 @@ class FakeModel:
     def generate(self, messages, **kwargs):
         self.calls += 1
         self.all_messages.append(list(messages))
-        system = messages[0]["content"]
-        user = messages[-1]["content"]
+        system = "\n".join(
+            message["content"] for message in messages if message["role"] == "system"
+        )
+        users = [
+            message["content"] for message in messages if message["role"] == "user"
+        ]
         if "LocalAgent Planner" in system:
             yield self.planning_json
-        elif user.startswith("You are the synthesis agent"):
+        elif "You are the synthesis agent" in system:
+            if "## 当前步骤 / Runtime Context" not in "\n".join(users):
+                raise AssertionError("synthesis CURRENT_STEP user data missing")
+            if not any("## Specialist / Step Result" in user for user in users):
+                raise AssertionError("synthesis STEP_RESULT user data missing")
+            if any(
+                marker in system
+                for marker in (
+                    "Inspect the code contract.",
+                    "Inspect the data contract.",
+                    "result-code_expert",
+                    "result-data_analyst",
+                )
+            ):
+                raise AssertionError("raw synthesis data entered system")
             yield "FINAL-SYNTHESIS"
         elif "Code Expert" in system:
             yield "result-code_expert"
@@ -75,7 +93,7 @@ class FakeModel:
         elif "Core Router" in system:
             yield "result-core_router"
         else:
-            yield "result-generic"
+            raise AssertionError("unknown model message shape")
 
 
 class _DummyDB:
@@ -340,14 +358,32 @@ async def test_shape3_real_router_never_reads_old_memory() -> None:
         assert "Inspect the code contract." in rendered
         assert "Inspect the data contract." in rendered
         # synthesis 输入只含依赖结果与当前上下文，不含旧 Memory。
-        synthesis_prompt = next(
-            message[-1]["content"]
-            for message in model.all_messages
-            if message[-1]["content"].startswith("You are the synthesis agent")
+        synthesis_calls = [
+            messages
+            for messages in model.all_messages
+            if any(
+                message["role"] == "system"
+                and "You are the synthesis agent" in message["content"]
+                for message in messages
+            )
+        ]
+        assert len(synthesis_calls) == 1
+        synthesis_messages = synthesis_calls[0]
+        synthesis_system = "\n".join(
+            message["content"]
+            for message in synthesis_messages
+            if message["role"] == "system"
         )
-        assert "result-code_expert" in synthesis_prompt
-        assert "result-data_analyst" in synthesis_prompt
-        assert OLD_MEMORY_SECRET not in synthesis_prompt
+        synthesis_users = [
+            message["content"]
+            for message in synthesis_messages
+            if message["role"] == "user"
+        ]
+        assert "You are the synthesis agent" in synthesis_system
+        assert OLD_MEMORY_SECRET not in render_messages(synthesis_messages)
+        assert sum("## Specialist / Step Result" in text for text in synthesis_users) == 2
+        assert any("result-code_expert" in text for text in synthesis_users)
+        assert any("result-data_analyst" in text for text in synthesis_users)
 
         for agent_id in ("code_expert", "data_analyst", "synthesis_agent"):
             assert memory.count_messages(agent_id) == 1

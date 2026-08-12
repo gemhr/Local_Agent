@@ -1017,8 +1017,19 @@ def test_router_allowed_path_unchanged(tmp_path):
     messages = router._prepare_answer_messages(
         "core_router", "query", run_context=context
     )
-    assert messages[0]["content"].count("已使用工具：list_files") == 1
-    assert messages[0]["content"].count("工具观察结果：") == 1
+    system_text = "\n".join(
+        message["content"] for message in messages if message["role"] == "system"
+    )
+    tool_messages = [
+        message["content"]
+        for message in messages
+        if message["role"] == "user" and "a.txt" in message["content"]
+    ]
+    assert "请依据随后提供的工具观察结果直接回答用户" in system_text
+    assert "a.txt" not in system_text
+    assert len(tool_messages) == 1
+    assert "工具观察结果：" in tool_messages[0]
+    assert "[来源: list_files]" in tool_messages[0]
     assert context.budget_ledger.snapshot().committed_usage.tool_calls == 1
 
 

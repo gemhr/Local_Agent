@@ -21,7 +21,12 @@ import threading
 from core.runtime.planning import OutputPolicy, Plan
 from core.runtime.state import AgentState, StepStatus
 from core.runtime.scheduler import StepClaim
-from core.runtime.step_result import ResultContentType, StepResult
+from core.runtime.step_result import (
+    ResultContentType,
+    ResultDisposition,
+    SecurityDenialCode,
+    StepResult,
+)
 from core.runtime.fault_injection import (
     FaultInjectionController,
     evaluate_sync_fault,
@@ -82,6 +87,8 @@ class DependencyResultEntry:
         "_content_type",
         "_content",
         "_complete",
+        "_result_disposition",
+        "_security_denial_code",
         "_locked",
     )
 
@@ -92,12 +99,30 @@ class DependencyResultEntry:
         content_type: ResultContentType,
         content: str,
         complete: bool,
+        result_disposition: ResultDisposition = ResultDisposition.NORMAL,
+        security_denial_code: SecurityDenialCode | None = None,
     ) -> None:
         object.__setattr__(self, "_step_id", step_id)
         object.__setattr__(self, "_producer_agent_id", producer_agent_id)
         object.__setattr__(self, "_content_type", content_type)
         object.__setattr__(self, "_content", content)
         object.__setattr__(self, "_complete", complete)
+        if not isinstance(result_disposition, ResultDisposition):
+            raise TypeError("result_disposition 必须合法")
+        if security_denial_code is not None and not isinstance(
+            security_denial_code, SecurityDenialCode
+        ):
+            raise TypeError("security_denial_code 必须合法")
+        if (
+            result_disposition is ResultDisposition.NORMAL
+            and security_denial_code is not None
+        ) or (
+            result_disposition is ResultDisposition.SECURITY_DENIED
+            and security_denial_code is None
+        ):
+            raise ValueError("result disposition 与 security denial code 不一致")
+        object.__setattr__(self, "_result_disposition", result_disposition)
+        object.__setattr__(self, "_security_denial_code", security_denial_code)
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name, value) -> None:
@@ -126,16 +151,29 @@ class DependencyResultEntry:
         return self._complete
 
     @property
+    def result_disposition(self) -> ResultDisposition:
+        return self._result_disposition
+
+    @property
+    def security_denial_code(self) -> SecurityDenialCode | None:
+        return self._security_denial_code
+
+    @property
     def char_count(self) -> int:
         return len(self._content)
 
     def __repr__(self) -> str:
+        denial_code = (
+            self.security_denial_code.value if self.security_denial_code else None
+        )
         return (
             "DependencyResultEntry("
             f"step_id={self.step_id!r}, "
             f"producer_agent_id={self.producer_agent_id!r}, "
             f"content_type={self.content_type.value!r}, "
             f"char_count={self.char_count}, complete={self.complete!r}, "
+            f"result_disposition={self.result_disposition.value!r}, "
+            f"security_denial_code={denial_code!r}, "
             "content=<redacted>)"
         )
 
@@ -194,7 +232,11 @@ class DependencyResultView:
 class _StoreEntry:
     """Internal store entry; safe repr, raw content never leaves memory."""
 
-    __slots__ = ("step_id", "producer_agent_id", "content_type", "content", "complete", "status", "created_at", "readable_at")
+    __slots__ = (
+        "step_id", "producer_agent_id", "content_type", "content", "complete",
+        "result_disposition", "security_denial_code", "status", "created_at",
+        "readable_at",
+    )
 
     def __init__(
         self,
@@ -204,6 +246,8 @@ class _StoreEntry:
         content_type: ResultContentType,
         content: str,
         complete: bool,
+        result_disposition: ResultDisposition,
+        security_denial_code: SecurityDenialCode | None,
         created_at: datetime,
     ) -> None:
         self.step_id = step_id
@@ -211,6 +255,8 @@ class _StoreEntry:
         self.content_type = content_type
         self.content = content
         self.complete = complete
+        self.result_disposition = result_disposition
+        self.security_denial_code = security_denial_code
         self.status = StoreEntryStatus.PREPARED
         self.created_at = created_at
         self.readable_at: datetime | None = None
@@ -230,6 +276,8 @@ class _StoreEntry:
             self.content_type,
             self.content,
             self.complete,
+            self.result_disposition,
+            self.security_denial_code,
         )
 
 
@@ -394,6 +442,8 @@ class StepResultStore:
                 content_type=entry.content_type,
                 content=entry.content,
                 complete=entry.complete,
+                result_disposition=entry.result_disposition,
+                security_denial_code=entry.security_denial_code,
                 created_at=datetime.now(UTC),
             )
 
