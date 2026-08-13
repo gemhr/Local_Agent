@@ -18,6 +18,7 @@ Known Limitations：无authenticated human IAM、inbound TLS、Rate Limit、full
 | --- | --- | --- |
 | WAF / generic abuse protection | `NOT_IMPLEMENTED` | WP3-B 的 fixed raw-body/semantic payload bounds 不是 Web Application Firewall（WAF）；当前没有 generic abuse detection、bot detection、distributed request filtering、per-user/per-principal traffic policy 或 WAF-style rule engine。 |
 | Prompt Injection protection | `PARTIALLY_SUPPORTED` | Stage 3 WP3-C 已建立确定性的 instruction/data trust boundary 与 typed security denial integrity：只有 code-owned trusted controls 可绑定 `system` role；User/RAG/Tool/Memory/Step 内容只能作为 data/proposal。它不保证模型不受恶意自然语言影响，也不是 generic injection classifier、WAF 或 DLP。 |
+| SQL Injection protection | `SUPPORTED` | 仅限 current LocalAgent production SQLite inventory：SQL structure owner 是 code，User/Model/RAG/Tool/Memory/HTTP 内容只可作为 DB-API bound values；test-only AST Gate 冻结直接 SQLite owner 与 sink 形状。它不是通用 SQL firewall、NL2SQL 或任意数据库技术认证。 |
 | Human IAM | `NOT_IMPLEMENTED` | numeric loopback、`agent_id` 和 Tool principal 均不是 authenticated human identity、RBAC/ABAC 或 tenant isolation。 |
 | Inbound Local API TLS | `NOT_IMPLEMENTED` | 当前 certified boundary 仍是 numeric-loopback HTTP。 |
 | Inbound API rate limit | `NOT_IMPLEMENTED` | payload bounds、Runtime admission/concurrency 与 Provider rate handling 均不等于 caller rate limit；distributed/per-principal策略 defer to WAF/deployment edge。 |
@@ -38,7 +39,15 @@ Known Limitations：无authenticated human IAM、inbound TLS、Rate Limit、full
 
 实际 `ToolGovernanceError` / `ResourceAuthorizationError` 会在 adapter boundary映射为 `ResultDisposition.SECURITY_DENIED` + 固定 `SecurityDenialCode`，并经 `AgentAdapterResult -> StepResult -> StepResultStore -> DependencyResultView` 单调传播。Synthesis在任何context build、model selection或model invocation前检查typed disposition；任一required dependency被拒绝时执行 `DENIAL_DOMINATES`，丢弃其它成功partial result并直接交付固定safe denial。此Authority不读取正文，不使用string matching、regex或keyword推断。Permission、Approval与Resource拒绝均发生在Tool execution前，denied case的Tool execution为0。COORDINATED与explicit LEGACY均保持no fake success、delivered-only Memory与既有OutputGate边界。
 
-Known Limitations：F-03保留为P2；F-04为P2 `KNOWN_LIMITATION`。模型仍可能受恶意自然语言影响，并可能复述或改写System Prompt；RAG / Memory / Tool / Step data仍可能影响自然语言答案。当前没有generic injection classifier、WAF、generic DLP、Human IAM、full Sandbox或HITL approval workflow。mixed denial会丢弃成功的partial user-visible result；没有dedicated RuntimeEvent或Journal security-denial fact，Snapshot未新增该事实，Recovery也不能重建runtime-internal typed denial。当前Tool inventory下Command Injection、SQL Injection与SSRF均为 `NOT_APPLICABLE_CURRENT_INVENTORY`，不是已实现通用防护。
+Known Limitations：F-03保留为P2；F-04为P2 `KNOWN_LIMITATION`。模型仍可能受恶意自然语言影响，并可能复述或改写System Prompt；RAG / Memory / Tool / Step data仍可能影响自然语言答案。当前没有generic injection classifier、WAF、generic DLP、Human IAM、full Sandbox或HITL approval workflow。mixed denial会丢弃成功的partial user-visible result；没有dedicated RuntimeEvent或Journal security-denial fact，Snapshot未新增该事实，Recovery也不能重建runtime-internal typed denial。当前Tool inventory下Command Injection与SSRF为 `NOT_APPLICABLE_CURRENT_INVENTORY`，不是已实现通用防护。
+
+## SQL Injection / SQLite Statement Authority（Stage 3 WP3-D）
+
+在 current LocalAgent production SQLite inventory 内，SQL structure owner 固定为 production code；User、Model output、RAG、Tool result、Memory text 与 HTTP payload 均不拥有 statement authority，只能经 DB-API parameter binding 成为值。直接 SQLite owner inventory 冻结为 `core/memory_manager.py`、`core/persistence_migration.py`、`core/runtime/event_journal_store.py`、`core/runtime/event_consumer.py` 与 `core/runtime/snapshot_store.py`。排序方向由 code-owned boolean 映射，动态 `IN` 仅由代码生成 `?` placeholders 并单独绑定 values，immutable module SQL constants仍由代码拥有结构。
+
+test-only AST Gate 扫描 `main.py`、`server.py`、`core/**`、`tools/**`、`ui/**` 与 `scripts/**`，并冻结 owner discovery、SQLite receiver 与 SQL sink 分类。新增直接 SQLite owner、未知 receiver、动态 statement、`executescript`、exception shape drift 或未解析 sink 都 fail closed。启动/内部只读检查所需的 schema-metadata PRAGMA 仅在精确 helper、固定 metadata 名称、无正文输入并对 `sqlite3.Error` fail closed 的形状下例外；该例外不授予通用 identifier interpolation authority。
+
+Known Limitations：No generic SQL firewall 或 parser；No NL2SQL validator/feature；No SQL Tool。未来新增 SQL Tool、NL2SQL、直接 SQLite owner 或新数据库技术必须重新过 Gate。FTS query-language semantics（包括 `OR`、`NOT`、`NEAR` 与 malformed query）和 LIKE wildcard semantics（`%`、`_`）仍是搜索语义，不等于 statement structure authority。Chroma 的内部持久化不属于 LocalAgent direct SQL owner，本结论不认证其内部 schema/实现。用户可见错误保持固定非泄漏不代表 internal logs 已具备 generic DLP；日志仍受各自 safe projection 合同约束。本节记录实现与测试事实，不宣称 WP3-D Final Gate、WP3 aggregate 或 Stage 3 PASS。
 
 ## HTTP Payload Boundary（WP3-B）
 
