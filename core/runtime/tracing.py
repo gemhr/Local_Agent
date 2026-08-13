@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
 from types import MappingProxyType
-from typing import Iterator, Mapping, Protocol
+from typing import Callable, Iterator, Mapping, Protocol
 from uuid import uuid4
 
 from core.runtime.cancellation import CancellationToken, RunCancelledError
@@ -219,18 +219,39 @@ class SpanRecorderHealth:
         if self.last_safe_error_code is not None:
             _identifier(self.last_safe_error_code, "last_safe_error_code")
 
+CompletedSpanObserver = Callable[[SpanRecord], bool | None]
+"""Narrow single completed-span observer：``SpanRecord -> bool | None``。
+
+best-effort 侧通道；observer 的任何返回值都不影响本地 recorder truth。
+只允许一个 observer（构造注入、不可变）；不支持 list/plugin registry/
+动态 add/remove/priority/fan-out。
+"""
+
+
 class InMemorySpanRecorder:
+    """本地 completed/active span 的权威 Owner；可带一个窄 completion observer。
+
+    ``record()`` 先在 recorder lock 内完成本地 bookkeeping（移除 active、
+    append completed 或 closed drop 计数），释放锁后才 best-effort 调用
+    ``completion_observer(record)``。observer 失败被隔离，不改变本地 span
+    结果；close() 收口产生的 ``RECORDER_CLOSED`` final spans 走同一正常
+    record path 并通知 observer（producer barrier）。
+    """
+
     _DROP_REASONS = frozenset({
         "recorder_start_failed", "recorder_end_failed", "adapter_failed",
         "flush_failed", "queue_full",
     })
-    def __init__(self, *, metrics_recorder=None) -> None:
+    def __init__(self, *, metrics_recorder=None, completion_observer=None) -> None:
+        if completion_observer is not None and not callable(completion_observer):
+            raise TypeError("completion_observer must be callable or None")
         self._records=[]; self._lock=threading.Lock(); self._closed=False
         self._active: dict[str, SpanHandle] = {}
         self.dropped_spans=0
         self._start_failures=0; self._end_failures=0; self._flush_failures=0
         self._last_safe_error_code: str | None = None
         self._metrics_recorder=metrics_recorder
+        self._completion_observer=completion_observer
     def start_span(self, *, trace_id, run_id, component, operation, step_id=None, parent_context=None):
         parent=parent_context if parent_context is not None else current_trace_context()
         if parent is not None and (parent.trace_id != trace_id or parent.run_id != run_id): raise ValueError("parent trace/run mismatch")
@@ -244,10 +265,20 @@ class InMemorySpanRecorder:
             self._active[context.span_id]=handle
             return handle
     def record(self,record):
+        observer = self._completion_observer
         with self._lock:
             self._active.pop(record.span_id, None)
             if self._closed: self._record_drop_locked(record.component, "recorder_end_failed")
             else: self._records.append(record)
+        # local bookkeeping 已权威完成且 recorder lock 已释放；observer 是
+        # best-effort 侧通道。observer 普通 Exception 被隔离（content-free）：
+        # 本地 completed record/drop 事实不变，不计入 recorder drop/health
+        # （避免导出侧所有权模糊）；KeyboardInterrupt/SystemExit 按既有策略保留。
+        if observer is not None:
+            try:
+                observer(record)
+            except Exception:
+                pass
     def record_end_failure(self, record):
         with self._lock:
             self._active.pop(record.span_id, None)

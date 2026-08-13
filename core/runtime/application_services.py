@@ -26,6 +26,7 @@ from core.runtime.shutdown_faults import (
 )
 from core.runtime.state import AgentState
 from core.runtime.tracing import OperationScopedSpanRecorder
+from core.runtime.trace_export_dispatcher import TraceExportDispatcherState
 
 
 SAFE_RUNTIME_ASSEMBLY_VERSION = "1"
@@ -135,6 +136,39 @@ def _remaining_timeout(started: float, timeout: float) -> float:
     return max(0.0, timeout - (time.monotonic() - started))
 
 
+def _classify_trace_export_close(target: object) -> str:
+    """``TraceExportDispatcher.close()`` 返回 False 后的 content-free 分类。
+
+    只读取 bounded 生命周期事实，不暴露 exception/envelope/IDs：
+
+    - ``state == CLOSED``：物理 lifecycle 已结束但 adapter close 返回 False
+      或抛异常（被 dispatcher 隔离）→ ``RUNTIME_TRACE_EXPORT_CLOSE_FAILED``；
+    - ``state == FAILED``：worker 因 dispatcher 内部致命失败已死，close 立即
+      （不经 deadline 耗尽）返回 False → 也是失败 → 同一
+      ``RUNTIME_TRACE_EXPORT_CLOSE_FAILED``（不是 timeout）；
+    - 其余（``CLOSING``）：deadline 内未完成 → 真超时 →
+      ``RUNTIME_TRACE_EXPORT_CLOSE_TIMEOUT``。
+
+    任何 health 读取失败都回退为 TIMEOUT（保守、content-free）。真实
+    ``_invoke_bounded`` deadline 过期由调用方 TimeoutError 分支先行映射为
+    TIMEOUT，不会被本分类覆盖。
+    """
+
+    state: object | None = None
+    try:
+        health = getattr(target, "health", None)
+        if callable(health):
+            snapshot = health()
+            state = getattr(snapshot, "state", None)
+    except Exception:
+        state = None
+    if state is TraceExportDispatcherState.CLOSED:
+        return "RUNTIME_TRACE_EXPORT_CLOSE_FAILED"
+    if state is TraceExportDispatcherState.FAILED:
+        return "RUNTIME_TRACE_EXPORT_CLOSE_FAILED"
+    return "RUNTIME_TRACE_EXPORT_CLOSE_TIMEOUT"
+
+
 def _invoke_arguments(method, timeout: float, operation: str) -> tuple[tuple, dict]:
     """Select a bounded-call spelling without exposing the target in errors."""
     try:
@@ -195,6 +229,7 @@ class ApplicationRuntimeServices:
     admission_gate: RuntimeAdmissionGate = field(
         default_factory=RuntimeAdmissionGate
     )
+    trace_export_dispatcher: object | None = None
     coordinated_step_executor: object | None = None
     legacy_step_executor: object | None = None
     snapshot_enabled: bool = False
@@ -238,6 +273,7 @@ class ApplicationRuntimeServices:
             self.structured_logger,
             self.runtime_metrics_recorder,
             self.span_recorder,
+            self.trace_export_dispatcher,
             self.snapshot_store,
             self.recovery_validator,
             self.model_invocation_router,
@@ -306,6 +342,7 @@ class ApplicationRuntimeServices:
         candidates: list[tuple[str, object | None, str]] = [
             ("observability_dispatcher", self.observability_dispatcher, "close"),
             ("span_recorder", self.span_recorder, "close"),
+            ("trace_export_dispatcher", self.trace_export_dispatcher, "close"),
             ("snapshot_store", self.snapshot_store, "close"),
             ("event_journal", self.event_journal, "close"),
         ]
@@ -390,6 +427,8 @@ class ApplicationRuntimeServices:
                 error_code = (
                     "RUNTIME_OBSERVABILITY_FLUSH_TIMEOUT"
                     if component == "observability_dispatcher"
+                    else "RUNTIME_TRACE_EXPORT_FLUSH_TIMEOUT"
+                    if component == "trace_export_dispatcher"
                     else "RUNTIME_TRACE_FLUSH_TIMEOUT"
                     if component == "span_recorder"
                     else "RUNTIME_COMPONENT_FLUSH_TIMEOUT"
@@ -399,6 +438,8 @@ class ApplicationRuntimeServices:
                 error_code = (
                     "RUNTIME_OBSERVABILITY_FLUSH_FAILED"
                     if component == "observability_dispatcher"
+                    else "RUNTIME_TRACE_EXPORT_FLUSH_FAILED"
+                    if component == "trace_export_dispatcher"
                     else "RUNTIME_TRACE_FLUSH_FAILED"
                     if component == "span_recorder"
                     else "RUNTIME_COMPONENT_FLUSH_FAILED"
@@ -406,7 +447,11 @@ class ApplicationRuntimeServices:
                 issues.append(RuntimeLifecycleIssue(component, error_code))
             else:
                 if not completed:
-                    error_code = "RUNTIME_COMPONENT_FLUSH_TIMEOUT"
+                    error_code = (
+                        "RUNTIME_TRACE_EXPORT_FLUSH_TIMEOUT"
+                        if component == "trace_export_dispatcher"
+                        else "RUNTIME_COMPONENT_FLUSH_TIMEOUT"
+                    )
                     issues.append(RuntimeLifecycleIssue(component, error_code))
                 else:
                     error_code = None
@@ -503,14 +548,26 @@ class ApplicationRuntimeServices:
                         self._lifecycle.close_results[identity] = result
                         raise
                     except TimeoutError:
-                        error_code = "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
+                        error_code = (
+                            "RUNTIME_TRACE_EXPORT_CLOSE_TIMEOUT"
+                            if component == "trace_export_dispatcher"
+                            else "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
+                        )
                     except Exception:
-                        error_code = "RUNTIME_COMPONENT_CLOSE_FAILED"
+                        error_code = (
+                            "RUNTIME_TRACE_EXPORT_CLOSE_FAILED"
+                            if component == "trace_export_dispatcher"
+                            else "RUNTIME_COMPONENT_CLOSE_FAILED"
+                        )
                     else:
                         error_code = (
                             None
                             if completed
-                            else "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
+                            else (
+                                _classify_trace_export_close(target)
+                                if component == "trace_export_dispatcher"
+                                else "RUNTIME_COMPONENT_CLOSE_TIMEOUT"
+                            )
                         )
                 if error_code is not None:
                     issues.append(RuntimeLifecycleIssue(component, error_code))

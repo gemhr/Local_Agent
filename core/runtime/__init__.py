@@ -1029,3 +1029,21 @@ __all__ += [
     "build_fault_coverage_report",
     "build_fault_point_support_report",
 ]
+
+from core.runtime.trace_exporter import TraceExporter
+from core.runtime.trace_export_dispatcher import (
+    TRACE_EXPORT_DROP_REASONS,
+    TRACE_EXPORT_FAILURE_STAGES,
+    TraceExportDispatcher,
+    TraceExportDispatcherState,
+    TraceExportHealthSnapshot,
+)
+
+__all__ += [
+    "TRACE_EXPORT_DROP_REASONS",
+    "TRACE_EXPORT_FAILURE_STAGES",
+    "TraceExportDispatcher",
+    "TraceExportDispatcherState",
+    "TraceExportHealthSnapshot",
+    "TraceExporter",
+]
