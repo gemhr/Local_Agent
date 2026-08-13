@@ -72,6 +72,40 @@ WP4-A 公共 Trace export 是 metadata-first 的严格 allowlist 边界：
 - 兼容判断失败 content-free：固定 reason codes（`ACCEPTED`/`IDENTITY_MISSING`/`IDENTITY_MISMATCH`/`VERSION_UNSUPPORTED`/`FINGERPRINT_MISSING`/`FINGERPRINT_MALFORMED`/`FINGERPRINT_UNSUPPORTED`/`ENVELOPE_INVALID`），拒绝原因不携带 envelope/raw 值；已知 identity/version/fingerprint 但 envelope 语义非法时返回 `ENVELOPE_INVALID`。
 - 该边界是严格 contract allowlisting，不是 generic DLP、generic secret scanner 或完整隐私保护。
 
+## Trace Export Dispatch / Exporter Security Boundary（WP4-B）
+
+WP4-B 在 WP4-A 合同之上实现 application-scoped 分发与 transport-neutral
+adapter 边界，并保持同样的 content-free 原则：
+
+- **外部 adapter 永不接收 raw `SpanRecord`**。所有 adapter 输入严格为
+  `TraceExportEnvelope`（WP4-A 严格校验的不可变公共值）；raw attributes、
+  OTel-shaped mapping、dict 或 JSON 字符串均被 protocol 与 dispatcher 路径禁止。
+- WP4-A metadata-first 严格 allowlist 仍是强制要求：只有六类 category 导出
+  schema 批准的键可以跨出观察边界；INTERNAL_ONLY 与未知键被省略，raw
+  user/agent/model/tool/RAG/memory 正文、路径、URL、密钥与 raw exception
+  永不导出。
+- dispatcher error/health 路径 content-free：只保留固定 safe error code、
+  bounded reason/stage、queue depth/capacity 与聚合计数；不含 span/envelope
+  repr、attributes、IDs、fingerprint、endpoint、exception message 或 traceback。
+- **Known Limitation（raw helper bypass risk）**：
+  `OpenTelemetryCompatibleSpanAdapter.export_snapshot()` 可直接复制内部
+  `SpanRecord.attributes` 到 OTel-shaped mapping，绕过 `TraceExportEnvelope`
+  allowlist（internal-only marker 在该 snapshot 可见）。该 helper 当前未装配、
+  无 transport，分类为 `KNOWN_LIMITATION + DESIGN_STOP_CONDITION`，**不是
+  production incident**；它不是 WP4-B transport path，禁止被 production
+  exporter 复用。
+- exporter metrics 是 best-effort diagnostic projection；禁止高基数 label：
+  `run_id`、`trace_id`、`span_id`、`step_id`、`fingerprint`、
+  `contract_fingerprint`、`endpoint`、`url`、`raw_status`、`raw_exception`。
+  fingerprint 是 contract identity，不是 metric dimension；drop reason 与
+  failure stage 使用 dispatcher code-owned 有限词表。
+- exporter health 不影响 `/readyz`/`/health`；disabled 无 degradation；export
+  路径失败只反映在 dispatcher health/metrics/shutdown component truth，不改变
+  Runtime 可用性。
+- exporter 是侧通道 observability 能力：不写回 Run terminal status、
+  AgentState、OutputGate/DeliveryStatus、Memory commit、Journal、Snapshot 或
+  Recovery；Recovery 保持 validation-only，不读取 export queue。
+
 ## Sensitive Data Types
 
 Prompt、Model output、Tool arguments/output、RAG chunks、Memory 正文、本地路径、Provider error/endpoint、API key/token、idempotency/resource key 均为敏感数据。Run id、session id、trace id、Tool name 在特定输出面也可能形成高基数或关联风险。

@@ -267,8 +267,11 @@ server.app（POST /api/chat）
 | ToolCompletionGapFixture | TEST_ONLY | 仅存在于 `tests`；生产 RecoveryValidator 不接受 |
 | Test Fake / Test Mutator | TEST_ONLY | 只能由测试显式创建/注入 |
 | Trace Contract v1 | PUBLIC_VERSIONED | 六个稳定 operation 语义冻结；内部 Span 模型（`TraceContext`/`SpanHandle`/`SpanRecord`）为 INTERNAL，不是公共 exporter payload |
-| Consumer-neutral Trace export contract | PUBLIC_VERSIONED | `core/runtime/trace_export_contract.py`：identity/version、不可变 `TraceExportEnvelope`、严格 completed-only 投影、六类 category 导出 schema（type/presence/value-domain）、`TraceCompatibilityEvaluator`；同时是 Export Contract Semantic Owner，唯一构建权威规范语义描述符（`export_contract_semantic_descriptor()`） |
+| Consumer-neutral Trace export contract | PUBLIC_VERSIONED | `core/runtime/trace_export_contract.py`：identity/version、不可变 `TraceExportEnvelope`、严格 completed-only 投影、六类 category 导出 schema（type/presence/value-domain）、`TraceCompatibilityEvaluator`；同时是 Export Contract Semantic Owner，唯一构建权威规范语义描述符（`export_contract_semantic_descriptor()`）。消费者包括已实现的 `TraceExportDispatcher`（WP4-B） |
 | Trace Contract Fingerprint | PUBLIC_VERSIONED | `core/runtime/trace_contract_fingerprint.py`：`TraceContractFingerprinter` 只做 canonicalize+digest（sha256 + canonical_json_v1，lowercase 64-hex）；语义描述符由 export contract owner 消费，识别 schema+语义兼容性（含 value-domain 与 compatibility 行为），不识别 Trace 实例/Run/配置 |
+| TraceExporter protocol | INTERNAL_RC | `core/runtime/trace_exporter.py`：envelope-only transport-neutral Protocol（`send(TraceExportEnvelope)` + `close(timeout_seconds)`）；adapter 只接受公共 envelope，禁止 raw `SpanRecord`/dict/mapping |
+| TraceExportDispatcher | INTERNAL_RC | `core/runtime/trace_export_dispatcher.py`：APPLICATION_SCOPE bounded 分发器（projection invocation、compatibility consumption、queue、worker、drop/health、flush/close）；`TraceExportHealthSnapshot` 为不可变 content-free 内部快照 |
+| CompletedSpanObserver | INTERNAL_RC | `InMemorySpanRecorder` 单个可选 completion observer（`Callable[[SpanRecord], bool | None]`）；非公共 fan-out/plugin 机制 |
 
 `PUBLIC_*` 指阶段二项目代码可依赖的合同，不等于网络 API。只有明确的安全投影可以进入 Wire；内部 evolving 对象不能直接序列化。
 
@@ -409,6 +412,9 @@ KB degraded 语义：`knowledge_base_required=false` 且 KB 初始化/import 失
 - `StartupDependencySnapshot` 是 frozen、application-scope、lifespan 构造一次的 immutable 启动事实；运行中不修改、不持久化。
 - Health / Readiness endpoint 与 Client readiness probe 只读投影；不得写回 lifecycle / admission / snapshot，不触发 recovery/retry。
 - `/readyz` 的 readiness 结论必须与 `/api/chat` 消费的同一 `ApplicationRuntimeServices.admission_gate` identity 一致。
+- TraceExportDispatcher 是侧通道 observability 能力：绝不修改 Run terminal status、AgentState、OutputGate/DeliveryStatus、Memory commit、Journal、Snapshot、Recovery 或 Tool/Retrieval。
+- `span_recorder.close()` 成功返回 = trace export producer barrier；`ApplicationRuntimeServices` target 顺序冻结为 `span_recorder < trace_export_dispatcher < snapshot_store`，不得反转。
+- Exporter metric 禁止高基数 label（`run_id/trace_id/span_id/step_id/fingerprint/contract_fingerprint/endpoint/url/raw_status/raw_exception`）；fingerprint 是 contract identity，不是 metric dimension。
 
 ## 11. Persistence / Migration / Operations Closure（WP1-D）
 
@@ -484,3 +490,210 @@ Deployment Migration != Runtime Recovery Validation
 ```
 
 Migration 处理 deployment upgrade 中的 Store schema/compatibility（显式 SCRIPT_ROLE，Server stopped）。Recovery 仍为 validation-only：`RecoveryValidator` 只读 Snapshot + Journal 返回 immutable `RecoveryAssessment`；不写 AgentState、不启动 replay/resume、不从 Registry/Memory/adapter 回填历史事实。Migration/backup/restore 均不是 Runtime Recovery，也不改变其 validation-only 边界。
+
+## 12. Trace Export Dispatch / Exporter（WP4-B）
+
+WP4-B 是 application-scoped、consumer-neutral 的 Trace export 分发能力：把 WP4-A
+已校验的公共 `TraceExportEnvelope` 值以 bounded、非阻塞、best-effort 方式交给
+transport-neutral adapter。本部分只描述已实现能力；`production external
+delivery` 仍 `NOT_IMPLEMENTED`（WP4-C）。
+
+### 12.1 Final Export Pipeline
+
+```text
+SpanHandle._end()
+  -> InMemorySpanRecorder.record(completed SpanRecord)
+     -> local recorder bookkeeping FIRST（lock 内：移除 active、append 或 closed drop）
+     -> recorder lock released
+     -> single optional completion observer
+        -> TraceExportDispatcher.observe_completed_span(record)
+           -> project_span(record)                 [WP4-A Owner]
+           -> TraceCompatibilityEvaluator          [WP4-A Owner]
+           -> bounded queue.Queue[TraceExportEnvelope]
+              -> single application-owned daemon worker
+                 -> TraceExporter.send(TraceExportEnvelope)
+```
+
+raw `SpanRecord` 永不到达 exporter adapter；adapter 输入严格为
+`TraceExportEnvelope`。
+
+### 12.2 TraceExportDispatcher Owner（APPLICATION_SCOPE）
+
+Owns：`project_span()` invocation 时机、`TraceCompatibilityEvaluator` consumption、
+bounded export queue（`queue.Queue(maxsize=capacity)`，显式正整数 capacity）、
+单 daemon worker、submission/drop 计数、content-free health、bounded
+flush/close 生命周期。
+
+Does NOT own：Trace export 语义合同/schema/value-domain、fingerprint、
+compatibility 语义（均仍归 WP4-A Owner）、Runtime outcome、Journal、Snapshot、
+Recovery、AgentEvalOps mapping、retry/batch/durability、transport-specific
+mapping。
+
+Producer 路径（`observe_completed_span`）只做 SpanRecord type check、projection、
+compatibility、状态/计数同步与 `put_nowait`：无 I/O、sleep、await、retry、
+blocking put；绝不调用 exporter。worker 是 adapter 的唯一调用者：串行 `send`，
+per-item 至多一次 transport attempt；adapter 普通异常被隔离并继续，只有
+dispatcher 内部不变量失败才进入 `FAILED`。
+
+### 12.3 TraceExporter Protocol（envelope-only）
+
+`core/runtime/trace_exporter.py`：transport-neutral `Protocol`：
+
+- `send(envelope: TraceExportEnvelope) -> None`：对单 envelope 一次 transport
+  attempt；成功返回不代表 remote durable persistence；
+- `close(timeout_seconds: float) -> bool`：bounded 物理关闭，至多一次。
+
+无 `start/open`、无 adapter `flush`、无 queue/retry/batch。禁止输入 raw
+`SpanRecord`、OTel-shaped mapping、dict 或 JSON 字符串。
+
+### 12.4 Recorder Observer Seam
+
+`InMemorySpanRecorder` 有且只有一个可选 `completion_observer`
+（`Callable[[SpanRecord], bool | None]`，构造注入，默认 `None`）：
+
+- 在权威本地 bookkeeping 之后、recorder lock 释放之后 best-effort 调用；
+- observer 普通异常被隔离，不改变本地 recorder truth；返回值不影响任何业务
+  行为（False 只表示导出侧通道拒绝，不是本地 recorder 失败）；
+- 无 generic fan-out、observer registry、plugin framework 或多 sink 排序。
+
+### 12.5 RECORDER_CLOSED Semantics
+
+`recorder.close()` 会把 close-start 存在的 active spans 以
+`status=CANCELLED`、`error_code=RECORDER_CLOSED` 收口。这些 completed
+`SpanRecord` 遵循既有 recorder closed/drop bookkeeping（不进正常 completed
+snapshot，`dropped_span_count` 递增），**且**仍通知 completion observer——它们
+是经正常 record seam 的真实终态。
+
+### 12.6 Producer Barrier
+
+`span_recorder.close()` 成功返回 = exact producer barrier：close-start 所有
+active handles 已同步完成 end → local record/drop → observer invocation；之后
+新 `start_span()` 只返回 noop handle，不再产生真实 exportable `SpanRecord`。
+
+### 12.7 Application Lifecycle Ordering
+
+`ApplicationRuntimeServices` 冻结 target 顺序：
+
+```text
+observability_dispatcher -> span_recorder -> trace_export_dispatcher
+-> snapshot_store -> event_journal -> remaining targets
+```
+
+- Flush：trace exporter flush 是 pre-close drain，不替代
+  `dispatcher.close()` 内嵌 final drain；
+- Close：`span_recorder.close()` → producer barrier →
+  `trace_export_dispatcher.close()`（stop accepting → final accepted barrier →
+  bounded drain → worker shutdown → `adapter.close()` → bounded join）。
+
+`trace_export_dispatcher` 是 optional dependency（默认 `None` = disabled-by-
+absence）：absent 时不产生任何额外 target/component result/worker/queue/drop，
+不创建 Noop exporter 或 disabled dispatcher 对象。
+
+### 12.8 GracefulShutdown Boundary
+
+`GracefulShutdownCoordinator` 仍是整体 shutdown orchestration Owner。WP4-B 未
+新增 shutdown orchestration phase、未改 ShutdownReport schema、未建第二 shutdown
+Owner；`ApplicationRuntimeServices` 的 ordered targets 已足够表达 exporter
+lifecycle。
+
+### 12.9 Component Truth
+
+Exporter lifecycle 以独立 `RuntimeComponentResult` 表达：
+component=`trace_export_dispatcher`、operation=`FLUSH`/`CLOSE`。不 merge 入
+`observability_flush_status`/`trace_flush_status`，不新增 ShutdownReport 字段。
+
+Close 结果按 dispatcher content-free 生命周期事实分类（Phase 3.3 R1 + R2 修复）：
+
+- 物理 lifecycle 已结束（`state == CLOSED`）但 adapter close 返回 False /
+  抛异常（被隔离）→ `RUNTIME_TRACE_EXPORT_CLOSE_FAILED`；
+- worker fatal（`state == FAILED`，worker 已死，close 不经 deadline 耗尽
+  立即返回 False）→ 也是失败 → `RUNTIME_TRACE_EXPORT_CLOSE_FAILED`
+  （不是 timeout）；
+- deadline 到期而 lifecycle 未完成（`state == CLOSING`，worker 可能仍存活）→
+  `RUNTIME_TRACE_EXPORT_CLOSE_TIMEOUT`。
+
+不把每个 `close(False)` 都报为 timeout；不把已知 worker fatal 误报为
+timeout。`CLOSED` 状态可能与 close result False 共存（adapter 物理 close
+失败）。真实 `_invoke_bounded` deadline 过期由调用方 TimeoutError 分支映射为
+TIMEOUT，不被 post-call 状态分类覆盖。独立 Final Re-Gate 将复核 worker
+fatal / FAILED 状态的 component truth（本文档不预先声明该探针结果）。
+
+### 12.10 Delivery Semantics
+
+- overall delivery = `BEST_EFFORT`；
+- 每个 accepted envelope = 至多一次 transport attempt；
+- queue acceptance ≠ attempted ≠ sent ≠ remote durable/ack；send 成功不代表
+  remote durable persistence；
+- 进程崩溃可丢失 queued/in-flight envelopes；
+- 不承诺 at-most-once delivery、at-least-once、exactly-once 或跨进程顺序。
+
+### 12.11 Queue / Backpressure
+
+`queue.Queue` thread-safe、显式正 bounded capacity；producer `put_nowait`
+非阻塞；full 时 `DROP_NEWEST / REJECT_INCOMING`（不 evict 已 accepted item）。
+Exporter backpressure 绝不阻塞 Runtime business path。不复用
+`RuntimeEventChannel`/`asyncio.Queue`。
+
+### 12.12 Concurrency / Ordering
+
+Span completion 可来自多个线程；producer 路径 thread-safe、bounded、
+CPU/local-only。单 export worker 串行 adapter send（最大并发 1）。Queue FIFO
+只是本进程 local handling order，不承诺 parent-before-child、sibling 顺序或
+`RuntimeEventChannel.sequence` 语义顺序。
+
+### 12.13 Flush Semantics
+
+`flush(timeout)` 捕获 `accepted_total` barrier；成功表示 barrier 前所有
+accepted envelopes 已完成其单次 attempt 处理（success 或 transport failure），
+不代表全部 sent/remote durable/ack。timeout 返回 False、flush_failures 递增、
+worker 继续；不立即 drop pending。
+
+### 12.14 Close Semantics
+
+`close(timeout)`：停止接受 → 捕获 final barrier → bounded drain → worker
+shutdown control（单 sentinel）→ `adapter.close(remaining)` → bounded join。
+幂等、并发 safe（单 physical close owner）。timeout 且 worker 仍存活时不得
+标记 CLOSED；后续 close 可继续 bounded wait。`CLOSED` 表示物理生命周期结束，
+不表示 close error-free。
+
+### 12.15 Retry / Batch / Durable / Serialization
+
+- retry = `NOT_IMPLEMENTED`（每 accepted envelope 至多一次 transport attempt；
+  现有 Model `RetryExecutor` 属 invocation 语义，与 exporter 无关）；
+- batching = `NOT_IMPLEMENTED`；
+- durable delivery = `NOT_IMPLEMENTED`（无 outbox/spool/ack log；进程崩溃可
+  丢失 queue/in-flight；无 Trace/Journal/Snapshot replay）；
+- generic consumer-neutral wire serialization = `NOT_IMPLEMENTED / DEFERRED`
+  （保持 typed-envelope protocol；无 `to_json`/stable wire JSON/HTTP payload；
+  WP4-C 拥有 AgentEvalOps-specific mapping）。
+
+### 12.16 Disabled / Production Enable Boundary
+
+WP4-B disabled mode = dispatcher absent（`completion_observer=None` +
+`trace_export_dispatcher=None`），不创建 worker/queue/adapter。WP4-B 自身目前
+没有 concrete production external adapter、没有 `server.py` wiring、没有
+endpoint/auth 配置；这些属于 WP4-C（唯一 Composition Root
+`server.py::lifespan()` 注入）。
+
+### 12.17 Metric Drop Reason Vocabulary
+
+`runtime_trace_export_dropped_total{reason}` 使用 dispatcher code-owned 有限词表
+（`TraceExportDispatcher.TRACE_EXPORT_DROP_REASONS`，恰好 7 个值；
+`core/runtime/metrics.py` 只 import 同一常量做 descriptor bounded_values，不复制
+词表）。冻结语义：
+
+- `projection_failed` / `incompatible` / `queue_full` / `closed` /
+  `transport_failed`：projection/compatibility/入队/关闭/transport 阶段的
+  真实丢失或拒绝；
+- `shutdown_timeout`：final dispatcher shutdown deadline 实际到期，且 queued
+  envelope 因此（而非其他原因）被 final lifecycle 永久放弃；
+- `worker_unavailable`：唯一 export worker 不可用/已死，queue 无法再被 drain，
+  queued envelope 在 finalization 中被永久放弃。
+
+**`failures{stage=worker}`（回答"哪个组件失败"）与
+`dropped{reason=worker_unavailable}`（回答"为什么该 envelope 丢失"）是互补
+事实**，不是同义重复；worker fatal 只发 `stage=worker` failure，其 abandonment
+drop 只使用 `worker_unavailable` reason（不得使用 `shutdown_timeout`）。该词表
+属于 WP4-B `TraceExportDispatcher` 的 `INTERNAL_RC` operational contract，不是
+WP4-A `PUBLIC_VERSIONED` Trace Export Contract；不修改
+`TraceExportEnvelope`/fingerprint/health schema/lifecycle。

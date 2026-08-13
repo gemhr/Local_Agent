@@ -30,6 +30,17 @@ from core.runtime.observability import (
 )
 from core.runtime.run_registry import RunRegistry
 from core.runtime.tool_concurrency import ToolConcurrencyController
+from core.runtime.trace_export_dispatcher import (
+    TRACE_EXPORT_DROP_REASONS,
+    TRACE_EXPORT_FAILURE_STAGES,
+    TRACE_EXPORT_METRIC_ACCEPTED_TOTAL,
+    TRACE_EXPORT_METRIC_ATTEMPTED_TOTAL,
+    TRACE_EXPORT_METRIC_DROPPED_TOTAL,
+    TRACE_EXPORT_METRIC_FAILURES_TOTAL,
+    TRACE_EXPORT_METRIC_FLUSH_DURATION_SECONDS,
+    TRACE_EXPORT_METRIC_QUEUE_DEPTH,
+    TRACE_EXPORT_METRIC_SENT_TOTAL,
+)
 
 
 class MetricType(str, Enum):
@@ -42,6 +53,7 @@ _DENIED_LABELS = frozenset(
     {
         "run_id",
         "trace_id",
+        "span_id",
         "event_id",
         "step_id",
         "invocation_id",
@@ -81,6 +93,7 @@ _GLOBAL_ALLOWED_LABELS = frozenset(
         "delivery_status",
         "memory_commit_status",
         "agent_id",
+        "stage",
     }
 )
 _SAFE_LABEL_VALUE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -369,6 +382,56 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
         _descriptor("runtime_retrieval_stage_duration_seconds", MetricType.HISTOGRAM, "Retrieval Stage 时长", "seconds", "status", "retrieval_stage"),
         _descriptor("runtime_journal_append_duration_seconds", MetricType.HISTOGRAM, "Journal 追加时长", "seconds"),
         _descriptor("runtime_blocking_executor_wait_seconds", MetricType.HISTOGRAM, "Blocking Executor 等待时长", "seconds"),
+        # --- WP4-B Trace export dispatcher metrics（名称/词表单 owner：
+        # trace_export_dispatcher.py；metrics.py 只做正式 descriptor 注册） ---
+        _descriptor(
+            TRACE_EXPORT_METRIC_ACCEPTED_TOTAL,
+            MetricType.COUNTER,
+            "Trace export 成功入队 envelope 数",
+            "envelopes",
+        ),
+        _descriptor(
+            TRACE_EXPORT_METRIC_ATTEMPTED_TOTAL,
+            MetricType.COUNTER,
+            "Trace export 发起 transport attempt 的 envelope 数",
+            "envelopes",
+        ),
+        _descriptor(
+            TRACE_EXPORT_METRIC_SENT_TOTAL,
+            MetricType.COUNTER,
+            "Trace export send 成功 envelope 数",
+            "envelopes",
+        ),
+        MetricDescriptor(
+            name=TRACE_EXPORT_METRIC_DROPPED_TOTAL,
+            type=MetricType.COUNTER,
+            description="Trace export 丢弃/拒绝 envelope 数（bounded reason）",
+            unit="envelopes",
+            allowed_labels=frozenset({"reason"}),
+            required_labels=frozenset({"reason"}),
+            bounded_values={"reason": TRACE_EXPORT_DROP_REASONS},
+        ),
+        MetricDescriptor(
+            name=TRACE_EXPORT_METRIC_FAILURES_TOTAL,
+            type=MetricType.COUNTER,
+            description="Trace export 执行失败数（bounded stage）",
+            unit="failures",
+            allowed_labels=frozenset({"stage"}),
+            required_labels=frozenset({"stage"}),
+            bounded_values={"stage": TRACE_EXPORT_FAILURE_STAGES},
+        ),
+        _descriptor(
+            TRACE_EXPORT_METRIC_QUEUE_DEPTH,
+            MetricType.GAUGE,
+            "Trace export queue 深度（diagnostic projection）",
+            "envelopes",
+        ),
+        _descriptor(
+            TRACE_EXPORT_METRIC_FLUSH_DURATION_SECONDS,
+            MetricType.HISTOGRAM,
+            "Trace export bounded flush 时长",
+            "seconds",
+        ),
     ]
 )
 DEFAULT_RUNTIME_METRIC_REGISTRY = MappingProxyType(
