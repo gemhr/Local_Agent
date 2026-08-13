@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import math
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -873,139 +874,150 @@ class RunCoordinator:
         terminal_publication_failed = False
         cleanup_error_codes: list[str] = []
         decision: RunFinalizationDecision | None = None
+        result: RunCoordinatorResult | None = None
         try:
             try:
-                existing_handle = self.run_registry.get(self.run_context.run_id)
-                if existing_handle is None:
-                    self.run_registry.register(self.run_handle)
-                elif existing_handle is not self.run_handle:
-                    raise ValueError("different active handle already registered")
-            except Exception as exc:
-                raise RunCoordinatorError(
-                    "COORDINATOR_REGISTRATION_FAILED",
-                    "RunHandle 注册失败",
-                ) from exc
-            registered = True
-
-            with self.activity_tracker.track(
-                "state_event_transitions_in_flight"
-            ):
-                self.state_machine.apply_run_event(
-                    self.agent_state, RunStateEvent(RunEventType.STARTED)
-                )
-                await self._emit_run_started()
-            self._start_deadline_watcher()
-            planner_span = start_span_safely(self.span_recorder,
-                trace_id=self.run_context.trace_id, run_id=self.run_context.run_id,
-                component="planner", operation=RUNTIME_PLANNING_SPAN
-            )
-            with activate_span(planner_span):
-                if self._dynamic:
-                    decision = await self._prepare_dynamic_execution()
-                else:
-                    assert self.plan is not None and self.scheduler is not None
-                    PlanGraphValidator.validate(self.plan)
-                self._attach_planning_span_attributes(planner_span)
-            if decision is None:
-                assert self.plan is not None and self.scheduler is not None
-                self.scheduler.prepare(
-                    self.plan, self.agent_state, self._event_time(),
-                    self.policy.max_concurrency,
-                )
-                decision = await self._execute_batches(
-                    driver=driver,
-                    execution_mode=execution_mode,
-                    concurrency_specs=concurrency_specs,
-                )
-        except BudgetExceededError as exc:
-            self._budget_dimension = exc.dimension
-            decision = self._budget_decision()
-        except RunDeadlineExceededError:
-            decision = self._deadline_decision()
-        except RunCancelledError:
-            decision = self._cancellation_decision()
-        except (PlanningError, AgentRegistryError, PlanCompileError) as exc:
-            self._dynamic_plan_state = DynamicPlanState.FAILED
-            code = getattr(exc, "error_code", "PLANNING_FAILED")
-            decision = self._planning_failure_decision(
-                code.value if isinstance(code, Enum) else str(code)
-            )
-        except asyncio.CancelledError:
-            task_cancelled = True
-            decision = self._cancellation_decision(
-                fallback_code="COORDINATOR_TASK_CANCELLED"
-            )
-        except GeneratorExit:
-            decision = self._cancellation_decision(
-                fallback_code="COORDINATOR_GENERATOR_CLOSED"
-            )
-        except (
-            ParallelExecutionInfrastructureError,
-            SchedulerError,
-            PlanGraphValidationError,
-        ) as exc:
-            decision = self._infrastructure_decision(
-                getattr(exc, "error_code", "COORDINATOR_INFRASTRUCTURE_ERROR")
-            )
-        except RunCoordinatorError:
-            raise
-        except Exception:
-            decision = self._infrastructure_decision(
-                "COORDINATOR_INFRASTRUCTURE_ERROR"
-            )
-        finally:
-            await self._stop_executor_task(cleanup_error_codes)
-            self._seal_step_result_store(cleanup_error_codes)
-            if decision is None:
-                decision = self._infrastructure_decision(
-                    "COORDINATOR_FINALIZATION_REQUIRED"
-                )
-            if self._dynamic and self._dynamic_plan_state in {
-                DynamicPlanState.UNRESOLVED,
-                DynamicPlanState.RESOLVING,
-            }:
-                self._dynamic_plan_state = DynamicPlanState.FAILED
-            await self._settle_active_steps(decision, cleanup_error_codes)
-            with self.activity_tracker.track(
-                "state_event_transitions_in_flight"
-            ):
-                decision = self._finalize_once(decision)
                 try:
-                    await self._emit_terminal_events(decision)
-                except Exception:
-                    terminal_publication_failed = True
-                    cleanup_error_codes.append(
-                        "RUNTIME_TERMINAL_PUBLICATION_FAILED"
+                    existing_handle = self.run_registry.get(
+                        self.run_context.run_id
                     )
-            self._stop_deadline_watcher(cleanup_error_codes)
-            self._clear_step_result_store(cleanup_error_codes)
-            self._clear_invocation_bindings(cleanup_error_codes)
-            await self._run_cleanup_callbacks(cleanup_error_codes)
-            budget_snapshot = self._snapshot_budget(cleanup_error_codes)
-            if registered:
-                self._unregister(cleanup_error_codes)
+                    if existing_handle is None:
+                        self.run_registry.register(self.run_handle)
+                    elif existing_handle is not self.run_handle:
+                        raise ValueError(
+                            "different active handle already registered"
+                        )
+                except Exception as exc:
+                    raise RunCoordinatorError(
+                        "COORDINATOR_REGISTRATION_FAILED",
+                        "RunHandle 注册失败",
+                    ) from exc
+                registered = True
 
-        result = self._build_result(
-            decision=decision,
-            budget_snapshot=budget_snapshot,
-            cleanup_error_codes=cleanup_error_codes,
-        )
-        self._attach_run_span_attributes(run_span, result)
-        if terminal_publication_failed:
-            run_span.end_error("RUNTIME_TERMINAL_PUBLICATION_FAILED")
-        elif result.status is RunStatus.SUCCEEDED: run_span.end_ok()
-        elif result.status is RunStatus.CANCELLED: run_span.end_cancelled(result.error_code or "CANCELLED")
-        else: run_span.end_error(result.error_code or "RUN_FAILED")
-        reset_trace_context(trace_token)
-        reset_span_recorder(recorder_token)
-        if task_cancelled:
-            raise asyncio.CancelledError()
-        if terminal_publication_failed:
-            raise RunCoordinatorError(
-                "RUNTIME_TERMINAL_PUBLICATION_FAILED",
-                "Runtime terminal publication failed",
-            ) from None
-        return result
+                with self.activity_tracker.track(
+                    "state_event_transitions_in_flight"
+                ):
+                    self.state_machine.apply_run_event(
+                        self.agent_state, RunStateEvent(RunEventType.STARTED)
+                    )
+                    await self._emit_run_started()
+                self._start_deadline_watcher()
+                planner_span = start_span_safely(self.span_recorder,
+                    trace_id=self.run_context.trace_id,
+                    run_id=self.run_context.run_id,
+                    component="planner", operation=RUNTIME_PLANNING_SPAN
+                )
+                with activate_span(planner_span):
+                    if self._dynamic:
+                        decision = await self._prepare_dynamic_execution()
+                    else:
+                        assert self.plan is not None and self.scheduler is not None
+                        PlanGraphValidator.validate(self.plan)
+                    self._attach_planning_span_attributes(planner_span)
+                if decision is None:
+                    assert self.plan is not None and self.scheduler is not None
+                    self.scheduler.prepare(
+                        self.plan, self.agent_state, self._event_time(),
+                        self.policy.max_concurrency,
+                    )
+                    decision = await self._execute_batches(
+                        driver=driver,
+                        execution_mode=execution_mode,
+                        concurrency_specs=concurrency_specs,
+                    )
+            except BudgetExceededError as exc:
+                self._budget_dimension = exc.dimension
+                decision = self._budget_decision()
+            except RunDeadlineExceededError:
+                decision = self._deadline_decision()
+            except RunCancelledError:
+                decision = self._cancellation_decision()
+            except (PlanningError, AgentRegistryError, PlanCompileError) as exc:
+                self._dynamic_plan_state = DynamicPlanState.FAILED
+                code = getattr(exc, "error_code", "PLANNING_FAILED")
+                decision = self._planning_failure_decision(
+                    code.value if isinstance(code, Enum) else str(code)
+                )
+            except asyncio.CancelledError:
+                task_cancelled = True
+                decision = self._cancellation_decision(
+                    fallback_code="COORDINATOR_TASK_CANCELLED"
+                )
+            except GeneratorExit:
+                decision = self._cancellation_decision(
+                    fallback_code="COORDINATOR_GENERATOR_CLOSED"
+                )
+            except (
+                ParallelExecutionInfrastructureError,
+                SchedulerError,
+                PlanGraphValidationError,
+            ) as exc:
+                decision = self._infrastructure_decision(
+                    getattr(exc, "error_code", "COORDINATOR_INFRASTRUCTURE_ERROR")
+                )
+            except RunCoordinatorError:
+                raise
+            except Exception:
+                decision = self._infrastructure_decision(
+                    "COORDINATOR_INFRASTRUCTURE_ERROR"
+                )
+            finally:
+                await self._stop_executor_task(cleanup_error_codes)
+                self._seal_step_result_store(cleanup_error_codes)
+                if decision is None:
+                    decision = self._infrastructure_decision(
+                        "COORDINATOR_FINALIZATION_REQUIRED"
+                    )
+                if self._dynamic and self._dynamic_plan_state in {
+                    DynamicPlanState.UNRESOLVED,
+                    DynamicPlanState.RESOLVING,
+                }:
+                    self._dynamic_plan_state = DynamicPlanState.FAILED
+                await self._settle_active_steps(decision, cleanup_error_codes)
+                with self.activity_tracker.track(
+                    "state_event_transitions_in_flight"
+                ):
+                    decision = self._finalize_once(decision)
+                    try:
+                        await self._emit_terminal_events(decision)
+                    except Exception:
+                        terminal_publication_failed = True
+                        cleanup_error_codes.append(
+                            "RUNTIME_TERMINAL_PUBLICATION_FAILED"
+                        )
+                self._stop_deadline_watcher(cleanup_error_codes)
+                self._clear_step_result_store(cleanup_error_codes)
+                self._clear_invocation_bindings(cleanup_error_codes)
+                await self._run_cleanup_callbacks(cleanup_error_codes)
+                budget_snapshot = self._snapshot_budget(cleanup_error_codes)
+                if registered:
+                    self._unregister(cleanup_error_codes)
+
+            result = self._build_result(
+                decision=decision,
+                budget_snapshot=budget_snapshot,
+                cleanup_error_codes=cleanup_error_codes,
+            )
+            self._attach_run_span_attributes(run_span, result)
+            if task_cancelled:
+                raise asyncio.CancelledError()
+            if terminal_publication_failed:
+                raise RunCoordinatorError(
+                    "RUNTIME_TERMINAL_PUBLICATION_FAILED",
+                    "Runtime terminal publication failed",
+                ) from None
+            return result
+        finally:
+            # 唯一的 root Span / ContextVar 收口点：所有退出路径（正常返回、
+            # RunCoordinatorError 重新抛出、未知异常、取消、超时及清理阶段
+            # 异常）都必须在此结束 root Span 并恢复进入 execute() 前的上下文。
+            self._finalize_root_span(
+                run_span,
+                result=result,
+                terminal_publication_failed=terminal_publication_failed,
+            )
+            reset_trace_context(trace_token)
+            reset_span_recorder(recorder_token)
 
     def _attach_planning_span_attributes(self, planner_span) -> None:
         """只写 Trace Contract v1 允许的规划安全属性，不记录 raw 内容。"""
@@ -1031,6 +1043,41 @@ class RunCoordinator:
                 for step in plan.steps
             ),
         )
+
+    def _finalize_root_span(
+        self,
+        run_span,
+        *,
+        result: RunCoordinatorResult | None,
+        terminal_publication_failed: bool,
+    ) -> None:
+        """确保 root Span 在所有退出路径以 first-end-wins 收口。
+
+        正常收口路径（result 已构建）保留既有 status/error 映射；异常传播
+        路径（如 RunCoordinatorError 重新抛出）按传播中的 safe error code
+        收口，绝不携带 raw exception 文本。SpanHandle 自身的 first-end-wins
+        保证本方法无法覆盖已被既有正常路径合法结束的 root Span。
+        """
+        if run_span.ended:
+            return
+        if terminal_publication_failed:
+            run_span.end_error("RUNTIME_TERMINAL_PUBLICATION_FAILED")
+            return
+        if result is not None:
+            if result.status is RunStatus.SUCCEEDED:
+                run_span.end_ok()
+            elif result.status is RunStatus.CANCELLED:
+                run_span.end_cancelled(result.error_code or "CANCELLED")
+            else:
+                run_span.end_error(result.error_code or "RUN_FAILED")
+            return
+        exc = sys.exc_info()[1]
+        if isinstance(exc, RunCoordinatorError):
+            run_span.end_error(exc.error_code or "RUN_FAILED")
+        elif isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+            run_span.end_cancelled("CANCELLED")
+        else:
+            run_span.end_error("RUN_FAILED")
 
     def _attach_run_span_attributes(self, run_span, result) -> None:
         """Run root span 的安全归因属性；缺失版本一律不虚构。"""
