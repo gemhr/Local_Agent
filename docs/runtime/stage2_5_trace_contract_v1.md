@@ -1,10 +1,17 @@
 # Stage 2.5 Trace Contract v1
 
-> 状态：WP5 冻结。供 AgentEvalOps 后续消费的 Stage 2.5 安全 Trace Schema。
-> 实现 owner：`core/runtime/trace_contract.py`（常量与属性助手）、
-> `core/runtime/tracing.py`（span 原语）。Span 的实际创建仍由各运行 owner
-> 完成，`trace_contract.py` 不创建与 Event/Trace/Reducer/Coordinator
-> 竞争的第二套 owner。
+> 状态：WP5 冻结的 Trace Contract v1 语义合同，正式分类为 `PUBLIC_VERSIONED`。
+> 实现 owner：`core/runtime/trace_contract.py`（六个稳定 operation 与属性常量）、
+> `core/runtime/tracing.py`（span 原语与安全属性 allowlist）。Span 的实际创建
+> 仍由各运行 owner 完成，`trace_contract.py` 不创建与 Event/Trace/Reducer/
+> Coordinator 竞争的第二套 owner。
+>
+> 内部 Span 模型（`TraceContext` / `SpanHandle` / `SpanRecord`）分类为
+> `INTERNAL`，不是公共 exporter payload。公共消费边界是 WP4-A 新增的
+> consumer-neutral export contract（`core/runtime/trace_export_contract.py` +
+> `core/runtime/trace_contract_fingerprint.py`，分类 `PUBLIC_VERSIONED`）：
+> 只接受已完成且通过严格校验的 `SpanRecord`，投影为不可变 `TraceExportEnvelope`；
+> 详见本文档 §10 与 `runtime_architecture_v1.md` / `runtime_owner_matrix.md`。
 
 ## 1. Span 命名
 
@@ -28,12 +35,18 @@ Shape 3 并行 specialist span 必须满足：
 
 允许：
 
-- `trace_id`（记录自带）、`run_id`（记录自带）、`session_id`（如可用）
+- `trace_id`（记录自带）、`run_id`（记录自带）
 - `runtime_mode`、`plan_id`、`plan_version`、`plan_fingerprint`
-- `planning_source`、`step_count`、`selected_entry_agent_id`
+- `planning_source`、`step_count`、`selected_entry_agent_id`、`shape`
+- `final_status`、`stop_reason`
 - `runtime_version`、`prompt_version`、`model_config_hash`、`toolset_hash`、
-  `kb_version`（当前未配置项显式写 `not_configured`，不虚构版本）
-- `final_status`、`stop_reason`、`safe_error_code`、`duration_ms`
+  `kb_version`：内部占位字段，当前恒为 `not_configured`。它们**不是**真实版本
+  归因，**不**构成 Run Configuration Fingerprint，也**不**属于 WP4-A 公共导出
+  （INTERNAL_ONLY，见 §10）。
+- `session_id`：内部候选键，当前无 production writer，不进入公共导出。
+
+`status`、`error_code`、`duration_ms` 是 `SpanRecord` 顶层字段，不是 attribute
+map；`safe_error_code`/`duration_ms` 不以 attribute 形式重复导出。
 
 禁止：
 
@@ -43,9 +56,10 @@ Shape 3 并行 specialist span 必须满足：
 ## 3. Planning span 属性
 
 允许：`planning_source`、`schema_version`、`planner_model_invoked`、
-`planner_attempt_count`（如可用）、`planner_timeout_source`（如可用）、
-`compiled_shape`、`specialist_count`、`synthesis_required`、
-`duration_ms`、`status`、`safe_error_code`。
+`compiled_shape`、`specialist_count`、`synthesis_required`。
+
+`planner_attempt_count`、`planner_timeout_source` 为内部候选键，当前无
+production writer，不进入 WP4-A 公共导出（INTERNAL_ONLY）。
 
 禁止记录 raw model response 与 instruction。
 
@@ -54,26 +68,29 @@ Shape 3 并行 specialist span 必须满足：
 每个 Step 独立 `runtime.step`：
 
 - `step_id`（记录自带）
-- `preferred_agent`、`execution_kind`、`output_policy`、`invocation_role`
-- `dependency_count`、`content_type`、`result_char_count`、`state`
-- `duration_ms`、`safe_error_code`
+- `preferred_agent`、`execution_kind`、`output_policy`、`dependency_count`
+- `state`（typed 管道完成态/error code）、`result_char_count`（typed 管道）
+
+`invocation_role`、`content_type` 为内部候选键，当前无 production writer，
+不进入 WP4-A 公共导出（INTERNAL_ONLY）。
 
 不记录 result 正文。
 
 ## 5. Model / Tool / Retrieval span 属性
 
-沿用现有 typed 合同，补齐：
+低层 model invoke/attempt、tool invoke/attempt、retrieval execute/stages span
+继续作为内部可观测 span 存在，分类为 `INTERNAL_RC` extension operation：它们
+**不是** PUBLIC_VERSIONED 顶层 operation，不得升级为第七个稳定 operation。
+WP4-A 公共 export 投影当前对扩展 operation 返回固定 `UNSUPPORTED_OPERATION`
+（fail-closed），即扩展 span 当前不被导出。
 
-- `owning_step_id`（记录自带 `step_id`）、`owning_agent_id`、
-  `invocation_role`、`attempt_index`、`duration_ms`、安全 status/error、
-  token/usage 等已有安全字段。
+当前 `SAFE_SPAN_ATTRIBUTES` 不含 model token/usage、model cost 或 retrieval
+latency 键，因此这些字段**没有稳定实现**，不得描述为已导出/已支持。`kb_version`
+仅由 Run root 以 `not_configured` 占位写入，不是真实 KB 版本归因。低层 span 只
+记录各自 allowlist 允许的安全事实（如 `requested_top_k`、`returned_count` 与
+安全统计）。
 
-Tool 参数与返回值不得直接写入 Trace；Retrieval 只记录：
-
-- `requested_top_k`、`returned_count`、`latency`、`kb_version`
-- grounded/citation 安全统计（如已有）
-
-禁止写入 query/chunk 正文。
+Tool 参数与返回值不得直接写入 Trace；Retrieval 禁止写入 query/chunk 正文。
 
 ## 6. Output delivery span 属性
 
@@ -111,3 +128,50 @@ resource_key。`set_span_attributes` 对非法属性隔离，不改变 Runtime �
 - 从已有配置事实安全生成；
 - 或显式写 `unknown/not_configured`；
 - 不得虚构版本。
+
+当前五个配置归因键（`runtime_version`/`prompt_version`/`model_config_hash`/
+`toolset_hash`/`kb_version`）在 Run root 恒为 `not_configured` 占位：它们只是
+内部记录事实，不构成 Run Configuration Fingerprint，也不属于 WP4-A 公共导出。
+
+## 10. Export Contract 边界（WP4-A）
+
+```text
+内部已完成 SpanRecord
+→ 严格 consumer-neutral 安全 export 投影（project_span）
+→ contract identity/version + Trace Contract Fingerprint
+→ 不可变 TraceExportEnvelope
+→ （未来）WP4-B exporter transport
+→ （未来）WP4-C AgentEvalOps adapter
+```
+
+- export identity：`localagent.runtime.trace_export`
+  （`TRACE_EXPORT_CONTRACT_IDENTITY`）
+- export contract version：`1`（`TRACE_EXPORT_CONTRACT_VERSION`，与
+  `RUNTIME_TRACE_CONTRACT_VERSION` 是两个独立事实）
+- Trace Contract Fingerprint：算法 `sha256` + canonical encoding
+  `canonical_json_v1`，lowercase 64-hex；唯一 canonicalize/digest owner 为
+  `TraceContractFingerprinter`，权威规范语义描述符由 Consumer-neutral Trace
+  Export Contract Semantic Owner（`core/runtime/trace_export_contract.py` 的
+  `export_contract_semantic_descriptor()`）构建，指纹模块不维护第二份
+  field/domain/policy literals
+- 指纹覆盖：contract identity/version、`RUNTIME_TRACE_CONTRACT_VERSION`、
+  六类 operation（category/step-bound）、common field presence/type/domain 规则、
+  terminal `SpanStatus` 词汇表、OK/non-OK error-code 语义、六类 category 的
+  type/presence/value-domain 规则、扩展拒绝策略、unknown attribute 行为
+  （projection=OMIT / direct=INVALID）、metadata-first security 策略、
+  compatibility 行为与 `CompatibilityReason` 词汇表（含 `ENVELOPE_INVALID`）；
+  实例值（run/trace/span/step ID、时间、duration、status/error outcome、
+  `delivery_status=DELIVERED` 等运行期值）不进指纹
+- 只有已完成记录可导出：`completed_at`/`duration_ms` 存在、status 非
+  `UNSET`、UTC 时间合法、duration 有限非负；不虚构终态
+- 分类：Trace Contract v1 = `PUBLIC_VERSIONED`；consumer-neutral export
+  contract = `PUBLIC_VERSIONED`；Trace Contract Fingerprint = `PUBLIC_VERSIONED`
+- `SAFE_SPAN_ATTRIBUTES` ≠ 公共导出集合：公共导出使用六类 operation/category
+  严格 schema；未知内部键默认省略；五个 `not_configured` 占位不导出
+- 兼容判断：`TraceCompatibilityEvaluator`（已知 contract → ACCEPT；
+  identity/version/fingerprint 缺失、畸形或不支持 → REJECT；
+  已知 identity/version/fingerprint 但 envelope 语义非法 → REJECT
+  （`ENVELOPE_INVALID`））
+- 指纹版本：当前指纹取代 pre-Gate 历史值，**不**触发 export contract version
+  bump（`TRACE_EXPORT_CONTRACT_VERSION` 仍为 1）——v1 从未通过 Final Gate、
+  从未发布，无旧指纹兼容义务；代码仍是指纹值权威 Owner，文档不硬编码 digest

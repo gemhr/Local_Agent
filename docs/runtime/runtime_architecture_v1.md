@@ -266,6 +266,9 @@ server.app（POST /api/chat）
 | EventPublicationEvidence / SnapshotPublicationEvidence | INTERNAL_STABLE | 冻结安全事实，不保存正文或 live owner |
 | ToolCompletionGapFixture | TEST_ONLY | 仅存在于 `tests`；生产 RecoveryValidator 不接受 |
 | Test Fake / Test Mutator | TEST_ONLY | 只能由测试显式创建/注入 |
+| Trace Contract v1 | PUBLIC_VERSIONED | 六个稳定 operation 语义冻结；内部 Span 模型（`TraceContext`/`SpanHandle`/`SpanRecord`）为 INTERNAL，不是公共 exporter payload |
+| Consumer-neutral Trace export contract | PUBLIC_VERSIONED | `core/runtime/trace_export_contract.py`：identity/version、不可变 `TraceExportEnvelope`、严格 completed-only 投影、六类 category 导出 schema（type/presence/value-domain）、`TraceCompatibilityEvaluator`；同时是 Export Contract Semantic Owner，唯一构建权威规范语义描述符（`export_contract_semantic_descriptor()`） |
+| Trace Contract Fingerprint | PUBLIC_VERSIONED | `core/runtime/trace_contract_fingerprint.py`：`TraceContractFingerprinter` 只做 canonicalize+digest（sha256 + canonical_json_v1，lowercase 64-hex）；语义描述符由 export contract owner 消费，识别 schema+语义兼容性（含 value-domain 与 compatibility 行为），不识别 Trace 实例/Run/配置 |
 
 `PUBLIC_*` 指阶段二项目代码可依赖的合同，不等于网络 API。只有明确的安全投影可以进入 Wire；内部 evolving 对象不能直接序列化。
 
@@ -281,6 +284,7 @@ server.app（POST /api/chat）
 | Recovery evidence | 无独立 schema | 复用 Journal/Snapshot digest | Journal tail reducer / RecoveryValidator | Event 1/2 + Snapshot 1 | 不独立写入 | 上游未知版本 fail closed | 缺失历史工具证据保持 Unknown/需协调 | 不写回、不从 Registry 回填 |
 | FaultPlan | 1 | semantic plan canonical JSON SHA-256（随 schema 1） | `FaultPlan.digest_source()` | 1 | 1 | fail closed | 规则字段由 dataclass 默认和严格校验处理 | 测试对象，不写回生产存储 |
 | ShutdownReport | 未版本化 | 无 | 不适用 | 进程内当前类型 | 不持久化 | 不适用 | `completed` 兼容别名，不能解释为 fully closed | 不写回 |
+| Trace export contract | 1 | Trace Contract Fingerprint（canonical JSON SHA-256，lowercase 64-hex） | export semantic descriptor（`trace_export_contract.py`）→ canonicalize/digest（`trace_contract_fingerprint.py` + `snapshot_serialization`） | 1 | 1 | fail closed | 未知/缺失 identity/version/fingerprint 按合同 fail closed | 不写回 |
 
 冻结原则：不得使用 Python `repr` 计算持久 digest；不得虚构历史版本；不得在读取旧版本时升级写回；不得使用当前 Registry 或 live adapter 回填历史 evidence。
 

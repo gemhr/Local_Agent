@@ -61,6 +61,17 @@ Known Limitations：No generic SQL firewall 或 parser；No NL2SQL validator/fea
 
 raw-body Gate 在解析 JSON 前完整缓冲并按实际 bytes 计数；缺失、前导零、低报或等于上限的 `Content-Length` 都不能绕过实际计数。字段长度按 Python Unicode code point 计数，所以 astral 字符仍按一个 char 计。拒绝体是固定 JSON（400/413）或框架 validation detail（422），middleware 不记录 raw header/body。
 
+## Trace Export Security Boundary（WP4-A）
+
+WP4-A 公共 Trace export 是 metadata-first 的严格 allowlist 边界：
+
+- 只有已完成且通过严格校验的内部 `SpanRecord` 可投影为不可变 `TraceExportEnvelope`；投影不写回 Runtime、不写 Journal、不发 RuntimeEvent、不影响 Tool/Output/Memory。
+- `SAFE_SPAN_ATTRIBUTES`（内部最大安全记录集合）≠ 公共导出集合。公共导出只使用六类 operation/category 严格 schema；未知内部安全键默认省略，绝不自动导出。
+- 公共导出禁止 raw：user input/body、system/agent instruction、planner response、model prompt/messages/output、Tool args/result、RAG query/chunk/citation、Memory/history/summary、filesystem/resource/DB path、provider URL、header/cookie/key、raw exception、traceback。
+- 五个配置归因占位（`runtime_version`/`prompt_version`/`model_config_hash`/`toolset_hash`/`kb_version`，恒为 `not_configured`）不是真实版本归因，不进入公共导出；它们不是 Run Configuration Fingerprint。
+- 兼容判断失败 content-free：固定 reason codes（`ACCEPTED`/`IDENTITY_MISSING`/`IDENTITY_MISMATCH`/`VERSION_UNSUPPORTED`/`FINGERPRINT_MISSING`/`FINGERPRINT_MALFORMED`/`FINGERPRINT_UNSUPPORTED`/`ENVELOPE_INVALID`），拒绝原因不携带 envelope/raw 值；已知 identity/version/fingerprint 但 envelope 语义非法时返回 `ENVELOPE_INVALID`。
+- 该边界是严格 contract allowlisting，不是 generic DLP、generic secret scanner 或完整隐私保护。
+
 ## Sensitive Data Types
 
 Prompt、Model output、Tool arguments/output、RAG chunks、Memory 正文、本地路径、Provider error/endpoint、API key/token、idempotency/resource key 均为敏感数据。Run id、session id、trace id、Tool name 在特定输出面也可能形成高基数或关联风险。
