@@ -193,9 +193,17 @@ actual ToolGovernanceError / ResourceAuthorizationError
 
 该链不按正文做string matching、regex或keyword判断。Synthesis在context build、model selection与model invocation前检查typed denial；任一required dependency被拒绝即返回固定safe denial，成功partial result不进入用户可见合成。COORDINATED与explicit LEGACY均不允许denial被后续模型改写成success；OutputGate、RuntimeEvent、Journal与Snapshot合同未修改。
 
-能力状态为`PARTIALLY_SUPPORTED`：模型仍可能受恶意自然语言影响，System Prompt可能被复述/改写，RAG/Memory/Tool/Step data仍可能影响自然语言回答。无generic injection classifier、WAF、generic DLP、Human IAM、full Sandbox或HITL；无dedicated security-denial RuntimeEvent/Journal/Snapshot fact，Recovery不能重建runtime-internal typed denial。Command Injection、SQL Injection与SSRF在当前Tool inventory中为`NOT_APPLICABLE_CURRENT_INVENTORY`。
+能力状态为`PARTIALLY_SUPPORTED`：模型仍可能受恶意自然语言影响，System Prompt可能被复述/改写，RAG/Memory/Tool/Step data仍可能影响自然语言回答。无generic injection classifier、WAF、generic DLP、Human IAM、full Sandbox或HITL；无dedicated security-denial RuntimeEvent/Journal/Snapshot fact，Recovery不能重建runtime-internal typed denial。Command Injection与SSRF在当前Tool inventory中为`NOT_APPLICABLE_CURRENT_INVENTORY`。
 
-### 2.6 WP2 Tool Platform Integration Gate（offline deterministic E2E）
+### 2.6 SQLite Statement Authority（Stage 3 WP3-D）
+
+current LocalAgent production SQLite inventory 采用单向 authority：SQL structure owner 是 code，User、Model output、RAG、Tool result、Memory text 与 HTTP payload 只能经 DB-API parameter binding 成为 values，不得提供 statement、identifier、keyword 或 ordering authority。直接 SQLite owner 冻结为 `core/memory_manager.py`、`core/persistence_migration.py`、`core/runtime/event_journal_store.py`、`core/runtime/event_consumer.py` 与 `core/runtime/snapshot_store.py`；排序由 code-owned boolean 映射，动态 `IN` 仅生成 `?` placeholders，固定 module constants保持immutable code structure。
+
+test-only AST Gate 对完整 production Python surface 做 owner discovery、receiver resolution 与 SQL sink classification；新增 owner、未知 receiver、动态 statement、`executescript`、未解析 helper 或 exception shape drift 均 fail closed。schema-metadata PRAGMA 只允许精确 startup/internal/read-only helper shape、固定 metadata identifier与`sqlite3.Error` fail-closed行为，不构成通用 identifier interpolation。Chroma internal persistence不是LocalAgent direct SQL owner。
+
+能力状态为`SUPPORTED`，但只覆盖 current LocalAgent production SQLite inventory。No generic SQL firewall/parser，No NL2SQL validator/feature，No SQL Tool；未来新增 Tool/NL2SQL/direct SQLite owner/数据库技术必须重新过 Gate。FTS query-language semantics 与 LIKE wildcard semantics 保持搜索语义；用户可见固定错误不代表 internal logs 已实现 generic DLP。本节不宣称 WP3-D Final Gate、WP3 aggregate 或 Stage 3 PASS。
+
+### 2.7 WP2 Tool Platform Integration Gate（offline deterministic E2E）
 
 production Tool chain 在本 Gate 前已经实现；WP2-C 不新增 production integration 或第二套装配，只以 `tests/test_stage3_wp2_tool_e2e.py` 增加确定性全链验证。当前被测试的 topology 为：
 

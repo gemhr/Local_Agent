@@ -28,6 +28,18 @@ Tool Governance 仍拥有 Agent→Tool Permission/Risk/Approval，`ToolExecution
 
 `ContextBuilder`不拥有Tool Permission、Risk/Approval或Resource Authorization；它只拥有role binding。`SynthesisAgentAdapter`不成为新的security Gate，它只消费typed denial事实并执行`DENIAL_DOMINATES`。OutputGate、RuntimeEvent、Journal、Snapshot与Recovery Owner均未改变；Recovery不能从现有持久事实重建runtime-internal typed denial。
 
+## Stage 3 WP3-D SQLite Statement Authority Owners
+
+| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
+| --- | --- | --- | --- | --- | --- | --- |
+| SQL structure owner | code within current LocalAgent production SQLite inventory（APPLICATION/OPERATION/INVOCATION scope按既有Store边界） | Memory/Journal/Snapshot/Checkpoint stores、migration coordinator | fixed literals、immutable module constants、code-owned order mapping、`IN` placeholder generation | 复用既有SQLite stores；无新增security state | User/Model/RAG/Tool/Memory/HTTP text成为statement、identifier、keyword或ordering authority | SUPPORTED（scoped） |
+| Untrusted SQL values | owning Store/repository DB-API callsite；HTTP route schema先拥有请求类型/范围校验 | SQLite driver | DB-API parameter binding；值与statement structure分离 | 按既有业务/Runtime Store合同 | f-string、`+`、`%`、`.format()`或unresolved helper拼接untrusted values | SUPPORTED（scoped） |
+| Direct SQLite owner inventory | `core/memory_manager.py`、`core/persistence_migration.py`、`core/runtime/event_journal_store.py`、`core/runtime/event_consumer.py`、`core/runtime/snapshot_store.py` | test-only AST Gate、reviewer | direct `sqlite3` imports冻结owner discovery；新增owner必须显式re-gate | 无 | 未登记owner或未知receiver静默获得SQL authority | TEST_ORACLE |
+| schema-metadata PRAGMA exception | 精确startup/internal/read-only helper | persistence preflight/migration | fixed metadata name、narrow shape、`sqlite3.Error` fail closed | 无业务正文 | 通用identifier interpolation、请求/模型控制PRAGMA、扩大exception shape | INTERNAL_RC |
+| Chroma internal persistence | `VectorDBManager`/Chroma自身合同；不是LocalAgent direct SQL owner | startup compatibility marker readers | 仅既有collection metadata API | Chroma persistence | WP3-D AST Gate声称认证Chroma internal SQLite/schema | NOT_LOCAL_SCHEMA_OWNER |
+
+test-only AST Gate 只是全production Python surface的owner/sink oracle，不是runtime SQL owner，也不修改生产路径。No generic SQL firewall、No NL2SQL、No SQL Tool；FTS query-language semantics 与 LIKE wildcard semantics仍属于搜索语义。未来Tool、NL2SQL、direct SQLite owner或新数据库技术必须重新过Gate；用户可见错误不泄漏不代表 internal logs 具有generic DLP。
+
 本矩阵冻结 Runtime 事实的唯一权威 owner。`readers` 可以投影事实，`writers` 只能通过 owner 的受控 API 修改；Report、Evidence 与测试 Oracle 均不得升级为 owner。
 
 | fact | authoritative_owner | readers | writers | persistence_location | lifecycle_scope | must_not_own |
