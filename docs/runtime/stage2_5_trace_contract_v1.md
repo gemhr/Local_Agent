@@ -140,9 +140,16 @@ resource_key。`set_span_attributes` 对非法属性隔离，不改变 Runtime �
 → 严格 consumer-neutral 安全 export 投影（project_span）
 → contract identity/version + Trace Contract Fingerprint
 → 不可变 TraceExportEnvelope
-→ （未来）WP4-B exporter transport
-→ （未来）WP4-C AgentEvalOps adapter
+→ WP4-B exporter transport（WP4-B 已完成）
+→ WP4-C AgentEvalOps adapter（WP4-C 已完成；真实本地跨系统 E2E VERIFIED）
 ```
+
+> 历史状态说明：上述 export 流水线在 Stage 2.5 冻结时仅到
+> `TraceExportEnvelope`，WP4-B transport 与 WP4-C AgentEvalOps adapter 当时是
+> 未来工作。后续 Stage 3 WP4-B（exporter transport）与 WP4-C（AgentEvalOps
+> 最小 HTTP adapter 与 ingest API）均已实现并通过独立 Gate，真实本地跨系统
+> E2E（首写 201 / 精确 replay 200 / 冲突 409）已 VERIFIED。本文档保持其
+> Stage 2.5 历史合同上下文，不重写为 Stage 3 文档。
 
 - export identity：`localagent.runtime.trace_export`
   （`TRACE_EXPORT_CONTRACT_IDENTITY`）
