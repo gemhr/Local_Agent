@@ -94,8 +94,14 @@ from core.runtime.tool_governance import (
     register_default_tool_policies,
 )
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
+from core.runtime.agent_evalops_trace_exporter import AgentEvalOpsTraceExporter
+from core.runtime.trace_export_dispatcher import TraceExportDispatcher
 from core.settings import SERVER_ROLE, Settings, validate_role_configuration
 from tools.registry import register_all_tools
+
+# WP4-C：AgentEvalOps trace export dispatcher 的 code-owned bounded queue 容量
+# （最小配置约束：不新增 Settings；默认与 observability queue 一致）。
+AGENTEVALOPS_TRACE_EXPORT_QUEUE_CAPACITY = 256
 
 
 class _RequestOwnedStreamingResponse(StreamingResponse):
@@ -389,9 +395,42 @@ async def lifespan(app: FastAPI):
         ),
         close_operation="shutdown",
     )
+    # WP4-C：enabled 时构造 AgentEvalOpsTraceExporter 并注入 TraceExportDispatcher；
+    # disabled 时保持 WP4-B 现状（无 exporter/dispatcher、无 HTTP 依赖）。
+    # exporter 构造失败（含 PycURL/libcurl 能力缺失）由 initialization rollback
+    # 以 startup-fatal 处理；remote 暂不可达不阻止启动，不执行 startup probe。
+    trace_export_dispatcher = None
+    if settings.agentevalops_trace_export_enabled:
+        agent_evalops_exporter = await initialization_stack.create(
+            "agentevalops_trace_exporter",
+            lambda: AgentEvalOpsTraceExporter(
+                base_url=settings.agentevalops_base_url,
+                api_key=settings.agentevalops_api_key,
+                project_id=settings.agentevalops_project_id,
+                connect_timeout_seconds=(
+                    settings.agentevalops_connect_timeout_seconds
+                ),
+                total_deadline_seconds=(
+                    settings.agentevalops_total_deadline_seconds
+                ),
+            ),
+        )
+        trace_export_dispatcher = await initialization_stack.create(
+            "trace_export_dispatcher",
+            lambda: TraceExportDispatcher(
+                exporter=agent_evalops_exporter,
+                queue_capacity=AGENTEVALOPS_TRACE_EXPORT_QUEUE_CAPACITY,
+            ),
+        )
     span_recorder = await initialization_stack.create(
         "span_recorder",
-        InMemorySpanRecorder,
+        lambda: InMemorySpanRecorder(
+            completion_observer=(
+                trace_export_dispatcher.observe_completed_span
+                if trace_export_dispatcher is not None
+                else None
+            )
+        ),
     )
     db_manager = None
     knowledge_base_error = None
@@ -692,6 +731,7 @@ async def lifespan(app: FastAPI):
             run_registry=run_registry,
             coordinated_step_executor=coordinated_step_executor,
             legacy_step_executor=legacy_step_executor,
+            trace_export_dispatcher=trace_export_dispatcher,
             snapshot_enabled=settings.snapshot_store_enabled,
             recovery_enabled=settings.snapshot_store_enabled,
             startup_dependency_snapshot=StartupDependencySnapshot(

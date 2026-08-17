@@ -175,6 +175,12 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_PLANNING_TIMEOUT_SECONDS` | `15.0` | planner 独立超时 |
 | `RUNTIME_DISCONNECT_GRACE_SECONDS` | `0.75` | 客户端断连后的有界 drain 时间 |
 | `RUNTIME_SHUTDOWN_GRACE_SECONDS` | `5.0` | shutdown Run drain 时间 |
+| `LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED` | `false` | 严格布尔；启用 AgentEvalOps Trace export（PycURL HTTP POST） |
+| `LOCAL_AGENT_AGENTEVALOPS_BASE_URL` | 空 | enabled 时必填的 http(s) origin URL；PRODUCTION 强制 https |
+| `LOCAL_AGENT_AGENTEVALOPS_API_KEY` | 空 | enabled 时必填的 API key（仅环境变量，`repr` 隐藏） |
+| `LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID` | 空 | enabled 时必填的 project id |
+| `LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS` | `0.5` | connect 子界限；enabled 时校验 |
+| `LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS` | `3.0` | 单个 POST 的硬总 deadline；enabled 时必须小于 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS` 减去 0.5s cleanup margin |
 
 远程 HTTP 的 `requests.Session` 由 `LOCAL_AGENT_REMOTE_TRUST_ENV` 显式控制是否继承进程系统 proxy：为 True 时使用 operator 批准的受控代理，Test/Production 默认 False 不继承宿主 proxy；项目不记录 proxy URL 或凭据。Desktop Client 的 `requests.Session` 由 `LOCAL_AGENT_CLIENT_TRUST_ENV` 独立控制（默认 `True` 继承系统 proxy，保持既有行为）；两个 transport scope 完全分离。`LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS` 已标记 DEPRECATED（无行为），replacement 为 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。
 

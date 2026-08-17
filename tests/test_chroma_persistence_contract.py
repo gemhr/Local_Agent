@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import core.knowledge_base.vector_db_manager as vector_db_module
 from core.persistence_migration import (
     PERSISTENCE_PREFLIGHT_FAILED,
     MigrationAction,
@@ -25,6 +26,7 @@ from core.knowledge_base.vector_db_manager import VectorDBManager
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _EMBEDDING_MODEL_DIR = _REPO_ROOT / "data" / "models" / "Qwen3-Embedding-0.6B"
+pytestmark = pytest.mark.resource_intensive
 
 
 def _make_manager(chroma_dir: Path) -> VectorDBManager:
@@ -32,6 +34,27 @@ def _make_manager(chroma_dir: Path) -> VectorDBManager:
         db_persist_dir=str(chroma_dir),
         local_model_path=str(_EMBEDDING_MODEL_DIR),
         collection_name="wiki_collection",
+    )
+
+
+@pytest.fixture(scope="module")
+def shared_embeddings(tmp_path_factory):
+    """整份合同测试只加载一次真实 embedding 模型。"""
+    if not _EMBEDDING_MODEL_DIR.is_dir():
+        pytest.skip(
+            "EMBEDDING_MODEL_PREREQUISITE_ABSENT: "
+            f"repository-local embedding model missing: {_EMBEDDING_MODEL_DIR}"
+        )
+    manager = _make_manager(tmp_path_factory.mktemp("shared_embedding_model"))
+    return manager.embeddings
+
+
+@pytest.fixture(autouse=True)
+def reuse_shared_embeddings(monkeypatch, shared_embeddings) -> None:
+    monkeypatch.setattr(
+        vector_db_module,
+        "HuggingFaceEmbeddings",
+        lambda **kwargs: shared_embeddings,
     )
 
 

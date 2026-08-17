@@ -233,6 +233,7 @@ async def test_production_kb_explicit_opt_in_degrades(monkeypatch, tmp_path) -> 
         )
 
 
+@pytest.mark.resource_intensive
 @pytest.mark.asyncio
 async def test_healthy_kb_snapshot_is_not_degraded(monkeypatch, tmp_path) -> None:
     """healthy KB：真实 lifespan + 仓库内真实 embedding 模型 → degraded=False。
@@ -876,3 +877,195 @@ async def test_journal_extra_unique_blocks_ready(monkeypatch, tmp_path) -> None:
     assert captured.value.component == "persistence_preflight"
     assert app.state.runtime_lifecycle_state is RuntimeLifecycleState.STARTING
     assert journal_path.read_bytes() == before
+
+
+# ---- WP4-C: AgentEvalOps trace export 最小配置与 lifespan 接线 -------------
+
+def test_agentevalops_trace_export_defaults_disabled(monkeypatch) -> None:
+    for key in (
+        "LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED",
+        "LOCAL_AGENT_AGENTEVALOPS_BASE_URL",
+        "LOCAL_AGENT_AGENTEVALOPS_API_KEY",
+        "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    settings = _load(monkeypatch)
+    assert settings.agentevalops_trace_export_enabled is False
+    assert settings.agentevalops_base_url == ""
+    assert settings.agentevalops_api_key == ""
+    assert settings.agentevalops_project_id == ""
+    assert settings.agentevalops_connect_timeout_seconds == 0.5
+    assert settings.agentevalops_total_deadline_seconds == 3.0
+    assert "agentevalops_api_key" not in repr(settings)
+
+
+def test_agentevalops_disabled_ignores_invalid_other_fields(monkeypatch) -> None:
+    settings = _load(
+        monkeypatch,
+        LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="false",
+        LOCAL_AGENT_AGENTEVALOPS_BASE_URL="not-a-url",
+        LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS="not-a-number",
+    )
+    assert settings.agentevalops_trace_export_enabled is False
+    assert settings.agentevalops_base_url == ""
+
+
+def test_agentevalops_enabled_valid_config(monkeypatch) -> None:
+    settings = _load(
+        monkeypatch,
+        LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
+        LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
+        LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
+        LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+    )
+    assert settings.agentevalops_trace_export_enabled is True
+    assert settings.agentevalops_base_url == "http://127.0.0.1:8001"
+    assert settings.agentevalops_api_key == "api-key-test-1"
+    assert settings.agentevalops_project_id == "project-test-1"
+
+
+def test_agentevalops_enabled_requires_base_url(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(
+            monkeypatch,
+            LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
+            LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+        )
+    assert captured.value.safe_error_code == STARTUP_CONFIGURATION_ERROR
+    assert captured.value.field == "LOCAL_AGENT_AGENTEVALOPS_BASE_URL"
+
+
+def test_agentevalops_enabled_requires_api_key_and_project(monkeypatch) -> None:
+    for missing in ("LOCAL_AGENT_AGENTEVALOPS_API_KEY", "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID"):
+        env = {
+            "LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED": "true",
+            "LOCAL_AGENT_AGENTEVALOPS_BASE_URL": "http://127.0.0.1:8001",
+            "LOCAL_AGENT_AGENTEVALOPS_API_KEY": "api-key-test-1",
+            "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID": "project-test-1",
+        }
+        env[missing] = None
+        with pytest.raises(SettingsValidationError) as captured:
+            _load(monkeypatch, **env)
+        assert captured.value.field == missing
+
+
+def test_agentevalops_invalid_base_url_fails(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(
+            monkeypatch,
+            LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
+            LOCAL_AGENT_AGENTEVALOPS_BASE_URL="ftp://agent-eval.example",
+            LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+        )
+    assert captured.value.field == "LOCAL_AGENT_AGENTEVALOPS_BASE_URL"
+    assert captured.value.reason_code == "invalid_url"
+
+
+def test_agentevalops_connect_exceeds_total_deadline_fails(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(
+            monkeypatch,
+            LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
+            LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
+            LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS="2.0",
+            LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS="1.0",
+        )
+    assert captured.value.field == "LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS"
+    assert captured.value.reason_code == "connect_exceeds_total_deadline"
+
+
+def test_agentevalops_fractional_millisecond_fails(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(
+            monkeypatch,
+            LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
+            LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
+            LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS="0.0001",
+        )
+    assert captured.value.reason_code == "invalid_millisecond_conversion"
+
+
+def test_agentevalops_deadline_invariant_against_close_timeout(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(
+            monkeypatch,
+            LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
+            LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
+            LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS="5.0",
+        )
+    assert captured.value.field == (
+        "LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS"
+    )
+    assert captured.value.reason_code == "deadline_not_below_close_timeout"
+
+
+def test_agentevalops_production_requires_https(monkeypatch, tmp_path) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _tmp_settings(
+            monkeypatch,
+            tmp_path,
+            profile="PRODUCTION",
+        )
+        _load(
+            monkeypatch,
+            LOCAL_AGENT_ENVIRONMENT_PROFILE="PRODUCTION",
+            LOCAL_AGENT_ENVIRONMENT_ID="prod-wp4c",
+            LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS=str(tmp_path.resolve()),
+            LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
+            LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
+            LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+        )
+    assert captured.value.safe_error_code == SETTINGS_SECURITY_POLICY_ERROR
+    assert captured.value.field == "LOCAL_AGENT_AGENTEVALOPS_BASE_URL"
+    assert captured.value.reason_code == "production_requires_https"
+
+
+def test_agentevalops_production_https_valid(monkeypatch, tmp_path) -> None:
+    settings = _load(
+        monkeypatch,
+        LOCAL_AGENT_ENVIRONMENT_PROFILE="PRODUCTION",
+        LOCAL_AGENT_ENVIRONMENT_ID="prod-wp4c",
+        LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS=str(tmp_path.resolve()),
+        LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
+        LOCAL_AGENT_AGENTEVALOPS_BASE_URL="https://agent-eval.example",
+        LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
+        LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+    )
+    assert settings.agentevalops_trace_export_enabled is True
+    assert settings.agentevalops_base_url == "https://agent-eval.example"
+
+
+def test_lifespan_wires_agentevalops_dispatcher_before_recorder() -> None:
+    """enabled 路径：exporter → dispatcher → recorder(observer) 的构造顺序。"""
+    source = inspect.getsource(server.lifespan)
+    assert "agentevalops_trace_exporter" in source
+    assert "trace_export_dispatcher" in source
+    exporter_call = source.index("AgentEvalOpsTraceExporter(")
+    dispatcher_call = source.index("TraceExportDispatcher(")
+    recorder_call = source.index("InMemorySpanRecorder(")
+    assert exporter_call < dispatcher_call < recorder_call
+    assert "completion_observer=" in source
+    assert "observe_completed_span" in source
+    assert "trace_export_dispatcher=trace_export_dispatcher" in source
+
+
+def test_lifespan_agentevalops_disabled_preserves_no_exporter() -> None:
+    """disabled 路径：不构造 exporter/dispatcher（无 HTTP 依赖）。"""
+    source = inspect.getsource(server.lifespan)
+    assert "if settings.agentevalops_trace_export_enabled:" in source
+    assert "completion_observer=" in source
+    assert "trace_export_dispatcher.observe_completed_span" in source
+
+
+def test_agentevalops_settings_no_fault_surface() -> None:
+    fields = {field.name.lower() for field in Settings.__dataclass_fields__.values()}
+    assert not any("fault" in name or "chaos" in name for name in fields)

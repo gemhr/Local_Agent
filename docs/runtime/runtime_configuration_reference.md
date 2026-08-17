@@ -98,6 +98,12 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_STEP_RESULT_PER_RESULT_CHARS` | StepResultStore | int | `20000` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `20000` |
 | `LOCAL_AGENT_STEP_RESULT_RUN_TOTAL_CHARS` | StepResultStore | int | `60000` | integer ≥1 且 ≥ per-result | no | APPLICATION_SCOPE | yes | internal config | 越界或小于 per-result 显式值 fail closed | `60000` |
 | `LOCAL_AGENT_STEP_RESULT_MAX_ENTRIES` | StepResultStore | int | `16` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `16` |
+| `LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED` | AgentEvalOpsTraceExporter | strict bool | `0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | public-safe flag | enabled 时缺 base_url/api_key/project_id、无效 timeout、deadline 不满足 close invariant 均 startup-fatal | `0` |
+| `LOCAL_AGENT_AGENTEVALOPS_BASE_URL` | AgentEvalOpsTraceExporter | http(s) origin URL | empty | http/https origin（无 path/query/fragment/userinfo） | when enabled | APPLICATION_SCOPE | yes | internal endpoint | enabled 时缺失/非法 startup-fatal；PRODUCTION 强制 https | `http://127.0.0.1:8001` |
+| `LOCAL_AGENT_AGENTEVALOPS_API_KEY` | AgentEvalOpsTraceExporter | string | empty | credential | when enabled | APPLICATION_SCOPE | yes | secret（`repr=False`） | enabled 时缺失 startup-fatal；不进日志/异常/health | `<secret-store-reference>` |
+| `LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID` | AgentEvalOpsTraceExporter | string | empty | non-empty identifier | when enabled | APPLICATION_SCOPE | yes | internal identifier | enabled 时缺失 startup-fatal | `project-1` |
+| `LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS` | AgentEvalOpsTraceExporter | finite float | `0.5` | finite >0 且可转换为整数 ms | when enabled | APPLICATION_SCOPE | yes | internal config | 非正/非有限/小数毫秒/超过 total deadline 显式值 fail closed | `0.5` |
+| `LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS` | AgentEvalOpsTraceExporter | finite float | `3.0` | finite >0 且可转换为整数 ms | when enabled | APPLICATION_SCOPE | yes | internal config | 非正/非有限/小数毫秒 fail closed；total + 0.5s cleanup margin 必须 `< RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS` | `3.0` |
 
 ## Environment Profile
 
