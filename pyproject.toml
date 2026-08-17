@@ -24,6 +24,7 @@ dependencies = [
     "transformers>=4.51,<5",
     "uvicorn>=0.35.0",
     "xlrd>=2.0.1",
+    "pycurl>=7.47.0",
 ]
 
 [dependency-groups]
@@ -35,6 +36,10 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+addopts = ["-m", "not resource_intensive"]
+markers = [
+    "resource_intensive: 加载真实本地模型等高资源依赖；默认测试排除，使用 -m resource_intensive 显式运行",
+]
 
 [tool.uv]
 cache-dir = ".uv-cache"

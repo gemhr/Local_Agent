@@ -63,6 +63,11 @@ _PROFILE_ENVIRONMENT_ID_DEFAULT = {
     "PRODUCTION": None,
 }
 
+# WP4-C：AgentEvalOps transport 收口余量（code-owned，不可配置）。
+# 启动不变量：total deadline + margin < RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS，
+# 保证 shutdown 最坏情况下 transport 先于 dispatcher close deadline 返回。
+AGENTEVALOPS_TRANSPORT_CLEANUP_MARGIN_SECONDS = 0.5
+
 
 class SettingsValidationError(ValueError):
     """Safe startup configuration error.
@@ -387,6 +392,65 @@ def _validate_production_local_api(
         )
 
 
+def _validate_agentevalops_base_url(value: str, *, production: bool) -> None:
+    """enabled 时 AgentEvalOps base URL 必须是 http/https origin URL。
+
+    PRODUCTION profile 强制 https（与 remote API base URL 同一安全策略）。
+    URL 不允许 path/query/fragment/userinfo：exporter 只负责拼接固定兼容路径。
+    """
+    try:
+        parsed = urlsplit(value)
+    except (TypeError, ValueError):
+        raise SettingsValidationError(
+            STARTUP_CONFIGURATION_ERROR,
+            "LOCAL_AGENT_AGENTEVALOPS_BASE_URL",
+            "invalid_url",
+        ) from None
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise SettingsValidationError(
+            STARTUP_CONFIGURATION_ERROR,
+            "LOCAL_AGENT_AGENTEVALOPS_BASE_URL",
+            "invalid_url",
+        )
+    if production and scheme != "https":
+        raise SettingsValidationError(
+            SETTINGS_SECURITY_POLICY_ERROR,
+            "LOCAL_AGENT_AGENTEVALOPS_BASE_URL",
+            "production_requires_https",
+        )
+
+
+def _validate_agentevalops_timeouts(connect: float, total: float) -> None:
+    """正有限秒必须能转换为合法整数毫秒，且 connect 界限 <= 总 deadline。"""
+    for name, value in (
+        ("LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS", connect),
+        ("LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS", total),
+    ):
+        millis_float = value * 1000.0
+        millis = round(millis_float)
+        if not math.isclose(millis_float, millis) or not (
+            1 <= millis <= 2_147_483_647
+        ):
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR, name, "invalid_millisecond_conversion"
+            )
+    if connect > total:
+        raise SettingsValidationError(
+            SETTINGS_VALIDATION_ERROR,
+            "LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS",
+            "connect_exceeds_total_deadline",
+        )
+
+
 def _read_project_metadata() -> tuple[str | None, str | None]:
     """读取仓库 pyproject.toml 的 [project] name/version（source checkout 事实）。"""
     path = os.path.join(_project_root(), "pyproject.toml")
@@ -564,6 +628,12 @@ class Settings:
     step_result_run_total_chars: int
     step_result_max_entries: int
     tool_allowed_read_roots: tuple[str, ...] = ()
+    agentevalops_trace_export_enabled: bool = False
+    agentevalops_base_url: str = ""
+    agentevalops_api_key: str = field(default="", repr=False)
+    agentevalops_project_id: str = ""
+    agentevalops_connect_timeout_seconds: float = 0.5
+    agentevalops_total_deadline_seconds: float = 3.0
 
     @classmethod
     def load(cls) -> "Settings":
@@ -692,6 +762,75 @@ class Settings:
 
         # DEPRECATED env 只产生一次安全 warning，不改变行为。
         _warn_deprecated_observability_timeout()
+
+        runtime_component_close_timeout_seconds = _env_strict_float(
+            "RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS", 5.0, minimum=0.0
+        )
+
+        # WP4-C：AgentEvalOps Trace export 最小配置。enabled=false 时其余字段
+        # 不消费、不校验、不构造 exporter/dispatcher（disabled 保持 WP4-B 现状）。
+        agentevalops_trace_export_enabled = _env_strict_bool(
+            "LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED", False
+        )
+        agentevalops_base_url = ""
+        agentevalops_api_key = ""
+        agentevalops_project_id = ""
+        agentevalops_connect_timeout_seconds = 0.5
+        agentevalops_total_deadline_seconds = 3.0
+        if agentevalops_trace_export_enabled:
+            agentevalops_base_url = os.getenv(
+                "LOCAL_AGENT_AGENTEVALOPS_BASE_URL", ""
+            ).strip()
+            if not agentevalops_base_url:
+                raise SettingsValidationError(
+                    STARTUP_CONFIGURATION_ERROR,
+                    "LOCAL_AGENT_AGENTEVALOPS_BASE_URL",
+                    "required_when_enabled",
+                )
+            _validate_agentevalops_base_url(
+                agentevalops_base_url,
+                production=environment_profile is EnvironmentProfile.PRODUCTION,
+            )
+            agentevalops_api_key = os.getenv("LOCAL_AGENT_AGENTEVALOPS_API_KEY", "")
+            if not agentevalops_api_key:
+                raise SettingsValidationError(
+                    STARTUP_CONFIGURATION_ERROR,
+                    "LOCAL_AGENT_AGENTEVALOPS_API_KEY",
+                    "required_when_enabled",
+                )
+            agentevalops_project_id = os.getenv(
+                "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID", ""
+            ).strip()
+            if not agentevalops_project_id:
+                raise SettingsValidationError(
+                    STARTUP_CONFIGURATION_ERROR,
+                    "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID",
+                    "required_when_enabled",
+                )
+            agentevalops_connect_timeout_seconds = _env_strict_float(
+                "LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS",
+                0.5,
+                positive=True,
+            )
+            agentevalops_total_deadline_seconds = _env_strict_float(
+                "LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS",
+                3.0,
+                positive=True,
+            )
+            _validate_agentevalops_timeouts(
+                agentevalops_connect_timeout_seconds,
+                agentevalops_total_deadline_seconds,
+            )
+            if (
+                agentevalops_total_deadline_seconds
+                + AGENTEVALOPS_TRANSPORT_CLEANUP_MARGIN_SECONDS
+                >= runtime_component_close_timeout_seconds
+            ):
+                raise SettingsValidationError(
+                    SETTINGS_VALIDATION_ERROR,
+                    "LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS",
+                    "deadline_not_below_close_timeout",
+                )
 
         return cls(
             project_root=project_root,
@@ -843,9 +982,7 @@ class Settings:
             runtime_shutdown_grace_seconds=_env_strict_float(
                 "RUNTIME_SHUTDOWN_GRACE_SECONDS", 5.0, minimum=0.0
             ),
-            runtime_component_close_timeout_seconds=_env_strict_float(
-                "RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS", 5.0, minimum=0.0
-            ),
+            runtime_component_close_timeout_seconds=runtime_component_close_timeout_seconds,
             metrics_tool_name_allowlist=tuple(
                 value.strip()
                 for value in os.getenv(
@@ -895,4 +1032,10 @@ class Settings:
             step_result_run_total_chars=step_result_run_total_chars,
             step_result_max_entries=step_result_max_entries,
             tool_allowed_read_roots=tool_allowed_read_roots,
+            agentevalops_trace_export_enabled=agentevalops_trace_export_enabled,
+            agentevalops_base_url=agentevalops_base_url,
+            agentevalops_api_key=agentevalops_api_key,
+            agentevalops_project_id=agentevalops_project_id,
+            agentevalops_connect_timeout_seconds=agentevalops_connect_timeout_seconds,
+            agentevalops_total_deadline_seconds=agentevalops_total_deadline_seconds,
         )

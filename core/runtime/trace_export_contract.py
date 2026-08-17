@@ -46,6 +46,10 @@ TRACE_EXPORT_CONTRACT_IDENTITY = "localagent.runtime.trace_export"
 # 第一个 consumer-neutral Trace export contract。
 TRACE_EXPORT_CONTRACT_VERSION = 1
 
+# Exact code-owned v1 duration upper bound.  This is a fixed contract constant,
+# not derived from Python float range or sys.float_info at runtime.
+MAX_V1_DURATION_INT = 2**1024 - 2**970 - 1
+
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _OPERATION = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -371,6 +375,29 @@ def _validate_attribute_value(
     return None
 
 
+def _validate_duration_ms(duration_ms: object) -> str | None:
+    """Return a fixed contract code for an invalid duration, else ``None``.
+
+    This is the only duration validation Owner.  It avoids ``math.isfinite`` on
+    Python ``int`` values (which can raise raw ``OverflowError`` for very large
+    ints) and uses direct bounded comparisons against the code-owned
+    ``MAX_V1_DURATION_INT`` constant instead.
+    """
+    if duration_ms is None:
+        return "SPAN_DURATION_MISSING"
+    if isinstance(duration_ms, bool):
+        return "SPAN_DURATION_INVALID"
+    if isinstance(duration_ms, int):
+        if duration_ms < 0 or duration_ms > MAX_V1_DURATION_INT:
+            return "SPAN_DURATION_INVALID"
+        return None
+    if isinstance(duration_ms, float):
+        if not math.isfinite(duration_ms) or duration_ms < 0:
+            return "SPAN_DURATION_INVALID"
+        return None
+    return "SPAN_DURATION_INVALID"
+
+
 def _validate_envelope_semantics(
     *,
     run_id: object,
@@ -428,15 +455,9 @@ def _validate_envelope_semantics(
         return "SPAN_TIME_INVALID"
     if completed_at < started_at:
         return "SPAN_TIME_ORDER_INVALID"
-    if duration_ms is None:
-        return "SPAN_DURATION_MISSING"
-    if (
-        isinstance(duration_ms, bool)
-        or not isinstance(duration_ms, (int, float))
-        or not math.isfinite(duration_ms)
-        or duration_ms < 0
-    ):
-        return "SPAN_DURATION_INVALID"
+    duration_code = _validate_duration_ms(duration_ms)
+    if duration_code is not None:
+        return duration_code
     if status is SpanStatus.UNSET:
         return "SPAN_STATUS_UNSET"
     if status not in _PUBLIC_TERMINAL_STATUSES:
@@ -467,6 +488,34 @@ def _validate_envelope_semantics(
         if code is not None:
             return code
     return None
+
+
+def validate_trace_export_envelope_semantics(envelope: TraceExportEnvelope) -> None:
+    """Public shared Owner wrapper: raise TraceExportEnvelopeError if invalid.
+
+    This is the same single semantic validation path used by direct construction,
+    projection and compatibility evaluation; it exists so the standalone
+    serializer can validate an envelope without duplicating contract logic.
+    """
+    if not isinstance(envelope, TraceExportEnvelope):
+        raise TypeError("envelope must be a TraceExportEnvelope")
+    code = _validate_envelope_semantics(
+        run_id=envelope.run_id,
+        trace_id=envelope.trace_id,
+        span_id=envelope.span_id,
+        parent_span_id=envelope.parent_span_id,
+        step_id=envelope.step_id,
+        operation=envelope.operation,
+        component=envelope.component,
+        started_at=envelope.started_at,
+        completed_at=envelope.completed_at,
+        duration_ms=envelope.duration_ms,
+        status=envelope.status,
+        error_code=envelope.error_code,
+        attributes=envelope.attributes,
+    )
+    if code is not None:
+        raise TraceExportEnvelopeError(code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -814,6 +863,7 @@ __all__ = [
     "STABLE_OPERATION_SCHEMAS",
     "STEP_EXPORT_SCHEMA",
     "SYNTHESIS_EXPORT_SCHEMA",
+    "MAX_V1_DURATION_INT",
     "TRACE_EXPORT_CONTRACT_IDENTITY",
     "TRACE_EXPORT_CONTRACT_VERSION",
     "TraceCompatibilityEvaluator",
@@ -823,4 +873,5 @@ __all__ = [
     "ValueDomain",
     "export_contract_semantic_descriptor",
     "project_span",
+    "validate_trace_export_envelope_semantics",
 ]
