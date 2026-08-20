@@ -72,6 +72,11 @@ from core.runtime.retrieval_contract import (
     content_digest,
     query_digest,
 )
+from core.runtime.retrieval_evaluation import (
+    RetrievalEvaluationCaptureBuilder,
+    RetrievalEvaluationChannel,
+    current_retrieval_evaluation_collector,
+)
 from core.runtime.tracing import (
     NoopSpanRecorder,
     current_span_recorder,
@@ -176,6 +181,20 @@ class RetrievalExecutionService:
         defer_completed_event: bool = False,
         fault_controller: FaultInjectionController | None = None,
     ) -> RetrievalExecutionResult:
+        collector = current_retrieval_evaluation_collector()
+        capture_builder: RetrievalEvaluationCaptureBuilder | None = None
+        if collector is not None:
+            try:
+                capture_builder = collector.begin(
+                    run_id=run_context.run_id,
+                    invocation=invocation,
+                    max_context_chars=self.spec.max_context_chars,
+                )
+            except Exception:  # noqa: BLE001 - evaluation sidecar 必须 failure-isolated
+                try:
+                    collector.record_failure("RAG_EVALUATION_COLLECTOR_BEGIN_FAILED")
+                except Exception:  # noqa: BLE001 - collector 自身不得改变 Runtime
+                    collector = None
         recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
             recorder,
@@ -198,7 +217,16 @@ class RetrievalExecutionService:
                 event_emitter=event_emitter,
                 defer_completed_event=defer_completed_event,
                 fault_controller=fault_controller,
+                evaluation_capture=capture_builder,
             )
+            if collector is not None and capture_builder is not None:
+                try:
+                    collector.complete(capture_builder, result)
+                except Exception:  # noqa: BLE001 - evaluation sidecar 必须 failure-isolated
+                    try:
+                        collector.record_failure("RAG_EVALUATION_COLLECTOR_COMPLETE_FAILED")
+                    except Exception:  # noqa: BLE001 - collector 自身不得改变 Runtime
+                        collector = None
             if handle.context is not None:
                 handle.set_safe_attribute("output_count", len(result.final_chunks))
                 handle.set_safe_attribute("citation_count", len(result.citations))
@@ -233,6 +261,7 @@ class RetrievalExecutionService:
         event_emitter: StepEventEmitter | None = None,
         defer_completed_event: bool = False,
         fault_controller: FaultInjectionController | None = None,
+        evaluation_capture: RetrievalEvaluationCaptureBuilder | None = None,
     ) -> RetrievalExecutionResult:
         """返回类型化 Result；业务失败不会伪装成合法 EMPTY。"""
         if not isinstance(defer_completed_event, bool):
@@ -319,6 +348,9 @@ class RetrievalExecutionService:
                     degradation_reasons.append(exc.safe_error_code)
                     self._mark_last_record_degraded(records)
 
+            if evaluation_capture is not None:
+                evaluation_capture.capture_rewritten_query(rewritten_query)
+
             context.raise_if_cancelled()
             queries = tuple(
                 dict.fromkeys((rewritten_query, invocation.original_query))
@@ -382,43 +414,54 @@ class RetrievalExecutionService:
                         max(0.0, stage_deadline - time.monotonic()),
                         context.remaining_seconds(),
                     )
-                    combined.extend(
-                        self._invoke_budgeted(
-                            context,
-                            BudgetUsage(vector_queries=1),
-                            "retrieval_vector_query",
-                            lambda query=query: self.adapter.retrieve(
-                                query,
-                                embeddings[query],
-                                invocation,
-                                max_candidates=self.spec.max_candidates,
-                            ),
-                            timeout,
-                            BlockingTaskKind.VECTOR_QUERY,
-                        )
+                    vector_candidates = self._invoke_budgeted(
+                        context,
+                        BudgetUsage(vector_queries=1),
+                        "retrieval_vector_query",
+                        lambda query=query: self.adapter.retrieve(
+                            query,
+                            embeddings[query],
+                            invocation,
+                            max_candidates=self.spec.max_candidates,
+                        ),
+                        timeout,
+                        BlockingTaskKind.VECTOR_QUERY,
                     )
+                    if evaluation_capture is not None:
+                        if len(queries) == 1:
+                            channel = RetrievalEvaluationChannel.VECTOR_ORIGINAL_AND_REWRITTEN
+                        elif query == rewritten_query:
+                            channel = RetrievalEvaluationChannel.VECTOR_REWRITTEN_QUERY
+                        else:
+                            channel = RetrievalEvaluationChannel.VECTOR_ORIGINAL_QUERY
+                        evaluation_capture.observe_candidates(vector_candidates, channel)
+                    combined.extend(vector_candidates)
                 terms = self._extract_terms(rewritten_query, invocation.original_query)
                 should_keyword = self._should_keyword_retrieve(
                     terms, invocation
                 )
                 if should_keyword:
-                    combined.extend(
-                        self._invoke_budgeted(
-                            context,
-                            BudgetUsage(keyword_queries=1),
-                            "retrieval_keyword_query",
-                            lambda: self.adapter.keyword_retrieve(
-                                terms,
-                                invocation,
-                                max_candidates=self.spec.max_candidates,
-                            ),
-                            min(
-                                max(0.0, stage_deadline - time.monotonic()),
-                                context.remaining_seconds(),
-                            ),
-                            BlockingTaskKind.KEYWORD_QUERY,
-                        )
+                    keyword_candidates = self._invoke_budgeted(
+                        context,
+                        BudgetUsage(keyword_queries=1),
+                        "retrieval_keyword_query",
+                        lambda: self.adapter.keyword_retrieve(
+                            terms,
+                            invocation,
+                            max_candidates=self.spec.max_candidates,
+                        ),
+                        min(
+                            max(0.0, stage_deadline - time.monotonic()),
+                            context.remaining_seconds(),
+                        ),
+                        BlockingTaskKind.KEYWORD_QUERY,
                     )
+                    if evaluation_capture is not None:
+                        evaluation_capture.observe_candidates(
+                            keyword_candidates,
+                            RetrievalEvaluationChannel.KEYWORD,
+                        )
+                    combined.extend(keyword_candidates)
                 return self._merge_candidates(combined, self.spec.max_candidates)
 
             terms = self._extract_terms(rewritten_query, invocation.original_query)
@@ -438,7 +481,11 @@ class RetrievalExecutionService:
                 operation=retrieve_all,
             )
             usage = usage.plus(vector_usage)
+            if evaluation_capture is not None:
+                evaluation_capture.capture_retrieved(candidates)
             if not candidates:
+                if evaluation_capture is not None:
+                    evaluation_capture.capture_ranked(candidates, reranked=False)
                 usage = self._retrieval_usage_since(
                     ledger, retrieval_usage_baseline
                 )
@@ -458,6 +505,7 @@ class RetrievalExecutionService:
                     event_emitter=event_emitter,
                 )
 
+            reranked = False
             if self.adapter.has_reranker:
                 try:
                     def rerank_candidates(timeout: float) -> list[RetrievalCandidate]:
@@ -483,6 +531,7 @@ class RetrievalExecutionService:
                         operation=rerank_candidates,
                         degradable=True,
                     )
+                    reranked = True
                 except RetrievalAdapterError as exc:
                     if exc.category != RetrievalErrorCategory.RERANK_FAILED:
                         raise
@@ -500,6 +549,9 @@ class RetrievalExecutionService:
                     input_count=len(candidates),
                     output_count=len(candidates),
                 )
+
+            if evaluation_capture is not None:
+                evaluation_capture.capture_ranked(candidates, reranked=reranked)
 
             filtered = self._filter_candidates(candidates)
             if not filtered:
