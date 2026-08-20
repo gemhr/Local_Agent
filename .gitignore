@@ -26,3 +26,6 @@ data/logs/*.log
 
 # 多 Agent 交互工作流
 .ai/
+
+# 数据库备份
+data/backups/
