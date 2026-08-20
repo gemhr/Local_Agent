@@ -4,6 +4,7 @@
 
 from contextlib import asynccontextmanager
 import asyncio
+import json
 import logging
 import uuid
 from typing import Annotated, Optional
@@ -83,6 +84,13 @@ from core.runtime.metrics import (
     RuntimeMetricsProjector,
 )
 from core.runtime.observability_dispatcher import RuntimeObservabilityDispatcher
+from core.runtime.retrieval_evaluation import (
+    MAX_RESPONSE_BYTES,
+    RetrievalEvaluationCaptureStatus,
+    RetrievalEvaluationCollector,
+    install_retrieval_evaluation_collector,
+    reset_retrieval_evaluation_collector,
+)
 from core.runtime.structured_logging import (
     JsonStructuredRuntimeLogger,
     StructuredLogProjector,
@@ -900,6 +908,22 @@ class RuntimeExecuteResponse(BaseModel):
     safe_message: StrictStr | None
 
 
+class RuntimeEvaluationExecuteResponse(BaseModel):
+    """Run terminal 与 request-scoped RAG capture 的严格协议投影。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    protocol_version: StrictStr
+    run_id: StrictStr
+    status: StrictStr
+    stop_reason: StrictStr
+    error_code: StrictStr | None
+    safe_message: StrictStr | None
+    capture_status: StrictStr
+    capture_error_code: StrictStr | None
+    rag_evaluation_artifacts: list[dict[str, object]]
+
+
 MessageId = Annotated[
     int,
     Field(
@@ -1225,6 +1249,74 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest):
         safe_message=result.safe_message,
     )
     return JSONResponse(content=response.model_dump(mode="json"))
+
+
+@app.post("/api/runtime/evaluation-execute/v1")
+async def runtime_evaluation_execute_endpoint(payload: RuntimeExecuteRequest):
+    """通过同一 Coordinated Runtime 返回终态与请求级 RAG evaluation evidence。"""
+
+    service = require_service()
+    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
+        raise HTTPException(status_code=503, detail="COORDINATED_RUNTIME_REQUIRED")
+    admission_gate = getattr(service, "admission_gate", None)
+    if admission_gate is not None and not admission_gate.accepts_new_runs:
+        raise HTTPException(status_code=503, detail="RUNTIME_SHUTTING_DOWN")
+    try:
+        uuid.UUID(payload.run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid run_id") from exc
+
+    collector = RetrievalEvaluationCollector(payload.run_id)
+    token = install_retrieval_evaluation_collector(collector)
+    try:
+        try:
+            _output, result = await service.run_coordinated_agent(
+                agent_id=payload.agent_id,
+                query=payload.query,
+                run_id=payload.run_id,
+                timeout_seconds=payload.timeout_seconds,
+            )
+        except ChatRuntimeTransportError as exc:
+            raise HTTPException(status_code=503, detail=exc.error_code) from None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=500, detail="RUNTIME_EXECUTION_FAILED"
+            ) from None
+    finally:
+        reset_retrieval_evaluation_collector(token)
+
+    capture_status, capture_error_code, snapshots = collector.envelope()
+    response = RuntimeEvaluationExecuteResponse(
+        protocol_version="localagent-rag-evaluation-execute.v1",
+        run_id=result.run_id,
+        status=result.status.value,
+        stop_reason=result.stop_reason.value,
+        error_code=result.error_code,
+        safe_message=result.safe_message,
+        capture_status=capture_status.value,
+        capture_error_code=capture_error_code,
+        rag_evaluation_artifacts=[item.to_wire_dict() for item in snapshots],
+    )
+    content = response.model_dump(mode="json")
+    encoded = json.dumps(
+        content, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    if len(encoded) > MAX_RESPONSE_BYTES:
+        response = RuntimeEvaluationExecuteResponse(
+            protocol_version="localagent-rag-evaluation-execute.v1",
+            run_id=result.run_id,
+            status=result.status.value,
+            stop_reason=result.stop_reason.value,
+            error_code=result.error_code,
+            safe_message=result.safe_message,
+            capture_status=RetrievalEvaluationCaptureStatus.FAILED.value,
+            capture_error_code="RAG_EVALUATION_RESPONSE_SIZE_LIMIT_EXCEEDED",
+            rag_evaluation_artifacts=[],
+        )
+        content = response.model_dump(mode="json")
+    return JSONResponse(content=content)
 
 
 @app.post("/api/runtime/runs/{run_id}/cancel")
