@@ -11,11 +11,11 @@ from typing import Annotated, Optional
 import uvicorn
 from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from core.agent_router import AgentRouter
 from core.application_metadata import create_application_metadata
-from core.chat_service import ChatService
+from core.chat_service import ChatRuntimeTransportError, ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
 from core.memory_manager import MemoryManager
 from core.request_payload import (
@@ -861,6 +861,45 @@ class ChatRequest(BaseModel):
     ] | None = None
 
 
+RUNTIME_EXECUTE_TIMEOUT_MAX_SECONDS = 3_600.0
+
+
+class RuntimeExecuteRequest(BaseModel):
+    """结构化 Coordinated Runtime 执行请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: Annotated[
+        StrictStr, Field(max_length=REQUEST_PAYLOAD_POLICY.AGENT_ID_MAX_CHARS)
+    ]
+    query: Annotated[
+        StrictStr, Field(max_length=REQUEST_PAYLOAD_POLICY.CHAT_QUERY_MAX_CHARS)
+    ]
+    run_id: Annotated[
+        StrictStr, Field(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
+    ]
+    timeout_seconds: Annotated[
+        float,
+        Field(
+            gt=0,
+            le=RUNTIME_EXECUTE_TIMEOUT_MAX_SECONDS,
+            allow_inf_nan=False,
+        ),
+    ]
+
+
+class RuntimeExecuteResponse(BaseModel):
+    """RunCoordinatorResult 的 content-free 严格终态投影。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: StrictStr
+    status: StrictStr
+    stop_reason: StrictStr
+    error_code: StrictStr | None
+    safe_message: StrictStr | None
+
+
 MessageId = Annotated[
     int,
     Field(
@@ -1136,6 +1175,56 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         media_type="text/plain",
         headers={"X-Run-Id": run_id},
     )
+
+
+@app.post("/api/runtime/execute")
+async def runtime_execute_endpoint(payload: RuntimeExecuteRequest):
+    """同步执行一条严格校验的 Coordinated Runtime 请求。"""
+
+    service = require_service()
+    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
+        raise HTTPException(
+            status_code=503,
+            detail="COORDINATED_RUNTIME_REQUIRED",
+        )
+    admission_gate = getattr(service, "admission_gate", None)
+    if (
+        admission_gate is not None
+        and not admission_gate.accepts_new_runs
+    ):
+        raise HTTPException(
+            status_code=503, detail="RUNTIME_SHUTTING_DOWN"
+        )
+
+    try:
+        uuid.UUID(payload.run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid run_id") from exc
+
+    try:
+        _output, result = await service.run_coordinated_agent(
+            agent_id=payload.agent_id,
+            query=payload.query,
+            run_id=payload.run_id,
+            timeout_seconds=payload.timeout_seconds,
+        )
+    except ChatRuntimeTransportError as exc:
+        raise HTTPException(status_code=503, detail=exc.error_code) from None
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=500, detail="RUNTIME_EXECUTION_FAILED"
+        ) from None
+
+    response = RuntimeExecuteResponse(
+        run_id=result.run_id,
+        status=result.status.value,
+        stop_reason=result.stop_reason.value,
+        error_code=result.error_code,
+        safe_message=result.safe_message,
+    )
+    return JSONResponse(content=response.model_dump(mode="json"))
 
 
 @app.post("/api/runtime/runs/{run_id}/cancel")
