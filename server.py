@@ -68,6 +68,11 @@ from core.runtime import (
     ToolResourceExtractorDescriptor,
     process_legacy_step_executor,
     process_run_registry,
+    RunStatus,
+)
+from core.runtime.generation_evidence import (
+    FinalAnswerEvidenceError,
+    FinalAnswerEvidenceV1,
 )
 from core.runtime.health import (
     health_http_status,
@@ -924,6 +929,25 @@ class RuntimeEvaluationExecuteResponse(BaseModel):
     rag_evaluation_artifacts: list[dict[str, object]]
 
 
+class RuntimeEvaluationExecuteV2Response(BaseModel):
+    """v2：保持 RAG evidence，并独立携带 delivered final answer evidence。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    protocol_version: StrictStr
+    run_id: StrictStr
+    status: StrictStr
+    stop_reason: StrictStr
+    error_code: StrictStr | None
+    safe_message: StrictStr | None
+    capture_status: StrictStr
+    capture_error_code: StrictStr | None
+    rag_evaluation_artifacts: list[dict[str, object]]
+    final_answer_capture_status: StrictStr
+    final_answer_capture_error_code: StrictStr | None
+    final_answer_evidence: dict[str, str] | None
+
+
 MessageId = Annotated[
     int,
     Field(
@@ -1316,6 +1340,112 @@ async def runtime_evaluation_execute_endpoint(payload: RuntimeExecuteRequest):
             rag_evaluation_artifacts=[],
         )
         content = response.model_dump(mode="json")
+    return JSONResponse(content=content)
+
+
+def _final_answer_capture(
+    *,
+    output: str | None,
+    result,
+) -> tuple[str, str | None, dict[str, str] | None]:
+    """只从 run_coordinated_agent 的 delivered output 捕获 final answer。"""
+    if result.status is not RunStatus.SUCCEEDED:
+        return "FAILED", "FINAL_ANSWER_RUNTIME_NOT_SUCCEEDED", None
+    try:
+        evidence = FinalAnswerEvidenceV1.from_delivered_output(
+            run_id=result.run_id,
+            content=output,
+        )
+    except FinalAnswerEvidenceError as exc:
+        return "FAILED", exc.args[0], None
+    return "COMPLETE", None, evidence.to_wire_dict()
+
+
+def _encoded_response_content(response: BaseModel) -> tuple[dict[str, object], int]:
+    content = response.model_dump(mode="json")
+    encoded = json.dumps(
+        content, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+    ).encode("utf-8")
+    return content, len(encoded)
+
+
+@app.post("/api/runtime/evaluation-execute/v2")
+async def runtime_evaluation_execute_v2_endpoint(payload: RuntimeExecuteRequest):
+    """返回 v2 RAG 与独立 delivered final answer evaluation evidence。"""
+    service = require_service()
+    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
+        raise HTTPException(status_code=503, detail="COORDINATED_RUNTIME_REQUIRED")
+    admission_gate = getattr(service, "admission_gate", None)
+    if admission_gate is not None and not admission_gate.accepts_new_runs:
+        raise HTTPException(status_code=503, detail="RUNTIME_SHUTTING_DOWN")
+    try:
+        uuid.UUID(payload.run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid run_id") from exc
+
+    collector = RetrievalEvaluationCollector(payload.run_id)
+    token = install_retrieval_evaluation_collector(collector)
+    try:
+        try:
+            output, result = await service.run_coordinated_agent(
+                agent_id=payload.agent_id,
+                query=payload.query,
+                run_id=payload.run_id,
+                timeout_seconds=payload.timeout_seconds,
+            )
+        except ChatRuntimeTransportError as exc:
+            raise HTTPException(status_code=503, detail=exc.error_code) from None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=500, detail="RUNTIME_EXECUTION_FAILED"
+            ) from None
+    finally:
+        reset_retrieval_evaluation_collector(token)
+
+    capture_status, capture_error_code, snapshots = collector.envelope()
+    final_status, final_error_code, final_evidence = _final_answer_capture(
+        output=output,
+        result=result,
+    )
+    response = RuntimeEvaluationExecuteV2Response(
+        protocol_version="localagent-evaluation-execute.v2",
+        run_id=result.run_id,
+        status=result.status.value,
+        stop_reason=result.stop_reason.value,
+        error_code=result.error_code,
+        safe_message=result.safe_message,
+        capture_status=capture_status.value,
+        capture_error_code=capture_error_code,
+        rag_evaluation_artifacts=[item.to_wire_dict() for item in snapshots],
+        final_answer_capture_status=final_status,
+        final_answer_capture_error_code=final_error_code,
+        final_answer_evidence=final_evidence,
+    )
+    content, response_bytes = _encoded_response_content(response)
+    if response_bytes > MAX_RESPONSE_BYTES and final_evidence is not None:
+        response = response.model_copy(
+            update={
+                "final_answer_capture_status": "FAILED",
+                "final_answer_capture_error_code": (
+                    "FINAL_ANSWER_EVALUATION_RESPONSE_SIZE_LIMIT_EXCEEDED"
+                ),
+                "final_answer_evidence": None,
+            }
+        )
+        content, response_bytes = _encoded_response_content(response)
+    if response_bytes > MAX_RESPONSE_BYTES:
+        response = response.model_copy(
+            update={
+                "capture_status": RetrievalEvaluationCaptureStatus.FAILED.value,
+                "capture_error_code": "RAG_EVALUATION_RESPONSE_SIZE_LIMIT_EXCEEDED",
+                "rag_evaluation_artifacts": [],
+            }
+        )
+        content, response_bytes = _encoded_response_content(response)
+    if response_bytes > MAX_RESPONSE_BYTES:  # pragma: no cover - terminal fields are bounded
+        raise HTTPException(status_code=500, detail="EVALUATION_RESPONSE_SIZE_LIMIT_EXCEEDED")
     return JSONResponse(content=content)
 
 

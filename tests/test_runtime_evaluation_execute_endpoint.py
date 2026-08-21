@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from types import SimpleNamespace
@@ -53,8 +54,9 @@ def _payload(*, run_id: str | None = None) -> server.RuntimeExecuteRequest:
 class _EvalService:
     admission_gate = SimpleNamespace(accepts_new_runs=True)
 
-    def __init__(self, result) -> None:
+    def __init__(self, result, output: str | None = None) -> None:
         self.result = result
+        self.output = output
         self.seen_collector = None
 
     def selected_runtime_mode(self):
@@ -62,7 +64,7 @@ class _EvalService:
 
     async def run_coordinated_agent(self, **kwargs):
         self.seen_collector = current_retrieval_evaluation_collector()
-        return None, self.result
+        return self.output, self.result
 
 
 class _LargeTextAdapter:
@@ -157,8 +159,40 @@ class _LargeEvalService:
         return None, _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
 
 
+class _RagAndAnswerEvalService:
+    admission_gate = SimpleNamespace(accepts_new_runs=True)
+
+    def selected_runtime_mode(self):
+        return ChatRuntimeMode.COORDINATED
+
+    async def run_coordinated_agent(self, **kwargs):
+        run_id = kwargs["run_id"]
+        invocation = RetrievalInvocation.create(
+            "query",
+            collection_names=("kb",),
+            top_k=1,
+            rerank_top_k=1,
+            requested_timeout_seconds=5.0,
+            retrieval_id="rag-and-answer",
+        )
+        result = RetrievalExecutionService(_LargeTextAdapter(20)).execute(
+            invocation,
+            run_context=_context_for_run(run_id),
+        )
+        assert result.status is RetrievalExecutionStatus.SUCCEEDED
+        return "answer-v2", _result(
+            RunStatus.SUCCEEDED,
+            StopReason.COMPLETED,
+            run_id=run_id,
+        )
+
+
 async def _execute(payload: server.RuntimeExecuteRequest):
     return await server.runtime_evaluation_execute_endpoint(payload)
+
+
+async def _execute_v2(payload: server.RuntimeExecuteRequest):
+    return await server.runtime_evaluation_execute_v2_endpoint(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +297,90 @@ async def test_runtime_failed_capture_complete_keeps_failed_terminal(monkeypatch
     assert body["error_code"] == "RUNTIME_AGENT_FAILURE"
     assert body["capture_status"] == "COMPLETE"
     assert body["rag_evaluation_artifacts"] == []
+
+
+# ---------------------------------------------------------------------------
+# v2 final answer evidence — 独立于 RAG 与 Runtime terminal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_v2_captures_exact_delivered_final_answer(monkeypatch):
+    run_id = uuid.uuid4().hex
+    answer = "answer-v2\n原样保留"
+    result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
+    monkeypatch.setattr(server, "chat_service", _EvalService(result, answer))
+
+    body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
+
+    assert set(body) == {
+        "protocol_version", "run_id", "status", "stop_reason", "error_code",
+        "safe_message", "capture_status", "capture_error_code",
+        "rag_evaluation_artifacts", "final_answer_capture_status",
+        "final_answer_capture_error_code", "final_answer_evidence",
+    }
+    assert body["protocol_version"] == "localagent-evaluation-execute.v2"
+    assert body["final_answer_capture_status"] == "COMPLETE"
+    assert body["final_answer_capture_error_code"] is None
+    assert body["final_answer_evidence"] == {
+        "schema_version": "final-answer-evidence.v1",
+        "evidence_id": f"final-answer://{run_id}",
+        "run_id": run_id,
+        "attempt_id": run_id,
+        "media_type": "text/plain; charset=utf-8",
+        "content_sha256": hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+        "content": answer,
+    }
+
+
+@pytest.mark.asyncio
+async def test_v2_failed_runtime_never_captures_incidental_output(monkeypatch):
+    run_id = uuid.uuid4().hex
+    result = _result(
+        RunStatus.FAILED,
+        StopReason.UNHANDLED_ERROR,
+        run_id=run_id,
+        error_code="RUNTIME_AGENT_FAILURE",
+    )
+    monkeypatch.setattr(
+        server, "chat_service", _EvalService(result, "must-not-be-captured")
+    )
+
+    body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
+
+    assert body["status"] == "FAILED"
+    assert body["final_answer_capture_status"] == "FAILED"
+    assert body["final_answer_capture_error_code"] == "FINAL_ANSWER_RUNTIME_NOT_SUCCEEDED"
+    assert body["final_answer_evidence"] is None
+
+
+@pytest.mark.asyncio
+async def test_v2_final_answer_over_utf8_bound_fails_without_partial_content(monkeypatch):
+    run_id = uuid.uuid4().hex
+    answer = "中" * 21_846  # 65,538 UTF-8 bytes, not 21,846 bytes.
+    result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
+    monkeypatch.setattr(server, "chat_service", _EvalService(result, answer))
+
+    body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
+
+    assert body["status"] == "SUCCEEDED"
+    assert body["capture_status"] == "COMPLETE"
+    assert body["final_answer_capture_status"] == "FAILED"
+    assert body["final_answer_capture_error_code"] == "FINAL_ANSWER_CONTENT_LIMIT_EXCEEDED"
+    assert body["final_answer_evidence"] is None
+
+
+@pytest.mark.asyncio
+async def test_v2_keeps_rag_and_final_answer_evidence_independent(monkeypatch):
+    run_id = uuid.uuid4().hex
+    monkeypatch.setattr(server, "chat_service", _RagAndAnswerEvalService())
+
+    body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
+
+    assert body["capture_status"] == "COMPLETE"
+    assert len(body["rag_evaluation_artifacts"]) == 1
+    assert body["final_answer_capture_status"] == "COMPLETE"
+    assert body["final_answer_evidence"]["content"] == "answer-v2"
 
 
 # ---------------------------------------------------------------------------
