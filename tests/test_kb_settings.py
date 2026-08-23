@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from core.settings import (
@@ -23,6 +25,45 @@ def test_embedding_settings_environment_override(monkeypatch) -> None:
 
     assert settings.embedding_batch_size == 4
     assert settings.embedding_query_prompt_name == "query"
+
+
+def test_embedding_model_default_uses_repository_qwen_asset(monkeypatch) -> None:
+    monkeypatch.delenv("LOCAL_AGENT_EMBEDDING_MODEL_PATH", raising=False)
+
+    settings = Settings.load()
+
+    expected = (
+        Path(settings.project_root) / "data" / "models" / "Qwen3-Embedding-0.6B"
+    ).resolve()
+    assert Path(settings.embedding_model_path) == expected
+
+
+def test_relative_embedding_model_path_resolves_from_project_root(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(
+        "LOCAL_AGENT_EMBEDDING_MODEL_PATH",
+        "data/models/Qwen3-Embedding-0.6B",
+    )
+
+    settings = Settings.load()
+
+    expected = (
+        Path(settings.project_root) / "data" / "models" / "Qwen3-Embedding-0.6B"
+    ).resolve()
+    assert Path(settings.embedding_model_path) == expected
+
+
+def test_blank_embedding_model_path_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("LOCAL_AGENT_EMBEDDING_MODEL_PATH", "   ")
+
+    with pytest.raises(SettingsValidationError) as captured:
+        Settings.load()
+
+    assert captured.value.safe_error_code == SETTINGS_VALIDATION_ERROR
+    assert captured.value.field == "LOCAL_AGENT_EMBEDDING_MODEL_PATH"
+    assert captured.value.reason_code == "blank_path"
 
 
 def test_embedding_batch_size_below_minimum_fails_closed(monkeypatch) -> None:

@@ -66,7 +66,14 @@ class _RaisingVectorDB:
         raise RuntimeError("kb broken")
 
 
-def _tmp_settings(monkeypatch, tmp_path, *, profile="LOCAL", kb_required=None):
+def _tmp_settings(
+    monkeypatch,
+    tmp_path,
+    *,
+    profile="LOCAL",
+    kb_required=None,
+    embedding_model_path=None,
+):
     env = {
         "LOCAL_AGENT_ENVIRONMENT_PROFILE": profile,
         "LOCAL_AGENT_REMOTE_API_BASE_URL": "https://example.test/v1",
@@ -75,6 +82,9 @@ def _tmp_settings(monkeypatch, tmp_path, *, profile="LOCAL", kb_required=None):
         "LOCAL_AGENT_SNAPSHOT_DB_PATH": str(tmp_path / "snap.db"),
         "LOCAL_AGENT_OBSERVABILITY_CHECKPOINT_DB_PATH": str(tmp_path / "obs.db"),
         "LOCAL_AGENT_CHROMA_DIR": str(tmp_path / "chroma"),
+        "LOCAL_AGENT_EMBEDDING_MODEL_PATH": (
+            embedding_model_path or str(tmp_path / "missing-embedding-model")
+        ),
     }
     if profile == "PRODUCTION":
         env["LOCAL_AGENT_ENVIRONMENT_ID"] = "prod-integration"
@@ -248,8 +258,12 @@ async def test_healthy_kb_snapshot_is_not_degraded(monkeypatch, tmp_path) -> Non
             "EMBEDDING_MODEL_PREREQUISITE_ABSENT: "
             f"repository-local embedding model missing: {_EMBEDDING_MODEL_DIR}"
         )
-    monkeypatch.setenv("LOCAL_AGENT_EMBEDDING_MODEL_PATH", str(_EMBEDDING_MODEL_DIR))
-    settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
+    settings = _tmp_settings(
+        monkeypatch,
+        tmp_path,
+        profile="LOCAL",
+        embedding_model_path=str(_EMBEDDING_MODEL_DIR),
+    )
     monkeypatch.setattr(server, "settings", settings)
     app = FastAPI()
     async with server.lifespan(app):

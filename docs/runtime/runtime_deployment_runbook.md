@@ -154,7 +154,7 @@ $env:LOCAL_AGENT_WIKI_COOKIE="<secret-store-reference>"
 | 项 | 默认路径 | 分类 |
 | --- | --- | --- |
 | GGUF model | `data/models/qwen2.5-7b-instruct-q4_k_m.gguf` | Deployment Artifact（只读加载） |
-| Embedding model | `data/models/bge-large-zh-v1.5/` | Deployment Artifact（只读加载） |
+| Embedding model | `data/models/Qwen3-Embedding-0.6B/` | Deployment Artifact（只读、离线加载） |
 
 模型视为 **deployment artifact，不是 durable state**；模型文件变化时由 operator 更新，不依赖自动恢复。
 

@@ -68,6 +68,10 @@ _PROFILE_ENVIRONMENT_ID_DEFAULT = {
 # 保证 shutdown 最坏情况下 transport 先于 dispatcher close deadline 返回。
 AGENTEVALOPS_TRANSPORT_CLEANUP_MARGIN_SECONDS = 0.5
 
+_DEFAULT_EMBEDDING_MODEL_RELATIVE_PATH = os.path.join(
+    "data", "models", "Qwen3-Embedding-0.6B"
+)
+
 
 class SettingsValidationError(ValueError):
     """Safe startup configuration error.
@@ -253,6 +257,21 @@ def _env_environment_id(profile: EnvironmentProfile) -> str:
 
 def _project_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _resolve_project_relative_path(
+    value: str, *, project_root: str, env_name: str
+) -> str:
+    """把部署路径稳定解析到项目根目录，避免依赖进程当前工作目录。"""
+    normalized = value.strip()
+    if not normalized:
+        raise SettingsValidationError(
+            SETTINGS_VALIDATION_ERROR, env_name, "blank_path"
+        )
+    path = Path(normalized)
+    if not path.is_absolute():
+        path = Path(project_root) / path
+    return str(path.resolve(strict=False))
 
 
 def _strip_matching_outer_quotes(value: str, *, env_name: str) -> str:
@@ -932,9 +951,13 @@ class Settings:
             chroma_dir=os.getenv(
                 "LOCAL_AGENT_CHROMA_DIR", os.path.join(project_root, "chroma_db")
             ),
-            embedding_model_path=os.getenv(
-                "LOCAL_AGENT_EMBEDDING_MODEL_PATH",
-                os.path.join(project_root, "data", "models", "bge-large-zh-v1.5"),
+            embedding_model_path=_resolve_project_relative_path(
+                os.getenv(
+                    "LOCAL_AGENT_EMBEDDING_MODEL_PATH",
+                    _DEFAULT_EMBEDDING_MODEL_RELATIVE_PATH,
+                ),
+                project_root=project_root,
+                env_name="LOCAL_AGENT_EMBEDDING_MODEL_PATH",
             ),
             embedding_query_prompt_name=os.getenv(
                 "LOCAL_AGENT_EMBEDDING_QUERY_PROMPT_NAME", ""

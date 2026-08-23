@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from core.knowledge_base import vector_db_manager as vector_module
 
 
@@ -47,13 +49,14 @@ def test_vector_manager_forwards_collection_and_embedding_config(
 
     manager = vector_module.VectorDBManager(
         str(tmp_path),
-        "mock-model",
+        str(tmp_path),
         collection_name="local_agent_mock_v1",
         embedding_batch_size=4,
         query_prompt_name="query",
     )
 
     assert manager.vector_store.kwargs["collection_name"] == "local_agent_mock_v1"
+    assert manager.embeddings.kwargs["model_kwargs"]["local_files_only"] is True
     assert manager.embeddings.kwargs["encode_kwargs"]["batch_size"] == 4
     assert manager.embeddings.kwargs["query_encode_kwargs"]["prompt_name"] == "query"
 
@@ -63,7 +66,9 @@ def test_vector_manager_sanitizes_metadata_and_counts_writes(
 ) -> None:
     monkeypatch.setattr(vector_module, "HuggingFaceEmbeddings", FakeEmbeddings)
     monkeypatch.setattr(vector_module, "Chroma", FakeChroma)
-    manager = vector_module.VectorDBManager(str(tmp_path), ingest_batch_size=2)
+    manager = vector_module.VectorDBManager(
+        str(tmp_path), str(tmp_path), ingest_batch_size=2
+    )
 
     written = manager.ingest_chunks(
         [
@@ -85,7 +90,7 @@ def test_similarity_distances_are_normalized_to_higher_is_better(
 ) -> None:
     monkeypatch.setattr(vector_module, "HuggingFaceEmbeddings", FakeEmbeddings)
     monkeypatch.setattr(vector_module, "Chroma", FakeChroma)
-    manager = vector_module.VectorDBManager(str(tmp_path))
+    manager = vector_module.VectorDBManager(str(tmp_path), str(tmp_path))
     closer = vector_module.Document(page_content="closer", metadata={})
     farther = vector_module.Document(page_content="farther", metadata={})
     manager.vector_store.similarity_search_with_score = lambda **kwargs: [
@@ -103,7 +108,7 @@ def test_similarity_distances_are_normalized_to_higher_is_better(
 def test_keyword_search_reads_matching_chroma_documents(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(vector_module, "HuggingFaceEmbeddings", FakeEmbeddings)
     monkeypatch.setattr(vector_module, "Chroma", FakeChroma)
-    manager = vector_module.VectorDBManager(str(tmp_path))
+    manager = vector_module.VectorDBManager(str(tmp_path), str(tmp_path))
     manager.vector_store._collection.get_result = {
         "ids": ["cdt-1"],
         "documents": ["CDT 字段映射正文"],
@@ -118,3 +123,23 @@ def test_keyword_search_reads_matching_chroma_documents(monkeypatch, tmp_path) -
     assert manager.vector_store._collection.get_calls[0]["where_document"] == {
         "$contains": "cdt"
     }
+
+
+def test_missing_local_embedding_model_path_fails_before_adapter_load(
+    monkeypatch, tmp_path
+) -> None:
+    adapter_called = False
+
+    def unexpected_adapter(**kwargs):
+        nonlocal adapter_called
+        adapter_called = True
+        return FakeEmbeddings(**kwargs)
+
+    monkeypatch.setattr(vector_module, "HuggingFaceEmbeddings", unexpected_adapter)
+
+    with pytest.raises(FileNotFoundError, match="EMBEDDING_MODEL_ASSET_INVALID"):
+        vector_module.VectorDBManager(
+            str(tmp_path / "chroma"), str(tmp_path / "missing-model")
+        )
+
+    assert adapter_called is False
