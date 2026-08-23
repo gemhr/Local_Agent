@@ -63,7 +63,7 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_MODEL_BREAKER_COUNT_RATE_LIMITED` | circuit registry | strict bool | `1` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | internal config | 非法显式值 fail closed | `1` |
 | `LOCAL_AGENT_MEMORY_DB_PATH` | MemoryManager | path | project database path | writable SQLite path | no | APPLICATION_SCOPE | yes | sensitive path/data | initialization/I/O failure | `data/database/memory.db` |
 | `LOCAL_AGENT_CHROMA_DIR` | VectorDBManager | path | project chroma dir | readable/writable directory | no | APPLICATION_SCOPE | yes | sensitive path/data | KB degrades with safe code；PRODUCTION 默认 required | `data/vector_store` |
-| `LOCAL_AGENT_EMBEDDING_MODEL_PATH` | VectorDBManager | path | project model dir | readable model directory | no | APPLICATION_SCOPE | yes | sensitive path | KB degrades with safe code | `data/models/embedding` |
+| `LOCAL_AGENT_EMBEDDING_MODEL_PATH` | VectorDBManager | path | `data/models/Qwen3-Embedding-0.6B` | readable local model directory；相对路径按 project root 解析 | no | APPLICATION_SCOPE | yes | sensitive path | 缺失时离线 fail fast；KB 按 required policy 失败或降级 | `data/models/embedding` |
 | `LOCAL_AGENT_EMBEDDING_QUERY_PROMPT_NAME` | embedding adapter | string | empty | backend-supported name | no | APPLICATION_SCOPE | yes | internal config | adapter behavior/failure | `query` |
 | `LOCAL_AGENT_EMBEDDING_BATCH_SIZE` | embedding adapter | int | `8` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `8` |
 | `LOCAL_AGENT_EVENT_JOURNAL_DB_PATH` | SQLiteRunEventJournal | path | project database path | writable SQLite path | no | APPLICATION_SCOPE | yes | sensitive path/data | startup or append fails closed | `data/database/runtime_journal.db` |

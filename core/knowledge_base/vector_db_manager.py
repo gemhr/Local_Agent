@@ -46,7 +46,7 @@ class VectorDBManager:
     def __init__(
         self,
         db_persist_dir: str,
-        local_model_path: str | None = None,
+        local_model_path: str,
         *,
         collection_name: str = "huawei_wiki_collection",
         ingest_batch_size: int = 32,
@@ -57,7 +57,7 @@ class VectorDBManager:
 
         Args:
             db_persist_dir: Chroma 数据持久化目录。
-            local_model_path: 本地 embedding 模型目录；为空时使用默认模型名。
+            local_model_path: 已解析的本地 embedding 模型目录。
             collection_name: Chroma Collection 名称。
             ingest_batch_size: 应用层单次写入的 Chunk 数量。
             embedding_batch_size: Embedding 编码批次大小。
@@ -66,9 +66,17 @@ class VectorDBManager:
         self.db_persist_dir = db_persist_dir
         self.collection_name = collection_name
         self.ingest_batch_size = max(1, int(ingest_batch_size))
+
+        model_path = Path(local_model_path)
+        if not model_path.is_dir():
+            raise FileNotFoundError(
+                "EMBEDDING_MODEL_ASSET_INVALID: configured local embedding "
+                "model directory missing"
+            )
+        self.embedding_model_id = str(model_path.resolve(strict=True))
         os.makedirs(self.db_persist_dir, exist_ok=True)
 
-        model_kwargs = {"device": "cpu"}
+        model_kwargs = {"device": "cpu", "local_files_only": True}
         encode_kwargs = {
             "normalize_embeddings": True,
             "batch_size": max(1, int(embedding_batch_size)),
@@ -79,7 +87,7 @@ class VectorDBManager:
 
         self._query_prompt_name = query_prompt_name
         self.embeddings = HuggingFaceEmbeddings(
-            model_name=local_model_path or "BAAI/bge-large-zh-v1.5",
+            model_name=self.embedding_model_id,
             model_kwargs=model_kwargs,
             encode_kwargs=encode_kwargs,
             query_encode_kwargs=query_encode_kwargs,
@@ -89,7 +97,6 @@ class VectorDBManager:
             embedding_function=self.embeddings,
             persist_directory=self.db_persist_dir,
         )
-        self.embedding_model_id = local_model_path or "BAAI/bge-large-zh-v1.5"
         # Sentence Transformer 与本地 Chroma 都是同步依赖；显式串行化单实例
         # Query 调用，避免未知模型线程安全行为和并发查询状态交叉。
         self._embedding_query_lock = threading.Lock()
