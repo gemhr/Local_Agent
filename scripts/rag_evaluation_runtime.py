@@ -71,7 +71,8 @@ class RetrievalBaselineService:
 
     admission_gate = SimpleNamespace(accepts_new_runs=True)
 
-    def __init__(self, manager) -> None:
+    def __init__(self, manager, *, collection_name: str = COLLECTION_NAME) -> None:
+        self._collection_name = collection_name
         adapter = RuntimeKnowledgeRetrievalAdapter(
             manager,
             query_rewriter=lambda query, *_args, **_kwargs: query,
@@ -107,7 +108,7 @@ class RetrievalBaselineService:
         result = self._retrieval.execute(
             RetrievalInvocation.create(
                 query,
-                collection_names=(COLLECTION_NAME,),
+                collection_names=(self._collection_name,),
                 top_k=8,
                 rerank_top_k=3,
                 requested_timeout_seconds=30.0,
