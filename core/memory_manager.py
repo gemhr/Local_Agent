@@ -108,16 +108,25 @@ class MemoryManager:
             conn.close()
 
     def _init_db(self) -> None:
-        """初始化当前 v1 消息库 schema。
+        """初始化当前 v2 消息库 schema。
 
-        WP1-D：constructor 不再对 existing legacy DB 执行隐式缺列 ALTER；
-        只允许新建完整 v1 schema 或打开已通过 startup preflight 的 v1 库。
-        legacy / ambiguous DB 由 startup preflight 拦截（MIGRATION_REQUIRED /
+        WP1-D / WP1-B：constructor 不再对 existing DB 执行任何隐式 schema
+        修改（包括隐式缺列 ALTER 与隐式建表）；只允许两种状态：
+        - 全新（无表）DB → 直接创建完整 v2 schema（含 Long-term Memory 结构）；
+        - 已通过 startup preflight 的 DB → 保持原状，不做 IF NOT EXISTS 建表。
+        v1 / legacy / ambiguous DB 由 startup preflight 拦截（MIGRATION_REQUIRED /
         UNSUPPORTED），schema mutation 只属于显式 SCRIPT_ROLE migrate 命令。
         """
         with self._connect() as conn:
-            _create_current_memory_schema(conn)
-            conn.execute("PRAGMA user_version = 1")
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if not tables:
+                _create_current_memory_schema(conn)
+                conn.execute("PRAGMA user_version = 2")
 
     @staticmethod
     def _row_to_message(row: sqlite3.Row) -> Dict[str, Any]:
@@ -633,7 +642,7 @@ class MemoryManager:
 # WP1-D Persistence Preflight / Migration（Store-owned，Coordinator 只编排）
 # ---------------------------------------------------------------------------
 
-MEMORY_SCHEMA_VERSION = 1
+MEMORY_SCHEMA_VERSION = 2
 
 # 每个条目 = (name, declared_type, notnull, dflt_value, pk_position)。
 # dflt_value 比较时做大小写/引号规范化（见 _norm_default），避免格式漂移误判。
@@ -687,6 +696,57 @@ _LEGACY_INDEXES = {
     "idx_messages_timestamp": (0, 0, ("timestamp", "id")),
 }
 _IDX_EXCHANGE_ROLE_PREDICATE = "exchange_id IS NOT NULL"
+
+# Long-term Memory 独立结构（Advanced Memory Domain，不属于 Conversation
+# History / Short-term Context）。WP1 v1 只保存 SEMANTIC record。
+# created_at / updated_at 以 TEXT 保存 UTC ISO8601（由 Domain boundary 产生）。
+_LONG_TERM_MEMORY_COLUMNS = (
+    ("memory_id", "TEXT", 0, None, 1),
+    ("memory_type", "TEXT", 1, None, 0),
+    ("status", "TEXT", 1, None, 0),
+    ("agent_id", "TEXT", 1, None, 0),
+    ("memory_scope", "TEXT", 1, None, 0),
+    ("canonical_text", "TEXT", 1, None, 0),
+    ("payload", "TEXT", 1, None, 0),
+    ("logical_key", "TEXT", 0, None, 0),
+    ("origin_type", "TEXT", 1, None, 0),
+    ("origin_run_id", "TEXT", 1, None, 0),
+    ("origin_exchange_id", "TEXT", 1, None, 0),
+    ("origin_agent_id", "TEXT", 1, None, 0),
+    ("origin_memory_scope", "TEXT", 1, None, 0),
+    ("formation_method", "TEXT", 0, None, 0),
+    ("created_at", "TEXT", 1, None, 0),
+    ("updated_at", "TEXT", 1, None, 0),
+    ("superseded_by_memory_id", "TEXT", 0, None, 0),
+)
+_LONG_TERM_MEMORY_INDEXES = {
+    "idx_long_term_memory_agent_scope": (0, 0, ("agent_id", "memory_scope")),
+}
+_LONG_TERM_MEMORY_DDL = (
+    "CREATE TABLE IF NOT EXISTS long_term_memory ("
+    "memory_id TEXT PRIMARY KEY, "
+    "memory_type TEXT NOT NULL, "
+    "status TEXT NOT NULL, "
+    "agent_id TEXT NOT NULL, "
+    "memory_scope TEXT NOT NULL, "
+    "canonical_text TEXT NOT NULL, "
+    "payload TEXT NOT NULL, "
+    "logical_key TEXT, "
+    "origin_type TEXT NOT NULL, "
+    "origin_run_id TEXT NOT NULL, "
+    "origin_exchange_id TEXT NOT NULL, "
+    "origin_agent_id TEXT NOT NULL, "
+    "origin_memory_scope TEXT NOT NULL, "
+    "formation_method TEXT, "
+    "created_at TEXT NOT NULL, "
+    "updated_at TEXT NOT NULL, "
+    "superseded_by_memory_id TEXT"
+    ")"
+)
+_LONG_TERM_MEMORY_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_long_term_memory_agent_scope "
+    "ON long_term_memory(agent_id, memory_scope)"
+)
 
 # FTS / trigger 的 CREATE 语句事实 SQL（_create_current_memory_schema 与
 # signature 校验共用同一常量，杜绝漂移；sqlite_master 存储时去掉 IF NOT EXISTS）。
@@ -973,10 +1033,14 @@ def _fts_matches(conn: sqlite3.Connection, expected_ddl: str) -> bool:
     return _canonical_sql(row[0]) == _canonical_sql(expected_ddl)
 
 
-def _memory_current_signature_holds(conn: sqlite3.Connection) -> bool:
-    """完整 current v1 physical signature：tables + columns/constraints +
-    required indexes + FTS + triggers 全部精确匹配，且 UNIQUE semantic
-    constraint set exact（缺 run_id UNIQUE 或任何额外 UNIQUE 都拒绝）。"""
+def _memory_v1_core_holds(conn: sqlite3.Connection) -> bool:
+    """v1 core physical signature：messages(current columns) +
+    conversation_summaries + message_exchanges + required indexes + FTS +
+    triggers 全部精确匹配，且 UNIQUE semantic constraint set exact。
+
+    v2（current）与 v1 都要求该 core 精确成立；差异只在
+    `long_term_memory` 是否存在。
+    """
     tables = {
         row[0]
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -1026,6 +1090,48 @@ def _memory_current_signature_holds(conn: sqlite3.Connection) -> bool:
     return True
 
 
+def _memory_current_signature_holds(conn: sqlite3.Connection) -> bool:
+    """完整 current v2 physical signature：v1 core 精确成立 +
+    `long_term_memory` 独立结构精确存在（列/约束/索引），且无额外 UNIQUE
+    semantic constraint。"""
+    if not _memory_v1_core_holds(conn):
+        return False
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "long_term_memory" not in tables:
+        return False
+    if not _table_columns_match(conn, "long_term_memory", _LONG_TERM_MEMORY_COLUMNS):
+        return False
+    # memory_id 是 PK（origin='pk'），不属于 origin='u'；long_term_memory
+    # 不允许额外 table-level UNIQUE constraint。
+    if _unique_constraint_set(conn, "long_term_memory") != frozenset():
+        return False
+    if _unique_named_indexes(conn, "long_term_memory") != frozenset():
+        return False
+    for name, (unique, partial, columns) in _LONG_TERM_MEMORY_INDEXES.items():
+        if not _index_matches(
+            conn, "long_term_memory", name, unique=unique, partial=partial,
+            columns=columns,
+        ):
+            return False
+    return True
+
+
+def _memory_v1_signature_holds(conn: sqlite3.Connection) -> bool:
+    """v1 physical signature：v1 core 精确成立 + `long_term_memory` 缺席。
+
+    这是 v1→v2 migration 的已批准 from-state。"""
+    if not _memory_v1_core_holds(conn):
+        return False
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    return "long_term_memory" not in tables
+
+
 def _memory_legacy_signature_holds(conn: sqlite3.Connection) -> bool:
     """唯一 allowlisted pre-additive legacy signature：messages 恰为 6 基础列 +
     conversation_summaries 精确 + message_exchanges/FTS/triggers 缺席 +
@@ -1061,11 +1167,21 @@ def _memory_legacy_signature_holds(conn: sqlite3.Connection) -> bool:
     return True
 
 
-def _create_current_memory_schema(conn: sqlite3.Connection) -> None:
-    """创建当前 Memory v1 schema（全部 IF NOT EXISTS，additive-safe）。
+def _create_long_term_memory_schema(conn: sqlite3.Connection) -> None:
+    """创建 Long-term Memory 独立结构（v2 新增；全部 IF NOT EXISTS）。
 
-    messages 表按当前完整列集合定义；本函数同时是 MemoryManager._init_db
-    与 legacy migrate 共用的事实 SQL 来源。
+    只用于全新 v2 初始化与显式 v1→v2 migration；不会被 constructor 对
+    已有 DB 隐式调用。
+    """
+    conn.execute(_LONG_TERM_MEMORY_DDL)
+    conn.execute(_LONG_TERM_MEMORY_INDEX_DDL)
+
+
+def _create_current_memory_schema(conn: sqlite3.Connection) -> None:
+    """创建当前 Memory v2 schema（全部 IF NOT EXISTS，additive-safe）。
+
+    messages 表按当前完整列集合定义；本函数同时是全新 DB 初始化与
+    legacy migrate 共用的事实 SQL 来源。
     """
     conn.execute(
         """
@@ -1135,15 +1251,18 @@ def _create_current_memory_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_TRIGGER_AI_DDL)
     conn.execute(_TRIGGER_AD_DDL)
     conn.execute(_TRIGGER_AU_DDL)
+    _create_long_term_memory_schema(conn)
 
 
 def _detect_memory_shape(conn: sqlite3.Connection) -> str:
-    """返回 current / legacy / unknown；基于 deterministic exact physical
-    signature（列/类型/NOT NULL/DEFAULT/PK/索引列/唯一性/partial 谓词/
-    FTS/trigger 全部精确匹配）。malformed / ambiguous → unknown（由调用方
+    """返回 current / v1 / legacy / unknown；基于 deterministic exact
+    physical signature（列/类型/NOT NULL/DEFAULT/PK/索引列/唯一性/partial
+    谓词/FTS/trigger 全部精确匹配）。malformed / ambiguous → unknown（由调用方
     判 UNSUPPORTED，fail closed）。"""
     if _memory_current_signature_holds(conn):
         return "current"
+    if _memory_v1_signature_holds(conn):
+        return "v1"
     if _memory_legacy_signature_holds(conn):
         return "legacy"
     return "unknown"
@@ -1186,18 +1305,22 @@ def memory_preflight(
     try:
         user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
         shape = _detect_memory_shape(conn)
-        if mode is PreflightMode.FULL and shape in {"current", "legacy"}:
+        if mode is PreflightMode.FULL and shape in {"current", "v1", "legacy"}:
             conn.execute("SELECT COUNT(1) FROM messages").fetchone()
             conn.execute(
                 "SELECT COUNT(1) FROM conversation_summaries"
             ).fetchone()
+            if shape == "current":
+                conn.execute(
+                    "SELECT COUNT(1) FROM long_term_memory"
+                ).fetchone()
     except (sqlite3.Error, TypeError, ValueError):
         return _memory_failed_result()
     finally:
         conn.close()
 
     if shape == "unknown":
-        # truly empty valid SQLite file（无任何表）→ new v1 initialization
+        # truly empty valid SQLite file（无任何表）→ new v2 initialization
         try:
             probe = open_read_only(db_path)
             try:
@@ -1237,12 +1360,37 @@ def memory_preflight(
             target_version=str(MEMORY_SCHEMA_VERSION),
             safe_error_code=PERSISTENCE_SCHEMA_UNSUPPORTED,
         )
+    if user_version == 1 and shape == "v1":
+        return PersistencePreflightResult(
+            store_id=StoreId.MEMORY,
+            status=PreflightStatus.MIGRATION_REQUIRED,
+            action=MigrationAction.MIGRATE,
+            detected_version="1",
+            target_version=str(MEMORY_SCHEMA_VERSION),
+        )
+    if user_version == 1:
+        return PersistencePreflightResult(
+            store_id=StoreId.MEMORY,
+            status=PreflightStatus.UNSUPPORTED,
+            action=MigrationAction.NONE,
+            detected_version=str(user_version),
+            target_version=str(MEMORY_SCHEMA_VERSION),
+            safe_error_code=PERSISTENCE_SCHEMA_UNSUPPORTED,
+        )
     if user_version == 0 and shape == "current":
         return PersistencePreflightResult(
             store_id=StoreId.MEMORY,
             status=PreflightStatus.MIGRATION_REQUIRED,
             action=MigrationAction.MIGRATE,
             detected_version="0",
+            target_version=str(MEMORY_SCHEMA_VERSION),
+        )
+    if user_version == 0 and shape == "v1":
+        return PersistencePreflightResult(
+            store_id=StoreId.MEMORY,
+            status=PreflightStatus.MIGRATION_REQUIRED,
+            action=MigrationAction.MIGRATE,
+            detected_version="v1-0",
             target_version=str(MEMORY_SCHEMA_VERSION),
         )
     if user_version == 0 and shape == "legacy":
@@ -1252,6 +1400,15 @@ def memory_preflight(
             action=MigrationAction.MIGRATE,
             detected_version="legacy-0",
             target_version=str(MEMORY_SCHEMA_VERSION),
+        )
+    if user_version == 0:
+        return PersistencePreflightResult(
+            store_id=StoreId.MEMORY,
+            status=PreflightStatus.UNSUPPORTED,
+            action=MigrationAction.NONE,
+            detected_version=str(user_version),
+            target_version=str(MEMORY_SCHEMA_VERSION),
+            safe_error_code=PERSISTENCE_SCHEMA_UNSUPPORTED,
         )
     if user_version > MEMORY_SCHEMA_VERSION:
         return PersistencePreflightResult(
@@ -1273,11 +1430,13 @@ def memory_preflight(
 
 
 def memory_migrate(db_path: str) -> None:
-    """显式 Memory migration：单 Store transaction，只允许两种已批准 from-state。
+    """显式 Memory migration：单 Store transaction，只允许已批准 from-state。
 
-    - current-unversioned（user_version=0 + 完整 current shape）→ metadata adoption；
+    - current-unversioned（user_version=0 + 完整 v2 current shape）→ 版本 2 adoption；
+    - v1（user_version=0/1 + 完整 v1 shape，无 long_term_memory）→ additive 新增
+      Long-term Memory 结构 + 版本 2；
     - 唯一 allowlisted pre-additive legacy shape → additive columns + backfill +
-      approved tables/indexes/FTS/triggers。
+      approved tables/indexes/FTS/triggers + Long-term Memory + 版本 2。
     任何其他 from-state 抛 PERSISTENCE_MIGRATION_FAILED 且不修改。绝不改业务 row 正文。
     """
     conn = sqlite3.connect(db_path)
@@ -1290,7 +1449,17 @@ def memory_migrate(db_path: str) -> None:
         user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
         shape = _detect_memory_shape(conn)
         if user_version == 0 and shape == "current":
-            conn.execute("PRAGMA user_version = 1")
+            conn.execute("PRAGMA user_version = 2")
+            conn.execute("COMMIT")
+            return
+        if user_version in (0, 1) and shape == "v1":
+            _create_long_term_memory_schema(conn)
+            if _detect_memory_shape(conn) != "current":
+                raise PersistenceError(
+                    PERSISTENCE_MIGRATION_FAILED,
+                    "Memory v1→v2 迁移后 physical signature 校验未通过，拒绝提交",
+                )
+            conn.execute("PRAGMA user_version = 2")
             conn.execute("COMMIT")
             return
         if user_version == 0 and shape == "legacy":
@@ -1305,19 +1474,19 @@ def memory_migrate(db_path: str) -> None:
                 "WHERE memory_scope IS NULL OR memory_scope = ''"
             )
             _create_current_memory_schema(conn)
-            # §16：设置 user_version 前必须通过 exact current physical signature
-            # 校验；任何 wrong trigger/index/constraint 都不提交版本 1。
+            # §16：设置 user_version 前必须通过 exact current v2 physical signature
+            # 校验；任何 wrong trigger/index/constraint 都不提交版本 2。
             if _detect_memory_shape(conn) != "current":
                 raise PersistenceError(
                     PERSISTENCE_MIGRATION_FAILED,
                     "Memory 迁移后 physical signature 校验未通过，拒绝提交",
                 )
-            conn.execute("PRAGMA user_version = 1")
+            conn.execute("PRAGMA user_version = 2")
             conn.execute("COMMIT")
             return
         raise PersistenceError(
             PERSISTENCE_MIGRATION_FAILED,
-            "Memory 迁移前置校验未通过：只接受 current-unversioned 或 allowlisted legacy",
+            "Memory 迁移前置校验未通过：只接受 current-unversioned、v1 或 allowlisted legacy",
         )
     except PersistenceError:
         _rollback_safely(conn)

@@ -436,13 +436,13 @@ KB degraded 语义：`knowledge_base_required=false` 且 KB 初始化/import 失
 
 | Store | Version mechanism | Migration | Historical rewrite |
 | --- | --- | --- | --- |
-| Memory | `PRAGMA user_version=1`（SQLite physical marker） | 显式 SCRIPT_ROLE：current-unversioned → metadata adoption；唯一 allowlisted pre-additive legacy → additive columns + backfill + tables/indexes/FTS/triggers | 不修改业务 row 正文；version 与 schema change 同事务原子提交 |
+| Memory | `PRAGMA user_version=2`（SQLite physical marker；v2 新增独立 `long_term_memory` 结构） | 显式 SCRIPT_ROLE：current-unversioned → 版本 2 adoption；v1（无 `long_term_memory`）→ additive 新增 Long-term Memory 结构；唯一 allowlisted pre-additive legacy → additive columns + backfill + tables/indexes/FTS/triggers + Long-term Memory | 不修改业务 row 正文；version 与 schema change 同事务原子提交 |
 | Journal | exact physical signature（无 DB-level version）；row v1/v2 | 显式 SCRIPT_ROLE：仅允许缺 nullable `span_id`/`parent_span_id` 的 legacy → 单事务 ADD 两列 + index | **FORBIDDEN**（不 UPDATE/DELETE/rewrite 历史 row、version、digest、sequence、terminal ordering） |
 | Snapshot | row/payload v1（`snapshot_schema_version=1`）；exact table shape | 无 migration | FORBIDDEN（v0 不存在；未知版本 fail closed；不写回） |
 | Checkpoint | exact table shape（无版本） | 显式 SCRIPT_ROLE：不兼容 → 单事务 drop/recreate derived table | 可丢弃整个 derived Store（历史 offset 丢弃，不改变业务 Authority） |
 | Chroma | LocalAgent collection metadata marker（`localagent_collection_contract_version=1` + `chunk_schema_version=kb_chunk_schema_v2` + `embedding_compatibility_digest` + `embedding_dimension`） | marker validation + operator rebuild；不碰 Chroma internal SQLite | 不做 internal row migration |
 
-`record/payload schema version != SQLite physical schema version`。`journal_schema_version=2` 只说明 record digest/payload contract，不是 DB physical version；Memory 的 `PRAGMA user_version=1` 才是 physical marker。
+`record/payload schema version != SQLite physical schema version`。`journal_schema_version=2` 只说明 record digest/payload contract，不是 DB physical version；Memory 的 `PRAGMA user_version=2` 才是 physical marker。
 
 ### 11.3 Migration Boundary（frozen）
 

@@ -16,6 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_SQLITE_OWNERS = frozenset(
     {
+        "core/advanced_memory.py",
         "core/memory_manager.py",
         "core/persistence_migration.py",
         "core/runtime/event_journal_store.py",
@@ -539,7 +540,7 @@ _PRAGMA_FUNCTION_DIGESTS: dict[tuple[str, str], frozenset[str]] = {
 
 _PRAGMA_PROVENANCE_DIGESTS: dict[tuple[str, str], str] = {
     ("core/memory_manager.py", "_index_matches"): "77f5e579c85be1a3998c8bc3bb3bd07bf4c27bd3341baed1a0317f0f8ddf23ed",
-    ("core/memory_manager.py", "_memory_current_signature_holds"): "b4ae876c4ec27896d53ead95ea200d580716715a915fed37d75d2068f4af41f2",
+    ("core/memory_manager.py", "_memory_current_signature_holds"): "bbd26a9fc970bc7802f1e8d4fa4ea236fc8326efbe45a1dc81232e5f34f854b3",
     ("core/memory_manager.py", "_memory_legacy_signature_holds"): "b52507cd07e4f649e666a4e12aefe8dfb759c2238fe98bff4590686a47e765cc",
     ("core/runtime/event_journal_store.py", "_journal_pk_matches"): "a031cd2d25768aa0bb87985781e284e56f79433569125a94374fe40b1b563241",
     ("core/runtime/event_journal_store.py", "_journal_event_id_unique_matches"): "166594664e4110e399ff5562e17c53b84e1fbf52e14093c2eb68cd722a01d4f4",
@@ -564,21 +565,25 @@ _PRAGMA_ALLOWED_REFERENCES: dict[str, Counter[tuple[str, str, str]]] = {
     "core/memory_manager.py": Counter(
         {
             ("_index_definition", "_index_matches", "_index_definition(conn, table, index_name)"): 1,
-            ("_index_matches", "_memory_current_signature_holds", "_index_matches(conn, table, name, unique=unique, partial=partial, columns=columns, predicate=predicate)"): 1,
+            ("_index_matches", "_memory_v1_core_holds", "_index_matches(conn, table, name, unique=unique, partial=partial, columns=columns, predicate=predicate)"): 1,
             ("_index_matches", "_memory_legacy_signature_holds", "_index_matches(conn, 'messages', name, unique=unique, partial=partial, columns=columns)"): 1,
-            ("_table_columns_match", "_memory_current_signature_holds", "_table_columns_match(conn, 'messages', _MESSAGES_CURRENT_COLUMNS)"): 1,
-            ("_table_columns_match", "_memory_current_signature_holds", "_table_columns_match(conn, 'conversation_summaries', _SUMMARY_COLUMNS)"): 1,
-            ("_table_columns_match", "_memory_current_signature_holds", "_table_columns_match(conn, 'message_exchanges', _EXCHANGES_COLUMNS)"): 1,
+            ("_index_matches", "_memory_current_signature_holds", "_index_matches(conn, 'long_term_memory', name, unique=unique, partial=partial, columns=columns)"): 1,
+            ("_table_columns_match", "_memory_v1_core_holds", "_table_columns_match(conn, 'messages', _MESSAGES_CURRENT_COLUMNS)"): 1,
+            ("_table_columns_match", "_memory_v1_core_holds", "_table_columns_match(conn, 'conversation_summaries', _SUMMARY_COLUMNS)"): 1,
+            ("_table_columns_match", "_memory_v1_core_holds", "_table_columns_match(conn, 'message_exchanges', _EXCHANGES_COLUMNS)"): 1,
+            ("_table_columns_match", "_memory_current_signature_holds", "_table_columns_match(conn, 'long_term_memory', _LONG_TERM_MEMORY_COLUMNS)"): 1,
             ("_table_columns_match", "_memory_legacy_signature_holds", "_table_columns_match(conn, 'messages', _MESSAGES_LEGACY_COLUMNS)"): 1,
             ("_table_columns_match", "_memory_legacy_signature_holds", "_table_columns_match(conn, 'conversation_summaries', _SUMMARY_COLUMNS)"): 1,
-            ("_unique_constraint_set", "_memory_current_signature_holds", "_unique_constraint_set(conn, 'messages')"): 1,
-            ("_unique_constraint_set", "_memory_current_signature_holds", "_unique_constraint_set(conn, 'conversation_summaries')"): 1,
-            ("_unique_constraint_set", "_memory_current_signature_holds", "_unique_constraint_set(conn, 'message_exchanges')"): 1,
+            ("_unique_constraint_set", "_memory_v1_core_holds", "_unique_constraint_set(conn, 'messages')"): 1,
+            ("_unique_constraint_set", "_memory_v1_core_holds", "_unique_constraint_set(conn, 'conversation_summaries')"): 1,
+            ("_unique_constraint_set", "_memory_v1_core_holds", "_unique_constraint_set(conn, 'message_exchanges')"): 1,
+            ("_unique_constraint_set", "_memory_current_signature_holds", "_unique_constraint_set(conn, 'long_term_memory')"): 1,
             ("_unique_constraint_set", "_memory_legacy_signature_holds", "_unique_constraint_set(conn, 'messages')"): 1,
             ("_unique_constraint_set", "_memory_legacy_signature_holds", "_unique_constraint_set(conn, 'conversation_summaries')"): 1,
-            ("_unique_named_indexes", "_memory_current_signature_holds", "_unique_named_indexes(conn, 'messages')"): 1,
-            ("_unique_named_indexes", "_memory_current_signature_holds", "_unique_named_indexes(conn, 'conversation_summaries')"): 1,
-            ("_unique_named_indexes", "_memory_current_signature_holds", "_unique_named_indexes(conn, 'message_exchanges')"): 1,
+            ("_unique_named_indexes", "_memory_v1_core_holds", "_unique_named_indexes(conn, 'messages')"): 1,
+            ("_unique_named_indexes", "_memory_v1_core_holds", "_unique_named_indexes(conn, 'conversation_summaries')"): 1,
+            ("_unique_named_indexes", "_memory_v1_core_holds", "_unique_named_indexes(conn, 'message_exchanges')"): 1,
+            ("_unique_named_indexes", "_memory_current_signature_holds", "_unique_named_indexes(conn, 'long_term_memory')"): 1,
             ("_unique_named_indexes", "_memory_legacy_signature_holds", "_unique_named_indexes(conn, 'messages')"): 1,
             ("_unique_named_indexes", "_memory_legacy_signature_holds", "_unique_named_indexes(conn, 'conversation_summaries')"): 1,
         }

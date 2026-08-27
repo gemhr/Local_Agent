@@ -233,7 +233,7 @@ uv run python scripts/manage_persistence.py migrate --backup-confirmed
 
 - `preflight`：只读全 Store 检测，输出 `NEW / CURRENT / MIGRATION_REQUIRED / REBUILD_REQUIRED / UNSUPPORTED / FAILED`；非全部 `NEW/CURRENT` 返回 non-zero。
 - `migrate`：先全 Store preflight；任何 UNSUPPORTED/FAILED 或已有数据需要 mutation 时缺少 `--backup-confirmed` → non-zero 且零 mutation。
-- 每 Store 独立单事务：Memory additive migration + `user_version=1` 同事务原子提交；Journal 只加 nullable span 列绝不 rewrite 历史 row；Checkpoint 只 drop/recreate derived table（历史 offset 丢弃，不影响业务 Authority）。
+- 每 Store 独立单事务：Memory additive migration（v1→v2 新增 `long_term_memory`）+ `user_version=2` 同事务原子提交；Journal 只加 nullable span 列绝不 rewrite 历史 row；Checkpoint 只 drop/recreate derived table（历史 offset 丢弃，不影响业务 Authority）。
 - 部分 Store commit 后后续失败 → overall FAIL、partial committed facts 如实报告；rerun 从实际 facts 继续（idempotent / safely re-runnable，不宣称 exactly-once）。
 - Migration 是 forward-only：提交后 old binary compatibility NOT ASSUMED；无 downgrade migration。
 

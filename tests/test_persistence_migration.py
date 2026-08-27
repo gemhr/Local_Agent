@@ -45,6 +45,7 @@ from test_persistence_preflight import (
     _memory_legacy,
     _memory_unversioned_current,
     _memory_v1,
+    _memory_v2,
     _paths,
     _snapshot_current,
 )
@@ -93,7 +94,7 @@ def _checkpoint_rows(path: Path) -> int:
 
 
 def test_all_current_migrate_is_noop(tmp_path: Path) -> None:
-    memory = _memory_v1(tmp_path / "memory.db")
+    memory = _memory_v2(tmp_path / "memory.db")
     journal = _journal_current(tmp_path / "journal.db")
     snapshot = tmp_path / "snap.db"  # absent → NEW（snapshot enabled 但未初始化）
     checkpoint = _checkpoint_current(tmp_path / "checkpoint.db")
@@ -142,7 +143,7 @@ def test_migrate_all_new_does_not_require_backup(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_memory_legacy_migrates_to_v1_and_preserves_rows(tmp_path: Path) -> None:
+def test_memory_legacy_migrates_to_v2_and_preserves_rows(tmp_path: Path) -> None:
     path = _memory_legacy(tmp_path / "memory.db")
     with sqlite3.connect(path) as conn:
         content_before = conn.execute(
@@ -156,10 +157,11 @@ def test_memory_legacy_migrates_to_v1_and_preserves_rows(tmp_path: Path) -> None
     memory_result = next(r for r in outcome.results if r.store_id.value == "MEMORY")
     assert memory_result.committed is True
 
-    assert _user_version(path) == 1
+    assert _user_version(path) == 2
     columns = _memory_columns(path)
     assert {"memory_scope", "exchange_id", "run_id", "sequence"} <= columns
     assert "message_exchanges" in _memory_tables(path)
+    assert "long_term_memory" in _memory_tables(path)
     with sqlite3.connect(path) as conn:
         assert conn.execute(
             "SELECT content FROM messages WHERE agent_id='agent-a'"
@@ -176,7 +178,7 @@ def test_memory_current_unversioned_adoption(tmp_path: Path) -> None:
         _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
         backup_confirmed=True,
     )
-    assert _user_version(path) == 1
+    assert _user_version(path) == 2
 
 
 def test_memory_migration_rollback_on_partial_failure(tmp_path: Path, monkeypatch) -> None:
@@ -208,12 +210,122 @@ def test_memory_migration_rollback_on_partial_failure(tmp_path: Path, monkeypatc
         _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
         backup_confirmed=True,
     )
+    assert _user_version(path) == 2
+
+
+# ---------------------------------------------------------------------------
+# WP1-B v1 → v2 explicit additive migration
+# ---------------------------------------------------------------------------
+
+
+def test_memory_v1_migrates_to_v2_and_preserves_conversation(tmp_path: Path) -> None:
+    """v1 → v2：保留 messages/summaries/exchanges/FTS，新增 long_term_memory。"""
+    path = _memory_v1(tmp_path / "memory.db")
     assert _user_version(path) == 1
+    assert "long_term_memory" not in _memory_tables(path)
+    # 造 exchange + summary 数据（v1 已含 direct 消息）
+    manager = MemoryManager(db_path=str(path))
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO conversation_summaries(agent_id, summary, last_message_id)"
+            " VALUES ('agent-a', 'rolling-summary', 1)"
+        )
+        conn.commit()
+    manager.append_exchange_atomic(
+        "agent-a", "direct", "exchange-user", "exchange-assistant", run_id="run-e1"
+    )
+
+    outcome = run_persistence_migration(
+        _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
+        backup_confirmed=True,
+    )
+    memory_result = next(r for r in outcome.results if r.store_id.value == "MEMORY")
+    assert memory_result.committed is True
+
+    assert _user_version(path) == 2
+    assert "long_term_memory" in _memory_tables(path)
+    with sqlite3.connect(path) as conn:
+        # conversation rows 保留
+        assert conn.execute(
+            "SELECT COUNT(1) FROM messages WHERE agent_id='agent-a' AND content='hello'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(1) FROM messages WHERE agent_id='agent-a' AND content='exchange-user'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(1) FROM message_exchanges WHERE run_id='run-e1'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT summary FROM conversation_summaries WHERE agent_id='agent-a'"
+        ).fetchone()[0] == "rolling-summary"
+        # FTS 仍可检索（触发器保留）
+        assert conn.execute(
+            "SELECT COUNT(1) FROM messages_fts WHERE messages_fts MATCH 'hello'"
+        ).fetchone()[0] == 1
+        # long_term_memory 为空但结构存在
+        assert conn.execute(
+            "SELECT COUNT(1) FROM long_term_memory"
+        ).fetchone()[0] == 0
+    # 二次 preflight 变为 CURRENT；rerun no-op
+    assert run_persistence_preflight(
+        _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
+    )[0].status is PreflightStatus.CURRENT
+    second = run_persistence_migration(
+        _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
+        backup_confirmed=True,
+    )
+    memory_rerun = next(r for r in second.results if r.store_id.value == "MEMORY")
+    assert memory_rerun.action.value == "NONE"
 
 
-# ---------------------------------------------------------------------------
-# Journal migration
-# ---------------------------------------------------------------------------
+def test_memory_v1_to_v2_rollback_on_failure(tmp_path: Path, monkeypatch) -> None:
+    """v1→v2 失败 → 完整 rollback：version 不前移、无 long_term_memory、
+    conversation 保留；修复后 rerun 成功。"""
+    path = _memory_v1(tmp_path / "memory.db")
+
+    def boom(conn):
+        raise sqlite3.Error("forced long_term_memory failure")
+
+    monkeypatch.setattr(memory_module, "_create_long_term_memory_schema", boom)
+    outcome = run_persistence_migration(
+        _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
+        backup_confirmed=True,
+    )
+    assert outcome.failed
+    memory_result = next(r for r in outcome.results if r.store_id.value == "MEMORY")
+    assert memory_result.committed is False
+    assert memory_result.safe_error_code == PERSISTENCE_MIGRATION_FAILED
+    monkeypatch.undo()
+    # rollback：仍为 v1，conversation 保留
+    assert _user_version(path) == 1
+    assert "long_term_memory" not in _memory_tables(path)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT content FROM messages WHERE agent_id='agent-a'"
+        ).fetchone()[0] == "hello"
+    # 修复后 rerun 成功 → v2
+    run_persistence_migration(
+        _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
+        backup_confirmed=True,
+    )
+    assert _user_version(path) == 2
+    assert "long_term_memory" in _memory_tables(path)
+
+
+def test_memory_v1_unversioned_migrates_to_v2(tmp_path: Path) -> None:
+    """v1 shape + user_version=0 也按 v1→v2 additive 迁移（保持一致 fail-safe）。"""
+    path = _memory_v1(tmp_path / "memory.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA user_version = 0")
+    assert run_persistence_preflight(
+        _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
+    )[0].status is PreflightStatus.MIGRATION_REQUIRED
+    run_persistence_migration(
+        _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
+        backup_confirmed=True,
+    )
+    assert _user_version(path) == 2
+    assert "long_term_memory" in _memory_tables(path)
 
 
 def test_journal_legacy_migrates_to_current_and_preserves_rows(tmp_path: Path) -> None:
@@ -262,7 +374,7 @@ def test_journal_legacy_migrates_to_current_and_preserves_rows(tmp_path: Path) -
         )
 
     outcome = run_persistence_migration(
-        _paths(_memory_v1(tmp_path / "memory.db"), path, None, _checkpoint_current(tmp_path / "c.db")),
+        _paths(_memory_v2(tmp_path / "memory.db"), path, None, _checkpoint_current(tmp_path / "c.db")),
         backup_confirmed=True,
     )
     journal_result = next(r for r in outcome.results if r.store_id.value == "EVENT_JOURNAL")
@@ -297,7 +409,7 @@ def test_journal_unsupported_row_version_blocks_migration(tmp_path: Path) -> Non
         )
     with pytest.raises(PersistenceError):
         run_persistence_migration(
-            _paths(_memory_v1(tmp_path / "memory.db"), path, None, _checkpoint_current(tmp_path / "c.db")),
+            _paths(_memory_v2(tmp_path / "memory.db"), path, None, _checkpoint_current(tmp_path / "c.db")),
             backup_confirmed=True,
         )
     # 未修改
@@ -317,7 +429,7 @@ def test_checkpoint_incompatible_recreate_then_current(tmp_path: Path) -> None:
     path = _checkpoint_incompatible(tmp_path / "c.db")
     assert checkpoint_preflight(str(path)).status is PreflightStatus.MIGRATION_REQUIRED
 
-    memory = _memory_v1(tmp_path / "memory.db")
+    memory = _memory_v2(tmp_path / "memory.db")
     journal = _journal_current(tmp_path / "journal.db")
     outcome = run_persistence_migration(
         _paths(memory, journal, None, path), backup_confirmed=True
@@ -334,7 +446,7 @@ def test_checkpoint_incompatible_recreate_then_current(tmp_path: Path) -> None:
 
 
 def test_checkpoint_recreate_does_not_touch_memory_or_journal(tmp_path: Path) -> None:
-    memory = _memory_v1(tmp_path / "memory.db")
+    memory = _memory_v2(tmp_path / "memory.db")
     journal = _journal_current(tmp_path / "journal.db")
     checkpoint = _checkpoint_incompatible(tmp_path / "checkpoint.db")
     memory_bytes = memory.read_bytes()
@@ -372,7 +484,7 @@ def test_partial_completion_then_rerun_is_safe(tmp_path: Path, monkeypatch) -> N
     monkeypatch.undo()
 
     # Memory 已 commit；Journal 仍 legacy。rerun 从实际 facts 继续。
-    assert _user_version(memory) == 1
+    assert _user_version(memory) == 2
     rerun = run_persistence_migration(
         _paths(memory, journal, None, checkpoint), backup_confirmed=True
     )
@@ -392,15 +504,15 @@ def test_unsupported_anywhere_prevents_all_mutation(tmp_path: Path) -> None:
     memory = _memory_legacy(tmp_path / "memory.db")
     journal = _journal_current(tmp_path / "journal.db")
     checkpoint = _checkpoint_current(tmp_path / "checkpoint.db")
-    # future memory（user_version=2）→ UNSUPPORTED
+    # future memory（user_version=3）→ UNSUPPORTED
     with sqlite3.connect(memory) as conn:
-        conn.execute("PRAGMA user_version = 2")
+        conn.execute("PRAGMA user_version = 3")
     with pytest.raises(PersistenceError):
         run_persistence_migration(
             _paths(memory, journal, None, checkpoint), backup_confirmed=True
         )
     # 零 mutation：legacy memory 保持 legacy
-    assert _user_version(memory) == 2
+    assert _user_version(memory) == 3
     assert "memory_scope" not in _memory_columns(memory)
 
 
@@ -417,7 +529,7 @@ def test_offline_copy_backup_restore_full_preflight_pass(tmp_path: Path) -> None
 
     source_dir = tmp_path / "source"
     source_dir.mkdir()
-    memory = _memory_v1(source_dir / "memory.db")
+    memory = _memory_v2(source_dir / "memory.db")
     journal = _journal_current(source_dir / "journal.db")
     snapshot = _snapshot_current(source_dir / "snapshot.db")
     kb_source = source_dir / "kb"
@@ -445,11 +557,11 @@ def test_offline_copy_backup_restore_full_preflight_pass(tmp_path: Path) -> None
 
 
 def test_restore_newer_memory_fails_closed_without_mutation(tmp_path: Path) -> None:
-    """恢复 wrong/newer 版本（user_version=2）→ full preflight fail closed，
+    """恢复 wrong/newer 版本（user_version=3）→ full preflight fail closed，
     且不修改 fixture。"""
-    memory = _memory_v1(tmp_path / "memory.db")
+    memory = _memory_v2(tmp_path / "memory.db")
     with sqlite3.connect(memory) as conn:
-        conn.execute("PRAGMA user_version = 2")
+        conn.execute("PRAGMA user_version = 3")
     before = memory.read_bytes()
     results = run_persistence_preflight(
         _paths(
@@ -499,7 +611,7 @@ def test_migrate_refuses_malformed_journal_from_state(tmp_path: Path) -> None:
     with pytest.raises(PersistenceError):
         run_persistence_migration(
             _paths(
-                _memory_v1(tmp_path / "memory.db"),
+                _memory_v2(tmp_path / "memory.db"),
                 path,
                 None,
                 _checkpoint_current(tmp_path / "checkpoint.db"),
