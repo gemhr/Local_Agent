@@ -137,6 +137,26 @@ _DELIVERY_STATUS_VALUES = frozenset(
 _MEMORY_STATUS_VALUES = frozenset(
     {"SUCCEEDED", "FAILED", "NOT_ATTEMPTED", "unknown"}
 )
+_FORMATION_STATUS_VALUES = frozenset(
+    {"SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED", "TIMED_OUT", "unknown"}
+)
+_FORMATION_ERROR_CODES = frozenset(
+    {
+        "OK",
+        "FORMATION_MODEL_FAILED",
+        "FORMATION_OUTPUT_INVALID",
+        "FORMATION_OUTPUT_UNKNOWN_FIELD",
+        "FORMATION_OUTPUT_FORBIDDEN_FIELD",
+        "FORMATION_BATCH_TOO_LARGE",
+        "FORMATION_DUPLICATE_EXECUTION",
+        "FORMATION_IDENTITY_INVALID",
+        "FORMATION_PERSISTENCE_FAILED",
+        "FORMATION_TIMED_OUT",
+        "FORMATION_CANCELLED",
+        "FORMATION_INTERNAL_ERROR",
+        "unknown",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +354,27 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
             allowed_labels=frozenset({"status"}),
             required_labels=frozenset({"status"}),
             bounded_values={"status": _MEMORY_STATUS_VALUES},
+        ),
+        MetricDescriptor(
+            name="runtime_memory_formation_total",
+            type=MetricType.COUNTER,
+            description="WP2 post-delivery Semantic Memory Formation 结果",
+            unit="formations",
+            allowed_labels=frozenset({"status", "error_code"}),
+            required_labels=frozenset({"status", "error_code"}),
+            bounded_values={
+                "status": _FORMATION_STATUS_VALUES,
+                "error_code": _FORMATION_ERROR_CODES,
+            },
+        ),
+        MetricDescriptor(
+            name="runtime_memory_formation_duration_seconds",
+            type=MetricType.HISTOGRAM,
+            description="WP2 Semantic Memory Formation 总时长",
+            unit="seconds",
+            allowed_labels=frozenset({"status"}),
+            required_labels=frozenset({"status"}),
+            bounded_values={"status": _FORMATION_STATUS_VALUES},
         ),
         _descriptor("runtime_retries_total", MetricType.COUNTER, "Retry Attempt 数", "retries", "component"),
         _descriptor("runtime_budget_exhaustions_total", MetricType.COUNTER, "预算耗尽数", "events", "component", "budget_dimension", "status"),
@@ -818,6 +859,28 @@ class RuntimeMetricsProjector:
                     labels={"status": self._status(payload)},
                 )
             self._project_component_outcome("retrieval", payload)
+        elif event_type is RuntimeEventType.MEMORY_FORMATION_COMPLETED:
+            status = str(payload.get("status", "unknown"))
+            if status not in _FORMATION_STATUS_VALUES:
+                status = "unknown"
+            error_code = str(payload.get("safe_error_code") or "OK")
+            if error_code not in _FORMATION_ERROR_CODES:
+                error_code = "unknown"
+            self.recorder.increment_counter(
+                "runtime_memory_formation_total",
+                labels={"status": status, "error_code": error_code},
+            )
+            duration_ms = payload.get("formation_total_duration_ms")
+            if (
+                isinstance(duration_ms, int)
+                and not isinstance(duration_ms, bool)
+                and duration_ms >= 0
+            ):
+                self.recorder.observe_histogram(
+                    "runtime_memory_formation_duration_seconds",
+                    duration_ms / 1000.0,
+                    labels={"status": status},
+                )
         elif event_type is RuntimeEventType.BUDGET_EXHAUSTED:
             if payload.get("component") in {"run", "run_coordinator"}:
                 self.recorder.increment_counter(

@@ -1,5 +1,18 @@
 # Runtime Owner Matrix
 
+## Phase5 WP2 Semantic Memory Formation Owners
+
+| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
+| --- | --- | --- | --- | --- | --- | --- |
+| canonical delivered conversation exchange | `RunFinalMemoryWriter`（RUN_SCOPE） | StepResultCommitter、Semantic Formation eligibility | `OutputGate=DELIVERED` 后调用 `MemoryManager.append_exchange_atomic`；成功返回最小 committed receipt | Memory SQLite conversation rows | writer 调 LLM、判断 Should Remember 或写 Long-term Memory | INTERNAL_RC |
+| Semantic Formation execution/policy | `SemanticMemoryFormation`（RUN_SCOPE） | StepResultCommitter、safe observation | committed receipt 后 awaited 执行；strict parse + code-owned validation；同一 run/exchange write-once guard | 无独立 durable intent；typed result 进程内 | 改变 delivery/terminal；cross-Run dedup；Conflict/Supersede/Forget/Retrieval | INTERNAL_RC |
+| accepted Semantic record | `AdvancedMemoryStore.create` + immutable `SemanticMemoryRecord` | future Memory readers、safe provenance projection | LocalAgent 生成 ID/type/status/origin/method/timestamps；每 candidate 单 transaction | Memory SQLite `long_term_memory` | Model 生成 authoritative fields；direct SQL；batch transaction | INTERNAL_RC |
+| Formation observation | `MEMORY_FORMATION_COMPLETED` typed Event + Journal-first channel | Runtime observability metrics；internal span recorder | 从已确定 Formation result 单向投影，best-effort | Runtime Event Journal；metric/span 为派生观察 | 保存正文/payload/source quote/raw exception；写回 Memory/output/terminal | PUBLIC_VERSIONED Event v2 / formation payload v1 |
+
+`memory.formation` span 是 INTERNAL_RC extension operation，不属于 Trace Contract v1
+六个 PUBLIC_VERSIONED operation；`SAFE_SPAN_ATTRIBUTES` 的新增安全键不会自动进入
+consumer-neutral trace export。
+
 ## Stage 3 WP3 Resource Authorization Owner
 
 | Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |

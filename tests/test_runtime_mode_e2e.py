@@ -96,7 +96,8 @@ async def test_api_to_factory_to_output_delta_to_terminal_happy_path(monkeypatch
     assert wire_text == "offline answer"
     assert _terminal_count(chunks) == 1
     assert registry.observability_snapshot()["active_runs"] == 0
-    assert model.calls == 2
+    # planning + final answer + post-delivery Semantic Formation extraction
+    assert model.calls == 3
 
 
 @pytest.mark.asyncio

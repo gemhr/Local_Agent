@@ -72,6 +72,10 @@ class _CoordinatedDenialModel:
             self.calls.append(("TOOL_PLANNER", copied))
             yield _complex_tool_call()
             return
+        if "长期记忆候选提取器" in system:
+            self.calls.append(("FORMATION", copied))
+            yield '{"schema_version":1,"candidates":[]}'
+            return
         self.calls.append(("FORBIDDEN_SYNTHESIS", copied))
         yield FAKE_SUCCESS
 
@@ -208,7 +212,7 @@ async def test_coordinated_delegated_actual_approval_denial_dominates_full_http(
         assert texts == [APPROVAL_TEXT]
         assert FAKE_SUCCESS not in "".join(texts)
         assert Counter(stage for stage, _ in model.calls) == Counter(
-            {"PLANNING": 1, "TOOL_PLANNER": 1}
+            {"PLANNING": 1, "TOOL_PLANNER": 1, "FORMATION": 1}
         )
         assert all(stage != "FORBIDDEN_SYNTHESIS" for stage, _ in model.calls)
         event_counts = Counter(item["event_type"] for item in controls)

@@ -18,7 +18,7 @@ def test_agent_router_planner_uses_unified_model_contract_and_strict_prompt() ->
 
     captured = {}
     router = object.__new__(AgentRouter)
-    router.max_tokens = 640
+    router.max_tokens = 1536
 
     def invoke(**kwargs):
         captured.update(kwargs)
@@ -34,7 +34,11 @@ def test_agent_router_planner_uses_unified_model_contract_and_strict_prompt() ->
     ) == "{}"
     assert captured["run_context"] is context
     assert captured["event_emitter"] is emitter
-    assert captured["generation_options"] == {"enable_thinking": False}
+    assert captured["generation_options"] == {
+        "enable_thinking": False,
+        "temperature": 0.2,
+    }
+    assert captured["max_tokens"] == 1024
     system_prompt = captured["messages"][0]["content"]
     assert "DIRECT_ANSWER" in system_prompt
     assert "DELEGATE" in system_prompt

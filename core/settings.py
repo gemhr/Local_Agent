@@ -726,6 +726,11 @@ class Settings:
         }
         preset = presets[profile_name]
         llm_backend = _env_backend()
+        remote_only_max_tokens = {
+            "fast": 2048,
+            "balanced": 4096,
+            "deep": 8192,
+        }[profile_name]
 
         # Environment Profile 只管理下列字段的默认值；显式 env 仍最高优先。
         remote_verify_tls = _env_strict_bool(
@@ -864,9 +869,11 @@ class Settings:
                 "LOCAL_AGENT_MODEL_PATH",
                 os.path.join(project_root, "data", "models", "qwen2.5-7b-instruct-q4_k_m.gguf"),
             ),
-            remote_model_name=os.getenv("LOCAL_AGENT_REMOTE_MODEL_NAME", "Qwen3.5-27B"),
+            remote_model_name=os.getenv(
+                "LOCAL_AGENT_REMOTE_MODEL_NAME", "deepseek-v4-flash"
+            ),
             remote_provider_kind=os.getenv(
-                "LOCAL_AGENT_REMOTE_PROVIDER_KIND", "openai_compatible"
+                "LOCAL_AGENT_REMOTE_PROVIDER_KIND", "deepseek"
             ).lower(),
             remote_api_base_url=os.getenv("LOCAL_AGENT_REMOTE_API_BASE_URL", ""),
             remote_api_key=os.getenv("LOCAL_AGENT_REMOTE_API_KEY", ""),
@@ -880,7 +887,7 @@ class Settings:
                 "LOCAL_AGENT_REMOTE_ENABLE_THINKING", False
             ),
             remote_context_window=_env_strict_int(
-                "LOCAL_AGENT_REMOTE_CONTEXT_WINDOW", 32768, minimum=1
+                "LOCAL_AGENT_REMOTE_CONTEXT_WINDOW", 1_000_000, minimum=1
             ),
             local_fixed_call_cost_units=_env_strict_int(
                 "LOCAL_AGENT_LOCAL_FIXED_CALL_COST_UNITS", 1, minimum=0
@@ -928,7 +935,13 @@ class Settings:
                 "LOCAL_AGENT_MODEL_GPU_LAYERS", 0, minimum=-1
             ),
             model_max_tokens=_env_strict_int(
-                "LOCAL_AGENT_MODEL_MAX_TOKENS", preset["model_max_tokens"], minimum=1
+                "LOCAL_AGENT_MODEL_MAX_TOKENS",
+                (
+                    remote_only_max_tokens
+                    if llm_backend == "remote"
+                    else preset["model_max_tokens"]
+                ),
+                minimum=1,
             ),
             history_window_size=_env_strict_int(
                 "LOCAL_AGENT_HISTORY_WINDOW_SIZE",

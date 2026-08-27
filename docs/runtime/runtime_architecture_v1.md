@@ -219,6 +219,7 @@ server.app（POST /api/chat）
 -> ToolExecutionService / ToolAdapter / production Tool
 -> StepResultStore / StepResultCommitter
 -> OutputGate / RunFinalMemoryWriter
+-> committed exchange receipt / SemanticMemoryFormation
 -> RuntimeEventChannel + SQLite Journal
 -> ChatStreamCompatibilityAdapter
 -> user-visible text/plain TEXT
@@ -229,6 +230,29 @@ server.app（POST /api/chat）
 - 测试只在既有 `server.LocalLLMEngine` constructor seam 注入按 prompt 语义响应的 FakeModel；Router、Planner、Registry、Governance、execution service、adapter、Tool、OutputGate、Memory 与 Journal 均为 production 对象。每个场景使用独立临时持久化路径，不访问 Internet、remote LLM、外部服务或真实开发数据库。
 - `OUTPUT_DELTA` 在 Journal 中保留安全事实，经 `ChatStreamCompatibilityAdapter` 转换为 TEXT；它不是 `[[ORCH]]` CONTROL chunk。测试保留原始 ASGI body message 边界并消费至 `more_body=false`，据此验证 CONTROL 与用户 TEXT 分离。
 - 该测试证据不改变现有 Owner、contract classification 或安全能力，也不代表 human approval、approval evidence、durable approval resume、filesystem/path authorization、sandbox 或 dedicated governance event 已实现。
+
+### 2.5 Phase5 Semantic Memory Formation
+
+默认 `COORDINATED` 路径在唯一 final Step 的 `OutputGate=DELIVERED` 且
+`RunFinalMemoryWriter.write_delivered()` 成功提交 canonical conversation exchange
+后，使用不可变 committed exchange receipt 触发 awaited、bounded、run-scoped
+`SemanticMemoryFormation`。Formation 只消费 original user query、仅供规范化辅助的
+delivered answer，以及真实 run/exchange/entry-agent/`direct` scope identity；经统一
+Model Invocation 产生严格 schema v1 proposal，再由 LocalAgent code-owned gate 校验
+category、grounding、字段形状和 authoritative identity，最终通过
+`AdvancedMemoryStore.create()` 按 candidate 独立 transaction 创建 `ACTIVE SEMANTIC`
+record。
+
+Formation 的 `FAILED` / `PARTIAL` / `CANCELLED` / `TIMED_OUT` 不改变已交付正文、
+final Step、Run terminal，也不触发再次交付。`MEMORY_FORMATION_COMPLETED` 是 Event v2
+内新增的 content-minimized typed outcome；其 payload 自带 formation schema version 1，
+只保存 identity、count、safe outcome/reason、memory ID 和 latency。指标从该 Journal-first
+event 投影；`memory.formation` span 是 `INTERNAL_RC` extension operation，不是 Trace
+Contract v1 的第七个公共 operation，公共 trace export 对它保持 fail closed。
+
+WP2 只保证同一 execution 内 prepared-record persistence retry 幂等；不实现跨进程
+replay、cross-Run dedup、Conflict Resolution、NO_CHANGE、supersede、forget、retrieval
+或 Context Injection。
 
 ## 3. Contract Classification
 
@@ -246,6 +270,7 @@ server.app（POST /api/chat）
 | ToolInvocation | PUBLIC_STABLE | 调用边界，原始 arguments 不进入 Journal/Wire |
 | ToolExecutionResult / ToolExecutionError | PUBLIC_STABLE | 强类型执行结果；不是 state owner |
 | ToolCompletedPayload | PUBLIC_VERSIONED | Event 内嵌 evidence v1；旧缺失字段保持 Unknown |
+| MemoryFormationCompletedPayload | PUBLIC_VERSIONED | Event v2 内嵌 Formation outcome schema v1；content-minimized，失败不改变 delivery/terminal |
 | ToolRegistry | INTERNAL_RC | 进程级 Tool 身份/描述/枚举/绑定唯一事实源；startup 冻结后只读 |
 | ToolDescriptor | INTERNAL_RC | 不可变 name + description；不承载执行状态 |
 | ToolRegistration | INTERNAL_RC | 不可变 Descriptor + ToolAdapter 绑定 |

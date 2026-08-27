@@ -90,8 +90,10 @@ def test_empty_content_at_length_has_clear_truncation_error(monkeypatch) -> None
         provider_kind="deepseek",
     )
 
-    with pytest.raises(RuntimeError, match="truncated before producing final content"):
+    with pytest.raises(RuntimeError, match="truncated before producing final content") as captured:
         list(engine.generate([{"role": "user", "content": "hi"}], max_tokens=24))
+    assert captured.value.safe_error_code == "REMOTE_OUTPUT_TRUNCATED"
+    assert captured.value.model_failure_category == "CONTEXT_LIMIT_EXCEEDED"
 
 
 class RecordingLLM:

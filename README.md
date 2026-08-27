@@ -77,15 +77,19 @@ uv sync
 
 环境变量由不可变 `Settings.load()` 在进程启动时读取；修改后必须重启（无运行时 reload，也无需 `.env` 文件）。所有显式配置严格解析：非法 bool/int/float、未知 Profile/backend 在启动前 fail closed，不会静默纠正。解析与校验只由 `core/settings.py` 执行。
 
-### 4.1 远程 OpenAI-compatible 后端
+### 4.1 远程 DeepSeek / OpenAI-compatible 后端
 
 默认 `LOCAL_AGENT_LLM_BACKEND=remote`，因此启动前必须提供远程地址。地址可以是 API 根地址、以 `/v1` 结尾的地址，或完整 `/chat/completions` 地址。
 
 ```powershell
 $env:LOCAL_AGENT_LLM_BACKEND="remote"
-$env:LOCAL_AGENT_REMOTE_PROVIDER_KIND="openai_compatible"
-$env:LOCAL_AGENT_REMOTE_API_BASE_URL="<provider-api-base-or-chat-completions-url>"
-$env:LOCAL_AGENT_REMOTE_MODEL_NAME="<provider-model-id>"
+$env:LOCAL_AGENT_REMOTE_PROVIDER_KIND="deepseek"
+$env:LOCAL_AGENT_REMOTE_API_BASE_URL="https://api.deepseek.com"
+$env:LOCAL_AGENT_REMOTE_MODEL_NAME="deepseek-v4-flash"
+$env:LOCAL_AGENT_REMOTE_CONTEXT_WINDOW="1000000"
+$env:LOCAL_AGENT_MODEL_MAX_TOKENS="4096"
+$env:LOCAL_AGENT_REMOTE_ENABLE_THINKING="0"
+$env:LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS="120"
 $env:LOCAL_AGENT_REMOTE_VERIFY_TLS="1"
 # Provider 需要鉴权时，在当前终端从本机 secret source 注入：
 # $env:LOCAL_AGENT_REMOTE_API_KEY=...
@@ -93,7 +97,13 @@ $env:LOCAL_AGENT_REMOTE_VERIFY_TLS="1"
 uv run python server.py
 ```
 
-`LOCAL_AGENT_REMOTE_PROVIDER_KIND=deepseek` 只用于显式选择对应的 thinking payload 合同；其他 OpenAI-compatible Provider 使用默认值。不要根据 URL 或模型名隐式判断 Provider。HTTPS 端点应显式设置 `LOCAL_AGENT_REMOTE_VERIFY_TLS=1`。
+默认远端按 `deepseek-v4-flash` 配置。`LOCAL_AGENT_REMOTE_PROVIDER_KIND=deepseek`
+会使用 DeepSeek 官方 `thinking.type=enabled/disabled` payload；使用其他
+OpenAI-compatible Provider 时必须显式改为 `openai_compatible`，不要根据 URL
+或模型名隐式判断 Provider。默认关闭 thinking，Planning 也会显式关闭并使用
+低温 strict JSON；如显式开启 thinking，应同时根据真实延迟和输出量提高有界
+timeout/token budget。应用默认只申请 4096 output tokens，不直接采用 Provider
+允许的极大输出上限。HTTPS 端点应显式设置 `LOCAL_AGENT_REMOTE_VERIFY_TLS=1`。
 
 ### 4.2 本地 GGUF 后端
 
@@ -155,12 +165,17 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_ENVIRONMENT_PROFILE` | `LOCAL` | 可选 `LOCAL` / `TEST` / `PRODUCTION`；未知或空显式值启动失败 |
 | `LOCAL_AGENT_LLM_BACKEND` | `remote` | 可选 `local` / `remote` / `hybrid`；未知值启动失败 |
 | `LOCAL_AGENT_MODEL_PROFILE` | `balanced` | `fast` / `balanced` / `deep`；未知值启动失败 |
+| `LOCAL_AGENT_MODEL_MAX_TOKENS` | remote-only balanced=`4096`；local/hybrid balanced=`1024` | 显式值优先；remote-only 的 fast/balanced/deep 默认分别为 `2048/4096/8192` |
 | `LOCAL_AGENT_API_HOST` / `LOCAL_AGENT_API_PORT` | `127.0.0.1` / `8000` | 后端监听地址与端口 |
 | `LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS` | `LOCAL`=项目根；`TEST`=空；`PRODUCTION`=必填 | `;` 分隔的 existing Windows 本地目录；`list_files` / `analyze_excel` 只允许读取 canonical root 内资源 |
 | `LOCAL_AGENT_API_BASE_URL` | 由 host/port 派生 | 桌面端访问后端的根地址（client-only） |
 | `LOCAL_AGENT_REMOTE_API_BASE_URL` | 空 | `remote` / `hybrid` 的 SERVER role 必填；PRODUCTION 必须 HTTPS |
 | `LOCAL_AGENT_REMOTE_API_KEY` | 空 | 仅在非空时发送 Bearer Authorization |
-| `LOCAL_AGENT_REMOTE_PROVIDER_KIND` | `openai_compatible` | 显式选择远程 payload 合同 |
+| `LOCAL_AGENT_REMOTE_MODEL_NAME` | `deepseek-v4-flash` | Provider model identifier；其他 Provider 必须显式覆盖 |
+| `LOCAL_AGENT_REMOTE_PROVIDER_KIND` | `deepseek` | 显式选择远程 payload 合同；其他 OpenAI-compatible Provider 设置为 `openai_compatible` |
+| `LOCAL_AGENT_REMOTE_CONTEXT_WINDOW` | `1000000` | 远端 Profile context capacity；应与真实 Provider 能力一致 |
+| `LOCAL_AGENT_REMOTE_ENABLE_THINKING` | `false` | DeepSeek thinking 默认关闭；Planning 始终显式关闭 |
+| `LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS` | `120` | 远端 HTTP 请求 timeout；严格正整数 |
 | `LOCAL_AGENT_REMOTE_VERIFY_TLS` | Profile 默认：`LOCAL=0`、`TEST=1`、`PRODUCTION=1` | 严格布尔（`1`/`0`/`true`/`false`）；PRODUCTION 不可显式关闭 |
 | `LOCAL_AGENT_REMOTE_TRUST_ENV` | Profile 默认：`LOCAL=1`、`TEST=0`、`PRODUCTION=0` | 严格布尔；是否让远程 model Session 继承系统 proxy |
 | `LOCAL_AGENT_CLIENT_TRUST_ENV` | `1`（所有 Profile 一致） | 严格布尔；是否让 Desktop Client → LocalAgent Server Session 继承系统 proxy；与 `LOCAL_AGENT_REMOTE_TRUST_ENV` 独立 |

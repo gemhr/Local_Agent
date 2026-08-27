@@ -8,6 +8,26 @@
 | `WIKI_REMOTE_FILENAME_INVALID` | Wiki output security | pre-write | WikiCrawler | remote `sn` 不是安全单一Windows leaf | skip item | no write | fixed low-card log code；无raw sn/title/path | 修正upstream metadata | outside marker absent | WP3 Wiki regression |
 | `WIKI_OUTPUT_PATH_DENIED` | Wiki output security | pre-write | WikiCrawler | final `.md/.pdf` target canonical containment失败 | skip item | no outside write | fixed low-card log code；无raw path | 修正configured output root / filesystem links | outside marker absent | WP3 Wiki regression |
 
+## Phase5 WP2 Semantic Memory Formation Codes
+
+这些 code 只进入独立 Formation result/event/metric/span；不得写入
+`StepCompletionResult.error_code`、改变 delivered output/final Step/Run terminal，或复用
+`FINAL_OUTPUT_MEMORY_COMMIT_FAILED`。
+
+| Code | Trigger | Retry | Side effect / outcome |
+| --- | --- | --- | --- |
+| `FORMATION_MODEL_FAILED` | unified Model Invocation 最终失败 | 仅既有 invocation policy；Formation 外层不重跑 extraction | `FAILED`，0 Advanced Memory write |
+| `FORMATION_OUTPUT_INVALID` | JSON/schema/required field 形状非法 | 不重试 | `FAILED`，0 write |
+| `FORMATION_OUTPUT_UNKNOWN_FIELD` | proposal 含未知字段 | 不重试 | fail closed，0 write |
+| `FORMATION_OUTPUT_FORBIDDEN_FIELD` | Model 提议 ID/type/status/origin/timestamp/SQL 等 authoritative 字段 | 不重试 | fail closed，0 write |
+| `FORMATION_BATCH_TOO_LARGE` | candidate 数超过固定上限 | 不重试 | fail closed，0 write |
+| `FORMATION_DUPLICATE_EXECUTION` | 同一 run/exchange execution guard 命中但无已缓存结果 | 不重试 | `FAILED`；不是 durable/cross-Run dedup |
+| `FORMATION_IDENTITY_INVALID` | receipt/run/entry-agent/`direct` scope 不匹配 | 不重试 | `FAILED`，0 write |
+| `FORMATION_PERSISTENCE_FAILED` | accepted candidate 的 create 最终失败 | 仅可用同一 immutable prepared record 有限重试 | `FAILED` 或 `PARTIAL`；已提交 candidate 不回滚 |
+| `FORMATION_TIMED_OUT` | Formation operation timeout | 不重放 whole Formation | `TIMED_OUT` 或已提交部分存在时 `PARTIAL`；当前 transaction 先到安全边界 |
+| `FORMATION_CANCELLED` | post-delivery Formation cancellation/shutdown | 不重放 whole Formation | `CANCELLED` 或已提交部分存在时 `PARTIAL`；delivery 保持成功 |
+| `FORMATION_INTERNAL_ERROR` | 非预期内部错误的安全收口 | 不盲重试 | `FAILED`；不投影 raw exception |
+
 ### HTTP pre-Run rejection（不是 Runtime error code）
 
 | HTTP | Fixed detail / owner | Trigger | Run / side effect | Retry semantics | Evidence |
