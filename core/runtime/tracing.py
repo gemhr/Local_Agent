@@ -46,6 +46,12 @@ SAFE_SPAN_ATTRIBUTES = frozenset({
     "publish_attempt_count", "partially_persisted", "output_char_count",
     "persist_enabled", "entry_agent_id", "memory_scope",
     "user_write_status", "assistant_write_status", "transaction_used",
+    # WP2 Semantic Memory Formation（Trace Contract v1 最小 additive 扩展）。
+    "formation_method", "formation_status", "exchange_id",
+    "proposed_count", "accepted_count", "ignored_count",
+    "persisted_count", "reused_count", "failed_count",
+    "formation_total_duration_ms", "model_extraction_duration_ms",
+    "persistence_duration_ms",
     "owning_agent_id", "attempt_index", "requested_top_k", "returned_count",
     "grounded_count", "shape",
 })

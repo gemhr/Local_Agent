@@ -32,6 +32,7 @@ class RuntimeEventType(str, Enum):
     RETRIEVAL_COMPLETED = "RETRIEVAL_COMPLETED"
     OUTPUT_DELTA = "OUTPUT_DELTA"
     STEP_COMPLETED = "STEP_COMPLETED"
+    MEMORY_FORMATION_COMPLETED = "MEMORY_FORMATION_COMPLETED"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     TIMEOUT = "TIMEOUT"
     ERROR = "ERROR"
@@ -414,6 +415,70 @@ class StepCompletedPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryFormationCompletedPayload:
+    """WP2 post-delivery Semantic Memory Formation 的安全 outcome 投影。
+
+    Journal 只允许原子值，per-candidate outcome 以紧凑编码字符串表达：
+    ``ordinal|OUTCOME|REASON|memory_id`` 以 ``;`` 连接；零 candidate 时为
+    ``NONE``。禁止携带 user query、final answer、Memory 正文、payload value、
+    source quote、prompt、CoT、raw exception、tool/RAG/provider 数据或路径。
+    """
+
+    exchange_id: str
+    agent_id: str
+    memory_scope: str
+    formation_method: str
+    status: str
+    schema_version: int
+    proposed_count: int
+    accepted_count: int
+    ignored_count: int
+    persisted_count: int
+    reused_count: int
+    failed_count: int
+    formation_total_duration_ms: int
+    model_extraction_duration_ms: int
+    persistence_duration_ms: int
+    safe_error_code: str | None = None
+    candidate_outcomes: str = "NONE"
+
+    def __post_init__(self) -> None:
+        _require_text(self.exchange_id, "exchange_id")
+        _require_text(self.agent_id, "agent_id")
+        _require_text(self.memory_scope, "memory_scope")
+        _require_text(self.formation_method, "formation_method")
+        _require_text(self.status, "status")
+        if self.status not in {
+            "SUCCEEDED",
+            "PARTIAL",
+            "FAILED",
+            "CANCELLED",
+            "TIMED_OUT",
+        }:
+            raise ValueError("未知 memory formation status")
+        if self.formation_method != "HYBRID":
+            raise ValueError("WP2 formation_method 只允许 HYBRID")
+        _require_index(self.schema_version, "schema_version")
+        for name in (
+            "proposed_count",
+            "accepted_count",
+            "ignored_count",
+            "persisted_count",
+            "reused_count",
+            "failed_count",
+            "formation_total_duration_ms",
+            "model_extraction_duration_ms",
+            "persistence_duration_ms",
+        ):
+            _require_index(getattr(self, name), name)
+        if self.safe_error_code is not None:
+            _require_text(self.safe_error_code, "safe_error_code")
+        _require_text(self.candidate_outcomes, "candidate_outcomes")
+        if len(self.candidate_outcomes) > 2048:
+            raise ValueError("candidate_outcomes 超过 bounded 长度")
+
+
+@dataclass(frozen=True, slots=True)
 class BudgetExhaustedPayload:
     component: str
     dimension: str = "unknown"
@@ -516,6 +581,7 @@ RuntimeEventPayload: TypeAlias = (
     | RetrievalCompletedPayload
     | OutputDeltaPayload
     | StepCompletedPayload
+    | MemoryFormationCompletedPayload
     | BudgetExhaustedPayload
     | TimeoutPayload
     | ErrorPayload
@@ -538,6 +604,7 @@ _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
     RuntimeEventType.RETRIEVAL_COMPLETED: RetrievalCompletedPayload,
     RuntimeEventType.OUTPUT_DELTA: OutputDeltaPayload,
     RuntimeEventType.STEP_COMPLETED: StepCompletedPayload,
+    RuntimeEventType.MEMORY_FORMATION_COMPLETED: MemoryFormationCompletedPayload,
     RuntimeEventType.BUDGET_EXHAUSTED: BudgetExhaustedPayload,
     RuntimeEventType.TIMEOUT: TimeoutPayload,
     RuntimeEventType.ERROR: ErrorPayload,
@@ -646,6 +713,25 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "delivery_duration_ms",
         "execution_kind",
         "output_policy",
+    ),
+    MemoryFormationCompletedPayload: (
+        "exchange_id",
+        "agent_id",
+        "memory_scope",
+        "formation_method",
+        "status",
+        "safe_error_code",
+        "schema_version",
+        "proposed_count",
+        "accepted_count",
+        "ignored_count",
+        "persisted_count",
+        "reused_count",
+        "failed_count",
+        "formation_total_duration_ms",
+        "model_extraction_duration_ms",
+        "persistence_duration_ms",
+        "candidate_outcomes",
     ),
     BudgetExhaustedPayload: ("component", "dimension", "safe_error_code"),
     TimeoutPayload: ("component", "safe_error_code"),

@@ -1813,7 +1813,76 @@ class AgentRouter:
             context_requirements=None,
             run_context=run_context,
             capability_requirements=capabilities,
-            max_tokens=min(self.max_tokens, 512),
+            max_tokens=min(self.max_tokens, 1024),
+            event_emitter=event_emitter,
+            generation_options={"enable_thinking": False, "temperature": 0.2},
+            fault_controller=fault_controller,
+        )
+        return result.output
+
+    def complete_memory_formation_decision(
+        self,
+        user_query: str,
+        final_answer: str,
+        *,
+        run_context: RunContext,
+        event_emitter: RunEventEmitter | StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
+    ) -> str:
+        """WP2 窄入口：经统一 ModelInvocation 生成严格 Formation schema v1 JSON。
+
+        只消费 original user query（唯一事实 authority）与 delivered final
+        answer（仅辅助 normalization）；prompt 明确禁止 CoT、provider 数据、
+        tool/RAG 正文与 authoritative 字段。retry/fallback/circuit/budget 全部
+        留在既有统一 Model Invocation 合同内。
+        """
+        system_prompt = (
+            "你是 LocalAgent 长期记忆候选提取器。只输出一个 JSON 对象，"
+            "不得输出 Markdown 或解释。"
+            "顶层只允许字段 schema_version 和 candidates；schema_version 必须为 1。"
+            "candidates 是数组；每个元素只允许字段 disposition, category, "
+            "canonical_text, value, source_excerpt，可选字段 logical_key 和 "
+            "reason_code，不得包含其他任何字段。"
+            "disposition 只能为 REMEMBER 或 IGNORE。"
+            "category 只能为 STABLE_USER_PREFERENCE、PROJECT_STABLE_FACT、"
+            "ENGINEERING_CONSTRAINT 或 LONG_TERM_DECISION。"
+            "只有用户在原话中明确表达的稳定偏好、项目稳定事实、长期工程约束、"
+            "明确长期技术决策，或对上述事实的明确更正，才可提议 REMEMBER。"
+            "value 只能是字符串、数字或布尔值，不得为 null、数组或对象。"
+            "source_excerpt 必须是用户原话中支持该候选的连续原文片段。"
+            "临时状态、一次性操作、闲聊、单纯任务指令、不确定或推测性表述、"
+            "助手自己的推断或建议，一律提议 IGNORE。"
+            "已交付回答只用于辅助理解表达，不得作为新事实来源。"
+            "不得输出 memory_id、memory_type、status、origin、agent_id、"
+            "memory_scope、时间戳、formation_method、supersede、forget 或 SQL。"
+            "没有值得长期记住的内容时输出空 candidates 数组。"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "用户原话：\n"
+                    + user_query
+                    + "\n\n已交付回答（仅辅助理解表达，"
+                    "不得作为事实来源）：\n"
+                    + final_answer
+                ),
+            },
+        ]
+        capabilities = TaskCapabilityRequirements(
+            requires_multi_agent=False,
+            risk_level=RiskLevel.LOW,
+            estimated_steps=1,
+        )
+        result = self._invoke_model_contract(
+            agent_id="core_router",
+            user_query=user_query,
+            messages=messages,
+            context_requirements=None,
+            run_context=run_context,
+            capability_requirements=capabilities,
+            max_tokens=min(self.max_tokens, 1024),
             event_emitter=event_emitter,
             generation_options={"enable_thinking": False},
             fault_controller=fault_controller,

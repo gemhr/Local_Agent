@@ -1,5 +1,22 @@
 # Runtime Security Boundary
 
+## Phase5 WP2 Semantic Memory Formation Boundary
+
+Semantic Formation 的唯一事实 authority 是 original user query；delivered assistant
+answer 只能辅助规范化，不能提供新的事实 value。输入不包含 private reasoning、
+specialist/Synthesis 中间结果、raw Tool/RAG 内容、provider 数据或 system/developer
+instruction。Model 只可提出固定字段的 schema v1 candidates；unknown/forbidden 字段
+整体 fail closed，category、source excerpt grounding、scalar payload、logical key、长度和
+真实 identity 均由 LocalAgent code-owned gate 验证。`memory_id`、type/status、origin、
+scope、timestamps 和 `formation_method=HYBRID` 全由 LocalAgent 产生。
+
+`MEMORY_FORMATION_COMPLETED`、metrics 与 internal `memory.formation` span 只允许
+identity、bounded counts、safe status/reason、resulting memory ID 和 latency；禁止 query、
+answer、Memory 正文/payload、source quote、prompt、CoT、raw exception、Tool/RAG/provider
+数据和路径。Observation failure 不回滚已提交 Memory。该边界降低但不能消除 prompt
+injection/semantic misclassification；tool/RAG attestation、cross-Run dedup、conflict、
+supersede、forget、retrieval 与 Context Injection 未实现。
+
 ## Stage 3 WP3 Resource / Deployment Boundary
 
 `Tool Permission != Resource Authorization != Sandbox`。File Tool 的真实链为 `ToolRegistry -> ToolGovernanceService -> ResourceAuthorizationService -> ToolExecutionService -> Adapter -> Tool -> Windows filesystem/ACL`。`list_files` 与 `analyze_excel` 使用同一 frozen application-wide read roots；relative、drive-relative、UNC、device/extended path、outside/traversal/prefix collision、nonexistent、wrong type及resolved link escape均在业务I/O前拒绝。固定拒绝不包含path/root/OSError，不产生 `TOOL_STARTED` / `TOOL_COMPLETED`，不调用final-answer model；RuntimeEvent和Journal schema未扩展。
@@ -156,4 +173,3 @@ Prompt、Model output、Tool arguments/output、RAG chunks、Memory 正文、本
 - `ToolPermission != filesystem/path authorization`；WP3-A 已实现 frozen workspace read-root/path containment，仍不等于 OS Sandbox 或 TOCTOU elimination。两个 Settings credential 的 `repr=False` 与 Provider safe projection 已覆盖，但 generic secret isolation / DLP 仍未实现。
 - `ToolSideEffectKind.NONE` 不表示 permission-free；approval 不是 sandbox。approval evidence、durable pause/resume、human approval workflow 均未实现。
 - **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent / governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后，不为此新增 RuntimeEvent / Journal schema。
-

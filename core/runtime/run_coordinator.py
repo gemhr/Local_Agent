@@ -35,10 +35,15 @@ from core.runtime.parallel_execution import (
     StepExecutionDriver,
     StepExecutionMode,
 )
+from core.advanced_memory import AdvancedMemoryStore
 from core.runtime.step_completion import StepResultCommitter
 from core.runtime.step_result_store import StepResultStore
 from core.runtime.output_gate import OutputGate
 from core.runtime.final_memory_writer import RunFinalMemoryWriter
+from core.runtime.semantic_memory_formation import (
+    SemanticMemoryFormation,
+    UnifiedFormationExtractionAdapter,
+)
 from core.runtime.multi_agent_driver import MultiAgentDriver
 from core.runtime.plan_graph import PlanGraphValidationError, PlanGraphValidator
 from core.runtime.plan_fingerprint import PlanFingerprinter
@@ -495,6 +500,34 @@ class RunCoordinator:
                 span_recorder=self.span_recorder,
                 metrics_recorder=self._metrics_recorder,
             )
+        # WP2: run-scoped post-delivery Semantic Formation component，与 final
+        # writer 并列注入；只在 persist 且真实 Memory（含 v2 db_path）可用时
+        # 构造。db_path 缺失时保持 Formation 未接入，不伪造持久化。
+        semantic_formation: SemanticMemoryFormation | None = None
+        if memory_writer is not None and self._persist:
+            router = self._multi_agent_driver._router
+            memory_manager = getattr(router, "memory_manager", None)
+            db_path = (
+                getattr(memory_manager, "db_path", None)
+                if memory_manager is not None
+                else None
+            )
+            if isinstance(db_path, str) and db_path.strip():
+                semantic_formation = SemanticMemoryFormation(
+                    entry_agent_id=self._planning_request.selected_agent_id,
+                    user_request=self._planning_request.user_request,
+                    memory_store=AdvancedMemoryStore(db_path),
+                    extraction_model=UnifiedFormationExtractionAdapter(
+                        router,
+                        run_context=self.run_context,
+                        event_emitter=self.event_emitter,
+                        fault_controller=self._fault_controller,
+                    ),
+                    run_id=self.run_context.run_id,
+                    span_recorder=self.span_recorder,
+                    metrics_recorder=self._metrics_recorder,
+                    event_emitter=self.event_emitter,
+                )
         committer = StepResultCommitter(
             store=store,
             state_machine=self.state_machine,
@@ -502,6 +535,7 @@ class RunCoordinator:
             plan=plan,
             output_gate=gate,
             final_memory_writer=memory_writer,
+            semantic_memory_formation=semantic_formation,
         )
         self._step_result_store = store
         self._step_completion_owner = committer

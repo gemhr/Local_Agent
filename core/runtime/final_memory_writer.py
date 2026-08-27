@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 from uuid import uuid4
 
 from core.memory_manager import (
@@ -39,6 +40,32 @@ class FinalMemoryCommitStatus:
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     NOT_ATTEMPTED = "NOT_ATTEMPTED"
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedExchangeReceipt:
+    """成功提交的 canonical conversation exchange 的最小 committed identity。
+
+    只携带必要 committed identity（run / exchange / entry agent / scope），
+    不携带 user query、final answer、tool/RAG 输出或任意 RunContext；它不是
+    generic context bag。post-delivery Semantic Formation 以它作为唯一
+    provenance/eligibility 输入。
+    """
+
+    run_id: str | None
+    exchange_id: str
+    entry_agent_id: str
+    memory_scope: str
+
+    def __post_init__(self) -> None:
+        for name in ("exchange_id", "entry_agent_id", "memory_scope"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} 必须是非空字符串")
+        if self.run_id is not None and (
+            not isinstance(self.run_id, str) or not self.run_id.strip()
+        ):
+            raise ValueError("run_id 必须是非空字符串或 None")
 
 
 class RunFinalMemoryWriter:
@@ -92,16 +119,22 @@ class RunFinalMemoryWriter:
         *,
         final_step_id: str,
         store: StepResultStore,
-    ) -> None:
+    ) -> CommittedExchangeReceipt | None:
         """Write the original user message and the delivered final once.
 
         Write-once per Run: after the first call (success or failure) the
         writer refuses further calls, so a failed Memory commit is never
         automatically retried inside the same Run and user text is never
         duplicated.
+
+        WP2: a successful commit returns the immutable committed exchange
+        receipt (minimal committed identity only); ``persist=False`` returns
+        ``None`` and never produces a receipt. The writer still owns only
+        Conversation persistence — it never extracts candidates, calls a
+        model, or writes Long-term Memory.
         """
         if not self._persist:
-            return
+            return None
         if not isinstance(store, StepResultStore):
             raise TypeError("write_delivered 需要 StepResultStore")
         with self._write_lock:
@@ -147,6 +180,11 @@ class RunFinalMemoryWriter:
         user_write_status = "NOT_ATTEMPTED"
         assistant_write_status = "NOT_ATTEMPTED"
         transaction_used = True
+        exchange_id = (
+            self._run_id
+            if self._run_id is not None
+            else "exchange-" + str(uuid4().hex)
+        )
         try:
             memory.append_exchange_atomic(
                 self._entry_agent_id,
@@ -154,11 +192,7 @@ class RunFinalMemoryWriter:
                 self._user_request,
                 content,
                 run_id=self._run_id,
-                exchange_id=(
-                    self._run_id
-                    if self._run_id is not None
-                    else "exchange-" + str(uuid4().hex)
-                ),
+                exchange_id=exchange_id,
             )
             user_write_status = "WRITTEN"
             assistant_write_status = "WRITTEN"
@@ -212,6 +246,12 @@ class RunFinalMemoryWriter:
             assistant_write_status=assistant_write_status,
             transaction_used=transaction_used,
         )
+        return CommittedExchangeReceipt(
+            run_id=self._run_id,
+            exchange_id=exchange_id,
+            entry_agent_id=self._entry_agent_id,
+            memory_scope=scope,
+        )
 
     def _record_memory_outcome(
         self,
@@ -263,6 +303,7 @@ class RunFinalMemoryWriter:
 
 
 __all__ = [
+    "CommittedExchangeReceipt",
     "FinalMemoryCommitStatus",
     "MemoryExchangeErrorCode",
     "RunFinalMemoryWriter",

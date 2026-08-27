@@ -605,7 +605,10 @@ from core.runtime.output_gate import (
     OutputGateRejectionError,
     OutputGateState,
 )
-from core.runtime.final_memory_writer import RunFinalMemoryWriter
+from core.runtime.final_memory_writer import (
+    CommittedExchangeReceipt,
+    RunFinalMemoryWriter,
+)
 from core.runtime.step_result_store import (
     DependencyResultEntry,
     DependencyResultView,
@@ -629,6 +632,21 @@ from core.runtime.step_completion import (
     StepCompletionErrorCode,
     StepCompletionResult,
     StepResultCommitter,
+)
+from core.runtime.semantic_memory_formation import (
+    CandidateValidation,
+    FormationCandidateCategory,
+    FormationCandidateOutcome,
+    FormationCandidateOutcomeCode,
+    FormationExtractionModel,
+    SemanticFormationError,
+    SemanticFormationErrorCode,
+    SemanticFormationResult,
+    SemanticFormationStatus,
+    SemanticMemoryFormation,
+    StrictFormationProposalParser,
+    UnifiedFormationExtractionAdapter,
+    validate_candidate,
 )
 from core.runtime.multi_agent_driver import (
     MultiAgentDriver,
@@ -654,6 +672,7 @@ __all__ += [
     "OutputGateRejectionError",
     "OutputGateState",
     "RunFinalMemoryWriter",
+    "CommittedExchangeReceipt",
     "StepResult",
     "StepResultError",
     "StepResultErrorCode",
@@ -675,6 +694,19 @@ __all__ += [
     "StepCompletionErrorCode",
     "StepCompletionResult",
     "StepResultCommitter",
+    "CandidateValidation",
+    "FormationCandidateCategory",
+    "FormationCandidateOutcome",
+    "FormationCandidateOutcomeCode",
+    "FormationExtractionModel",
+    "SemanticFormationError",
+    "SemanticFormationErrorCode",
+    "SemanticFormationResult",
+    "SemanticFormationStatus",
+    "SemanticMemoryFormation",
+    "StrictFormationProposalParser",
+    "UnifiedFormationExtractionAdapter",
+    "validate_candidate",
     "MultiAgentDriver",
     "MultiAgentDriverError",
     "MultiAgentDriverErrorCode",

@@ -84,6 +84,10 @@ production writer，不进入 WP4-A 公共导出（INTERNAL_ONLY）。
 WP4-A 公共 export 投影当前对扩展 operation 返回固定 `UNSUPPORTED_OPERATION`
 （fail-closed），即扩展 span 当前不被导出。
 
+Phase5 WP2 的 `memory.formation` 同样属于 `INTERNAL_RC` extension operation；其
+安全属性仅用于进程内 observation，不改变本合同六个稳定 operation、版本或指纹，
+也不进入 consumer-neutral trace export。
+
 当前 `SAFE_SPAN_ATTRIBUTES` 不含 model token/usage、model cost 或 retrieval
 latency 键，因此这些字段**没有稳定实现**，不得描述为已导出/已支持。`kb_version`
 仅由 Run root 以 `not_configured` 占位写入，不是真实 KB 版本归因。低层 span 只

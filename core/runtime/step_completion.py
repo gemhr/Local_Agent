@@ -37,6 +37,7 @@ from core.runtime.event_channel import (
 )
 from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
 from core.runtime.events import RuntimeEventType, StepCompletedPayload
+from core.runtime.final_memory_writer import CommittedExchangeReceipt
 from core.runtime.output_gate import (
     DeliveryAttempt,
     DeliveryStatus,
@@ -44,6 +45,7 @@ from core.runtime.output_gate import (
 )
 from core.runtime.planning import OutputPolicy, Plan
 from core.runtime.scheduler import StepClaim
+from core.runtime.semantic_memory_formation import SemanticFormationResult
 from core.runtime.state import AgentState, StepStatus
 from core.runtime.state_machine import (
     AgentStateMachine,
@@ -85,6 +87,8 @@ class FinalMemoryWriter(Protocol):
     """Delivered-only run-level final Memory commit owner.
 
     Called by the completion pipeline only after OutputGate reports DELIVERED.
+    WP2: a successful commit returns the immutable committed exchange receipt
+    consumed by the independent post-delivery Semantic Formation component.
     """
 
     def write_delivered(
@@ -92,12 +96,34 @@ class FinalMemoryWriter(Protocol):
         *,
         final_step_id: str,
         store: StepResultStore,
-    ) -> None: ...
+    ) -> CommittedExchangeReceipt | None: ...
+
+
+class SemanticMemoryFormationRunner(Protocol):
+    """Independent post-delivery Semantic Memory Formation owner (WP2).
+
+    Only called after DELIVERED + a committed exchange receipt. Its typed
+    outcome never changes the delivered output, the final Step status, or the
+    Run terminal decision.
+    """
+
+    async def run_formation(
+        self,
+        *,
+        receipt: CommittedExchangeReceipt,
+        final_step_id: str,
+        store: StepResultStore,
+    ) -> SemanticFormationResult: ...
 
 
 @dataclass(frozen=True, slots=True)
 class StepCompletionResult:
-    """Safe control-plane completion metadata; never carries raw content."""
+    """Safe control-plane completion metadata; never carries raw content.
+
+    WP2 adds the independent post-delivery Formation outcome fields. They are
+    pure observation: ``succeeded`` / ``error_code`` / terminal policy ignore
+    them entirely.
+    """
 
     step_id: str
     producer_agent_id: str
@@ -112,6 +138,8 @@ class StepCompletionResult:
     delivery_error_code: str | None = None
     completion_error_code: str | None = None
     memory_error_code: str | None = None
+    formation_status: str | None = None
+    formation_error_code: str | None = None
     error_code: str | None = None
     safe_message: str = ""
 
@@ -137,6 +165,7 @@ class StepResultCommitter:
         plan: Plan,
         output_gate: OutputGate | None = None,
         final_memory_writer: FinalMemoryWriter | None = None,
+        semantic_memory_formation: SemanticMemoryFormationRunner | None = None,
     ) -> None:
         if not isinstance(store, StepResultStore):
             raise TypeError("committer 需要 StepResultStore")
@@ -154,12 +183,19 @@ class StepResultCommitter:
             getattr(final_memory_writer, "write_delivered", None)
         ):
             raise TypeError("final_memory_writer 必须实现 write_delivered")
+        if semantic_memory_formation is not None and not callable(
+            getattr(semantic_memory_formation, "run_formation", None)
+        ):
+            raise TypeError(
+                "semantic_memory_formation 必须实现 run_formation"
+            )
         self._store = store
         self._state_machine = state_machine
         self._event_emitter = event_emitter
         self._plan = plan
         self._output_gate = output_gate
         self._final_memory_writer = final_memory_writer
+        self._semantic_memory_formation = semantic_memory_formation
         self._guard_lock = threading.Lock()
         self._completed_steps: set[str] = set()
         finals = tuple(
@@ -286,6 +322,7 @@ class StepResultCommitter:
         is_final = claim.step_id == self._final_step_id
         delivery_attempt: DeliveryAttempt | None = None
         memory_error_code: str | None = None
+        receipt: CommittedExchangeReceipt | None = None
         if is_final and self._output_gate is not None:
             delivery_started = time.monotonic()
             delivery_attempt = await self._output_gate.attempt_publish(
@@ -303,7 +340,7 @@ class StepResultCommitter:
             and self._final_memory_writer is not None
         ):
             try:
-                await asyncio.to_thread(
+                receipt = await asyncio.to_thread(
                     self._final_memory_writer.write_delivered,
                     final_step_id=claim.step_id,
                     store=self._store,
@@ -312,6 +349,42 @@ class StepResultCommitter:
                 memory_error_code = (
                     StepCompletionErrorCode.FINAL_OUTPUT_MEMORY_COMMIT_FAILED.value
                 )
+        # Canonical WP2 ordering: DELIVERED -> conversation exchange committed
+        # (receipt) -> independent post-delivery Semantic Formation -> existing
+        # Step completion. Formation never runs without a committed receipt;
+        # its outcome is pure observation and cannot alter delivery/terminal.
+        formation_result: SemanticFormationResult | None = None
+        formation_status: str | None = None
+        formation_error_code: str | None = None
+        if (
+            receipt is not None
+            and self._semantic_memory_formation is not None
+        ):
+            try:
+                formation_result = await self._semantic_memory_formation.run_formation(
+                    receipt=receipt,
+                    final_step_id=claim.step_id,
+                    store=self._store,
+                )
+            except asyncio.CancelledError:
+                # DELIVERED 后的 Formation cancellation 是独立 business
+                # outcome；即使第三方 runner 未像 production component 一样
+                # 自行 typed 收口，也不得传播到现有 Step/Run terminal path。
+                formation_result = None
+                formation_status = "CANCELLED"
+                formation_error_code = "FORMATION_CANCELLED"
+            except Exception:
+                formation_result = None
+        if formation_result is not None:
+            formation_status = formation_result.status.value
+            formation_error_code = formation_result.safe_error_code
+        elif (
+            receipt is not None
+            and self._semantic_memory_formation is not None
+            and formation_status is None
+        ):
+            formation_status = "FAILED"
+            formation_error_code = "FORMATION_INTERNAL_ERROR"
 
         emitted = await self._emit_step_completed(
             claim,
@@ -338,6 +411,8 @@ class StepResultCommitter:
                 output_policy=output_policy,
                 delivery_attempt=delivery_attempt,
                 memory_error_code=memory_error_code,
+                formation_status=formation_status,
+                formation_error_code=formation_error_code,
             )
         if memory_error_code is not None:
             return self._failure(
@@ -386,6 +461,8 @@ class StepResultCommitter:
                 if delivery_attempt is not None
                 else None
             ),
+            formation_status=formation_status,
+            formation_error_code=formation_error_code,
         )
 
     @staticmethod
@@ -545,6 +622,8 @@ class StepResultCommitter:
         output_policy: OutputPolicy | None = None,
         delivery_attempt: DeliveryAttempt | None = None,
         memory_error_code: str | None = None,
+        formation_status: str | None = None,
+        formation_error_code: str | None = None,
     ) -> StepCompletionResult:
         delivery_status = DeliveryStatus.NOT_APPLICABLE
         delivery_error_code: str | None = None
@@ -569,6 +648,8 @@ class StepResultCommitter:
                 else None
             ),
             memory_error_code=memory_error_code,
+            formation_status=formation_status,
+            formation_error_code=formation_error_code,
             error_code=error_code.value,
             safe_message=safe_message,
         )
@@ -576,6 +657,7 @@ class StepResultCommitter:
 
 __all__ = [
     "FinalMemoryWriter",
+    "SemanticMemoryFormationRunner",
     "StepCommitStatus",
     "StepCompletionErrorCode",
     "StepCompletionResult",
