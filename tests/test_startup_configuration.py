@@ -639,7 +639,7 @@ async def test_memory_unsupported_blocks_ready(monkeypatch, tmp_path) -> None:
     manager = MemoryManager(db_path=str(db_path))
     manager.add_message("a", "user", "hello")
     with sqlite3.connect(db_path) as conn:
-        conn.execute("PRAGMA user_version = 2")
+        conn.execute("PRAGMA user_version = 3")
     monkeypatch.setattr(server, "settings", settings)
     app = FastAPI()
     with pytest.raises(RuntimeInitializationError) as captured:
@@ -729,10 +729,10 @@ async def test_quick_check_failed_blocks_ready(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_all_current_preflight_reaches_ready_and_sets_memory_v1(
+async def test_all_current_preflight_reaches_ready_and_sets_memory_v2(
     monkeypatch, tmp_path
 ) -> None:
-    """happy path：全新/current persistence → READY，且 constructor 新建 v1。"""
+    """happy path：全新/current persistence → READY，且 constructor 新建 v2。"""
     import sqlite3
 
     settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
@@ -746,7 +746,7 @@ async def test_all_current_preflight_reaches_ready_and_sets_memory_v1(
             is True
         )
     with sqlite3.connect(settings.memory_db_path) as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 1
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 2
 
 
 # ---- WP1-D P1 remediation：malformed physical signature startup fail-closed ----

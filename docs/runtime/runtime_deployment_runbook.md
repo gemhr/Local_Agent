@@ -142,7 +142,7 @@ $env:LOCAL_AGENT_WIKI_COOKIE="<secret-store-reference>"
 
 | 数据 | 默认路径 | 分类 | Schema/version | 说明 |
 | --- | --- | --- | --- | --- |
-| Memory DB | `data/database/agent_memory.db` | Durable State（required） | Memory SQLite `PRAGMA user_version=1` | 业务 Memory；startup preflight 通过后才构造；初始化失败 fail fast |
+| Memory DB | `data/database/agent_memory.db` | Durable State（required） | Memory SQLite `PRAGMA user_version=2`（v2 含 `long_term_memory`） | 业务 Memory（Conversation History + Advanced Long-term Memory 独立结构）；startup preflight 通过后才构造；初始化失败 fail fast |
 | Runtime Event Journal | `data/database/runtime_event_journal.db` | Durable State（required） | Journal exact physical signature（无 DB-level version）；row v1/v2 | append-only；损坏/追加失败 fail closed；legacy 缺 span 列需显式 migrate |
 | Observability checkpoint | `data/database/runtime_observability_checkpoint.db` | Rebuildable derived state（startup required） | Checkpoint exact table shape（无版本） | 不兼容时显式 recreate；backup optional |
 | Snapshot DB | `data/database/runtime_snapshots.db` | Durable State（opt-in） | Snapshot v1（`snapshot_schema_version=1`） | 仅 `LOCAL_AGENT_SNAPSHOT_ENABLED=true` 时装配；无 migration |
@@ -205,7 +205,7 @@ uv run python scripts/manage_persistence.py migrate --backup-confirmed
 
 - `preflight`：只读；输出每 Store `NEW / CURRENT / MIGRATION_REQUIRED / REBUILD_REQUIRED / UNSUPPORTED / FAILED`。
 - `migrate`：先全 Store preflight；任何 UNSUPPORTED/FAILED 或缺少 `--backup-confirmed`（已有数据需要 mutation 时）
-  都 non-zero 且零 mutation。每 Store 独立单事务（Memory `user_version=1` 与 schema change 同事务原子提交；
+  都 non-zero 且零 mutation。每 Store 独立单事务（Memory `user_version=2` 与 schema change 同事务原子提交；
   Journal 只加 nullable span 列绝不 rewrite 历史 row；Checkpoint 只 drop/recreate derived table）。
 - `--backup-confirmed` 只是 Operator acknowledgement，不证明备份内容正确；备份正确性由副本 preflight 验证。
 - Migration 是 forward-only：迁移提交后 `old binary compatibility NOT ASSUMED`。无 downgrade migration。

@@ -42,14 +42,28 @@ from test_snapshot_contract import make_snapshot
 # ---------------------------------------------------------------------------
 
 
-def _memory_v1(path: Path) -> Path:
+def _memory_v2(path: Path) -> Path:
+    """当前 v2 库：MemoryManager 直接初始化 v2 exact shape。"""
     manager = MemoryManager(db_path=str(path))
     manager.add_message("agent-a", "user", "hello")
     return path
 
 
+def _memory_v1(path: Path) -> Path:
+    """真实 v1 库：v2 库去掉 Long-term Memory 结构并回退版本标记。
+
+    保留 messages/summaries/exchanges/FTS/triggers，正是 v1→v2 migration
+    的已批准 from-state。
+    """
+    _memory_v2(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE long_term_memory")
+        conn.execute("PRAGMA user_version = 1")
+    return path
+
+
 def _memory_unversioned_current(path: Path) -> Path:
-    _memory_v1(path)
+    _memory_v2(path)
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA user_version = 0")
     return path
@@ -85,9 +99,10 @@ def _memory_legacy(path: Path) -> Path:
 
 
 def _memory_future(path: Path) -> Path:
-    _memory_v1(path)
+    """未来/未知版本（v3）：CURRENT 之外 must fail closed。"""
+    _memory_v2(path)
     with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA user_version = 2")
+        conn.execute("PRAGMA user_version = 3")
     return path
 
 
@@ -194,14 +209,25 @@ def test_memory_absent_is_new_and_does_not_create_file(tmp_path: Path) -> None:
     assert not target.exists()
 
 
-def test_memory_v1_is_current_and_unchanged(tmp_path: Path) -> None:
-    path = _memory_v1(tmp_path / "m.db")
+def test_memory_v2_is_current_and_unchanged(tmp_path: Path) -> None:
+    path = _memory_v2(tmp_path / "m.db")
     before = path.read_bytes()
     result = memory_preflight(str(path), mode=PreflightMode.FULL)
     assert result.status is PreflightStatus.CURRENT
-    assert result.detected_version == "1"
+    assert result.detected_version == "2"
     after = path.read_bytes()
     assert after == before
+
+
+def test_memory_v1_is_migration_required(tmp_path: Path) -> None:
+    path = _memory_v1(tmp_path / "m.db")
+    before = path.read_bytes()
+    result = memory_preflight(str(path), mode=PreflightMode.FULL)
+    assert result.status is PreflightStatus.MIGRATION_REQUIRED
+    assert result.action.value == "MIGRATE"
+    assert result.detected_version == "1"
+    assert result.target_version == "2"
+    assert path.read_bytes() == before
 
 
 def test_memory_unversioned_current_is_migration_required(tmp_path: Path) -> None:
@@ -331,7 +357,7 @@ def test_coordinator_preflight_absent_creates_nothing(tmp_path: Path) -> None:
 
 
 def test_coordinator_preflight_current_all(tmp_path: Path) -> None:
-    memory = _memory_v1(tmp_path / "memory.db")
+    memory = _memory_v2(tmp_path / "memory.db")
     journal = _journal_current(tmp_path / "journal.db")
     snapshot = _snapshot_current(tmp_path / "snapshot.db")
     checkpoint = _checkpoint_current(tmp_path / "checkpoint.db")
@@ -476,7 +502,7 @@ def _memory_break_fts(path: Path) -> Path:
 
 
 def _memory_current_formatted_variant(path: Path) -> Path:
-    """语义相同的 current schema，但使用小写关键字 / 不规则空白 /
+    """语义相同的 current v2 schema，但使用小写关键字 / 不规则空白 /
     双引号标识符——验证 canonical signature 不过度拟合格式。"""
     with sqlite3.connect(path) as conn:
         conn.executescript(
@@ -519,9 +545,20 @@ def _memory_current_formatted_variant(path: Path) -> Path:
                 values ('delete', "old"."id", "old"."content", "old"."agent_id", "old"."role");
                 insert into "messages_fts"(rowid, content, agent_id, role)
                 values ("new"."id", "new"."content", "new"."agent_id", "new"."role"); end;
+            create table long_term_memory (memory_id text primary key,
+                memory_type text not null, status text not null,
+                agent_id text not null, memory_scope text not null,
+                canonical_text text not null, payload text not null,
+                logical_key text, origin_type text not null,
+                origin_run_id text not null, origin_exchange_id text not null,
+                origin_agent_id text not null, origin_memory_scope text not null,
+                formation_method text, created_at text not null,
+                updated_at text not null, superseded_by_memory_id text);
+            create index idx_long_term_memory_agent_scope
+                on long_term_memory(agent_id, memory_scope);
             """
         )
-        conn.execute("PRAGMA user_version = 1")
+        conn.execute("PRAGMA user_version = 2")
     return path
 
 
@@ -541,21 +578,21 @@ def test_memory_malformed_constraints_is_unsupported(tmp_path: Path) -> None:
 
 
 def test_memory_wrong_index_columns_is_unsupported(tmp_path: Path) -> None:
-    path = _memory_break_index_columns(_memory_v1(tmp_path / "m.db"))
+    path = _memory_break_index_columns(_memory_v2(tmp_path / "m.db"))
     result = _memory_no_mutation_preflight(path)
     assert result.status is PreflightStatus.UNSUPPORTED
     assert result.safe_error_code == PERSISTENCE_SCHEMA_UNSUPPORTED
 
 
 def test_memory_noop_trigger_is_unsupported(tmp_path: Path) -> None:
-    path = _memory_break_trigger(_memory_v1(tmp_path / "m.db"))
+    path = _memory_break_trigger(_memory_v2(tmp_path / "m.db"))
     result = _memory_no_mutation_preflight(path)
     assert result.status is PreflightStatus.UNSUPPORTED
     assert result.safe_error_code == PERSISTENCE_SCHEMA_UNSUPPORTED
 
 
 def test_memory_wrong_fts_definition_is_unsupported(tmp_path: Path) -> None:
-    path = _memory_break_fts(_memory_v1(tmp_path / "m.db"))
+    path = _memory_break_fts(_memory_v2(tmp_path / "m.db"))
     result = _memory_no_mutation_preflight(path)
     assert result.status is PreflightStatus.UNSUPPORTED
     assert result.safe_error_code == PERSISTENCE_SCHEMA_UNSUPPORTED
@@ -639,7 +676,7 @@ def test_snapshot_malformed_no_pk_wrong_index_is_unsupported(tmp_path: Path) -> 
 
 def _memory_missing_run_id_unique(path: Path) -> Path:
     """otherwise exact current schema，但 message_exchanges.run_id 缺 UNIQUE。"""
-    _memory_v1(path)
+    _memory_v2(path)
     with sqlite3.connect(path) as conn:
         conn.executescript(
             """
@@ -672,7 +709,7 @@ def test_memory_missing_run_id_unique_is_unsupported(tmp_path: Path) -> None:
 
 
 def test_memory_extra_unique_constraint_is_unsupported(tmp_path: Path) -> None:
-    path = _memory_v1(tmp_path / "m.db")
+    path = _memory_v2(tmp_path / "m.db")
     with sqlite3.connect(path) as conn:
         conn.execute(
             "CREATE UNIQUE INDEX extra_unique_content ON messages(content)"
@@ -701,7 +738,7 @@ def test_memory_legacy_extra_unique_is_unsupported(tmp_path: Path) -> None:
 
 def test_memory_trigger_literal_change_is_unsupported(tmp_path: Path) -> None:
     """canonicalizer 必须保留单引号字面量内容：'delete' 改 'DELETE' → UNSUPPORTED。"""
-    path = _memory_v1(tmp_path / "m.db")
+    path = _memory_v2(tmp_path / "m.db")
     with sqlite3.connect(path) as conn:
         conn.execute("DROP TRIGGER messages_ad")
         conn.execute(
@@ -753,6 +790,90 @@ def test_snapshot_extra_unique_is_unsupported(tmp_path: Path) -> None:
         )
     before = path.read_bytes()
     result = snapshot_preflight(str(path), mode=PreflightMode.FULL)
+    assert path.read_bytes() == before
+    assert result.status is PreflightStatus.UNSUPPORTED
+    assert result.safe_error_code == PERSISTENCE_SCHEMA_UNSUPPORTED
+
+
+# ---------------------------------------------------------------------------
+# WP1-B v2 Long-term Memory exact physical signature
+# ---------------------------------------------------------------------------
+
+
+def _memory_v2_drop_long_term_memory(path: Path) -> Path:
+    """current v2 → 删掉 long_term_memory（但 user_version 仍为 2）：
+    shape 变回 v1、版本标记为 2 → fail closed UNSUPPORTED。"""
+    _memory_v2(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE long_term_memory")
+    return path
+
+
+def _memory_v2_malformed_long_term_memory(path: Path) -> Path:
+    """current v2 → long_term_memory 列集合被篡改（丢失 NOT NULL / 换列）。"""
+    _memory_v2(path)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            DROP TABLE long_term_memory;
+            CREATE TABLE long_term_memory (
+                memory_id TEXT PRIMARY KEY,
+                memory_type TEXT,
+                status TEXT,
+                agent_id TEXT NOT NULL,
+                memory_scope TEXT NOT NULL,
+                canonical_text TEXT,
+                payload TEXT,
+                logical_key TEXT,
+                origin_type TEXT NOT NULL,
+                origin_run_id TEXT NOT NULL,
+                origin_exchange_id TEXT NOT NULL,
+                origin_agent_id TEXT NOT NULL,
+                origin_memory_scope TEXT NOT NULL,
+                formation_method TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                superseded_by_memory_id TEXT
+            );
+            CREATE INDEX idx_long_term_memory_agent_scope
+                ON long_term_memory(agent_id, memory_scope);
+            """
+        )
+    return path
+
+
+def test_memory_v2_missing_long_term_memory_is_unsupported(tmp_path: Path) -> None:
+    """user_version=2 但 long_term_memory 缺席 → 版本与 shape 不一致 →
+    UNSUPPORTED（不是 MIGRATION_REQUIRED）。"""
+    path = _memory_v2_drop_long_term_memory(tmp_path / "m.db")
+    before = path.read_bytes()
+    result = memory_preflight(str(path), mode=PreflightMode.FULL)
+    assert path.read_bytes() == before
+    assert result.status is PreflightStatus.UNSUPPORTED
+    assert result.safe_error_code == PERSISTENCE_SCHEMA_UNSUPPORTED
+
+
+def test_memory_v2_malformed_long_term_memory_is_unsupported(tmp_path: Path) -> None:
+    """v2 exact physical signature 必须覆盖 long_term_memory 的列/约束。"""
+    path = _memory_v2_malformed_long_term_memory(tmp_path / "m.db")
+    before = path.read_bytes()
+    result = memory_preflight(str(path), mode=PreflightMode.FULL)
+    assert path.read_bytes() == before
+    assert result.status is PreflightStatus.UNSUPPORTED
+    assert result.safe_error_code == PERSISTENCE_SCHEMA_UNSUPPORTED
+
+
+def test_memory_v1_extra_long_term_memory_malformed_is_unsupported(
+    tmp_path: Path,
+) -> None:
+    """v1 core 精确 + 错误 long_term_memory 表 → unknown → UNSUPPORTED。"""
+    path = _memory_v1(tmp_path / "m.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE long_term_memory (memory_id TEXT PRIMARY KEY)"
+        )
+    before = path.read_bytes()
+    result = memory_preflight(str(path), mode=PreflightMode.FULL)
     assert path.read_bytes() == before
     assert result.status is PreflightStatus.UNSUPPORTED
     assert result.safe_error_code == PERSISTENCE_SCHEMA_UNSUPPORTED
