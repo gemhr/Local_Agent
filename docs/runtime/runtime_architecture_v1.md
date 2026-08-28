@@ -254,6 +254,75 @@ WP2 只保证同一 execution 内 prepared-record persistence retry 幂等；不
 replay、cross-Run dedup、Conflict Resolution、NO_CHANGE、supersede、forget、retrieval
 或 Context Injection。
 
+### 2.6 Phase5 WP3 Memory Lifecycle & Conflict Resolution
+
+WP3 在 keyed `SEMANTIC` Memory 上实现唯一 lifecycle policy Owner `MemoryLifecycleResolver`
+与 `AdvancedMemoryStore` 的窄 transaction executor（`resolve_semantic` /
+`forget_semantic_partition`）。accepted candidate 不再直接 `create()`，先进入 resolver。
+
+```text
+Semantic Candidate ACCEPT
+    -> MemoryLifecycleResolver（partition snapshot + candidate -> typed plan）
+    -> AdvancedMemoryStore（BEGIN IMMEDIATE：read -> validate plan -> apply -> validate post-state -> COMMIT）
+    -> INSERT / NO_CHANGE / SUPERSEDE
+```
+
+- 唯一自动 partition：`(agent_id, memory_scope, memory_type=SEMANTIC, logical_key)`；
+  `logical_key=None` 一律 INSERT（不比较）。
+- typed equality 只比较 `payload["value"]`；string trim、int/float/bool exact、
+  cross-type 不同；绝不调用 LLM/Embedding 语义等价。
+- 决策与 mutation 必须在同一 `BEGIN IMMEDIATE` 事务内（同一 connection、同一
+  authoritative snapshot）；任何 insert/update/relation failure 全事务 rollback。
+- keyed ACTIVE invariant（<=1）在每次成功 resolution 后 operation-local 验证；
+  lazy repair 只修复被新请求触发的 partition。
+- 允许迁移：`ABSENT→ACTIVE`、`ACTIVE→SUPERSEDED`、`ACTIVE→FORGOTTEN`、
+  `SUPERSEDED→FORGOTTEN`、`FORGOTTEN→FORGOTTEN`（幂等）。禁止
+  `SUPERSEDED→ACTIVE` / `FORGOTTEN→ACTIVE` / hard delete / stable field rewrite。
+
+Explicit forget 由 original-user deterministic cue gate + strict `ExplicitForgetIntentParser`
++ exact existing-key membership 构成，与 remember Formation 对同一 exchange 互斥：
+Model 输入只允许 original user query + bounded existing-key allowlist，输出只允许
+exact logical key；无精确成员 / malformed / ambiguous / overflow 一律 fail closed 零 mutation。
+forget 在一个 `BEGIN IMMEDIATE` 事务内完成目标 partition 全历史版本的 status/redaction/
+relation cleanup，tombstone 冻结为 `status=FORGOTTEN, canonical_text=[FORGOTTEN],
+payload={}, superseded_by_memory_id=None`，保留 `logical_key` 与 stable provenance。
+repeat forget 为 `NO_CHANGE/ALREADY_FORGOTTEN`（不改 updated_at）；exact key 从未存在为
+`NOT_FOUND`（lifecycle outcome，不是 MemoryStatus），零 mutation。
+
+`MEMORY_LIFECYCLE_RESOLVED` 是 Event v2 内新增的 content-minimized typed observation
+（lifecycle payload schema v1），journal-first、best-effort，禁止保存正文/payload/logical
+key/forget query/CoT/raw exception；event 发布失败不回滚已提交 lifecycle state。指标
+`runtime_memory_lifecycle_total` 及 resolution/mutation duration histogram 使用低基数
+labels（operation/outcome/error_code）。WP3 不进入 Retrieval、Embedding、Ranking、
+Context Injection；forget 的 exact key lookup 只是 lifecycle targeting，不是 WP4 Retrieval。
+
+### 2.7 WP3-R1 Canonical Predicate Identity & Predicate Resolution
+
+`logical_key` 的角色是 canonical predicate identity，其值不得由 Model 自由发明后直接
+持久化。WP3-R1 引入小型 code-owned `CanonicalPredicateRegistry`，v1 只冻结
+`project.database`、`project.package_manager`、`engineering.public_network_allowed`
+（`user.response_style` / `project.runtime` / `engineering.network_access` 不在 v1）。
+
+Formation proposal：每个 `REMEMBER` 必须显式提供 `predicate_resolution`
+（`REGISTERED` / `OPEN`）。`REGISTERED` 需要 exact registry ID → LocalAgent 校验
+category/value constraint → 编译 canonical `logical_key` → 进入 keyed WP3 lifecycle；
+`OPEN` 需要 null ID → `logical_key=None` → INSERT-only。所有其他组合
+（missing/unknown resolution、invented/alias/underscore ID、`OPEN`+non-null、
+category/value mismatch）fail closed 零写入，invalid REGISTERED 绝不静默降级为 OPEN。
+Model 输出 `logical_key` 视为 forbidden authoritative field。
+
+`SEMANTIC_PREDICATE_CLASSIFICATION` 是 probabilistic：registry 不保证 Model 正确选择
+REGISTERED/OPEN；若注册事实被误分类为 OPEN，v1 允许 unkeyed INSERT（不能 mutate keyed
+partition），属于 Evaluation target，不是 schema/identity 缺陷。`CANONICAL_IDENTITY_
+DETERMINISTIC_AFTER_REGISTERED_SELECTION`：一旦 REGISTERED 选择成立，identity/key 完全由
+LocalAgent 决定。`MemoryLifecycleResolver` 不认识 predicate_resolution / registry，identity
+必须在进入 Resolver 前完成。
+
+Historical rows（含 `None`、`project_database`、旧 free-form key）保留 legacy exact-key
+行为，不做 startup sweep / global repair / DB rewrite；新行为只约束新 Formation。Explicit
+forget 的新 canonical path 只允许 registry-backed existing keys；OPEN/unkeyed 不提供
+semantic user-chat forget（NOT_IMPLEMENTED / KNOWN_LIMITATION）。
+
 ## 3. Contract Classification
 
 | Contract | Classification | 说明 |

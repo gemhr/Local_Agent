@@ -648,6 +648,20 @@ from core.runtime.semantic_memory_formation import (
     UnifiedFormationExtractionAdapter,
     validate_candidate,
 )
+from core.runtime.memory_lifecycle import (
+    ExplicitForgetIntentParser,
+    ForgetProposalError,
+    ForgetProposalErrorCode,
+    ForgetProposalModel,
+    UnifiedForgetProposalAdapter,
+    has_explicit_forget_cue,
+)
+from core.runtime.predicate_registry import (
+    CanonicalPredicateRegistry,
+    CanonicalPredicateSlot,
+    PredicateResolution,
+    PredicateValueConstraint,
+)
 from core.runtime.multi_agent_driver import (
     MultiAgentDriver,
     MultiAgentDriverError,
@@ -707,6 +721,16 @@ __all__ += [
     "StrictFormationProposalParser",
     "UnifiedFormationExtractionAdapter",
     "validate_candidate",
+    "ExplicitForgetIntentParser",
+    "ForgetProposalError",
+    "ForgetProposalErrorCode",
+    "ForgetProposalModel",
+    "UnifiedForgetProposalAdapter",
+    "has_explicit_forget_cue",
+    "CanonicalPredicateRegistry",
+    "CanonicalPredicateSlot",
+    "PredicateResolution",
+    "PredicateValueConstraint",
     "MultiAgentDriver",
     "MultiAgentDriverError",
     "MultiAgentDriverErrorCode",

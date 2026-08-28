@@ -530,10 +530,11 @@ async def test_production_wiring_forms_memory_and_emits_event(tmp_path) -> None:
         formation_json=formation_candidates_json(
             {
                 "disposition": "REMEMBER",
-                "category": "STABLE_USER_PREFERENCE",
+                "category": "PROJECT_STABLE_FACT",
                 "canonical_text": "项目统一使用 uv 管理依赖。",
                 "value": "uv",
-                "logical_key": "project.package_manager",
+                "predicate_resolution": "REGISTERED",
+                "proposed_predicate_id": "project.package_manager",
                 "source_excerpt": "统一用 uv",
                 "reason_code": "EXPLICIT_PREFERENCE",
             }

@@ -42,6 +42,8 @@ from uuid import uuid4
 
 from core.advanced_memory import (
     AdvancedMemoryStore,
+    LifecycleOperation,
+    LifecycleResolutionResult,
     MemoryDomainError,
     MemoryErrorCode,
     MemoryOrigin,
@@ -53,9 +55,21 @@ from core.runtime.cancellation import RunCancelledError
 from core.runtime.context import RunDeadlineExceededError
 from core.runtime.events import (
     MemoryFormationCompletedPayload,
+    MemoryLifecycleResolvedPayload,
     RuntimeEventType,
 )
 from core.runtime.final_memory_writer import CommittedExchangeReceipt
+from core.runtime.memory_lifecycle import (
+    ExplicitForgetIntentParser,
+    ForgetProposalError,
+    ForgetProposalErrorCode,
+    ForgetProposalModel,
+    has_explicit_forget_cue,
+)
+from core.runtime.predicate_registry import (
+    CanonicalPredicateRegistry,
+    PredicateResolution,
+)
 from core.runtime.trace_contract import set_span_attributes
 from core.runtime.tracing import current_trace_context, start_span_safely
 
@@ -87,7 +101,6 @@ FORMATION_PERSISTENCE_RETRY_LIMIT = 2
 # operation；该 Formation span 不进入 consumer-neutral trace export contract。
 _SEMANTIC_FORMATION_SPAN_OPERATION = "memory.formation"
 
-_LOGICAL_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$")
 _SAFE_REASON_PATTERN = re.compile(r"^[A-Z0-9_]{1,40}$")
 _OBVIOUS_SMALL_TALK_PATTERN = re.compile(
     r"^(?:你好|您好|嗨|hi|hello|谢谢|感谢|多谢|再见)[!！,.，。\s]*$",
@@ -130,6 +143,7 @@ class SemanticFormationErrorCode(str, Enum):
     TIMED_OUT = "FORMATION_TIMED_OUT"
     CANCELLED = "FORMATION_CANCELLED"
     INTERNAL_ERROR = "FORMATION_INTERNAL_ERROR"
+    FORGET_NOT_ATTEMPTED = "FORMATION_FORGET_NOT_ATTEMPTED"
 
 
 class FormationCandidateOutcomeCode(str, Enum):
@@ -137,6 +151,7 @@ class FormationCandidateOutcomeCode(str, Enum):
 
     PERSISTED = "PERSISTED"
     REUSED = "REUSED"
+    NO_CHANGE = "NO_CHANGE"
     IGNORED_POLICY = "IGNORED_POLICY"
     IGNORED_INVALID = "IGNORED_INVALID"
     PERSIST_FAILED = "PERSIST_FAILED"
@@ -180,7 +195,9 @@ class SemanticFormationError(RuntimeError):
 _CANDIDATE_REQUIRED_FIELDS = frozenset(
     {"disposition", "category", "canonical_text", "value", "source_excerpt"}
 )
-_CANDIDATE_OPTIONAL_FIELDS = frozenset({"logical_key", "reason_code"})
+_CANDIDATE_OPTIONAL_FIELDS = frozenset(
+    {"predicate_resolution", "proposed_predicate_id", "reason_code"}
+)
 _CANDIDATE_ALLOWED_FIELDS = _CANDIDATE_REQUIRED_FIELDS | _CANDIDATE_OPTIONAL_FIELDS
 
 #: Model 无权声明的 authoritative 字段；出现即整体 fail closed。
@@ -208,13 +225,20 @@ _FORBIDDEN_CANDIDATE_FIELDS = frozenset(
         "forget",
         "sql",
         "query",
+        # logical_key 是 LocalAgent 编译出的 canonical identity；Model 提出即 fail closed。
+        "logical_key",
     }
 )
 
 
 @dataclass(frozen=True, slots=True)
 class FormationProposal:
-    """strict parser 产出的一条 model proposal（未经验证）。"""
+    """strict parser 产出的一条 model proposal（未经验证）。
+
+    - ``predicate_resolution``：REMEMBER 必填；REGISTERED / OPEN；
+    - ``proposed_predicate_id``：REGISTERED 时必填精确 registry ID，OPEN 时必须为 null；
+    - Model 不得输出 ``logical_key``（authoritative）。
+    """
 
     ordinal: int
     disposition: str
@@ -222,7 +246,8 @@ class FormationProposal:
     canonical_text: Any
     value: Any
     source_excerpt: Any
-    logical_key: Any = None
+    predicate_resolution: Any = None
+    proposed_predicate_id: Any = None
     reason_code: Any = None
 
 
@@ -247,7 +272,11 @@ class FormationCandidateOutcome:
 
 @dataclass(frozen=True, slots=True)
 class SemanticFormationResult:
-    """content-minimized typed Formation 结果；不携带任何正文/payload/quote。"""
+    """content-minimized typed Formation 结果；不携带任何正文/payload/quote。
+
+    WP3-B：lifecycle 字段用于表达同一 delivered exchange 的 explicit-forget
+    branch 结果（此时 remember 计数全部为零）。logical_key 绝不进入本结果。
+    """
 
     run_id: str
     exchange_id: str
@@ -267,6 +296,9 @@ class SemanticFormationResult:
     model_extraction_duration_ms: int
     persistence_duration_ms: int
     safe_error_code: Optional[str] = None
+    lifecycle_operation: Optional[str] = None
+    lifecycle_outcome: Optional[str] = None
+    lifecycle_affected_count: int = 0
 
     def candidate_outcomes_encoded(self) -> str:
         if not self.candidate_outcomes:
@@ -368,7 +400,8 @@ class StrictFormationProposalParser:
             canonical_text=item["canonical_text"],
             value=item["value"],
             source_excerpt=item["source_excerpt"],
-            logical_key=item.get("logical_key"),
+            predicate_resolution=item.get("predicate_resolution"),
+            proposed_predicate_id=item.get("proposed_predicate_id"),
             reason_code=item.get("reason_code"),
         )
 
@@ -423,14 +456,22 @@ def validate_candidate(
 ) -> Optional[CandidateValidation]:
     """code-owned validation；返回 None 表示 candidate invalid。
 
-    Model 的 REMEMBER 只是 proposal；category allowlist、payload 形状、
-    logical key 规则、字段长度与 source grounding 全部由本函数（LocalAgent
-    code）决定 ACCEPT / IGNORE。
+    WP3-R1 predicate resolution contract：
+    - REMEMBER 必须显式提供 ``predicate_resolution``（REGISTERED / OPEN）；
+    - REGISTERED：exact registry ID → category/value 校验 → LocalAgent 编译
+      canonical ``logical_key``；
+    - OPEN：``proposed_predicate_id`` 必须为 null → ``logical_key=None``
+      → INSERT-only；
+    - 其他组合一律 invalid，零写入；invalid REGISTERED 绝不静默降级为 OPEN。
+
+    category allowlist、payload 形状、字段长度、source grounding 与 registry
+    slot 校验全部由本函数（LocalAgent code）决定 ACCEPT / IGNORE。
     """
     if not isinstance(proposal.disposition, str):
         return None
     if proposal.disposition == "IGNORE":
         # policy ignore：正常业务结果（例如 small talk / transient statement）。
+        # IGNORE 不需要 predicate resolution（REMEMBER 才需要）。
         return CandidateValidation(
             accepted=False,
             policy_ignored=True,
@@ -464,15 +505,30 @@ def validate_candidate(
             return None
     else:
         return None
-    # logical_key：optional 小写 dotted token
-    logical_key = proposal.logical_key
-    if logical_key is not None:
-        if (
-            not isinstance(logical_key, str)
-            or len(logical_key) > FORMATION_MAX_LOGICAL_KEY_CHARS
-            or not _LOGICAL_KEY_PATTERN.fullmatch(logical_key)
-        ):
+    # ---- predicate resolution（REMEMBER 必填） ----
+    resolution = proposal.predicate_resolution
+    if resolution not in (
+        PredicateResolution.REGISTERED.value,
+        PredicateResolution.OPEN.value,
+    ):
+        # missing / unknown resolution：invalid，零写入，不静默降级。
+        return None
+    if resolution == PredicateResolution.REGISTERED.value:
+        pid = proposal.proposed_predicate_id
+        slot = CanonicalPredicateRegistry.get(pid)
+        if slot is None:
+            # null / missing / invented / alias / unknown ID：invalid，零写入。
             return None
+        if proposal.category not in slot.allowed_categories:
+            return None
+        if not slot.validate_value(value):
+            return None
+        logical_key = slot.canonical_logical_key
+    else:  # OPEN
+        if proposal.proposed_predicate_id is not None:
+            # OPEN + non-null ID：invalid，零写入。
+            return None
+        logical_key = None
     # source grounding：excerpt 必须能在 original user query 中找到
     if (
         not isinstance(proposal.source_excerpt, str)
@@ -575,15 +631,22 @@ class SemanticMemoryFormation:
         span_recorder=None,
         metrics_recorder=None,
         event_emitter=None,
+        forget_model: Optional[ForgetProposalModel] = None,
     ) -> None:
         if not isinstance(entry_agent_id, str) or not entry_agent_id.strip():
             raise ValueError("entry_agent_id 不能为空")
         if not isinstance(user_request, str) or not user_request.strip():
             raise ValueError("user_request 不能为空")
-        if not callable(getattr(memory_store, "create", None)):
-            raise TypeError("memory_store 必须实现 create（AdvancedMemoryStore 窄边界）")
+        if not callable(getattr(memory_store, "resolve_semantic", None)):
+            raise TypeError(
+                "memory_store 必须实现 resolve_semantic（AdvancedMemoryStore 窄边界）"
+            )
         if not isinstance(extraction_model, FormationExtractionModel):
             raise TypeError("extraction_model 必须实现 extract")
+        if forget_model is not None and not isinstance(
+            forget_model, ForgetProposalModel
+        ):
+            raise TypeError("forget_model 必须实现 propose_key")
         if run_id is not None and (
             not isinstance(run_id, str) or not run_id.strip()
         ):
@@ -594,6 +657,7 @@ class SemanticMemoryFormation:
         self._user_request = user_request
         self._memory_store = memory_store
         self._extraction_model = extraction_model
+        self._forget_model = forget_model
         self._run_id = run_id
         self._memory_scope = memory_scope
         self._span_recorder = span_recorder
@@ -791,6 +855,13 @@ class SemanticMemoryFormation:
         timings: _FormationTimings,
         total_started: float,
     ) -> SemanticFormationResult:
+        # WP3-B：explicit forget 与 remember Formation 对同一 exchange 互斥。
+        # deterministic forget cue 命中即进入独立 forget branch，本 exchange 不再
+        # 形成任何新的 Semantic Memory。
+        if has_explicit_forget_cue(self._user_request):
+            return await self._run_forget_branch(
+                receipt=receipt, total_started=total_started
+            )
         final_answer = store.read_final_content(final_step_id)
         # ---- extraction（单一一次；重试只属于统一 Model Invocation） ----
         extraction_started = time.monotonic()
@@ -861,7 +932,9 @@ class SemanticMemoryFormation:
             )
             persistence_started = time.monotonic()
             try:
-                outcome = await self._persist_record(record, proposal.ordinal)
+                outcome = await self._persist_record(
+                    record, proposal.ordinal, receipt=receipt
+                )
             except _PersistenceInterrupted as exc:
                 # cancellation/timeout 到达时仍等待当前单条 transaction 完成或
                 # rollback，并记录真实 outcome；随后停止剩余 candidates。
@@ -921,13 +994,21 @@ class SemanticMemoryFormation:
         )
 
     async def _persist_record(
-        self, record: SemanticMemoryRecord, ordinal: int
+        self,
+        record: SemanticMemoryRecord,
+        ordinal: int,
+        *,
+        receipt: CommittedExchangeReceipt,
     ) -> FormationCandidateOutcome:
-        """bounded retry：仅 retryable persistence failure，且复用同一 record。"""
+        """WP3-B：accepted candidate 经 ``resolve_semantic`` 进入 lifecycle
+        resolver（INSERT / NO_CHANGE / SUPERSEDE），不再直接 ``create``。
+
+        bounded retry：仅 retryable persistence failure，且复用同一 record。
+        """
         attempts_left = 1 + FORMATION_PERSISTENCE_RETRY_LIMIT
         while True:
             completion, interrupted = await self._await_blocking_safe_boundary(
-                self._memory_store.create, record
+                self._memory_store.resolve_semantic, record
             )
             if isinstance(completion, MemoryDomainError):
                 exc = completion
@@ -935,16 +1016,16 @@ class SemanticMemoryFormation:
                 if retryable and attempts_left > 1 and not interrupted:
                     attempts_left -= 1
                     continue
+                reason = {
+                    MemoryErrorCode.MALFORMED_KEYED_PAYLOAD: "MEMORY_MALFORMED_KEYED_PAYLOAD",
+                    MemoryErrorCode.DUPLICATE_CONFLICT: "MEMORY_DUPLICATE_CONFLICT",
+                    MemoryErrorCode.PUBLIC_CREATE_ACTIVE_ONLY: "MEMORY_CREATE_REJECTED",
+                    MemoryErrorCode.INVALID_ARGUMENT: "MEMORY_CREATE_REJECTED",
+                }.get(exc.error_code, "MEMORY_PERSISTENCE_FAILED")
                 outcome = FormationCandidateOutcome(
                     ordinal,
                     FormationCandidateOutcomeCode.PERSIST_FAILED,
-                    (
-                        "MEMORY_PERSISTENCE_FAILED"
-                        if retryable
-                        else "MEMORY_DUPLICATE_CONFLICT"
-                        if exc.error_code == MemoryErrorCode.DUPLICATE_CONFLICT
-                        else "MEMORY_CREATE_REJECTED"
-                    ),
+                    reason,
                     None,
                 )
             elif isinstance(completion, BaseException):
@@ -954,27 +1035,322 @@ class SemanticMemoryFormation:
                     "MEMORY_CREATE_REJECTED",
                     None,
                 )
-            elif completion is not record:
-                # complete-record idempotency：第一次已提交但 caller 未确认。
-                outcome = FormationCandidateOutcome(
-                    ordinal,
-                    FormationCandidateOutcomeCode.REUSED,
-                    "IDEMPOTENT_REUSE",
-                    completion.memory_id,
-                )
             else:
-                outcome = FormationCandidateOutcome(
-                    ordinal,
-                    FormationCandidateOutcomeCode.PERSISTED,
-                    "OK",
-                    record.memory_id,
-                )
+                lifecycle = completion
+                await self._observe_lifecycle(receipt, lifecycle)
+                candidate_outcome = lifecycle.candidate_outcome
+                if candidate_outcome == "REUSED":
+                    outcome = FormationCandidateOutcome(
+                        ordinal,
+                        FormationCandidateOutcomeCode.REUSED,
+                        "IDEMPOTENT_REUSE",
+                        lifecycle.new_memory_id or lifecycle.winner_memory_id,
+                    )
+                elif candidate_outcome == "NO_CHANGE":
+                    outcome = FormationCandidateOutcome(
+                        ordinal,
+                        FormationCandidateOutcomeCode.NO_CHANGE,
+                        lifecycle.safe_reason,
+                        lifecycle.winner_memory_id,
+                    )
+                else:
+                    outcome = FormationCandidateOutcome(
+                        ordinal,
+                        FormationCandidateOutcomeCode.PERSISTED,
+                        "OK",
+                        lifecycle.new_memory_id,
+                    )
             if interrupted:
                 raise _PersistenceInterrupted(outcome)
             return outcome
 
+    # ------------------------------------------------------------------
+    # WP3-B explicit forget branch（mutually exclusive with remember）
+    # ------------------------------------------------------------------
+
+    async def _run_forget_branch(
+        self,
+        *,
+        receipt: CommittedExchangeReceipt,
+        total_started: float,
+    ) -> SemanticFormationResult:
+        """explicit-forget branch：只消费 original user query + bounded
+        existing-key allowlist；exact membership 后经 store 单事务 FORGET。
+
+        WP3-R1：新 canonical path 只允许 registry-backed existing keys 进入
+        forget targeting。OPEN/unkeyed（logical_key=None）不提供 semantic
+        user-chat forget（NOT_IMPLEMENTED）。
+
+        任何 fail-closed（无模型、无精确成员、malformed、ambiguous、目标缺失）
+        都返回 typed outcome 且零 mutation；logical_key 绝不进入 result/event。
+        """
+        if self._forget_model is None:
+            return await self._build_observed_forget_result(
+                receipt,
+                operation=LifecycleOperation.FORGET.value,
+                outcome="FAILED_CLOSED",
+                affected=0,
+                safe_reason="FORGET_NOT_ATTEMPTED",
+                safe_error_code=SemanticFormationErrorCode.FORGET_NOT_ATTEMPTED,
+                total_started=total_started,
+            )
+        try:
+            allowlist, interrupted = await self._await_blocking_safe_boundary(
+                self._memory_store.list_logical_keys,
+                self._entry_agent_id,
+                self._memory_scope,
+            )
+            if interrupted:
+                raise asyncio.CancelledError()
+            if isinstance(allowlist, BaseException):
+                raise allowlist
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return await self._build_observed_forget_result(
+                receipt,
+                operation=LifecycleOperation.FORGET.value,
+                outcome="FAILED_CLOSED",
+                affected=0,
+                safe_reason="ALLOWLIST_READ_FAILED",
+                safe_error_code=SemanticFormationErrorCode.FORGET_NOT_ATTEMPTED,
+                total_started=total_started,
+            )
+        # WP3-R1：新 canonical path 只允许 registry-backed existing keys。
+        # 历史 free-form key（如 project_database）与 OPEN/unkeyed 不进入
+        # new forget targeting；无 registry 成员时 NOT_FOUND，零 mutation。
+        allowlist = [
+            key for key in allowlist if key in CanonicalPredicateRegistry.all_ids()
+        ]
+        if not allowlist:
+            return await self._build_observed_forget_result(
+                receipt,
+                operation=LifecycleOperation.FORGET.value,
+                outcome="NOT_FOUND",
+                affected=0,
+                safe_reason="NO_EXACT_MEMBER",
+                safe_error_code=None,
+                total_started=total_started,
+            )
+        try:
+            raw_output, interrupted = await self._await_blocking_safe_boundary(
+                self._forget_model.propose_key,
+                self._user_request,
+                allowlist,
+            )
+            if interrupted:
+                raise asyncio.CancelledError()
+            if isinstance(raw_output, BaseException):
+                raise raw_output
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return await self._build_observed_forget_result(
+                receipt,
+                operation=LifecycleOperation.FORGET.value,
+                outcome="FAILED_CLOSED",
+                affected=0,
+                safe_reason="FORGET_PROPOSAL_FAILED",
+                safe_error_code=SemanticFormationErrorCode.FORGET_NOT_ATTEMPTED,
+                total_started=total_started,
+            )
+        try:
+            proposal = ExplicitForgetIntentParser.parse(raw_output)
+        except ForgetProposalError as exc:
+            return await self._build_observed_forget_result(
+                receipt,
+                operation=LifecycleOperation.FORGET.value,
+                outcome="FAILED_CLOSED",
+                affected=0,
+                safe_reason=exc.error_code,
+                safe_error_code=SemanticFormationErrorCode.FORGET_NOT_ATTEMPTED,
+                total_started=total_started,
+            )
+        key = ExplicitForgetIntentParser.validate(
+            proposal, allowlist, user_query=self._user_request
+        )
+        if key is None:
+            return await self._build_observed_forget_result(
+                receipt,
+                operation=LifecycleOperation.FORGET.value,
+                outcome="FAILED_CLOSED",
+                affected=0,
+                safe_reason=ForgetProposalErrorCode.TARGET_NOT_MEMBER,
+                safe_error_code=SemanticFormationErrorCode.FORGET_NOT_ATTEMPTED,
+                total_started=total_started,
+            )
+        try:
+            lifecycle, interrupted = await self._await_blocking_safe_boundary(
+                self._memory_store.forget_semantic_partition,
+                agent_id=self._entry_agent_id,
+                memory_scope=self._memory_scope,
+                logical_key=key,
+            )
+            if interrupted:
+                raise asyncio.CancelledError()
+            if isinstance(lifecycle, BaseException):
+                raise lifecycle
+        except asyncio.CancelledError:
+            raise
+        except MemoryDomainError:
+            return await self._build_observed_forget_result(
+                receipt,
+                operation=LifecycleOperation.FORGET.value,
+                outcome="FAILED_CLOSED",
+                affected=0,
+                safe_reason="FORGET_PERSISTENCE_FAILED",
+                safe_error_code=SemanticFormationErrorCode.FORGET_NOT_ATTEMPTED,
+                total_started=total_started,
+            )
+        except Exception:
+            return await self._build_observed_forget_result(
+                receipt,
+                operation=LifecycleOperation.FORGET.value,
+                outcome="FAILED_CLOSED",
+                affected=0,
+                safe_reason="FORGET_PERSISTENCE_FAILED",
+                safe_error_code=SemanticFormationErrorCode.FORGET_NOT_ATTEMPTED,
+                total_started=total_started,
+            )
+        await self._observe_lifecycle(receipt, lifecycle)
+        result = self._build_forget_result(
+            receipt,
+            operation=lifecycle.operation.value,
+            outcome=lifecycle.outcome,
+            affected=lifecycle.affected_count,
+            safe_reason=lifecycle.safe_reason,
+            safe_error_code=None,
+            total_started=total_started,
+        )
+        return result
+
+    async def _build_observed_forget_result(
+        self,
+        receipt: CommittedExchangeReceipt,
+        *,
+        operation: str,
+        outcome: str,
+        affected: int,
+        safe_reason: str,
+        safe_error_code: Optional[SemanticFormationErrorCode],
+        total_started: float,
+    ) -> SemanticFormationResult:
+        """为零 mutation / fail-closed Forget 结果补齐安全 lifecycle 证据。"""
+        lifecycle = LifecycleResolutionResult(
+            operation=LifecycleOperation(operation),
+            outcome=outcome,
+            candidate_outcome=None,
+            winner_memory_id=None,
+            new_memory_id=None,
+            affected_transitions=(),
+            affected_count=affected,
+            ids_truncated=False,
+            omitted_count=0,
+            safe_reason=safe_reason,
+            safe_error_code=(safe_error_code.value if safe_error_code else None),
+            resolution_duration_ms=max(
+                0, int((time.monotonic() - total_started) * 1000)
+            ),
+            mutation_duration_ms=0,
+        )
+        await self._observe_lifecycle(receipt, lifecycle)
+        return self._build_forget_result(
+            receipt,
+            operation=operation,
+            outcome=outcome,
+            affected=affected,
+            safe_reason=safe_reason,
+            safe_error_code=safe_error_code,
+            total_started=total_started,
+        )
+
+    def _build_forget_result(
+        self,
+        receipt: CommittedExchangeReceipt,
+        *,
+        operation: str,
+        outcome: str,
+        affected: int,
+        safe_reason: str,
+        safe_error_code: Optional[SemanticFormationErrorCode],
+        total_started: float,
+    ) -> SemanticFormationResult:
+        failed = safe_error_code is not None
+        return SemanticFormationResult(
+            run_id=receipt.run_id or "unknown",
+            exchange_id=receipt.exchange_id,
+            agent_id=self._entry_agent_id,
+            memory_scope=self._memory_scope,
+            formation_method=FORMATION_METHOD_HYBRID,
+            status=(
+                SemanticFormationStatus.FAILED
+                if failed
+                else SemanticFormationStatus.SUCCEEDED
+            ),
+            schema_version=FORMATION_SCHEMA_VERSION,
+            proposed_count=0,
+            accepted_count=0,
+            ignored_count=0,
+            persisted_count=0,
+            reused_count=0,
+            failed_count=0,
+            candidate_outcomes=(),
+            formation_total_duration_ms=max(
+                0, int((time.monotonic() - total_started) * 1000)
+            ),
+            model_extraction_duration_ms=0,
+            persistence_duration_ms=0,
+            safe_error_code=safe_error_code.value if safe_error_code else None,
+            lifecycle_operation=operation,
+            lifecycle_outcome=outcome,
+            lifecycle_affected_count=affected,
+        )
+
+    # -- lifecycle observation（journal-first；best-effort） ------------------
+
+    async def _observe_lifecycle(
+        self,
+        receipt: CommittedExchangeReceipt,
+        lifecycle: LifecycleResolutionResult,
+    ) -> None:
+        if self._event_emitter is None:
+            return
+        try:
+            transitions = ";".join(
+                f"{t.memory_id}|{t.before_status}|{t.after_status}"
+                for t in lifecycle.affected_transitions
+            ) or "NONE"
+            await self._event_emitter.emit(
+                RuntimeEventType.MEMORY_LIFECYCLE_RESOLVED,
+                MemoryLifecycleResolvedPayload(
+                    exchange_id=receipt.exchange_id,
+                    agent_id=self._entry_agent_id,
+                    memory_scope=self._memory_scope,
+                    memory_type="SEMANTIC",
+                    operation=lifecycle.operation.value,
+                    outcome=lifecycle.outcome,
+                    candidate_outcome=lifecycle.candidate_outcome,
+                    winner_memory_id=lifecycle.winner_memory_id,
+                    new_memory_id=lifecycle.new_memory_id,
+                    affected_count=lifecycle.affected_count,
+                    affected_transitions=transitions,
+                    ids_truncated=lifecycle.ids_truncated,
+                    omitted_count=lifecycle.omitted_count,
+                    safe_reason=lifecycle.safe_reason,
+                    safe_error_code=lifecycle.safe_error_code,
+                    resolution_duration_ms=lifecycle.resolution_duration_ms,
+                    mutation_duration_ms=lifecycle.mutation_duration_ms,
+                    schema_version=FORMATION_SCHEMA_VERSION,
+                ),
+                component="semantic_memory_formation",
+                ignore_run_cancellation=True,
+            )
+        except (asyncio.CancelledError, Exception):
+            # Observation failure 永远 best-effort：不 rollback Memory。
+            return
+
     @staticmethod
-    async def _await_blocking_safe_boundary(function, *args):
+    async def _await_blocking_safe_boundary(function, *args, **kwargs):
         """等待同步调用到安全边界，并延迟传播 task cancellation。
 
         ``asyncio.to_thread`` 本身不能停止已开始的 SQLite/model 调用。这里用
@@ -984,7 +1360,7 @@ class SemanticMemoryFormation:
 
         def invoke():
             try:
-                return function(*args)
+                return function(*args, **kwargs)
             except BaseException as exc:  # 只在调用线程内搬运，随后按 typed 边界处理。
                 return exc
 

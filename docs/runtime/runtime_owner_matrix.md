@@ -13,6 +13,16 @@
 六个 PUBLIC_VERSIONED operation；`SAFE_SPAN_ATTRIBUTES` 的新增安全键不会自动进入
 consumer-neutral trace export。
 
+## Phase5 WP3 Memory Lifecycle & Conflict Owners
+
+| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
+| --- | --- | --- | --- | --- | --- | --- |
+| Canonical predicate identity / registry | `CanonicalPredicateRegistry`（LocalAgent code-owned 只读） | Formation validation、forget targeting、deterministic tests | v1 只冻结 `project.database` / `project.package_manager` / `engineering.public_network_allowed`；`logical_key` 只能由 LocalAgent 从 accepted registry entry 编译 | 无（纯代码元数据） | dynamic registration、config plugin、DB table、ontology、alias、external API、`NEW_PREDICATE`、Model 输出 `logical_key` | INTERNAL_RC |
+| keyed Semantic lifecycle decision（typed equality / winner / INSERT / NO_CHANGE / SUPERSEDE / FORGET plan） | `MemoryLifecycleResolver`（纯函数 policy Owner） | `AdvancedMemoryStore` transaction executor、deterministic tests | snapshot + candidate → 窄 mutation plan；不做 SQL / 不持有 connection；不认识 predicate_resolution/registry | 无 | 实现第二套 persistence policy；在 Store 外 SELECT 后决策再另开事务；Model 参与决策 | INTERNAL_RC |
+| lifecycle mutation orchestration | `AdvancedMemoryStore.resolve_semantic` / `forget_semantic_partition`（transaction executor） | Formation / forget branch、lifecycle tests | 同一 `BEGIN IMMEDIATE` 内 partition read → resolver → plan 校验 → apply → post-state 校验 → COMMIT；失败 ROLLBACK ALL | Memory SQLite `long_term_memory`（Schema v2 不变） | generic update/set_status API；direct SQL second owner；跨 agent/scope/type/key mutation；SUPERSEDED→ACTIVE / FORGOTTEN→ACTIVE | INTERNAL_RC |
+| explicit forget source / targeting | `ExplicitForgetIntentParser` + forget branch（deterministic cue + exact registry-backed key membership） | `AdvancedMemoryStore.forget_semantic_partition` | 只消费 original user query + bounded registry-backed existing-key allowlist；Model 只提议 exact key | 无 | assistant/RAG/Tool/final answer 触发；Model 输出 memory_id/status/scope/SQL；fuzzy/canonical/vector 定位；OPEN/unkeyed chat forget | INTERNAL_RC |
+| lifecycle observation | `MEMORY_LIFECYCLE_RESOLVED` typed Event + Journal-first channel | Runtime observability metrics；WP5 只读 evidence | 从已提交 lifecycle result 单向投影，best-effort | Runtime Event Journal；metric/span 为派生观察 | 保存 canonical text / payload value / logical key / forget query / raw exception；写回 Memory/output/terminal | PUBLIC_VERSIONED Event v2 / lifecycle payload v1 |
+
 ## Stage 3 WP3 Resource Authorization Owner
 
 | Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
