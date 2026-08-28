@@ -27,6 +27,48 @@
 | `FORMATION_TIMED_OUT` | Formation operation timeout | 不重放 whole Formation | `TIMED_OUT` 或已提交部分存在时 `PARTIAL`；当前 transaction 先到安全边界 |
 | `FORMATION_CANCELLED` | post-delivery Formation cancellation/shutdown | 不重放 whole Formation | `CANCELLED` 或已提交部分存在时 `PARTIAL`；delivery 保持成功 |
 | `FORMATION_INTERNAL_ERROR` | 非预期内部错误的安全收口 | 不盲重试 | `FAILED`；不投影 raw exception |
+| `FORMATION_FORGET_NOT_ATTEMPTED` | explicit-forget branch fail-closed（无 forget model / proposal 失败 / exact key 不命中 / allowlist overflow） | 不重试 | `FAILED_CLOSED`，0 mutation；logical_key 永不进入 result/event |
+
+### WP3-R1 Canonical Predicate Identity（proposal validation outcome）
+
+`logical_key` 由 LocalAgent 从 accepted `CanonicalPredicateRegistry` entry 编译，Model
+不得输出。这些 outcome 不进入 `StepCompletionResult.error_code`；只作为 per-candidate
+`IGNORED_INVALID` / `OUTPUT_FORBIDDEN_FIELD` 安全投影。
+
+- `REMEMBER` 缺 `predicate_resolution`：fail closed，candidate invalid，0 write；
+- `predicate_resolution` 未知（非 REGISTERED/OPEN）：fail closed，candidate invalid，0 write；
+- `REGISTERED` + null/missing/invented/alias predicate ID：exact registry lookup 失败，
+  candidate invalid，0 write；
+- `REGISTERED` + category 不在 slot allowlist：fail closed，candidate invalid，0 write；
+- `REGISTERED` + value 不满足 slot constraint（`"false"` 不能 coercion 成 bool）：
+  fail closed，candidate invalid，0 write；
+- `OPEN` + non-null predicate ID：fail closed，candidate invalid，0 write；
+- Model 输出 `logical_key`：forbidden authoritative field，batch `OUTPUT_FORBIDDEN_FIELD`，
+  0 write；
+- `OPEN` + null：accepted，`logical_key=None` → INSERT-only；
+- `REGISTERED` + exact registry ID + category/value 匹配：accepted，canonical
+  `logical_key` 编译 → keyed lifecycle。
+
+## Phase5 WP3 Memory Lifecycle & Conflict Codes
+
+这些 code 只进入 lifecycle result/`MEMORY_LIFECYCLE_RESOLVED` event/metric；
+不得写入 `StepCompletionResult.error_code` 或改变 delivered output/final
+Step/Run terminal。Business Authority 始终是 SQLite `SemanticMemoryRecord`。
+
+| Code / outcome | Trigger | Retry | Side effect / outcome |
+| --- | --- | --- | --- |
+| LifecycleOperation.INSERT | no-key 或 keyed 无 ACTIVE | 不重试 | 新 ACTIVE row；`candidate_outcome=PERSISTED` |
+| LifecycleOperation.NO_CHANGE | 等价 ACTIVE + relation invariant clean，或 forget 全安全 tombstone | 不重试 | 零 business mutation；`outcome=OK` 或 `ALREADY_FORGOTTEN` |
+| LifecycleOperation.SUPERSEDE | 冲突/duplicate repair / new winner | 不重试 | 单事务：insert（可选）+ displaced ACTIVE → SUPERSEDED + historical relation 重指；`candidate_outcome=PERSISTED` 或 `NO_CHANGE` |
+| LifecycleOperation.FORGET | explicit user forget exact key | 不重试 | 单事务 all-version redaction；`outcome=OK` |
+| `NOT_FOUND`（lifecycle outcome） | exact key 从未存在 | 不重试 | 零 mutation；不伪造 MemoryStatus |
+| `MEMORY_MALFORMED_KEYED_PAYLOAD` | keyed 历史 row payload 非精确 `{"value": scalar}` | 不重试 | typed fail closed；事务零 mutation |
+| `MEMORY_FORGET_NOT_ATTEMPTED` | forget branch 无 forget model / allowlist 读取失败 | 不重试 | `FAILED_CLOSED`，0 mutation |
+| `FORGET_TARGET_MISSING` | strict forget parser 缺少 target | 不重试 | 0 mutation；不允许 fuzzy/canonical/vector 定位 |
+| `FORGET_TARGET_INVALID_SYNTAX` | logical key 语法非法 | 不重试 | 0 mutation；不允许 fuzzy/canonical/vector 定位 |
+| `FORGET_TARGET_NOT_MEMBER` | exact membership 校验失败 | 不重试 | 0 mutation；不允许 fuzzy/canonical/vector 定位 |
+| `FORGET_TARGET_AMBIGUOUS` | target proposal 不唯一 | 不重试 | 0 mutation；不允许 fuzzy/canonical/vector 定位 |
+| `FORGET_ALLOWLIST_OVERFLOW` | existing-key allowlist 超过固定上限 | 不重试 | 0 mutation；不允许 fuzzy/canonical/vector 定位 |
 
 ### HTTP pre-Run rejection（不是 Runtime error code）
 

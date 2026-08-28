@@ -93,10 +93,11 @@ def make_formation(
     event_emitter=None,
     span_recorder=None,
     run_id: Optional[str] = "run-1",
+    user_request: str = USER_QUERY,
 ) -> SemanticMemoryFormation:
     return SemanticMemoryFormation(
         entry_agent_id="core_router",
-        user_request=USER_QUERY,
+        user_request=user_request,
         memory_store=store or make_store(tmp_path),
         extraction_model=extraction,
         run_id=run_id,
@@ -113,12 +114,12 @@ class FakeStore:
         self.fail_times = fail_times
         self.received: List[object] = []
 
-    def create(self, record):
+    def resolve_semantic(self, record):
         self.received.append(record)
         if self.fail_times > 0:
             self.fail_times -= 1
             raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED)
-        return self._real.create(record)
+        return self._real.resolve_semantic(record)
 
 
 def candidates_json(*candidates: dict) -> str:
@@ -132,7 +133,8 @@ def remember(
     category="PROJECT_STABLE_FACT",
     text="项目数据库使用 PostgreSQL。",
     value="PostgreSQL",
-    key=None,
+    predicate="REGISTERED",
+    pid="project.database",
     excerpt="数据库换成 PostgreSQL",
     reason="EXPLICIT_PROJECT_FACT",
     **extra,
@@ -144,9 +146,9 @@ def remember(
         "value": value,
         "source_excerpt": excerpt,
         "reason_code": reason,
+        "predicate_resolution": predicate,
+        "proposed_predicate_id": pid,
     }
-    if key is not None:
-        item["logical_key"] = key
     item.update(extra)
     return item
 
@@ -240,20 +242,20 @@ def test_parser_rejects_top_level_extra_field() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("category", "text", "value", "key"),
+    ("category", "text", "value", "predicate", "pid"),
     [
-        ("STABLE_USER_PREFERENCE", "用户偏好使用 uv 管理依赖。", "uv", "project.package_manager"),
-        ("PROJECT_STABLE_FACT", "项目数据库使用 PostgreSQL。", "PostgreSQL", "project.database"),
-        ("ENGINEERING_CONSTRAINT", "项目禁止直接提交 main 分支。", True, "project.branch_protection"),
-        ("LONG_TERM_DECISION", "项目长期使用 SQLite 作为本地存储。", "SQLite", None),
+        ("PROJECT_STABLE_FACT", "项目数据库使用 PostgreSQL。", "PostgreSQL", "REGISTERED", "project.database"),
+        ("LONG_TERM_DECISION", "项目长期使用 SQLite 作为本地存储。", "SQLite", "REGISTERED", "project.database"),
+        ("ENGINEERING_CONSTRAINT", "项目不允许出站公网访问。", False, "REGISTERED", "engineering.public_network_allowed"),
+        ("STABLE_USER_PREFERENCE", "用户偏好使用 uv 管理依赖。", "uv", "OPEN", None),
     ],
 )
 async def test_explicit_stable_statement_is_accepted(
-    tmp_path, category, text, value, key
+    tmp_path, category, text, value, predicate, pid
 ) -> None:
     extraction = FakeExtractionModel(
         candidates_json(
-            remember(category=category, text=text, value=value, key=key)
+            remember(category=category, text=text, value=value, predicate=predicate, pid=pid)
         )
     )
     store = make_store(tmp_path)
@@ -447,9 +449,9 @@ async def test_private_reasoning_never_enters_formation_input(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_logical_key_makes_candidate_invalid(tmp_path) -> None:
+async def test_invented_predicate_id_makes_candidate_invalid(tmp_path) -> None:
     extraction = FakeExtractionModel(
-        candidates_json(remember(key="Project.DataBase", value="PostgreSQL"))
+        candidates_json(remember(pid="Project.DataBase", value="PostgreSQL"))
     )
     store = make_store(tmp_path)
     formation = make_formation(tmp_path, extraction, store=store)
@@ -461,6 +463,210 @@ async def test_invalid_logical_key_makes_candidate_invalid(tmp_path) -> None:
         FormationCandidateOutcomeCode.IGNORED_INVALID
     )
     assert store.list_by_agent("core_router") == []
+
+
+@pytest.mark.asyncio
+async def test_missing_predicate_resolution_fails_closed(tmp_path) -> None:
+    candidate = remember()
+    candidate.pop("predicate_resolution")
+    extraction = FakeExtractionModel(candidates_json(candidate))
+    store = make_store(tmp_path)
+    formation = make_formation(tmp_path, extraction, store=store)
+    result = await formation.run_formation(
+        receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+    )
+    assert result.ignored_count == 1
+    assert result.candidate_outcomes[0].outcome is (
+        FormationCandidateOutcomeCode.IGNORED_INVALID
+    )
+    assert store.list_by_agent("core_router") == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_predicate_resolution_fails_closed(tmp_path) -> None:
+    extraction = FakeExtractionModel(
+        candidates_json(remember(predicate="GUESSED", pid="project.database"))
+    )
+    store = make_store(tmp_path)
+    formation = make_formation(tmp_path, extraction, store=store)
+    result = await formation.run_formation(
+        receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+    )
+    assert result.ignored_count == 1
+    assert store.list_by_agent("core_router") == []
+
+
+@pytest.mark.asyncio
+async def test_registered_with_null_predicate_id_fails_closed(tmp_path) -> None:
+    extraction = FakeExtractionModel(
+        candidates_json(remember(predicate="REGISTERED", pid=None))
+    )
+    store = make_store(tmp_path)
+    formation = make_formation(tmp_path, extraction, store=store)
+    result = await formation.run_formation(
+        receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+    )
+    assert result.ignored_count == 1
+    assert store.list_by_agent("core_router") == []
+
+
+@pytest.mark.asyncio
+async def test_open_with_non_null_predicate_id_fails_closed(tmp_path) -> None:
+    extraction = FakeExtractionModel(
+        candidates_json(remember(predicate="OPEN", pid="project.database"))
+    )
+    store = make_store(tmp_path)
+    formation = make_formation(tmp_path, extraction, store=store)
+    result = await formation.run_formation(
+        receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+    )
+    assert result.ignored_count == 1
+    assert store.list_by_agent("core_router") == []
+
+
+@pytest.mark.asyncio
+async def test_model_outputting_logical_key_fails_closed(tmp_path) -> None:
+    # logical_key 是 LocalAgent 编译的 authoritative identity；Model 输出即整体
+    # fail closed（OUTPUT_FORBIDDEN_FIELD）。
+    extraction = FakeExtractionModel(
+        candidates_json(
+            {
+                "disposition": "REMEMBER",
+                "category": "PROJECT_STABLE_FACT",
+                "canonical_text": "项目数据库使用 PostgreSQL。",
+                "value": "PostgreSQL",
+                "source_excerpt": "数据库换成 PostgreSQL",
+                "predicate_resolution": "REGISTERED",
+                "proposed_predicate_id": "project.database",
+                "logical_key": "project.database",
+            }
+        )
+    )
+    store = make_store(tmp_path)
+    formation = make_formation(tmp_path, extraction, store=store)
+    result = await formation.run_formation(
+        receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+    )
+    assert result.status is SemanticFormationStatus.FAILED
+    assert (
+        result.safe_error_code
+        == SemanticFormationErrorCode.OUTPUT_FORBIDDEN_FIELD.value
+    )
+    assert store.list_by_agent("core_router") == []
+
+
+@pytest.mark.asyncio
+async def test_registered_predicate_compiles_canonical_logical_key(tmp_path) -> None:
+    extraction = FakeExtractionModel(candidates_json(remember(pid="project.database")))
+    store = make_store(tmp_path)
+    formation = make_formation(tmp_path, extraction, store=store)
+    result = await formation.run_formation(
+        receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+    )
+    record = store.get_by_memory_id(result.candidate_outcomes[0].memory_id)
+    assert record.logical_key == "project.database"
+
+
+@pytest.mark.asyncio
+async def test_open_candidate_persists_unkeyed_insert_only(tmp_path) -> None:
+    extraction = FakeExtractionModel(
+        candidates_json(remember(predicate="OPEN", pid=None))
+    )
+    store = make_store(tmp_path)
+    formation = make_formation(tmp_path, extraction, store=store)
+    result = await formation.run_formation(
+        receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+    )
+    assert result.persisted_count == 1
+    record = store.get_by_memory_id(result.candidate_outcomes[0].memory_id)
+    assert record.logical_key is None
+
+
+@pytest.mark.asyncio
+async def test_registered_alias_or_underscore_id_fails_closed(tmp_path) -> None:
+    # 无 alias / underscore normalizer：project_database / project.db /
+    # database_backend 都是 invented ID，零写入。
+    for invented in ("project_database", "project.db", "database_backend"):
+        extraction = FakeExtractionModel(
+            candidates_json(remember(pid=invented))
+        )
+        store = make_store(tmp_path)
+        formation = make_formation(tmp_path, extraction, store=store)
+        result = await formation.run_formation(
+            receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+        )
+        assert result.ignored_count == 1
+        assert store.list_by_agent("core_router") == []
+
+
+@pytest.mark.asyncio
+async def test_registered_id_with_invalid_category_fails_closed(tmp_path) -> None:
+    # project.database 只允许 PROJECT_STABLE_FACT / LONG_TERM_DECISION；
+    # STABLE_USER_PREFERENCE / ENGINEERING_CONSTRAINT 都 invalid。
+    for bad_category in ("STABLE_USER_PREFERENCE", "ENGINEERING_CONSTRAINT"):
+        extraction = FakeExtractionModel(
+            candidates_json(
+                remember(category=bad_category, value="PostgreSQL", pid="project.database")
+            )
+        )
+        store = make_store(tmp_path)
+        formation = make_formation(tmp_path, extraction, store=store)
+        result = await formation.run_formation(
+            receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+        )
+        assert result.ignored_count == 1
+        assert store.list_by_agent("core_router") == []
+
+
+@pytest.mark.asyncio
+async def test_engineering_public_network_allowed_rejects_string_coercion(
+    tmp_path,
+) -> None:
+    # 禁止把 "false"/"no"/"disabled" 字符串静默 coercion 成 bool。
+    for bad_value in ("false", "no", "disabled"):
+        extraction = FakeExtractionModel(
+            candidates_json(
+                remember(
+                    category="ENGINEERING_CONSTRAINT",
+                    text="项目不允许出站公网访问。",
+                    value=bad_value,
+                    pid="engineering.public_network_allowed",
+                    excerpt="数据库换成 PostgreSQL",
+                )
+            )
+        )
+        store = make_store(tmp_path)
+        formation = make_formation(tmp_path, extraction, store=store)
+        result = await formation.run_formation(
+            receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+        )
+        assert result.ignored_count == 1
+        assert store.list_by_agent("core_router") == []
+
+
+@pytest.mark.asyncio
+async def test_engineering_public_network_allowed_accepts_strict_bool(tmp_path) -> None:
+    for boolean in (True, False):
+        extraction = FakeExtractionModel(
+            candidates_json(
+                remember(
+                    category="ENGINEERING_CONSTRAINT",
+                    text="项目不允许出站公网访问。",
+                    value=boolean,
+                    pid="engineering.public_network_allowed",
+                    excerpt="数据库换成 PostgreSQL",
+                )
+            )
+        )
+        store = make_store(tmp_path)
+        formation = make_formation(tmp_path, extraction, store=store)
+        result = await formation.run_formation(
+            receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+        )
+        assert result.persisted_count == 1
+        record = store.get_by_memory_id(result.candidate_outcomes[0].memory_id)
+        assert record.payload == {"value": boolean}
+        assert record.logical_key == "engineering.public_network_allowed"
 
 
 @pytest.mark.asyncio
@@ -509,7 +715,7 @@ async def test_accepted_candidate_maps_to_active_semantic_hybrid_record(
                 category="PROJECT_STABLE_FACT",
                 text="项目数据库使用 PostgreSQL。",
                 value="PostgreSQL",
-                key="project.database",
+                pid="project.database",
             )
         )
     )
@@ -572,14 +778,14 @@ async def test_one_exchange_can_form_multiple_atomic_memories(tmp_path) -> None:
             remember(
                 text="项目数据库使用 PostgreSQL。",
                 value="PostgreSQL",
-                key="project.database",
+                pid="project.database",
                 excerpt="数据库换成 PostgreSQL",
             ),
             remember(
-                category="STABLE_USER_PREFERENCE",
+                category="ENGINEERING_CONSTRAINT",
                 text="项目统一使用 uv 管理依赖。",
                 value="uv",
-                key="project.package_manager",
+                pid="project.package_manager",
                 excerpt="统一用 uv",
             ),
         )
@@ -634,9 +840,10 @@ async def test_persistence_failure_yields_partial_without_rollback(tmp_path) -> 
                 excerpt="数据库换成 PostgreSQL",
             ),
             remember(
-                category="STABLE_USER_PREFERENCE",
+                category="ENGINEERING_CONSTRAINT",
                 text="项目统一使用 uv 管理依赖。",
                 value="uv",
+                pid="project.package_manager",
                 excerpt="统一用 uv",
             ),
         )
@@ -665,11 +872,11 @@ class _DuplicateConflictOnSecondStore:
         self._real = real
         self.count = 0
 
-    def create(self, record):
+    def resolve_semantic(self, record):
         self.count += 1
         if self.count == 2:
             raise MemoryDomainError(MemoryErrorCode.DUPLICATE_CONFLICT)
-        return self._real.create(record)
+        return self._real.resolve_semantic(record)
 
 
 # ---------------------------------------------------------------------------
@@ -740,8 +947,8 @@ class _CommitThenFailStore:
         self._real = real
         self.fail_times = fail_times
 
-    def create(self, record):
-        resulting = self._real.create(record)
+    def resolve_semantic(self, record):
+        resulting = self._real.resolve_semantic(record)
         if self.fail_times > 0:
             self.fail_times -= 1
             raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED)
@@ -873,15 +1080,17 @@ async def test_zero_memory_small_talk_is_normal_success(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# WP3 boundary：无 cross-run dedup / supersede / NO_CHANGE
+# WP3 keyed lifecycle integration
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_two_runs_same_fact_form_two_active_records(tmp_path) -> None:
+async def test_two_runs_same_keyed_fact_resolves_no_change_without_second_row(tmp_path) -> None:
     store = make_store(tmp_path)
     for run_id in ("run-a", "run-b"):
-        extraction = FakeExtractionModel(candidates_json(remember()))
+        extraction = FakeExtractionModel(
+            candidates_json(remember(pid="project.database"))
+        )
         formation = SemanticMemoryFormation(
             entry_agent_id="core_router",
             user_request=USER_QUERY,
@@ -895,23 +1104,25 @@ async def test_two_runs_same_fact_form_two_active_records(tmp_path) -> None:
             store=_FakeFinalStore(),
         )
         assert result.status is SemanticFormationStatus.SUCCEEDED
+        if run_id == "run-b":
+            assert result.candidate_outcomes[0].outcome is (
+                FormationCandidateOutcomeCode.NO_CHANGE
+            )
     records = store.list_by_agent("core_router")
-    assert len(records) == 2
-    assert all(record.status is MemoryStatus.ACTIVE for record in records)
-    assert len({record.memory_id for record in records}) == 2
-    # 没有 semantic NO_CHANGE / supersede：两条都是 ACTIVE，无 lifecycle 变化。
+    assert len(records) == 1
+    assert records[0].status is MemoryStatus.ACTIVE
 
 
 @pytest.mark.asyncio
-async def test_user_correction_only_creates_new_active_record(tmp_path) -> None:
+async def test_user_correction_with_same_key_supersedes_old_active(tmp_path) -> None:
     store = make_store(tmp_path)
-    # Run A：SQLite 事实
+    # Run A：SQLite 事实（keyed）
     first_extraction = FakeExtractionModel(
         candidates_json(
             remember(
                 text="项目数据库使用 SQLite。",
                 value="SQLite",
-                key="project.database",
+                pid="project.database",
                 excerpt="数据库换成 PostgreSQL",
             )
         )
@@ -929,13 +1140,14 @@ async def test_user_correction_only_creates_new_active_record(tmp_path) -> None:
         store=_FakeFinalStore(),
     )
     sqlite_record = store.list_by_agent("core_router")[0]
-    # Run B：用户更正为 PostgreSQL —— 只创建新 ACTIVE，不改旧 record。
+    # Run B：同 key 用户更正为 PostgreSQL —— WP3 resolver 让新值成为 ACTIVE
+    # winner，旧 SQLite 变 SUPERSEDED 并直接指向新 winner；不产生第三个 ACTIVE。
     second_extraction = FakeExtractionModel(
         candidates_json(
             remember(
                 text="项目数据库使用 PostgreSQL。",
                 value="PostgreSQL",
-                key="project.database",
+                pid="project.database",
                 excerpt="数据库换成 PostgreSQL",
             )
         )
@@ -947,20 +1159,166 @@ async def test_user_correction_only_creates_new_active_record(tmp_path) -> None:
         extraction_model=second_extraction,
         run_id="run-b",
     )
-    await formation_b.run_formation(
+    result_b = await formation_b.run_formation(
         receipt=receipt(run_id="run-b", exchange_id="run-b"),
         final_step_id="synthesis",
         store=_FakeFinalStore(),
     )
+    assert result_b.status is SemanticFormationStatus.SUCCEEDED
+    assert result_b.persisted_count == 1
+    records = store.list_by_agent("core_router", active_only=False)
+    statuses = {r.memory_id: r.status for r in records}
+    assert statuses[sqlite_record.memory_id] is MemoryStatus.SUPERSEDED
+    active = store.list_by_agent("core_router")
+    assert len(active) == 1
+    new_record = active[0]
+    assert new_record.memory_id != sqlite_record.memory_id
+    assert new_record.status is MemoryStatus.ACTIVE
+    assert new_record.payload == {"value": "PostgreSQL"}
+    old = store.get_by_memory_id(sqlite_record.memory_id)
+    assert old.status is MemoryStatus.SUPERSEDED
+    assert old.superseded_by_memory_id == new_record.memory_id
+
+
+@pytest.mark.asyncio
+async def test_open_fact_repeated_is_insert_only(tmp_path) -> None:
+    store = make_store(tmp_path)
+    for run_id in ("run-a", "run-b"):
+        extraction = FakeExtractionModel(
+            candidates_json(
+                remember(
+                    category="STABLE_USER_PREFERENCE",
+                    text="用户偏好简洁的回答。",
+                    value="简洁",
+                    predicate="OPEN",
+                    pid=None,
+                    excerpt="统一用 uv",
+                )
+            )
+        )
+        formation = SemanticMemoryFormation(
+            entry_agent_id="core_router",
+            user_request=USER_QUERY,
+            memory_store=store,
+            extraction_model=extraction,
+            run_id=run_id,
+        )
+        result = await formation.run_formation(
+            receipt=receipt(run_id=run_id, exchange_id=run_id),
+            final_step_id="synthesis",
+            store=_FakeFinalStore(),
+        )
+        assert result.status is SemanticFormationStatus.SUCCEEDED
+        assert result.persisted_count == 1
+    # OPEN 事实 repeated：每次都是 INSERT（logical_key=None），不参与 keyed
+    # NO_CHANGE / SUPERSEDE。
     records = store.list_by_agent("core_router", active_only=False)
     assert len(records) == 2
-    assert all(record.status is MemoryStatus.ACTIVE for record in records)
-    # 旧 record 完全不变（identity/正文/status/timestamps）。
-    unchanged = store.get_by_memory_id(sqlite_record.memory_id)
-    assert unchanged.status is MemoryStatus.ACTIVE
-    assert unchanged.payload == {"value": "SQLite"}
-    assert unchanged.updated_at == sqlite_record.updated_at
-    assert unchanged.superseded_by_memory_id is None
+    assert all(r.logical_key is None for r in records)
+    assert all(r.status is MemoryStatus.ACTIVE for r in records)
+
+
+@pytest.mark.asyncio
+async def test_registered_package_manager_isolated_from_database(tmp_path) -> None:
+    store = make_store(tmp_path)
+    for run_id, candidate in (
+        ("run-a", remember(text="项目数据库使用 PostgreSQL。", value="PostgreSQL", pid="project.database", excerpt="数据库换成 PostgreSQL")),
+        ("run-b", remember(category="ENGINEERING_CONSTRAINT", text="项目统一使用 uv 管理依赖。", value="uv", pid="project.package_manager", excerpt="统一用 uv")),
+    ):
+        extraction = FakeExtractionModel(candidates_json(candidate))
+        formation = SemanticMemoryFormation(
+            entry_agent_id="core_router",
+            user_request=USER_QUERY,
+            memory_store=store,
+            extraction_model=extraction,
+            run_id=run_id,
+        )
+        result = await formation.run_formation(
+            receipt=receipt(run_id=run_id, exchange_id=run_id),
+            final_step_id="synthesis",
+            store=_FakeFinalStore(),
+        )
+        assert result.status is SemanticFormationStatus.SUCCEEDED
+    # package_manager 与 database 是不同 partition：互不影响。
+    assert len(store.list_by_agent("core_router")) == 2
+    for record in store.list_by_agent("core_router"):
+        if record.logical_key == "project.database":
+            assert record.payload == {"value": "PostgreSQL"}
+        elif record.logical_key == "project.package_manager":
+            assert record.payload == {"value": "uv"}
+        else:
+            raise AssertionError("unexpected logical_key")
+
+
+@pytest.mark.asyncio
+async def test_open_fact_is_not_chat_forgettable(tmp_path) -> None:
+    store = make_store(tmp_path)
+    # 预置一个 OPEN 事实与一个 registry keyed 事实。
+    open_extraction = FakeExtractionModel(
+        candidates_json(
+            remember(
+                category="STABLE_USER_PREFERENCE",
+                text="用户偏好简洁的回答。",
+                value="简洁",
+                predicate="OPEN",
+                pid=None,
+                excerpt="统一用 uv",
+            )
+        )
+    )
+    formation_open = SemanticMemoryFormation(
+        entry_agent_id="core_router",
+        user_request=USER_QUERY,
+        memory_store=store,
+        extraction_model=open_extraction,
+        run_id="run-open",
+    )
+    await formation_open.run_formation(
+        receipt=receipt(run_id="run-open", exchange_id="run-open"),
+        final_step_id="synthesis",
+        store=_FakeFinalStore(),
+    )
+    db_extraction = FakeExtractionModel(
+        candidates_json(remember(pid="project.database"))
+    )
+    formation_db = SemanticMemoryFormation(
+        entry_agent_id="core_router",
+        user_request=USER_QUERY,
+        memory_store=store,
+        extraction_model=db_extraction,
+        run_id="run-db",
+    )
+    await formation_db.run_formation(
+        receipt=receipt(run_id="run-db", exchange_id="run-db"),
+        final_step_id="synthesis",
+        store=_FakeFinalStore(),
+    )
+    # chat forget 只针对 registry-backed exact key：project.database 全版本 FORGOTTEN。
+    from tests.test_memory_lifecycle_forget import (
+        FakeForgetModel,
+        forget_json,
+        make_forget_formation,
+    )
+
+    forget_model = FakeForgetModel(output=forget_json("project.database"))
+    forget = make_forget_formation(tmp_path, forget_model, store=store)
+    result = await forget.run_formation(
+        receipt=receipt(), final_step_id="synthesis", store=_FakeFinalStore()
+    )
+    assert result.lifecycle_outcome == "OK"
+    # OPEN/unkeyed 事实保持 ACTIVE，不被 exact-key forget 误处理。
+    open_rows = [
+        r for r in store.list_by_agent("core_router", active_only=False)
+        if r.logical_key is None
+    ]
+    assert len(open_rows) == 1
+    assert open_rows[0].status is MemoryStatus.ACTIVE
+    assert open_rows[0].payload == {"value": "简洁"}
+    db_rows = [
+        r for r in store.list_by_agent("core_router", active_only=False)
+        if r.logical_key == "project.database"
+    ]
+    assert all(r.status is MemoryStatus.FORGOTTEN for r in db_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1358,14 @@ def _formation_events(journal, run_id: str) -> list:
     ]
 
 
+def _lifecycle_events(journal, run_id: str) -> list:
+    return [
+        record
+        for record in journal.read_after(run_id, 0, 100)
+        if record.event_type.value == "MEMORY_LIFECYCLE_RESOLVED"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_success_observation_has_counts_ids_status_latency(tmp_path) -> None:
     emitter, journal, channel = await _make_emitter()
@@ -1019,6 +1385,10 @@ async def test_success_observation_has_counts_ids_status_latency(tmp_path) -> No
         )
         events = _formation_events(journal, emitter.run_id)
         assert len(events) == 1
+        lifecycle_events = _lifecycle_events(journal, emitter.run_id)
+        assert len(lifecycle_events) == 1
+        assert lifecycle_events[0].safe_payload["operation"] == "INSERT"
+        assert lifecycle_events[0].safe_payload["outcome"] == "OK"
         payload = events[0].safe_payload
         assert payload["status"] == "SUCCEEDED"
         assert payload["formation_method"] == "HYBRID"
@@ -1279,9 +1649,9 @@ class _SlowCreateStore:
         self.delay = delay
         self.committed_count = 0
 
-    def create(self, record):
+    def resolve_semantic(self, record):
         import time as _time
 
         _time.sleep(self.delay)
         self.committed_count += 1
-        return self._real.create(record)
+        return self._real.resolve_semantic(record)

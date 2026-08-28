@@ -50,6 +50,8 @@ IGNORED_EVENT_TYPES = frozenset(
         RuntimeEventType.RETRIEVAL_STAGE_COMPLETED,
         RuntimeEventType.RETRIEVAL_COMPLETED,
         RuntimeEventType.ERROR,
+        RuntimeEventType.MEMORY_FORMATION_COMPLETED,
+        RuntimeEventType.MEMORY_LIFECYCLE_RESOLVED,
     }
 )
 SUPPORTED_RECOVERY_EVENT_TYPES = REDUCED_EVENT_TYPES | IGNORED_EVENT_TYPES
@@ -385,6 +387,12 @@ class LimitedJournalTailReducer:
                     output_publication_attempted = True
                 if payload.get("safe_error_code") == "FINAL_OUTPUT_DELIVERY_UNKNOWN":
                     delivery_status = "OUTCOME_UNKNOWN"
+            elif event_type is RuntimeEventType.MEMORY_FORMATION_COMPLETED:
+                # 纯观察；不进入 recovery projection。
+                pass
+            elif event_type is RuntimeEventType.MEMORY_LIFECYCLE_RESOLVED:
+                # 纯观察；不进入 recovery projection。
+                pass
             else:  # pragma: no cover - validator closes this set first
                 raise JournalTailReductionError(
                     RecoveryStatus.UNSUPPORTED,

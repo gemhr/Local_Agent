@@ -94,6 +94,8 @@ _GLOBAL_ALLOWED_LABELS = frozenset(
         "memory_commit_status",
         "agent_id",
         "stage",
+        "operation",
+        "outcome",
     }
 )
 _SAFE_LABEL_VALUE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -154,6 +156,28 @@ _FORMATION_ERROR_CODES = frozenset(
         "FORMATION_TIMED_OUT",
         "FORMATION_CANCELLED",
         "FORMATION_INTERNAL_ERROR",
+        "FORMATION_FORGET_NOT_ATTEMPTED",
+        "unknown",
+    }
+)
+_LIFECYCLE_OPERATION_VALUES = frozenset(
+    {"INSERT", "NO_CHANGE", "SUPERSEDE", "FORGET", "unknown"}
+)
+_LIFECYCLE_OUTCOME_VALUES = frozenset(
+    {"OK", "NOT_FOUND", "ALREADY_FORGOTTEN", "FAILED_CLOSED", "unknown"}
+)
+_LIFECYCLE_ERROR_CODES = frozenset(
+    {
+        "OK",
+        "FORGET_TARGET_MISSING",
+        "FORGET_TARGET_INVALID_SYNTAX",
+        "FORGET_TARGET_NOT_MEMBER",
+        "FORGET_TARGET_AMBIGUOUS",
+        "FORGET_ALLOWLIST_OVERFLOW",
+        "MEMORY_MALFORMED_KEYED_PAYLOAD",
+        "MEMORY_PERSISTENCE_FAILED",
+        "MEMORY_DUPLICATE_CONFLICT",
+        "MEMORY_FORGET_NOT_ATTEMPTED",
         "unknown",
     }
 )
@@ -375,6 +399,39 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
             allowed_labels=frozenset({"status"}),
             required_labels=frozenset({"status"}),
             bounded_values={"status": _FORMATION_STATUS_VALUES},
+        ),
+        MetricDescriptor(
+            name="runtime_memory_lifecycle_total",
+            type=MetricType.COUNTER,
+            description="WP3-B keyed Memory lifecycle resolution 结果",
+            unit="resolutions",
+            allowed_labels=frozenset(
+                {"operation", "outcome", "error_code"}
+            ),
+            required_labels=frozenset({"operation", "outcome", "error_code"}),
+            bounded_values={
+                "operation": _LIFECYCLE_OPERATION_VALUES,
+                "outcome": _LIFECYCLE_OUTCOME_VALUES,
+                "error_code": _LIFECYCLE_ERROR_CODES,
+            },
+        ),
+        MetricDescriptor(
+            name="runtime_memory_lifecycle_resolution_duration_seconds",
+            type=MetricType.HISTOGRAM,
+            description="WP3-B lifecycle resolution 时长（锁内 partition read/compare 至 plan）",
+            unit="seconds",
+            allowed_labels=frozenset({"operation"}),
+            required_labels=frozenset({"operation"}),
+            bounded_values={"operation": _LIFECYCLE_OPERATION_VALUES},
+        ),
+        MetricDescriptor(
+            name="runtime_memory_lifecycle_mutation_duration_seconds",
+            type=MetricType.HISTOGRAM,
+            description="WP3-B lifecycle mutation 时长（apply plan 至 commit outcome）",
+            unit="seconds",
+            allowed_labels=frozenset({"operation"}),
+            required_labels=frozenset({"operation"}),
+            bounded_values={"operation": _LIFECYCLE_OPERATION_VALUES},
         ),
         _descriptor("runtime_retries_total", MetricType.COUNTER, "Retry Attempt 数", "retries", "component"),
         _descriptor("runtime_budget_exhaustions_total", MetricType.COUNTER, "预算耗尽数", "events", "component", "budget_dimension", "status"),
@@ -880,6 +937,46 @@ class RuntimeMetricsProjector:
                     "runtime_memory_formation_duration_seconds",
                     duration_ms / 1000.0,
                     labels={"status": status},
+                )
+        elif event_type is RuntimeEventType.MEMORY_LIFECYCLE_RESOLVED:
+            operation = str(payload.get("operation", "unknown"))
+            if operation not in _LIFECYCLE_OPERATION_VALUES:
+                operation = "unknown"
+            outcome = str(payload.get("outcome", "unknown"))
+            if outcome not in _LIFECYCLE_OUTCOME_VALUES:
+                outcome = "unknown"
+            error_code = str(payload.get("safe_error_code") or "OK")
+            if error_code not in _LIFECYCLE_ERROR_CODES:
+                error_code = "unknown"
+            self.recorder.increment_counter(
+                "runtime_memory_lifecycle_total",
+                labels={
+                    "operation": operation,
+                    "outcome": outcome,
+                    "error_code": error_code,
+                },
+            )
+            resolution_ms = payload.get("resolution_duration_ms")
+            if (
+                isinstance(resolution_ms, int)
+                and not isinstance(resolution_ms, bool)
+                and resolution_ms >= 0
+            ):
+                self.recorder.observe_histogram(
+                    "runtime_memory_lifecycle_resolution_duration_seconds",
+                    resolution_ms / 1000.0,
+                    labels={"operation": operation},
+                )
+            mutation_ms = payload.get("mutation_duration_ms")
+            if (
+                isinstance(mutation_ms, int)
+                and not isinstance(mutation_ms, bool)
+                and mutation_ms >= 0
+            ):
+                self.recorder.observe_histogram(
+                    "runtime_memory_lifecycle_mutation_duration_seconds",
+                    mutation_ms / 1000.0,
+                    labels={"operation": operation},
                 )
         elif event_type is RuntimeEventType.BUDGET_EXHAUSTED:
             if payload.get("component") in {"run", "run_coordinator"}:

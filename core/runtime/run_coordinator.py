@@ -44,6 +44,7 @@ from core.runtime.semantic_memory_formation import (
     SemanticMemoryFormation,
     UnifiedFormationExtractionAdapter,
 )
+from core.runtime.memory_lifecycle import UnifiedForgetProposalAdapter
 from core.runtime.multi_agent_driver import MultiAgentDriver
 from core.runtime.plan_graph import PlanGraphValidationError, PlanGraphValidator
 from core.runtime.plan_fingerprint import PlanFingerprinter
@@ -518,6 +519,12 @@ class RunCoordinator:
                     user_request=self._planning_request.user_request,
                     memory_store=AdvancedMemoryStore(db_path),
                     extraction_model=UnifiedFormationExtractionAdapter(
+                        router,
+                        run_context=self.run_context,
+                        event_emitter=self.event_emitter,
+                        fault_controller=self._fault_controller,
+                    ),
+                    forget_model=UnifiedForgetProposalAdapter(
                         router,
                         run_context=self.run_context,
                         event_emitter=self.event_emitter,

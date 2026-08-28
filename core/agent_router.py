@@ -1841,14 +1841,22 @@ class AgentRouter:
             "不得输出 Markdown 或解释。"
             "顶层只允许字段 schema_version 和 candidates；schema_version 必须为 1。"
             "candidates 是数组；每个元素只允许字段 disposition, category, "
-            "canonical_text, value, source_excerpt，可选字段 logical_key 和 "
-            "reason_code，不得包含其他任何字段。"
+            "canonical_text, value, source_excerpt，可选字段 predicate_resolution, "
+            "proposed_predicate_id 和 reason_code，不得包含其他任何字段。"
             "disposition 只能为 REMEMBER 或 IGNORE。"
             "category 只能为 STABLE_USER_PREFERENCE、PROJECT_STABLE_FACT、"
             "ENGINEERING_CONSTRAINT 或 LONG_TERM_DECISION。"
-            "只有用户在原话中明确表达的稳定偏好、项目稳定事实、长期工程约束、"
-            "明确长期技术决策，或对上述事实的明确更正，才可提议 REMEMBER。"
-            "value 只能是字符串、数字或布尔值，不得为 null、数组或对象。"
+            "每个 REMEMBER 必须提供 predicate_resolution，只能为 REGISTERED 或 OPEN。"
+            "REGISTERED：只有当该事实明确属于下方预定义记忆槽位之一时使用；"
+            "此时 proposed_predicate_id 必须从注册表精确选择：project.database、"
+            "project.package_manager 或 engineering.public_network_allowed。"
+            "OPEN：值得长期记住但不属于任何注册槽位时使用；"
+            "此时 proposed_predicate_id 必须为 null。"
+            "不得发明新的 predicate ID、不得创建别名、不得猜测相近 ID；"
+            "无法确定时选择 OPEN。"
+            "不得输出 logical_key——它由系统根据注册表编译。"
+            "value 只能是字符串、数字或布尔值，不得为 null、数组或对象；"
+            "engineering.public_network_allowed 只接受布尔值 true 或 false。"
             "source_excerpt 必须是用户原话中支持该候选的连续原文片段。"
             "临时状态、一次性操作、闲聊、单纯任务指令、不确定或推测性表述、"
             "助手自己的推断或建议，一律提议 IGNORE。"
@@ -1883,6 +1891,65 @@ class AgentRouter:
             run_context=run_context,
             capability_requirements=capabilities,
             max_tokens=min(self.max_tokens, 1024),
+            event_emitter=event_emitter,
+            generation_options={"enable_thinking": False},
+            fault_controller=fault_controller,
+        )
+        return result.output
+
+    def complete_forget_proposal(
+        self,
+        user_query: str,
+        existing_keys: list[str],
+        *,
+        run_context: RunContext,
+        event_emitter: RunEventEmitter | StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
+    ) -> str:
+        """WP3-B 窄入口：经统一 ModelInvocation 生成严格 Forget proposal JSON。
+
+        Model 输入只允许 original user query（唯一事实 authority）与 bounded
+        existing-key allowlist；不得输入 Memory 正文、payload、RAG、Tool、
+        final answer、specialist trace 或 CoT。Model 只提议一个 exact
+        logical_key；LocalAgent 做 exact membership 校验后才可 forget。
+        """
+        system_prompt = (
+            "你是 LocalAgent 长期记忆遗忘目标提取器。只输出一个 JSON 对象，"
+            "不得输出 Markdown 或解释。"
+            "顶层必须且只允许字段 schema_version、logical_key、source_excerpt 和 "
+            "safe_reason；schema_version 必须为 1。"
+            "logical_key 必须从下方现有记忆键列表中精确选择唯一一个，"
+            "必须原样保留大小写与点分形式；不得发明、改写或模糊匹配键。"
+            "如果用户要求遗忘的内容没有精确对应键，logical_key 输出 null。"
+            "source_excerpt 必须是用户原话中表达遗忘要求的连续原文片段。"
+            "safe_reason 必须输出固定值 EXPLICIT_FORGET。"
+            "不得输出 memory_id、status、agent、scope、SQL、operation 或 supersede。"
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "用户原话：\n"
+                    + user_query
+                    + "\n\n现有记忆键列表（只能精确选择其中之一）：\n"
+                    + "\n".join(existing_keys)
+                ),
+            },
+        ]
+        capabilities = TaskCapabilityRequirements(
+            requires_multi_agent=False,
+            risk_level=RiskLevel.LOW,
+            estimated_steps=1,
+        )
+        result = self._invoke_model_contract(
+            agent_id="core_router",
+            user_query=user_query,
+            messages=messages,
+            context_requirements=None,
+            run_context=run_context,
+            capability_requirements=capabilities,
+            max_tokens=min(self.max_tokens, 256),
             event_emitter=event_emitter,
             generation_options={"enable_thinking": False},
             fault_controller=fault_controller,

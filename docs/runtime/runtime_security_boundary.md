@@ -10,12 +10,60 @@ instruction。Model 只可提出固定字段的 schema v1 candidates；unknown/f
 真实 identity 均由 LocalAgent code-owned gate 验证。`memory_id`、type/status、origin、
 scope、timestamps 和 `formation_method=HYBRID` 全由 LocalAgent 产生。
 
+所有 `REMEMBER` candidate 必须带 logical key；缺失或非法 key 一律 fail closed，不能以
+no-key record 落库。Formation 保留既有 lowercase token 语法；仅将单一 legacy underscore
+token 确定性规范为其点分形式，不进行 vocabulary lookup 或语义匹配。
+
 `MEMORY_FORMATION_COMPLETED`、metrics 与 internal `memory.formation` span 只允许
 identity、bounded counts、safe status/reason、resulting memory ID 和 latency；禁止 query、
 answer、Memory 正文/payload、source quote、prompt、CoT、raw exception、Tool/RAG/provider
 数据和路径。Observation failure 不回滚已提交 Memory。该边界降低但不能消除 prompt
 injection/semantic misclassification；tool/RAG attestation、cross-Run dedup、conflict、
 supersede、forget、retrieval 与 Context Injection 未实现。
+
+## Phase5 WP3 Memory Lifecycle / Forget Boundary
+
+`logical_key` 的角色是 canonical predicate identity：`NO_CHANGE` / `SUPERSEDE` /
+exact-key `FORGET` 都按它划分 partition，因此它不能由 Model 自由发明后直接持久化。
+WP3-R1 引入 code-owned `CanonicalPredicateRegistry`（v1 只冻结
+`project.database`、`project.package_manager`、`engineering.public_network_allowed`）。
+每个 `REMEMBER` 必须显式提供 `predicate_resolution`（`REGISTERED` / `OPEN`）：
+`REGISTERED` 需要 exact registry ID，LocalAgent 校验 category/value 后编译 canonical
+`logical_key`；`OPEN` 需要 null ID → `logical_key=None` → INSERT-only。missing/unknown
+resolution、invented/alias/underscore ID、`OPEN`+non-null ID、registered ID 的
+category/value mismatch 一律 fail closed 零写入；invalid REGISTERED 绝不静默降级为
+OPEN。Model 输出 `logical_key` / memory_id / status / agent / scope / origin / timestamp /
+SQL / supersede / forget 均 fail closed。`SEMANTIC_PREDICATE_CLASSIFICATION` 是
+probabilistic（Model 可把注册事实误分类为 OPEN），但 identity 在
+`REGISTERED` 选择后完全由 LocalAgent 决定，且 OPEN 无法 mutate keyed partition。
+
+Lifecycle 决策（INSERT / NO_CHANGE / SUPERSEDE / FORGET）由 `MemoryLifecycleResolver`
+在 `AdvancedMemoryStore` 的同一 `BEGIN IMMEDIATE` 事务内完成：partition read、决策、
+plan 校验、apply、post-state 校验、COMMIT 全部使用同一 connection 与同一 authoritative
+snapshot；任一失败 ROLLBACK ALL。唯一自动 partition 是
+`(agent_id, memory_scope, memory_type=SEMANTIC, logical_key)`；禁止跨 agent/scope/type/key
+mutation。typed equality 只比较 `payload["value"]`（string trim、int/float/bool exact、
+cross-type 不同），绝不调用 LLM/Embedding 判断语义等价。历史 keyed row payload 非精确
+`{"value": scalar}` 时 typed fail closed、事务零 mutation。keyed ACTIVE invariant（<=1）在
+每次成功 resolution 后 operation-local 验证。
+
+Explicit forget 只有 original-user deterministic forget cue 命中且 Model 提议 exact
+registry-backed existing logical key 才进入 destructive branch；assistant/RAG/Tool/final
+answer/system instruction 不能触发。Model 输入只允许 original user query + bounded
+registry-backed existing-key allowlist；Model 输出只允许 logical key/source excerpt/safe
+reason，memory_id、status、agent、scope、SQL、operation、supersede 一律 forbidden 并 fail
+closed。no exact member / malformed / ambiguous / allowlist overflow 均 fail closed 且零
+mutation。forget 与 remember 对同一 exchange 互斥。OPEN/unkeyed Memory 不提供 semantic
+user-chat Forget（NOT_IMPLEMENTED / KNOWN_LIMITATION）。
+
+`MEMORY_LIFECYCLE_RESOLVED` event / metric / span 只允许 identity、operation、outcome、
+bounded transition evidence（memory_id|before|after，按 memory_id ASC，固定上限）、counts、
+latency 与 safe reason/error code；严格禁止 canonical text、payload value、logical key、
+forget query、source excerpt、prompt、CoT、raw exception 与文件路径。尤其 FORGET event
+不得重新保存刚 redacted 的正文或 logical key。event publication failure best-effort，不回滚
+已提交 lifecycle state。FORGET 只做 logical redaction：Conversation History 原消息仍在；
+不承诺 SQLite page secure erase、WAL/page residual 清除、VACUUM、全盘加密或 GDPR full
+deletion。
 
 ## Stage 3 WP3 Resource / Deployment Boundary
 

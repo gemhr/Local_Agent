@@ -33,6 +33,7 @@ class RuntimeEventType(str, Enum):
     OUTPUT_DELTA = "OUTPUT_DELTA"
     STEP_COMPLETED = "STEP_COMPLETED"
     MEMORY_FORMATION_COMPLETED = "MEMORY_FORMATION_COMPLETED"
+    MEMORY_LIFECYCLE_RESOLVED = "MEMORY_LIFECYCLE_RESOLVED"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     TIMEOUT = "TIMEOUT"
     ERROR = "ERROR"
@@ -491,6 +492,74 @@ class BudgetExhaustedPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryLifecycleResolvedPayload:
+    """WP3-B keyed Semantic Memory lifecycle 的安全 outcome 投影。
+
+    Business Authority 是 SQLite ``SemanticMemoryRecord`` row；本 payload 只是
+    derived observation。禁止携带 canonical text、payload value、logical key、
+    forget query、source excerpt、prompt、CoT、raw exception、Tool/RAG/provider
+    数据或文件路径。transition 以 ``memory_id|before|after`` 用 ``;`` 连接；
+    有固定小上限并按 memory_id ASC deterministic 编码，超限显式标记。
+    """
+
+    exchange_id: str
+    agent_id: str
+    memory_scope: str
+    memory_type: str
+    operation: str
+    outcome: str
+    schema_version: int
+    affected_count: int
+    resolution_duration_ms: int
+    mutation_duration_ms: int
+    candidate_outcome: str | None = None
+    winner_memory_id: str | None = None
+    new_memory_id: str | None = None
+    affected_transitions: str = "NONE"
+    ids_truncated: bool = False
+    omitted_count: int = 0
+    safe_reason: str = ""
+    safe_error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.exchange_id, "exchange_id")
+        _require_text(self.agent_id, "agent_id")
+        _require_text(self.memory_scope, "memory_scope")
+        _require_text(self.memory_type, "memory_type")
+        _require_text(self.operation, "operation")
+        if self.operation not in {"INSERT", "NO_CHANGE", "SUPERSEDE", "FORGET"}:
+            raise ValueError("未知 lifecycle operation")
+        _require_text(self.outcome, "outcome")
+        if self.outcome not in {
+            "OK",
+            "NOT_FOUND",
+            "ALREADY_FORGOTTEN",
+            "FAILED_CLOSED",
+        }:
+            raise ValueError("未知 lifecycle outcome")
+        _require_index(self.schema_version, "schema_version")
+        _require_index(self.affected_count, "affected_count")
+        _require_index(self.resolution_duration_ms, "resolution_duration_ms")
+        _require_index(self.mutation_duration_ms, "mutation_duration_ms")
+        for name in (
+            "candidate_outcome",
+            "winner_memory_id",
+            "new_memory_id",
+            "safe_reason",
+            "safe_error_code",
+        ):
+            value = getattr(self, name)
+            if value is not None and value != "":
+                _require_text(value, name)
+        _require_text(self.affected_transitions, "affected_transitions")
+        if len(self.affected_transitions) > 2048:
+            raise ValueError("affected_transitions 超过 bounded 长度")
+        if not isinstance(self.ids_truncated, bool):
+            raise TypeError("ids_truncated 必须是 bool")
+        _require_index(self.omitted_count, "omitted_count")
+
+
+@dataclass(frozen=True, slots=True)
 class TimeoutPayload:
     component: str
     safe_error_code: str = "DEADLINE_EXCEEDED"
@@ -582,6 +651,7 @@ RuntimeEventPayload: TypeAlias = (
     | OutputDeltaPayload
     | StepCompletedPayload
     | MemoryFormationCompletedPayload
+    | MemoryLifecycleResolvedPayload
     | BudgetExhaustedPayload
     | TimeoutPayload
     | ErrorPayload
@@ -605,6 +675,7 @@ _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
     RuntimeEventType.OUTPUT_DELTA: OutputDeltaPayload,
     RuntimeEventType.STEP_COMPLETED: StepCompletedPayload,
     RuntimeEventType.MEMORY_FORMATION_COMPLETED: MemoryFormationCompletedPayload,
+    RuntimeEventType.MEMORY_LIFECYCLE_RESOLVED: MemoryLifecycleResolvedPayload,
     RuntimeEventType.BUDGET_EXHAUSTED: BudgetExhaustedPayload,
     RuntimeEventType.TIMEOUT: TimeoutPayload,
     RuntimeEventType.ERROR: ErrorPayload,
@@ -732,6 +803,26 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "model_extraction_duration_ms",
         "persistence_duration_ms",
         "candidate_outcomes",
+    ),
+    MemoryLifecycleResolvedPayload: (
+        "exchange_id",
+        "agent_id",
+        "memory_scope",
+        "memory_type",
+        "operation",
+        "outcome",
+        "candidate_outcome",
+        "winner_memory_id",
+        "new_memory_id",
+        "affected_count",
+        "affected_transitions",
+        "ids_truncated",
+        "omitted_count",
+        "safe_reason",
+        "safe_error_code",
+        "resolution_duration_ms",
+        "mutation_duration_ms",
+        "schema_version",
     ),
     BudgetExhaustedPayload: ("component", "dimension", "safe_error_code"),
     TimeoutPayload: ("component", "safe_error_code"),

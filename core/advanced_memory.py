@@ -18,13 +18,15 @@ persistence boundary。不接入 Formation / Retrieval / Context Injection。
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 LONG_TERM_MEMORY_TABLE = "long_term_memory"
@@ -53,6 +55,8 @@ class MemoryErrorCode:
     INVALID_SUPERSEDE_SELF = "MEMORY_INVALID_SUPERSEDE_SELF"
     NOT_FOUND = "MEMORY_NOT_FOUND"
     PERSISTENCE_FAILED = "MEMORY_PERSISTENCE_FAILED"
+    MALFORMED_KEYED_PAYLOAD = "MEMORY_MALFORMED_KEYED_PAYLOAD"
+    FORGET_INVALID_TARGET = "MEMORY_FORGET_INVALID_TARGET"
 
 
 _MEMORY_ERROR_MESSAGES = {
@@ -64,6 +68,12 @@ _MEMORY_ERROR_MESSAGES = {
     MemoryErrorCode.INVALID_SUPERSEDE_SELF: "superseded_by_memory_id must not reference itself",
     MemoryErrorCode.NOT_FOUND: "advanced memory record not found",
     MemoryErrorCode.PERSISTENCE_FAILED: "advanced memory persistence failed",
+    MemoryErrorCode.MALFORMED_KEYED_PAYLOAD: (
+        "keyed history row payload must be exactly {\"value\": scalar}"
+    ),
+    MemoryErrorCode.FORGET_INVALID_TARGET: (
+        "forget target logical_key is not a valid existing partition key"
+    ),
 }
 
 
@@ -235,6 +245,405 @@ _SQL_SELECT_LTM_AGENT_SCOPE_ACTIVE = (
     "SELECT * FROM long_term_memory WHERE agent_id = ? AND memory_scope = ? "
     "AND status = ? ORDER BY created_at DESC, memory_id ASC"
 )
+# WP3-B keyed lifecycle partition read（status-inclusive；deterministic order）。
+_SQL_SELECT_LTM_PARTITION = (
+    "SELECT * FROM long_term_memory WHERE agent_id = ? AND memory_scope = ? "
+    "AND memory_type = ? AND logical_key = ? "
+    "ORDER BY created_at ASC, memory_id ASC"
+)
+# WP3-B forget targeting allowlist：同 agent/scope/type 下现有 distinct key。
+_SQL_SELECT_LTM_DISTINCT_KEYS = (
+    "SELECT DISTINCT logical_key FROM long_term_memory "
+    "WHERE agent_id = ? AND memory_scope = ? AND memory_type = ? "
+    "AND logical_key IS NOT NULL ORDER BY logical_key ASC"
+)
+_SQL_UPDATE_LTM_SUPERSEDE = (
+    "UPDATE long_term_memory SET status = ?, superseded_by_memory_id = ?, "
+    "updated_at = ? WHERE memory_id = ?"
+)
+_SQL_UPDATE_LTM_RELATION = (
+    "UPDATE long_term_memory SET superseded_by_memory_id = ?, updated_at = ? "
+    "WHERE memory_id = ?"
+)
+_SQL_UPDATE_LTM_REDACT = (
+    "UPDATE long_term_memory SET status = ?, canonical_text = ?, payload = ?, "
+    "superseded_by_memory_id = ?, updated_at = ? WHERE memory_id = ?"
+)
+
+
+#: Schema v2 固定的 forget tombstone representation（WP3-B 冻结）。
+FORGET_TOMBSTONE_TEXT = "[FORGOTTEN]"
+
+
+class LifecycleOperation(str, Enum):
+    """WP3-B keyed Semantic Memory 生命周期决策操作。"""
+
+    INSERT = "INSERT"
+    NO_CHANGE = "NO_CHANGE"
+    SUPERSEDE = "SUPERSEDE"
+    FORGET = "FORGET"
+
+
+@dataclass(frozen=True)
+class MemoryTransition:
+    """单条 row 的状态迁移证据（bounded；deterministic）。"""
+
+    memory_id: str
+    before_status: str
+    after_status: str
+
+
+@dataclass(frozen=True)
+class LifecycleResolutionResult:
+    """WP3-B typed lifecycle outcome。
+
+    ``outcome`` 是 safe lifecycle outcome（``OK`` / ``NOT_FOUND`` /
+    ``ALREADY_FORGOTTEN``），与 ``MemoryStatus`` 分离：NOT_FOUND 不伪装成
+    某条记录的状态。business Authority 始终是 SQLite row；本结果只是观察。
+    """
+
+    operation: LifecycleOperation
+    outcome: str
+    candidate_outcome: Optional[str]
+    winner_memory_id: Optional[str]
+    new_memory_id: Optional[str]
+    affected_transitions: Tuple[MemoryTransition, ...]
+    affected_count: int
+    ids_truncated: bool
+    omitted_count: int
+    safe_reason: str
+    safe_error_code: Optional[str]
+    resolution_duration_ms: int
+    mutation_duration_ms: int
+
+
+@dataclass(frozen=True)
+class _LifecyclePlan:
+    """resolver 产出的窄 mutation plan；Store 在 BEGIN IMMEDIATE 内校验并应用。
+
+    不携带正文 / payload / query；只引用 memory_id、status、relation 与
+    tombstone 行为。Store 不在此重新实现 lifecycle policy。
+    """
+
+    operation: LifecycleOperation
+    outcome: str
+    candidate_outcome: Optional[str]
+    insert: Optional[SemanticMemoryRecord]
+    winner_memory_id: Optional[str]
+    supersede_rows: Tuple[str, ...]
+    repoint_rows: Tuple[str, ...]
+    forget_rows: Tuple[str, ...]
+    mutation_timestamp: Optional[datetime]
+    transitions: Tuple[MemoryTransition, ...]
+
+
+def _scalar_kind(value: object) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+    return "other"
+
+
+def typed_values_equal(a: object, b: object) -> bool:
+    """WP3-B 冻结的 deterministic typed equality（只比较 payload["value"]）。
+
+    - string：只 trim 首尾 whitespace；case-sensitive；
+    - int：非 bool int，值相同；
+    - float：finite float，值相同；
+    - bool：strict bool；
+    - cross-type：一律不同（因此 1 != 1.0，True != 1）。
+    """
+    ka, kb = _scalar_kind(a), _scalar_kind(b)
+    if ka != kb:
+        return False
+    if ka == "str":
+        return a.strip() == b.strip()
+    if ka == "float":
+        return math.isfinite(a) and math.isfinite(b) and a == b
+    return a == b
+
+
+def _extract_scalar(payload: object) -> Optional[Tuple[object, str]]:
+    """payload 精确为 ``{"value": <scalar>}`` 时返回 ``(value, kind)``，否则 None。"""
+    if not isinstance(payload, dict):
+        return None
+    if set(payload.keys()) != {"value"}:
+        return None
+    value = payload["value"]
+    kind = _scalar_kind(value)
+    if kind == "other":
+        return None
+    if kind == "float" and not math.isfinite(value):
+        return None
+    return value, kind
+
+
+def _normalize_candidate_string_value(record: SemanticMemoryRecord) -> SemanticMemoryRecord:
+    """新 string candidate 在 authoritative record preparation 前 trim。"""
+    value = record.payload.get("value")
+    if isinstance(value, str):
+        return replace(record, payload={"value": value.strip()})
+    return record
+
+
+def _is_safe_forget_tombstone(row: sqlite3.Row) -> bool:
+    if row["status"] != MemoryStatus.FORGOTTEN.value:
+        return False
+    if row["canonical_text"] != FORGET_TOMBSTONE_TEXT:
+        return False
+    try:
+        if json.loads(row["payload"]) != {}:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if row["superseded_by_memory_id"] is not None:
+        return False
+    return True
+
+
+class MemoryLifecycleResolver:
+    """WP3-B 唯一 keyed Semantic Memory lifecycle decision Owner。
+
+    职责（纯函数）：typed equality、winner selection、lifecycle decision、
+    窄 mutation plan 准备。不执行 SQL、不拥有 connection、不实现另一套
+    persistence；AdvancedMemoryStore 负责在 BEGIN IMMEDIATE 事务内
+    read / validate / apply。
+
+    v1 conflict partition：
+        (agent_id, memory_scope, memory_type=SEMANTIC, logical_key)
+    """
+
+    # -- remember resolution -------------------------------------------------
+
+    @classmethod
+    def resolve_remember(
+        cls,
+        candidate: SemanticMemoryRecord,
+        rows: Sequence[sqlite3.Row],
+        *,
+        mutation_time: datetime,
+    ) -> _LifecyclePlan:
+        """基于 partition snapshot（status-inclusive）对 candidate 决策。"""
+        if candidate.logical_key is None:
+            return _LifecyclePlan(
+                operation=LifecycleOperation.INSERT,
+                outcome="OK",
+                candidate_outcome="PERSISTED",
+                insert=_normalize_candidate_string_value(candidate),
+                winner_memory_id=candidate.memory_id,
+                supersede_rows=(),
+                repoint_rows=(),
+                forget_rows=(),
+                mutation_timestamp=None,
+                transitions=(),
+            )
+        candidate_scalar = _extract_scalar(candidate.payload)
+        if candidate_scalar is None:
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "candidate payload 必须是精确 {\"value\": scalar}",
+            )
+        candidate_value, _ = candidate_scalar
+        # 历史 keyed row（非 FORGOTTEN）必须满足精确 {"value": scalar}，否则
+        # typed fail closed（零 mutation）。FORGOTTEN tombstone 是 redacted row，
+        # 不参与 remember 比较，也不允许被当作畸形正文阻塞新事实。
+        non_forgotten = [r for r in rows if r["status"] != MemoryStatus.FORGOTTEN.value]
+        scalar_by_id: dict[str, object] = {}
+        for row in non_forgotten:
+            try:
+                scalar = _extract_scalar(json.loads(row["payload"]))
+            except (TypeError, ValueError):
+                scalar = None
+            if scalar is None:
+                raise MemoryDomainError(
+                    MemoryErrorCode.MALFORMED_KEYED_PAYLOAD,
+                    "keyed 历史 row payload 必须是精确 {\"value\": scalar}",
+                )
+            scalar_by_id[row["memory_id"]] = scalar[0]
+        active = [r for r in non_forgotten if r["status"] == MemoryStatus.ACTIVE.value]
+        if not active:
+            winner = candidate.memory_id
+            repoint = tuple(
+                r["memory_id"]
+                for r in non_forgotten
+                if r["status"] == MemoryStatus.SUPERSEDED.value
+                and r["superseded_by_memory_id"] != winner
+            )
+            return _LifecyclePlan(
+                operation=LifecycleOperation.INSERT,
+                outcome="OK",
+                candidate_outcome="PERSISTED",
+                insert=_normalize_candidate_string_value(candidate),
+                winner_memory_id=winner,
+                supersede_rows=(),
+                repoint_rows=repoint,
+                forget_rows=(),
+                mutation_timestamp=mutation_time if repoint else None,
+                transitions=tuple(
+                    MemoryTransition(
+                        mid,
+                        MemoryStatus.SUPERSEDED.value,
+                        MemoryStatus.SUPERSEDED.value,
+                    )
+                    for mid in repoint
+                ),
+            )
+        equivalent = [
+            r
+            for r in active
+            if typed_values_equal(scalar_by_id[r["memory_id"]], candidate_value)
+        ]
+        if not equivalent:
+            # candidate 成为新 ACTIVE winner；全部旧 ACTIVE 被取代并直接指向它。
+            winner = candidate.memory_id
+            supersede = tuple(r["memory_id"] for r in active)
+            repoint = tuple(
+                r["memory_id"]
+                for r in non_forgotten
+                if r["status"] == MemoryStatus.SUPERSEDED.value
+                and r["superseded_by_memory_id"] != winner
+            )
+            transitions = tuple(
+                MemoryTransition(r["memory_id"], MemoryStatus.ACTIVE.value, MemoryStatus.SUPERSEDED.value)
+                for r in active
+            ) + tuple(
+                MemoryTransition(
+                    mid,
+                    MemoryStatus.SUPERSEDED.value,
+                    MemoryStatus.SUPERSEDED.value,
+                )
+                for mid in repoint
+            )
+            return _LifecyclePlan(
+                operation=LifecycleOperation.SUPERSEDE,
+                outcome="OK",
+                candidate_outcome="PERSISTED",
+                insert=_normalize_candidate_string_value(candidate),
+                winner_memory_id=winner,
+                supersede_rows=supersede,
+                repoint_rows=repoint,
+                forget_rows=(),
+                mutation_timestamp=mutation_time,
+                transitions=transitions,
+            )
+        # 至少一个等价 ACTIVE：deterministic existing winner
+        winner_row = min(equivalent, key=lambda r: (r["created_at"], r["memory_id"]))
+        winner = winner_row["memory_id"]
+        other_active = tuple(
+            r["memory_id"] for r in active if r["memory_id"] != winner
+        )
+        repoint = tuple(
+            r["memory_id"]
+            for r in non_forgotten
+            if r["status"] == MemoryStatus.SUPERSEDED.value
+            and r["superseded_by_memory_id"] != winner
+        )
+        is_clean = (
+            len(equivalent) == 1
+            and len(active) == 1
+            and not other_active
+            and not repoint
+        )
+        if is_clean:
+            return _LifecyclePlan(
+                operation=LifecycleOperation.NO_CHANGE,
+                outcome="OK",
+                candidate_outcome="NO_CHANGE",
+                insert=None,
+                winner_memory_id=winner,
+                supersede_rows=(),
+                repoint_rows=(),
+                forget_rows=(),
+                mutation_timestamp=None,
+                transitions=(),
+            )
+        transitions = tuple(
+            MemoryTransition(mid, MemoryStatus.ACTIVE.value, MemoryStatus.SUPERSEDED.value)
+            for mid in other_active
+        ) + tuple(
+            MemoryTransition(
+                mid,
+                MemoryStatus.SUPERSEDED.value,
+                MemoryStatus.SUPERSEDED.value,
+            )
+            for mid in repoint
+        )
+        return _LifecyclePlan(
+            operation=LifecycleOperation.SUPERSEDE,
+            outcome="OK",
+            candidate_outcome="NO_CHANGE",
+            insert=None,
+            winner_memory_id=winner,
+            supersede_rows=other_active,
+            repoint_rows=repoint,
+            forget_rows=(),
+            mutation_timestamp=mutation_time,
+            transitions=transitions,
+        )
+
+    # -- forget resolution ----------------------------------------------------
+
+    @classmethod
+    def resolve_forget(
+        cls,
+        rows: Sequence[sqlite3.Row],
+        *,
+        mutation_time: datetime,
+    ) -> _LifecyclePlan:
+        """对目标 partition 全历史版本决策 FORGET（all-version redaction）。"""
+        if not rows:
+            return _LifecyclePlan(
+                operation=LifecycleOperation.FORGET,
+                outcome="NOT_FOUND",
+                candidate_outcome=None,
+                insert=None,
+                winner_memory_id=None,
+                supersede_rows=(),
+                repoint_rows=(),
+                forget_rows=(),
+                mutation_timestamp=None,
+                transitions=(),
+            )
+        forget_ids: List[str] = []
+        transitions: List[MemoryTransition] = []
+        for r in rows:
+            if _is_safe_forget_tombstone(r):
+                continue
+            before = r["status"]
+            forget_ids.append(r["memory_id"])
+            transitions.append(
+                MemoryTransition(r["memory_id"], before, MemoryStatus.FORGOTTEN.value)
+            )
+        if not forget_ids:
+            return _LifecyclePlan(
+                operation=LifecycleOperation.NO_CHANGE,
+                outcome="ALREADY_FORGOTTEN",
+                candidate_outcome=None,
+                insert=None,
+                winner_memory_id=None,
+                supersede_rows=(),
+                repoint_rows=(),
+                forget_rows=(),
+                mutation_timestamp=None,
+                transitions=(),
+            )
+        return _LifecyclePlan(
+            operation=LifecycleOperation.FORGET,
+            outcome="OK",
+            candidate_outcome=None,
+            insert=None,
+            winner_memory_id=None,
+            supersede_rows=(),
+            repoint_rows=(),
+            forget_rows=tuple(forget_ids),
+            mutation_timestamp=mutation_time,
+            transitions=tuple(transitions),
+        )
 
 
 class AdvancedMemoryStore:
@@ -437,6 +846,409 @@ class AdvancedMemoryStore:
         return [self._row_to_record(row) for row in rows]
 
     # ------------------------------------------------------------------
+    # WP3-B Lifecycle（keyed resolution + forget；BEGIN IMMEDIATE 内闭环）
+    # ------------------------------------------------------------------
+
+    def resolve_semantic(
+        self, candidate: SemanticMemoryRecord
+    ) -> LifecycleResolutionResult:
+        """keyed Semantic Memory lifecycle resolution，单事务原子。
+
+        BEGIN IMMEDIATE 内：partition read → resolver 决策 → plan 校验 →
+        apply → post-state 校验 → COMMIT。任何一步失败 ROLLBACK ALL。
+
+        - ``logical_key=None``：一律 INSERT；
+        - keyed：按 ``(agent_id, memory_scope, SEMANTIC, logical_key)`` partition
+          做 typed equality / winner / NO_CHANGE / SUPERSEDE。
+        """
+        if not isinstance(candidate, SemanticMemoryRecord):
+            raise TypeError("resolve_semantic 需要 SemanticMemoryRecord")
+        if candidate.memory_type is not MemoryType.SEMANTIC:
+            raise MemoryDomainError(
+                MemoryErrorCode.UNSUPPORTED_TYPE,
+                "v1 lifecycle 只处理 SEMANTIC memory_type",
+            )
+        if candidate.status is not MemoryStatus.ACTIVE:
+            raise MemoryDomainError(
+                MemoryErrorCode.PUBLIC_CREATE_ACTIVE_ONLY,
+                "lifecycle candidate 必须是 ACTIVE",
+            )
+        if candidate.superseded_by_memory_id is not None:
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "ACTIVE candidate 不能携带 superseded_by_memory_id",
+            )
+        candidate = _normalize_candidate_string_value(candidate)
+        resolution_started = time.monotonic()
+        try:
+            with self._transaction() as conn:
+                existing = self._fetch_row(conn, candidate.memory_id)
+                if existing is not None:
+                    if self._same_business_record(existing, candidate):
+                        return self._build_lifecycle_result(
+                            LifecycleOperation.NO_CHANGE,
+                            "OK",
+                            "REUSED",
+                            winner_memory_id=candidate.memory_id,
+                            new_memory_id=candidate.memory_id,
+                            transitions=(),
+                            affected_count=0,
+                            safe_reason="IDEMPOTENT_REUSE",
+                            safe_error_code=None,
+                            resolution_started=resolution_started,
+                            mutation_duration_ms=0,
+                        )
+                    raise MemoryDomainError(
+                        MemoryErrorCode.DUPLICATE_CONFLICT,
+                        "memory_id 已存在且 canonical record 不同，拒绝覆盖",
+                    )
+                if candidate.logical_key is None:
+                    rows: Tuple[sqlite3.Row, ...] = ()
+                else:
+                    rows = self._select_partition(
+                        conn,
+                        candidate.agent_id,
+                        candidate.memory_scope,
+                        candidate.logical_key,
+                    )
+                plan = MemoryLifecycleResolver.resolve_remember(
+                    candidate, rows, mutation_time=datetime.now(UTC)
+                )
+                self._validate_plan(plan, candidate, rows)
+                mutation_started = time.monotonic()
+                self._apply_plan(conn, plan)
+                mutation_duration_ms = max(
+                    0, int((time.monotonic() - mutation_started) * 1000)
+                )
+                self._validate_post_state(conn, candidate, plan)
+                return self._build_lifecycle_result(
+                    plan.operation,
+                    plan.outcome,
+                    plan.candidate_outcome,
+                    winner_memory_id=plan.winner_memory_id,
+                    new_memory_id=(
+                        plan.insert.memory_id if plan.insert is not None else None
+                    ),
+                    transitions=plan.transitions,
+                    affected_count=(
+                        (1 if plan.insert is not None else 0)
+                        + len(plan.supersede_rows)
+                        + len(plan.repoint_rows)
+                    ),
+                    safe_reason=(
+                        "NO_CHANGE"
+                        if plan.operation is LifecycleOperation.NO_CHANGE
+                        else plan.operation.value
+                    ),
+                    safe_error_code=None,
+                    resolution_started=resolution_started,
+                    mutation_duration_ms=mutation_duration_ms,
+                )
+        except MemoryDomainError:
+            raise
+        except sqlite3.Error:
+            raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+
+    def forget_semantic_partition(
+        self,
+        *,
+        agent_id: str,
+        memory_scope: str,
+        logical_key: str,
+        mutation_time: Optional[datetime] = None,
+    ) -> LifecycleResolutionResult:
+        """显式 forget 一个 logical slot 的全部历史版本（单事务原子）。
+
+        目标 partition 的 read + all-version redaction + status update +
+        relation cleanup 全在同一个 BEGIN IMMEDIATE 事务内；任一 row 失败
+        ROLLBACK ALL。exact key 从未存在 → ``NOT_FOUND`` outcome，零 mutation。
+        """
+        _require_non_empty(agent_id, "agent_id")
+        _require_non_empty(memory_scope, "memory_scope")
+        _require_non_empty(logical_key, "logical_key")
+        if mutation_time is None:
+            mutation_time = datetime.now(UTC)
+        else:
+            _require_utc(mutation_time, "mutation_time")
+        resolution_started = time.monotonic()
+        try:
+            with self._transaction() as conn:
+                rows = self._select_partition(conn, agent_id, memory_scope, logical_key)
+                plan = MemoryLifecycleResolver.resolve_forget(
+                    rows, mutation_time=mutation_time
+                )
+                self._validate_plan(plan, None, rows)
+                mutation_started = time.monotonic()
+                self._apply_plan(conn, plan)
+                mutation_duration_ms = max(
+                    0, int((time.monotonic() - mutation_started) * 1000)
+                )
+                self._validate_post_state(conn, None, plan)
+                return self._build_lifecycle_result(
+                    plan.operation,
+                    plan.outcome,
+                    plan.candidate_outcome,
+                    winner_memory_id=plan.winner_memory_id,
+                    new_memory_id=(
+                        plan.insert.memory_id if plan.insert is not None else None
+                    ),
+                    transitions=plan.transitions,
+                    affected_count=len(plan.forget_rows),
+                    safe_reason=(
+                        "ALREADY_FORGOTTEN"
+                        if plan.outcome == "ALREADY_FORGOTTEN"
+                        else "NOT_FOUND"
+                        if plan.outcome == "NOT_FOUND"
+                        else "FORGET"
+                    ),
+                    safe_error_code=None,
+                    resolution_started=resolution_started,
+                    mutation_duration_ms=mutation_duration_ms,
+                )
+        except MemoryDomainError:
+            raise
+        except sqlite3.Error:
+            raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+
+    def list_logical_keys(
+        self,
+        agent_id: str,
+        memory_scope: str,
+        *,
+        max_keys: int = 64,
+    ) -> List[str]:
+        """WP3-B forget targeting 用现有 logical-key allowlist（lifecycle lookup，
+        不是 retrieval）：同 agent/scope/type 下 distinct existing key。
+
+        仅用于 exact membership 校验；不返回正文 / payload / 排序语义 / 注入
+        Context。超过 ``max_keys`` 时 fail closed（返回空），宁可不 forget 也
+        不 fuzzy delete。
+        """
+        _require_non_empty(agent_id, "agent_id")
+        _require_non_empty(memory_scope, "memory_scope")
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    _SQL_SELECT_LTM_DISTINCT_KEYS,
+                    [agent_id, memory_scope, MemoryType.SEMANTIC.value],
+                ).fetchall()
+        except sqlite3.Error:
+            raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+        keys = [str(row["logical_key"]) for row in rows]
+        if len(keys) > max_keys:
+            return []
+        return keys
+
+    def _select_partition(
+        self,
+        conn: sqlite3.Connection,
+        agent_id: str,
+        memory_scope: str,
+        logical_key: str,
+    ) -> Tuple[sqlite3.Row, ...]:
+        return tuple(
+            conn.execute(
+                _SQL_SELECT_LTM_PARTITION,
+                [agent_id, memory_scope, MemoryType.SEMANTIC.value, logical_key],
+            ).fetchall()
+        )
+
+    def _apply_plan(
+        self, conn: sqlite3.Connection, plan: _LifecyclePlan
+    ) -> None:
+        ts = plan.mutation_timestamp
+        if plan.insert is not None:
+            self._insert_row(conn, plan.insert)
+        for mid in plan.supersede_rows:
+            conn.execute(
+                _SQL_UPDATE_LTM_SUPERSEDE,
+                (
+                    MemoryStatus.SUPERSEDED.value,
+                    plan.winner_memory_id,
+                    ts.isoformat(),
+                    mid,
+                ),
+            )
+        for mid in plan.repoint_rows:
+            conn.execute(
+                _SQL_UPDATE_LTM_RELATION,
+                (plan.winner_memory_id, ts.isoformat(), mid),
+            )
+        for mid in plan.forget_rows:
+            conn.execute(
+                _SQL_UPDATE_LTM_REDACT,
+                (
+                    MemoryStatus.FORGOTTEN.value,
+                    FORGET_TOMBSTONE_TEXT,
+                    "{}",
+                    None,
+                    ts.isoformat(),
+                    mid,
+                ),
+            )
+
+    def _validate_plan(
+        self,
+        plan: _LifecyclePlan,
+        candidate: Optional[SemanticMemoryRecord],
+        rows: Sequence[sqlite3.Row],
+    ) -> None:
+        """Store 侧窄 invariant 校验（不重实现 lifecycle policy）。"""
+        if plan.operation in {
+            LifecycleOperation.INSERT,
+            LifecycleOperation.SUPERSEDE,
+            LifecycleOperation.NO_CHANGE,
+        } and plan.candidate_outcome is not None:
+            if plan.winner_memory_id is None:
+                raise MemoryDomainError(
+                    MemoryErrorCode.INVALID_ARGUMENT, "lifecycle winner 缺失"
+                )
+            by_id = {r["memory_id"]: r for r in rows}
+            if plan.insert is None:
+                winner_row = by_id.get(plan.winner_memory_id)
+                if winner_row is None or winner_row["status"] != MemoryStatus.ACTIVE.value:
+                    raise MemoryDomainError(
+                        MemoryErrorCode.INVALID_ARGUMENT,
+                        "supersede winner 必须存在且 ACTIVE",
+                    )
+            else:
+                if plan.winner_memory_id != plan.insert.memory_id:
+                    raise MemoryDomainError(
+                        MemoryErrorCode.INVALID_ARGUMENT,
+                        "新 winner 必须是被插入的 candidate",
+                    )
+            for mid in plan.supersede_rows:
+                row = by_id.get(mid)
+                if row is None or row["status"] != MemoryStatus.ACTIVE.value:
+                    raise MemoryDomainError(
+                        MemoryErrorCode.INVALID_ARGUMENT,
+                        "supersede 目标必须存在且 ACTIVE",
+                    )
+                if mid == plan.winner_memory_id:
+                    raise MemoryDomainError(
+                        MemoryErrorCode.INVALID_ARGUMENT,
+                        "supersede 不得自指 winner",
+                    )
+            for mid in plan.repoint_rows:
+                row = by_id.get(mid)
+                if row is None or row["status"] != MemoryStatus.SUPERSEDED.value:
+                    raise MemoryDomainError(
+                        MemoryErrorCode.INVALID_ARGUMENT,
+                        "relation 修复目标必须存在且 SUPERSEDED",
+                    )
+                if mid == plan.winner_memory_id:
+                    raise MemoryDomainError(
+                        MemoryErrorCode.INVALID_ARGUMENT,
+                        "relation 修复不得自指",
+                    )
+        if plan.operation is LifecycleOperation.FORGET:
+            for mid in plan.forget_rows:
+                if not any(r["memory_id"] == mid for r in rows):
+                    raise MemoryDomainError(
+                        MemoryErrorCode.INVALID_ARGUMENT,
+                        "forget 目标 row 必须属于当前 partition",
+                    )
+
+    def _validate_post_state(
+        self,
+        conn: sqlite3.Connection,
+        candidate: Optional[SemanticMemoryRecord],
+        plan: _LifecyclePlan,
+    ) -> None:
+        """operation-local invariant：keyed canonical winner 与 FORGET tombstone。"""
+        if candidate is not None and candidate.logical_key is not None and plan.operation in {
+            LifecycleOperation.INSERT,
+            LifecycleOperation.SUPERSEDE,
+            LifecycleOperation.NO_CHANGE,
+        }:
+            after = conn.execute(
+                _SQL_SELECT_LTM_PARTITION,
+                [
+                    candidate.agent_id,
+                    candidate.memory_scope,
+                    MemoryType.SEMANTIC.value,
+                    candidate.logical_key,
+                ],
+            ).fetchall()
+            active = [r for r in after if r["status"] == MemoryStatus.ACTIVE.value]
+            if len(active) != 1 or active[0]["memory_id"] != plan.winner_memory_id:
+                raise MemoryDomainError(
+                    MemoryErrorCode.PERSISTENCE_FAILED,
+                    "keyed ACTIVE invariant 违反：canonical winner 不唯一",
+                )
+            if active[0]["superseded_by_memory_id"] is not None:
+                raise MemoryDomainError(
+                    MemoryErrorCode.PERSISTENCE_FAILED,
+                    "keyed ACTIVE invariant 违反：winner relation 非空",
+                )
+            for row in after:
+                if (
+                    row["status"] == MemoryStatus.SUPERSEDED.value
+                    and row["superseded_by_memory_id"] != plan.winner_memory_id
+                ):
+                    raise MemoryDomainError(
+                        MemoryErrorCode.PERSISTENCE_FAILED,
+                        "keyed relation invariant 违反：未 direct-to-latest",
+                    )
+        if plan.operation is LifecycleOperation.FORGET and plan.forget_rows:
+            # all-version redaction 后该 partition 不应再暴露原正文/非 tombstone。
+            first = self._fetch_row(conn, plan.forget_rows[0])
+            if first is not None:
+                after = self._select_partition(
+                    conn,
+                    first["agent_id"],
+                    first["memory_scope"],
+                    first["logical_key"],
+                )
+                for r in after:
+                    if not _is_safe_forget_tombstone(r):
+                        raise MemoryDomainError(
+                            MemoryErrorCode.PERSISTENCE_FAILED,
+                            "forget 后仍存在非安全 tombstone row",
+                        )
+
+    def _build_lifecycle_result(
+        self,
+        operation: LifecycleOperation,
+        outcome: str,
+        candidate_outcome: Optional[str],
+        *,
+        winner_memory_id: Optional[str],
+        new_memory_id: Optional[str],
+        transitions: Tuple[MemoryTransition, ...],
+        affected_count: int,
+        safe_reason: str,
+        safe_error_code: Optional[str],
+        resolution_started: float,
+        mutation_duration_ms: int,
+    ) -> LifecycleResolutionResult:
+        ids_truncated = False
+        omitted = 0
+        ordered = sorted(transitions, key=lambda t: t.memory_id)
+        bounded = tuple(ordered)
+        if len(transitions) > 8:
+            bounded = tuple(ordered[:8])
+            ids_truncated = True
+            omitted = len(ordered) - 8
+        return LifecycleResolutionResult(
+            operation=operation,
+            outcome=outcome,
+            candidate_outcome=candidate_outcome,
+            winner_memory_id=winner_memory_id,
+            new_memory_id=new_memory_id,
+            affected_transitions=bounded,
+            affected_count=affected_count,
+            ids_truncated=ids_truncated,
+            omitted_count=omitted,
+            safe_reason=safe_reason,
+            safe_error_code=safe_error_code,
+            resolution_duration_ms=max(
+                0, int((time.monotonic() - resolution_started) * 1000)
+            ),
+            mutation_duration_ms=mutation_duration_ms,
+        )
+
+    # ------------------------------------------------------------------
     # row <-> record mapping / comparison
     # ------------------------------------------------------------------
 
@@ -521,11 +1333,17 @@ class AdvancedMemoryStore:
 
 __all__ = [
     "AdvancedMemoryStore",
+    "FORGET_TOMBSTONE_TEXT",
     "LONG_TERM_MEMORY_TABLE",
+    "LifecycleOperation",
+    "LifecycleResolutionResult",
     "MemoryDomainError",
     "MemoryErrorCode",
+    "MemoryLifecycleResolver",
     "MemoryOrigin",
     "MemoryStatus",
+    "MemoryTransition",
     "MemoryType",
     "SemanticMemoryRecord",
+    "typed_values_equal",
 ]
