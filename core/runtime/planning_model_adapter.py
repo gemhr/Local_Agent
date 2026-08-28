@@ -26,7 +26,14 @@ class UnifiedPlanningModelAdapter:
         self._event_emitter = event_emitter
         self._fault_controller = fault_controller
 
-    async def generate_plan(self, request: PlanningRequest, run_context) -> str:
+    async def generate_plan(
+        self,
+        request: PlanningRequest,
+        run_context,
+        *,
+        memory_context_bundle=None,
+        memory_injection_report_out=None,
+    ) -> str:
         run_context.raise_if_inactive()
 
         def admission_remaining() -> float:
@@ -44,6 +51,8 @@ class UnifiedPlanningModelAdapter:
                 run_context=run_context,
                 event_emitter=self._event_emitter,
                 fault_controller=self._fault_controller,
+                memory_context_bundle=memory_context_bundle,
+                memory_injection_report_out=memory_injection_report_out,
             ),
             kind=BlockingTaskKind.PLANNING_MODEL,
             run_id=run_context.run_id,

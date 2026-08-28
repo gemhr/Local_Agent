@@ -117,6 +117,18 @@ class ResolvedSingleStepDriver:
         binding = bindings.resolve_for_step(
             claim.step_id, expected_agent_id=claim.preferred_agent
         )
+        # WP4-B direct entry bundle reuse：single-step plan 且 step agent 等于
+        # entry agent 时复用同一 immutable bundle（每 Run 至多一次 retrieval，
+        # 禁止再次查询 SQLite）。delegated specialist step 不满足 agent 匹配，
+        # 天然 fail closed（SPECIALIST_MEMORY_VISIBILITY = NO）。
+        memory_context_bundle = None
+        coordinator_bundle = self._coordinator.memory_context_bundle
+        if (
+            coordinator_bundle is not None
+            and coordinator_bundle.entry_agent_id == claim.preferred_agent
+            and plan.steps[0].execution_kind is ExecutionKind.AGENT
+        ):
+            memory_context_bundle = coordinator_bundle
         invocation_results: list[ModelInvocationResult] = []
         self.output = self._router.complete_single_agent(
             claim.preferred_agent,
@@ -127,6 +139,7 @@ class ResolvedSingleStepDriver:
             invocation_result_out=invocation_results,
             event_emitter=self._event_emitter.for_step(claim.step_id),
             fault_controller=self._fault_controller,
+            memory_context_bundle=memory_context_bundle,
         )
         self.invocation_result = invocation_results[0] if invocation_results else None
         return self.output

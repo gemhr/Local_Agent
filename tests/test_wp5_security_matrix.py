@@ -164,6 +164,7 @@ def _payload_from_safe(event_type, safe_payload):
     """
     from core.runtime.events import (
         ErrorPayload,
+        MemoryRetrievalCompletedPayload,
         OutputDeltaPayload,
         PlanCreatedPayload,
         PlanningStartedPayload,
@@ -236,4 +237,24 @@ def _payload_from_safe(event_type, safe_payload):
         # Journal 只保存 digest/length，正文由本测试已知的 delivered final
         # 提供，验证唯一正文通道只承载该 final。
         return OutputDeltaPayload(SECRET_FINAL)
+    if event_type is RuntimeEventType.MEMORY_RETRIEVAL_COMPLETED:
+        return MemoryRetrievalCompletedPayload(
+            str(safe_payload["retrieval_method"]),
+            str(safe_payload["ranking_method"]),
+            str(safe_payload["status"]),
+            int(safe_payload["schema_version"]),
+            int(safe_payload["candidate_count"]),
+            int(safe_payload["eligible_count"]),
+            int(safe_payload["selected_count"]),
+            int(safe_payload["context_record_count"]),
+            int(safe_payload["malformed_count"]),
+            int(safe_payload["omitted_count"]),
+            int(safe_payload["budget_used_chars"]),
+            int(safe_payload["registered_selected_count"]),
+            int(safe_payload["open_selected_count"]),
+            int(safe_payload["duration_ms"]),
+            bool(safe_payload["planning_injected"]),
+            bool(safe_payload["direct_entry_supplied"]),
+            safe_error_code=safe_payload.get("safe_error_code"),
+        )
     return None

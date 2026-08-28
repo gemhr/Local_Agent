@@ -50,7 +50,14 @@ class FakePlanningModel:
         self.error = error
         self.calls = 0
 
-    async def generate_plan(self, request: PlanningRequest, run_context: RunContext) -> str:
+    async def generate_plan(
+        self,
+        request: PlanningRequest,
+        run_context: RunContext,
+        *,
+        memory_context_bundle=None,
+        memory_injection_report_out=None,
+    ) -> str:
         self.calls += 1
         if self.error is not None:
             raise self.error

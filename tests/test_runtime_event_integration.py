@@ -97,6 +97,8 @@ class RuntimeEventIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 RuntimeEventType.PLANNING_STARTED,
                 RuntimeEventType.MODEL_STARTED,
                 RuntimeEventType.MODEL_COMPLETED,
+                # WP4-B：Memory retrieval observation 在 PLAN_CREATED 之前 journal-first 发布。
+                RuntimeEventType.MEMORY_RETRIEVAL_COMPLETED,
                 RuntimeEventType.PLAN_CREATED,
                 RuntimeEventType.STEP_STARTED,
                 RuntimeEventType.MODEL_STARTED,

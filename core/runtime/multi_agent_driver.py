@@ -175,6 +175,11 @@ class MultiAgentDriver:
                 else None
             ),
             fault_controller=self._fault_controller,
+            memory_context_bundle=self._entry_direct_memory_bundle(
+                plan=plan,
+                plan_step=plan_step,
+                claim_agent_id=claim.preferred_agent,
+            ),
         )
         if (
             plan_step.execution_kind is ExecutionKind.SYNTHESIS
@@ -262,6 +267,24 @@ class MultiAgentDriver:
         if not user_request:
             return binding_instruction
         return f"{binding_instruction}\n\nUser request: {user_request}"
+
+    def _entry_direct_memory_bundle(self, *, plan: Plan, plan_step: PlanStep, claim_agent_id: str):
+        """WP4-B entry-direct bundle reuse（禁止 specialist / synthesis 继承）。
+
+        仅当 bundle 非空、entry agent 匹配、且冻结 Plan 是单步 entry-agent
+        AGENT step（direct answer）时，复用同一 immutable bundle；delegated
+        specialist、synthesis 与多步 Plan 的任何 step 都不携带 bundle。
+        """
+        bundle = getattr(self._coordinator, "memory_context_bundle", None)
+        if bundle is None or bundle.record_count == 0:
+            return None
+        if bundle.entry_agent_id != claim_agent_id:
+            return None
+        if len(plan.steps) != 1:
+            return None
+        if plan_step.execution_kind is not ExecutionKind.AGENT:
+            return None
+        return bundle
 
     @staticmethod
     def _runtime_content_type(registration: AgentRegistration) -> ResultContentType:
