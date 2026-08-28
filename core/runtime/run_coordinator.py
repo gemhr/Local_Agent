@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
@@ -55,7 +55,16 @@ from core.runtime.multi_agent_planning import (
     PlanningError,
     PlanningErrorCode,
     PlanningRequest,
+    PlanningSource,
     ResolvedPlan,
+)
+from core.runtime.memory_retrieval import (
+    MEMORY_DIRECT_SCOPE,
+    MEMORY_RETRIEVAL_SCHEMA_VERSION,
+    MemoryContextBundle,
+    MemoryRetrievalError,
+    MemoryRetrievalErrorCode,
+    MemoryRetrievalService,
 )
 from core.runtime.agent_registry import AgentRegistryError
 from core.runtime.plan_compiler import PlanCompileError
@@ -75,6 +84,7 @@ from core.runtime.events import (
     BudgetExhaustedPayload,
     CancellationPayload,
     ErrorPayload,
+    MemoryRetrievalCompletedPayload,
     PlanCreatedPayload,
     PlanningStartedPayload,
     RunCompletedPayload,
@@ -139,6 +149,19 @@ class RunCoordinatorError(RuntimeError):
         self.error_code = error_code
         self.safe_message = safe_message
         super().__init__(f"{safe_message} (error_code={error_code})")
+
+
+@dataclass(frozen=True, slots=True)
+class _MemoryRetrievalObservation:
+    """WP4-B retrieval 的内部安全观察（不含 query / 正文 / logical_key）。"""
+
+    bundle: MemoryContextBundle
+    status: str
+    safe_error_code: str | None
+    duration_ms: int
+    planning_injected: bool = False
+    direct_entry_supplied: bool = False
+    context_record_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +278,7 @@ class RunCoordinator:
         step_result_run_total_chars: int = 60_000,
         step_result_max_entries: int = 16,
         fault_controller: FaultInjectionController | None = None,
+        memory_retrieval_service: MemoryRetrievalService | None = None,
     ) -> "RunCoordinator":
         """构造尚无 Plan/Scheduler/Checkpoint 的动态规划 Runtime。"""
         if not isinstance(plan_resolver, PlanResolver):
@@ -267,6 +291,12 @@ class RunCoordinator:
             fault_controller, FaultInjectionController
         ):
             raise TypeError("fault_controller 必须是 FaultInjectionController 或 None")
+        if memory_retrieval_service is not None and not isinstance(
+            memory_retrieval_service, MemoryRetrievalService
+        ):
+            raise TypeError(
+                "memory_retrieval_service 必须是 MemoryRetrievalService 或 None"
+            )
         if (
             isinstance(planning_timeout_seconds, bool)
             or not isinstance(planning_timeout_seconds, (int, float))
@@ -326,6 +356,9 @@ class RunCoordinator:
         self._step_result_run_total_chars = step_result_run_total_chars
         self._step_result_max_entries = step_result_max_entries
         self._fault_controller = fault_controller
+        self._memory_retrieval_service = memory_retrieval_service
+        self._memory_context_bundle: MemoryContextBundle | None = None
+        self._memory_retrieval_observation: _MemoryRetrievalObservation | None = None
         return self
 
     def _initialize_base(
@@ -382,6 +415,9 @@ class RunCoordinator:
         self._execution_factory = None
         self._planning_timeout_seconds = 0.0
         self._fault_controller = None
+        self._memory_retrieval_service = None
+        self._memory_context_bundle = None
+        self._memory_retrieval_observation = None
 
         self._start_lock = threading.Lock()
         self._started = False
@@ -428,6 +464,11 @@ class RunCoordinator:
     @property
     def dynamic_plan_state(self) -> DynamicPlanState:
         return self._dynamic_plan_state
+
+    @property
+    def memory_context_bundle(self) -> MemoryContextBundle | None:
+        """WP4-B run-scoped immutable Memory bundle（每 Run 至多一次 retrieval）。"""
+        return self._memory_context_bundle
 
     def attach_multi_agent_runtime(self, driver: MultiAgentDriver) -> None:
         """WP3 typed runtime injection; must happen before execution."""
@@ -616,6 +657,172 @@ class RunCoordinator:
             runtime_metadata=self._runtime_metadata or default_runtime_metadata(),
         )
 
+    # ------------------------------------------------------------------
+    # WP4-B Memory Retrieval hook（run scope 内、PlanResolver.resolve 之前）
+    # ------------------------------------------------------------------
+
+    def _build_memory_retrieval_service(self) -> MemoryRetrievalService:
+        """构造 run-scoped MemoryRetrievalService（RETRIEVAL/RANKING Owner）。
+
+        PERSISTENCE_OWNER 仍是 AdvancedMemoryStore；db_path 缺失时抛 typed
+        UNAVAILABLE，由 best-effort 策略转为空 bundle，不伪造持久化。
+        """
+        router = (
+            getattr(self._multi_agent_driver, "_router", None)
+            if self._multi_agent_driver is not None
+            else None
+        )
+        memory_manager = getattr(router, "memory_manager", None)
+        db_path = getattr(memory_manager, "db_path", None)
+        if not isinstance(db_path, str) or not db_path.strip():
+            raise MemoryRetrievalError(
+                MemoryRetrievalErrorCode.UNAVAILABLE,
+                "Long-term Memory authority 不可用",
+            )
+        return MemoryRetrievalService(AdvancedMemoryStore(db_path))
+
+    def _retrieve_memory_context(self) -> None:
+        """单次 canonical retrieval：entry agent + DIRECT scope + original query。
+
+        RETRIEVAL_FAILURE_POLICY =
+        BEST_EFFORT_EMPTY_BUNDLE_NO_STALE_FALLBACK：SQLite unavailable /
+        malformed rows / ranking exception / bundle construction failure 均转
+        为 safe observation + 空 bundle，Run 继续；Cancellation / run deadline
+        / budget terminal signal 按既有 contract 传播，不被吞掉。
+        """
+        if self._memory_context_bundle is not None:
+            # 每 Run 至多一次 retrieval；禁止第二次查询。
+            return
+        if self._planning_request is None:
+            return
+        entry_agent_id = self._planning_request.selected_agent_id
+        started = time.monotonic()
+        try:
+            self.run_context.raise_if_inactive()
+            service = self._memory_retrieval_service
+            if service is None:
+                service = self._build_memory_retrieval_service()
+            bundle = service.retrieve(
+                agent_id=entry_agent_id,
+                memory_scope=MEMORY_DIRECT_SCOPE,
+                query=self._planning_request.user_request,
+            )
+            self.run_context.raise_if_inactive()
+            self._memory_context_bundle = bundle
+            self._memory_retrieval_observation = _MemoryRetrievalObservation(
+                bundle=bundle,
+                status="SUCCEEDED",
+                safe_error_code=None,
+                duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                context_record_count=0,
+            )
+        except (
+            RunCancelledError,
+            RunDeadlineExceededError,
+            BudgetExceededError,
+            asyncio.CancelledError,
+        ):
+            raise
+        except MemoryRetrievalError as exc:
+            self._record_memory_retrieval_failure(
+                entry_agent_id, exc.error_code, started
+            )
+        except Exception:
+            self._record_memory_retrieval_failure(
+                entry_agent_id, MemoryRetrievalErrorCode.FAILED, started
+            )
+
+    def _record_memory_retrieval_failure(
+        self, entry_agent_id: str, safe_error_code: str, started: float
+    ) -> None:
+        self._memory_context_bundle = MemoryContextBundle.empty(
+            entry_agent_id, MEMORY_DIRECT_SCOPE
+        )
+        self._memory_retrieval_observation = _MemoryRetrievalObservation(
+            bundle=self._memory_context_bundle,
+            status="FAILED",
+            safe_error_code=safe_error_code,
+            duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+            context_record_count=0,
+        )
+
+    def _update_memory_retrieval_injection(
+        self,
+        resolved: ResolvedPlan,
+        injection_reports: list,
+    ) -> None:
+        """Plan 冻结后补齐 injection evidence（selection != injection）。"""
+        observation = self._memory_retrieval_observation
+        bundle = self._memory_context_bundle
+        if observation is None or bundle is None:
+            return
+        planning_injected = False
+        # ``context_record_count`` 只记录 Planner ContextBuilder 的实际接纳；
+        # selected 或 direct-entry supplied 都不能替代该事实。
+        context_record_count = 0
+        planning_report = next(
+            (
+                report
+                for report in injection_reports
+                if getattr(report, "target", "") == "PLANNING"
+            ),
+            None,
+        )
+        if (
+            resolved.planning_source is PlanningSource.MODEL
+            and planning_report is not None
+        ):
+            planning_injected = planning_report.accepted_count > 0
+            if planning_report.accepted_count > 0:
+                context_record_count = planning_report.accepted_count
+        plan = resolved.plan
+        direct_entry_supplied = (
+            bundle.record_count > 0
+            and plan is not None
+            and len(plan.steps) == 1
+            and plan.steps[0].preferred_agent == bundle.entry_agent_id
+        )
+        self._memory_retrieval_observation = replace(
+            observation,
+            planning_injected=planning_injected,
+            direct_entry_supplied=direct_entry_supplied,
+            context_record_count=context_record_count,
+        )
+
+    async def _emit_memory_retrieval_observation(self) -> None:
+        observation = self._memory_retrieval_observation
+        if observation is None or self.event_emitter is None:
+            return
+        bundle = observation.bundle
+        try:
+            await self.event_emitter.emit(
+                RuntimeEventType.MEMORY_RETRIEVAL_COMPLETED,
+                MemoryRetrievalCompletedPayload(
+                    retrieval_method=bundle.retrieval_method,
+                    ranking_method=bundle.ranking_method,
+                    status=observation.status,
+                    schema_version=MEMORY_RETRIEVAL_SCHEMA_VERSION,
+                    candidate_count=bundle.candidate_count,
+                    eligible_count=bundle.eligible_count,
+                    selected_count=bundle.selected_count,
+                    context_record_count=observation.context_record_count,
+                    malformed_count=bundle.malformed_count,
+                    omitted_count=bundle.omitted_count,
+                    budget_used_chars=bundle.budget_used_chars,
+                    registered_selected_count=bundle.registered_selected_count,
+                    open_selected_count=bundle.open_selected_count,
+                    duration_ms=observation.duration_ms,
+                    planning_injected=observation.planning_injected,
+                    direct_entry_supplied=observation.direct_entry_supplied,
+                    safe_error_code=observation.safe_error_code,
+                ),
+                component="run_coordinator",
+                ignore_run_cancellation=True,
+            )
+        except Exception:
+            # Observation 失败永远 best-effort；不影响 Run 语义。
+            return
+
     async def _prepare_dynamic_execution(self) -> RunFinalizationDecision | None:
         if self._dynamic_plan_state is not DynamicPlanState.UNRESOLVED:
             raise RunCoordinatorError(
@@ -634,7 +841,11 @@ class RunCoordinator:
             effective_timeout = min(effective_timeout, remaining)
         if effective_timeout <= 0:
             raise RunDeadlineExceededError("run deadline exceeded")
+        # WP4-B canonical retrieval hook：run scope 已创建、original query 与
+        # entry agent 已冻结，且在 PlanResolver.resolve() 之前执行。
+        self._retrieve_memory_context()
         planning_started = time.monotonic()
+        injection_reports: list = []
         try:
             try:
                 evaluate_sync_fault(
@@ -648,6 +859,8 @@ class RunCoordinator:
                     self._plan_resolver.resolve(
                         self._planning_request,
                         self.run_context,
+                        memory_context_bundle=self._memory_context_bundle,
+                        memory_injection_report_out=injection_reports,
                     ),
                     timeout=effective_timeout,
                 )
@@ -665,12 +878,25 @@ class RunCoordinator:
                 raise PlanningError(
                     self._planner_timeout_code(), "Planner 独立超时"
                 ) from None
-        except BaseException:
+        except BaseException as exc:
             self._record_planning_metrics(
                 planning_source="unknown",
                 status="FAILED",
                 duration_seconds=time.monotonic() - planning_started,
             )
+            if not isinstance(
+                exc,
+                (
+                    RunCancelledError,
+                    RunDeadlineExceededError,
+                    BudgetExceededError,
+                    asyncio.CancelledError,
+                ),
+            ):
+                try:
+                    await self._emit_memory_retrieval_observation()
+                except BaseException:
+                    pass
             raise
         self._record_planning_metrics(
             planning_source=resolved.planning_source.value,
@@ -679,6 +905,8 @@ class RunCoordinator:
         )
         self.run_context.raise_if_inactive()
         self._freeze_dynamic_plan(resolved)
+        self._update_memory_retrieval_injection(resolved, injection_reports)
+        await self._emit_memory_retrieval_observation()
         evaluate_sync_fault(
             self._fault_controller,
             point=FaultPoint.PLANNING_BEFORE_PLAN_CREATED,

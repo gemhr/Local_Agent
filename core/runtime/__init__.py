@@ -53,6 +53,11 @@ from core.runtime.model_context import (
     ContextItem, ContextSourceType, ContextStats, ContextTrustLevel, DeterministicTokenEstimator,
     MemoryContextRecord, MemoryProvenance, ModelContextRequirements, TokenEstimator,
 )
+from core.runtime.memory_retrieval import (
+    MEMORY_DIRECT_SCOPE, MEMORY_RETRIEVAL_SCHEMA_VERSION, MemoryContextBundle,
+    MemoryInjectionReport, MemoryRetrievalError, MemoryRetrievalErrorCode,
+    MemoryRetrievalService, RANKING_METHOD, RETRIEVAL_METHOD,
+)
 from core.runtime.planning import ExecutionKind, OutputPolicy, Plan, PlanSource, PlanStep, PlanValidator, RiskLevel, TaskCapabilityRequirements, create_single_step_plan
 from core.runtime.plan_graph import PlanGraph, PlanGraphValidationError, PlanGraphValidator
 from core.runtime.agent_registry import (
@@ -189,6 +194,9 @@ __all__ = [
     "ContextDropRecord", "ContextItem", "ContextSourceType", "ContextStats", "ContextTrustLevel",
     "DeterministicTokenEstimator", "MemoryContextRecord", "MemoryProvenance",
     "ModelContextRequirements", "TokenEstimator",
+    "MEMORY_DIRECT_SCOPE", "MEMORY_RETRIEVAL_SCHEMA_VERSION", "MemoryContextBundle",
+    "MemoryInjectionReport", "MemoryRetrievalError", "MemoryRetrievalErrorCode",
+    "MemoryRetrievalService", "RANKING_METHOD", "RETRIEVAL_METHOD",
     "ExecutionKind", "OutputPolicy", "Plan", "PlanSource", "PlanStep", "PlanValidator", "RiskLevel", "TaskCapabilityRequirements", "create_single_step_plan",
     "PlanGraph", "PlanGraphValidationError", "PlanGraphValidator",
     "AgentRegistration", "AgentRegistry", "AgentRegistryError", "AgentRegistryErrorCode", "DEFAULT_AGENT_REGISTRY", "ResultContentType",

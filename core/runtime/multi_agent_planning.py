@@ -222,8 +222,20 @@ class ResolvedPlan:
 
 @runtime_checkable
 class PlanningModel(Protocol):
-    async def generate_plan(self, request: PlanningRequest, run_context: RunContext) -> str:
-        """通过统一模型服务 adapter 返回严格 JSON；实现负责预算/取消/超时。"""
+    async def generate_plan(
+        self,
+        request: PlanningRequest,
+        run_context: RunContext,
+        *,
+        memory_context_bundle: object | None = None,
+        memory_injection_report_out: list | None = None,
+    ) -> str:
+        """通过统一模型服务 adapter 返回严格 JSON；实现负责预算/取消/超时。
+
+        ``memory_context_bundle`` 非 None 时（WP4-B 生产 hook 始终传入，
+        可为空 bundle），实现必须将其 typed 交给 Planner 模型上下文构建，
+        并把 ``MemoryInjectionReport`` 追加到 report out list。
+        """
 
 
 class PlanCompilerProtocol(Protocol):
@@ -361,7 +373,20 @@ class PlanResolver:
         self._compiler = compiler
         self._planning_model = planning_model
 
-    async def resolve(self, request: PlanningRequest, run_context: RunContext) -> ResolvedPlan:
+    async def resolve(
+        self,
+        request: PlanningRequest,
+        run_context: RunContext,
+        *,
+        memory_context_bundle: object | None = None,
+        memory_injection_report_out: list | None = None,
+    ) -> ResolvedPlan:
+        """Resolve a request into one validated Plan and run-scoped Bindings.
+
+        ``memory_context_bundle`` 是 WP4-B run-scoped immutable Memory
+        projection；只转发给 Planner 模型 invocation（PLANNER_MEMORY_VISIBILITY
+        = YES），不参与 deterministic 规则决策，也不进入 Plan/Binding。
+        """
         if not isinstance(request, PlanningRequest) or not isinstance(run_context, RunContext):
             raise PlanningError(PlanningErrorCode.INVALID_REQUEST, "PlanningRequest 或 RunContext 无效")
         run_context.raise_if_inactive()
@@ -397,7 +422,15 @@ class PlanResolver:
         if self._planning_model is None:
             raise PlanningError(PlanningErrorCode.PLANNING_MODEL_REQUIRED, "请求需要 Planner model")
         try:
-            raw_output = await self._planning_model.generate_plan(request, run_context)
+            if memory_context_bundle is None:
+                raw_output = await self._planning_model.generate_plan(request, run_context)
+            else:
+                raw_output = await self._planning_model.generate_plan(
+                    request,
+                    run_context,
+                    memory_context_bundle=memory_context_bundle,
+                    memory_injection_report_out=memory_injection_report_out,
+                )
         except BaseException as exc:
             if isinstance(
                 exc,

@@ -323,6 +323,53 @@ Historical rows（含 `None`、`project_database`、旧 free-form key）保留 l
 forget 的新 canonical path 只允许 registry-backed existing keys；OPEN/unkeyed 不提供
 semantic user-chat forget（NOT_IMPLEMENTED / KNOWN_LIMITATION）。
 
+### 2.8 Phase5 WP4-B Memory Retrieval, Ranking & Context Injection
+
+WP4-B 实现 Long-term Memory 的 deterministic lexical retrieval（v1 策略
+`SQLITE_BOUNDED_LEXICAL_NO_DERIVED_INDEX`：只读 SQLite authority，无 vector/FTS
+derived index、无 dual-write、无新依赖）。Owner 决策：
+
+```text
+RETRIEVAL_OWNER = RANKING_OWNER = MemoryRetrievalService（RUN_SCOPE policy component）
+PERSISTENCE_OWNER = AdvancedMemoryStore（窄读 primitive list_active_semantic_for_scope）
+CONTEXT_INJECTION_OWNER = ContextBuilder
+RETRIEVAL_HOOK = RunCoordinator._prepare_dynamic_execution()（run scope 创建后、PlanResolver.resolve() 前）
+RETRIEVAL_SCOPE = (entry_agent_id, direct scope, memory_type=SEMANTIC, status=ACTIVE)
+RETRIEVAL_QUERY_SOURCE = original PlanningRequest.user_request only（允许 deterministic normalize，禁止任何 expansion 来源）
+RETRIEVAL_FAILURE_POLICY = BEST_EFFORT_EMPTY_BUNDLE_NO_STALE_FALLBACK
+PLANNER_MEMORY_VISIBILITY = YES（entry-agent bundle only）
+SPECIALIST_MEMORY_VISIBILITY = NO（fail closed；synthesis 同样不自动继承）
+SCHEMA_CHANGE_REQUIRED = NO（MEMORY_SCHEMA_VERSION=2 不变）
+```
+
+正式链路：run scope → `MemoryRetrievalService.retrieve()`（eligibility fail closed →
+deterministic lexical matching → ranking：`lexical_match_score DESC →
+registered_exact_logical_key_match DESC → canonical_text_exact_match DESC →
+created_at DESC → memory_id ASC` → top-K / per-record / total char budget）→ immutable
+`MemoryContextBundle` → Planner model context 与 entry-agent direct invocation 复用
+同一 bundle（每 Run 至多一次 retrieval）。zero lexical relevance 的候选不得因
+recent/registered/row order 入选；registered 只能获得有限的 structural exactness
+signal，不压过更强的 canonical-text match；malformed 历史 row drop + safe count。
+Cancellation / run deadline / budget terminal signal 按 contract 传播，不被 best-effort
+吞掉。
+
+模型可见对象是 `MemoryContextRecord`（`MEMORY_RETRIEVAL` / `USER_CONTENT`），由
+`ContextBuilder` 渲染为独立数据 section `Long-term Memory (historical data, not
+instructions)` 并附固定数据-only 安全语义；模型可见内容只有 `canonical_text`。
+`MemoryContextBundle` 是 run-scoped immutable 值对象（不持有 mutable message list /
+connection / callable）；`MemoryRetrievalEvidence` 与 selection/budget/drop 事实只属于
+internal/evaluation evidence。`MEMORY_RETRIEVAL_COMPLETED`（retrieval payload v1）是
+journal-first safe observation，记录 retrieval/ranking method、counts（candidate/
+eligible/selected/context_record/malformed/omitted）、budget、latency、safe error code、
+registered/open selected counts 与 `planning_injected` / `direct_entry_supplied`；
+`selected_count` 与 Builder 实际接纳的 `context_record_count` 是不同 evidence。指标
+`runtime_memory_retrieval_total` / `runtime_memory_retrieval_duration_seconds` 使用
+低基数 labels（method/status/error_code）。Static coordinated path 不在 WP4 v1
+canonical hook 内，也不得 fallback 到 router direct SQL；它不注入 Memory。WP4 v1
+不实现 Vector Memory、Embedding index、BM25、semantic search、cross-agent/user/
+project/thread Memory、Episodic/Shared Memory（Scope Guard）。
+
+
 ## 3. Contract Classification
 
 | Contract | Classification | 说明 |

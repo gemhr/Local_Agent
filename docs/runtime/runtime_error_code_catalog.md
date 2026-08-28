@@ -70,6 +70,22 @@ Step/Run terminal。Business Authority 始终是 SQLite `SemanticMemoryRecord`�
 | `FORGET_TARGET_AMBIGUOUS` | target proposal 不唯一 | 不重试 | 0 mutation；不允许 fuzzy/canonical/vector 定位 |
 | `FORGET_ALLOWLIST_OVERFLOW` | existing-key allowlist 超过固定上限 | 不重试 | 0 mutation；不允许 fuzzy/canonical/vector 定位 |
 
+## Phase5 WP4-B Memory Retrieval Codes
+
+这些 code 只进入 `MemoryRetrievalError` / `MEMORY_RETRIEVAL_COMPLETED`
+event / metric；不得写入 `StepCompletionResult.error_code` 或改变
+delivered output / final Step / Run terminal。失败策略固定为
+`BEST_EFFORT_EMPTY_BUNDLE_NO_STALE_FALLBACK`：Run 携带空
+`MemoryContextBundle` 继续，不伪造 stale Memory。
+
+| Code | Trigger | Retry | Side effect / outcome |
+| --- | --- | --- | --- |
+| `MEMORY_RETRIEVAL_UNAVAILABLE` | SQLite authority read 失败（Store 不可用 / `PERSISTENCE_FAILED`）或 db_path 缺失 | 不重试（不跑第二次 retrieval） | `status=FAILED` safe observation + 空 bundle；Run 继续 |
+| `MEMORY_RETRIEVAL_FAILED` | 检索/排序/bundle 构造中的非预期内部错误的安全收口 | 不重试 | `status=FAILED` safe observation + 空 bundle；Run 继续；不投影 raw exception |
+
+Cancellation、run deadline 与 budget terminal signal 不映射为上述 code，
+按既有 Runtime contract 原样传播。
+
 ### HTTP pre-Run rejection（不是 Runtime error code）
 
 | HTTP | Fixed detail / owner | Trigger | Run / side effect | Retry semantics | Evidence |

@@ -78,6 +78,7 @@ class AgentExecutionRequest:
         "_dependency_results",
         "_event_emitter",
         "_fault_controller",
+        "_memory_context_bundle",
         "_locked",
     )
 
@@ -96,6 +97,7 @@ class AgentExecutionRequest:
         dependency_results: DependencyResultView | None = None,
         event_emitter: StepEventEmitter | None = None,
         fault_controller=None,
+        memory_context_bundle=None,
     ) -> None:
         if not isinstance(step_id, str) or not step_id.strip():
             raise AgentAdapterError(
@@ -170,6 +172,7 @@ class AgentExecutionRequest:
         object.__setattr__(self, "_dependency_results", dependency_results)
         object.__setattr__(self, "_event_emitter", event_emitter)
         object.__setattr__(self, "_fault_controller", fault_controller)
+        object.__setattr__(self, "_memory_context_bundle", memory_context_bundle)
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name, value) -> None:
@@ -224,6 +227,15 @@ class AgentExecutionRequest:
     @property
     def fault_controller(self):
         return self._fault_controller
+
+    @property
+    def memory_context_bundle(self):
+        """WP4-B：仅 entry-direct invocation 由 Driver 注入的 run-scoped bundle。
+
+        delegated specialist / synthesis step 恒为 None（fail closed）；
+        repr 不暴露 bundle 内容。
+        """
+        return self._memory_context_bundle
 
     def __repr__(self) -> str:
         return (
@@ -428,6 +440,7 @@ class AgentRouterSingleAgentAdapter:
                 raise_security_denial=True,
                 event_emitter=request.event_emitter,
                 fault_controller=request.fault_controller,
+                memory_context_bundle=request.memory_context_bundle,
             )
         except (
             asyncio.CancelledError,

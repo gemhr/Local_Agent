@@ -34,6 +34,7 @@ class RuntimeEventType(str, Enum):
     STEP_COMPLETED = "STEP_COMPLETED"
     MEMORY_FORMATION_COMPLETED = "MEMORY_FORMATION_COMPLETED"
     MEMORY_LIFECYCLE_RESOLVED = "MEMORY_LIFECYCLE_RESOLVED"
+    MEMORY_RETRIEVAL_COMPLETED = "MEMORY_RETRIEVAL_COMPLETED"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     TIMEOUT = "TIMEOUT"
     ERROR = "ERROR"
@@ -480,6 +481,64 @@ class MemoryFormationCompletedPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryRetrievalCompletedPayload:
+    """WP4-B Long-term Memory retrieval 的安全 outcome 投影。
+
+    Business Authority 始终是 SQLite ``long_term_memory`` row；本 payload
+    只是 derived observation。禁止携带 raw query、canonical text、payload、
+    logical_key、prompt、source excerpt、origin/run/exchange IDs、
+    raw exception、provider data 或路径。``selected_count`` 是 retrieval
+    selection；``context_record_count`` 只表示 Planner ContextBuilder 实际接纳
+    的 record 数；``direct_entry_supplied`` 不表示后续 direct invocation 的
+    Builder acceptance。selection != supplied != injection。
+    """
+
+    retrieval_method: str
+    ranking_method: str
+    status: str
+    schema_version: int
+    candidate_count: int
+    eligible_count: int
+    selected_count: int
+    context_record_count: int
+    malformed_count: int
+    omitted_count: int
+    budget_used_chars: int
+    registered_selected_count: int
+    open_selected_count: int
+    duration_ms: int
+    planning_injected: bool
+    direct_entry_supplied: bool
+    safe_error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.retrieval_method, "retrieval_method")
+        _require_text(self.ranking_method, "ranking_method")
+        _require_text(self.status, "status")
+        if self.status not in {"SUCCEEDED", "FAILED"}:
+            raise ValueError("未知 memory retrieval status")
+        _require_index(self.schema_version, "schema_version")
+        for name in (
+            "candidate_count",
+            "eligible_count",
+            "selected_count",
+            "context_record_count",
+            "malformed_count",
+            "omitted_count",
+            "budget_used_chars",
+            "registered_selected_count",
+            "open_selected_count",
+            "duration_ms",
+        ):
+            _require_index(getattr(self, name), name)
+        for name in ("planning_injected", "direct_entry_supplied"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} 必须是 bool")
+        if self.safe_error_code is not None:
+            _require_text(self.safe_error_code, "safe_error_code")
+
+
+@dataclass(frozen=True, slots=True)
 class BudgetExhaustedPayload:
     component: str
     dimension: str = "unknown"
@@ -652,6 +711,7 @@ RuntimeEventPayload: TypeAlias = (
     | StepCompletedPayload
     | MemoryFormationCompletedPayload
     | MemoryLifecycleResolvedPayload
+    | MemoryRetrievalCompletedPayload
     | BudgetExhaustedPayload
     | TimeoutPayload
     | ErrorPayload
@@ -676,6 +736,7 @@ _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
     RuntimeEventType.STEP_COMPLETED: StepCompletedPayload,
     RuntimeEventType.MEMORY_FORMATION_COMPLETED: MemoryFormationCompletedPayload,
     RuntimeEventType.MEMORY_LIFECYCLE_RESOLVED: MemoryLifecycleResolvedPayload,
+    RuntimeEventType.MEMORY_RETRIEVAL_COMPLETED: MemoryRetrievalCompletedPayload,
     RuntimeEventType.BUDGET_EXHAUSTED: BudgetExhaustedPayload,
     RuntimeEventType.TIMEOUT: TimeoutPayload,
     RuntimeEventType.ERROR: ErrorPayload,
@@ -823,6 +884,25 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "resolution_duration_ms",
         "mutation_duration_ms",
         "schema_version",
+    ),
+    MemoryRetrievalCompletedPayload: (
+        "retrieval_method",
+        "ranking_method",
+        "status",
+        "schema_version",
+        "candidate_count",
+        "eligible_count",
+        "selected_count",
+        "context_record_count",
+        "malformed_count",
+        "omitted_count",
+        "budget_used_chars",
+        "registered_selected_count",
+        "open_selected_count",
+        "duration_ms",
+        "planning_injected",
+        "direct_entry_supplied",
+        "safe_error_code",
     ),
     BudgetExhaustedPayload: ("component", "dimension", "safe_error_code"),
     TimeoutPayload: ("component", "safe_error_code"),

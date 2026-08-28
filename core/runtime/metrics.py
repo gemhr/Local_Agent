@@ -96,6 +96,7 @@ _GLOBAL_ALLOWED_LABELS = frozenset(
         "stage",
         "operation",
         "outcome",
+        "method",
     }
 )
 _SAFE_LABEL_VALUE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -178,6 +179,20 @@ _LIFECYCLE_ERROR_CODES = frozenset(
         "MEMORY_PERSISTENCE_FAILED",
         "MEMORY_DUPLICATE_CONFLICT",
         "MEMORY_FORGET_NOT_ATTEMPTED",
+        "unknown",
+    }
+)
+_MEMORY_RETRIEVAL_METHOD_VALUES = frozenset(
+    {"SQLITE_BOUNDED_LEXICAL_V1", "unknown"}
+)
+_MEMORY_RETRIEVAL_STATUS_VALUES = frozenset(
+    {"SUCCEEDED", "FAILED", "unknown"}
+)
+_MEMORY_RETRIEVAL_ERROR_CODES = frozenset(
+    {
+        "OK",
+        "MEMORY_RETRIEVAL_FAILED",
+        "MEMORY_RETRIEVAL_UNAVAILABLE",
         "unknown",
     }
 )
@@ -432,6 +447,28 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
             allowed_labels=frozenset({"operation"}),
             required_labels=frozenset({"operation"}),
             bounded_values={"operation": _LIFECYCLE_OPERATION_VALUES},
+        ),
+        MetricDescriptor(
+            name="runtime_memory_retrieval_total",
+            type=MetricType.COUNTER,
+            description="WP4-B Long-term Memory retrieval 结果",
+            unit="retrievals",
+            allowed_labels=frozenset({"method", "status", "error_code"}),
+            required_labels=frozenset({"method", "status", "error_code"}),
+            bounded_values={
+                "method": _MEMORY_RETRIEVAL_METHOD_VALUES,
+                "status": _MEMORY_RETRIEVAL_STATUS_VALUES,
+                "error_code": _MEMORY_RETRIEVAL_ERROR_CODES,
+            },
+        ),
+        MetricDescriptor(
+            name="runtime_memory_retrieval_duration_seconds",
+            type=MetricType.HISTOGRAM,
+            description="WP4-B Long-term Memory retrieval 时长",
+            unit="seconds",
+            allowed_labels=frozenset({"method"}),
+            required_labels=frozenset({"method"}),
+            bounded_values={"method": _MEMORY_RETRIEVAL_METHOD_VALUES},
         ),
         _descriptor("runtime_retries_total", MetricType.COUNTER, "Retry Attempt 数", "retries", "component"),
         _descriptor("runtime_budget_exhaustions_total", MetricType.COUNTER, "预算耗尽数", "events", "component", "budget_dimension", "status"),
@@ -966,6 +1003,35 @@ class RuntimeMetricsProjector:
                     "runtime_memory_lifecycle_resolution_duration_seconds",
                     resolution_ms / 1000.0,
                     labels={"operation": operation},
+                )
+        elif event_type is RuntimeEventType.MEMORY_RETRIEVAL_COMPLETED:
+            method = str(payload.get("retrieval_method", "unknown"))
+            if method not in _MEMORY_RETRIEVAL_METHOD_VALUES:
+                method = "unknown"
+            status = str(payload.get("status", "unknown"))
+            if status not in _MEMORY_RETRIEVAL_STATUS_VALUES:
+                status = "unknown"
+            error_code = str(payload.get("safe_error_code") or "OK")
+            if error_code not in _MEMORY_RETRIEVAL_ERROR_CODES:
+                error_code = "unknown"
+            self.recorder.increment_counter(
+                "runtime_memory_retrieval_total",
+                labels={
+                    "method": method,
+                    "status": status,
+                    "error_code": error_code,
+                },
+            )
+            duration_ms = payload.get("duration_ms")
+            if (
+                isinstance(duration_ms, int)
+                and not isinstance(duration_ms, bool)
+                and duration_ms >= 0
+            ):
+                self.recorder.observe_histogram(
+                    "runtime_memory_retrieval_duration_seconds",
+                    duration_ms / 1000.0,
+                    labels={"method": method},
                 )
             mutation_ms = payload.get("mutation_duration_ms")
             if (

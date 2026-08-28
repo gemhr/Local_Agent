@@ -52,6 +52,7 @@ IGNORED_EVENT_TYPES = frozenset(
         RuntimeEventType.ERROR,
         RuntimeEventType.MEMORY_FORMATION_COMPLETED,
         RuntimeEventType.MEMORY_LIFECYCLE_RESOLVED,
+        RuntimeEventType.MEMORY_RETRIEVAL_COMPLETED,
     }
 )
 SUPPORTED_RECOVERY_EVENT_TYPES = REDUCED_EVENT_TYPES | IGNORED_EVENT_TYPES
@@ -391,6 +392,9 @@ class LimitedJournalTailReducer:
                 # 纯观察；不进入 recovery projection。
                 pass
             elif event_type is RuntimeEventType.MEMORY_LIFECYCLE_RESOLVED:
+                # 纯观察；不进入 recovery projection。
+                pass
+            elif event_type is RuntimeEventType.MEMORY_RETRIEVAL_COMPLETED:
                 # 纯观察；不进入 recovery projection。
                 pass
             else:  # pragma: no cover - validator closes this set first

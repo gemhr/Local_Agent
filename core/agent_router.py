@@ -47,6 +47,7 @@ from core.runtime import (
     ResourceAuthorizationService, ResourceKind, ResourceOperation,
     ToolResourceExtractorCatalog, ToolResourceExtractorDescriptor,
 )
+from core.runtime.memory_retrieval import MemoryInjectionReport
 
 if TYPE_CHECKING:
     from core.knowledge_base.vector_db_manager import VectorDBManager
@@ -831,8 +832,16 @@ class AgentRouter:
         run_context: RunContext | None = None,
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
+        memory_context_bundle=None,
+        memory_injection_report_out: list | None = None,
     ) -> list[dict[str, str]]:
-        """构建一次推理所需的完整消息序列。"""
+        """构建一次推理所需的完整消息序列。
+
+        WP4-B：``memory_context_bundle`` 中的 ``MemoryContextRecord`` 经
+        ContextBuilder 以 typed ``MEMORY_RETRIEVAL``（``USER_CONTENT``）数据
+        section 注入；模型可见内容只有 ``canonical_text``。memory_id /
+        logical_key / payload / ranking score 不进入模型可见文本。
+        """
         summary_text = ""
         if (
             history_policy is HistoryPolicy.AGENT_SCOPE
@@ -872,6 +881,16 @@ class AgentRouter:
                 now,
             ),
         ]
+
+        memory_supplied = 0
+        memory_records = (
+            tuple(memory_context_bundle.records)
+            if memory_context_bundle is not None
+            else ()
+        )
+        for record in memory_records:
+            context_items.append(record.to_context_item())
+            memory_supplied += 1
 
         if agent_id == "knowledge_expert":
             retrieval_result = self._execute_knowledge_retrieval(
@@ -1026,6 +1045,23 @@ class AgentRouter:
             )
         if context_requirements_out is not None:
             context_requirements_out.append(context_result.model_requirements)
+        if (
+            memory_context_bundle is not None
+            and memory_injection_report_out is not None
+        ):
+            accepted = sum(
+                1
+                for item in context_result.included_items
+                if item.source_type is ContextSourceType.MEMORY_RETRIEVAL
+            )
+            memory_injection_report_out.append(
+                MemoryInjectionReport(
+                    target="DIRECT_ENTRY",
+                    supplied_count=memory_supplied,
+                    accepted_count=accepted,
+                    dropped_count=memory_supplied - accepted,
+                )
+            )
         return self.context_builder.bind_messages(
             context_result.included_items,
             history=tuple(
@@ -1204,6 +1240,8 @@ class AgentRouter:
         context_requirements_out: list[ModelContextRequirements] | None = None,
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
+        memory_context_bundle=None,
+        memory_injection_report_out: list | None = None,
     ) -> list[dict[str, str]]:
         """构建回答消息，并在需要时注入工具观察结果。"""
         if run_context is not None:
@@ -1218,6 +1256,8 @@ class AgentRouter:
             run_context=run_context,
             event_emitter=event_emitter,
             fault_controller=fault_controller,
+            memory_context_bundle=memory_context_bundle,
+            memory_injection_report_out=memory_injection_report_out,
         )
         tool_call = self._plan_tool_call(messages, agent_id)
         if not tool_call:
@@ -1423,6 +1463,8 @@ class AgentRouter:
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
         raise_security_denial: bool = False,
+        memory_context_bundle=None,
+        memory_injection_report_out: list | None = None,
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
@@ -1436,6 +1478,8 @@ class AgentRouter:
                 context_requirements_out=context_requirements_out,
                 event_emitter=event_emitter,
                 fault_controller=fault_controller,
+                memory_context_bundle=memory_context_bundle,
+                memory_injection_report_out=memory_injection_report_out,
             )
         except (ToolGovernanceError, ResourceAuthorizationError) as denied:
             # WP2-B：governance non-ALLOW 直接返回固定 safe denial 作为本步业务
@@ -1669,6 +1713,8 @@ class AgentRouter:
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
         raise_security_denial: bool = False,
+        memory_context_bundle=None,
+        memory_injection_report_out: list | None = None,
     ) -> str:
         """执行一次非流式智能体调用。"""
         if run_context is not None:
@@ -1692,6 +1738,8 @@ class AgentRouter:
             event_emitter=event_emitter,
             fault_controller=fault_controller,
             raise_security_denial=raise_security_denial,
+            memory_context_bundle=memory_context_bundle,
+            memory_injection_report_out=memory_injection_report_out,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -1717,8 +1765,15 @@ class AgentRouter:
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
         raise_security_denial: bool = False,
+        memory_context_bundle=None,
+        memory_injection_report_out: list | None = None,
     ) -> str:
-        """供 RunCoordinator Driver 使用的真实单 Agent 非流式业务入口。"""
+        """供 RunCoordinator Driver 使用的真实单 Agent 非流式业务入口。
+
+        WP4-B：``memory_context_bundle`` 仅由 entry-agent direct invocation
+        调用方（ResolvedSingleStepDriver）传入；delegated specialist /
+        synthesis 不传（SPECIALIST_MEMORY_VISIBILITY = NO，fail closed）。
+        """
         return self._run_agent_once(
             agent_id=agent_id,
             user_query=user_query,
@@ -1731,6 +1786,8 @@ class AgentRouter:
             event_emitter=event_emitter,
             fault_controller=fault_controller,
             raise_security_denial=raise_security_denial,
+            memory_context_bundle=memory_context_bundle,
+            memory_injection_report_out=memory_injection_report_out,
         )
 
     def complete_context_items(
@@ -1778,8 +1835,16 @@ class AgentRouter:
         run_context: RunContext,
         event_emitter: RunEventEmitter | StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
+        memory_context_bundle=None,
+        memory_injection_report_out: list | None = None,
     ) -> str:
-        """通过统一 ModelInvocation 合同生成 strict Planner schema v1 JSON。"""
+        """通过统一 ModelInvocation 合同生成 strict Planner schema v1 JSON。
+
+        WP4-B：``memory_context_bundle`` 非 None 且含 selected records 时，
+        Planner 模型消息必须经 ContextBuilder 以 typed ``MEMORY_RETRIEVAL``
+        ``USER_CONTENT`` 数据 section 注入；不得在 Planner 内直接拼 Memory
+        prompt。bundle 为空或未提供时保持原有最小消息结构。
+        """
         system_prompt = (
             "你是 LocalAgent Planner。只输出一个 JSON 对象，不得输出 Markdown。"
             "schema_version 必须为 1。decision 只能为 DIRECT_ANSWER 或 DELEGATE。"
@@ -1797,10 +1862,67 @@ class AgentRouter:
             "只有单个 knowledge_expert task 可以设置 "
             "synthesis_required=false；其他专业任务必须设置 synthesis_required=true。"
         )
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_request},
-        ]
+        memory_records = (
+            tuple(memory_context_bundle.records)
+            if memory_context_bundle is not None
+            else ()
+        )
+        if memory_records:
+            now = datetime.now(timezone.utc)
+            context_items = [
+                ContextItem(
+                    "core_router-planner-system-instruction",
+                    ContextSourceType.SYSTEM_INSTRUCTION,
+                    ContextTrustLevel.TRUSTED_INSTRUCTION,
+                    system_prompt,
+                    1000,
+                    now,
+                ),
+                ContextItem(
+                    "core_router-planner-user-request",
+                    ContextSourceType.CURRENT_USER_REQUEST,
+                    ContextTrustLevel.USER_CONTENT,
+                    user_request,
+                    1000,
+                    now,
+                ),
+            ]
+            context_items.extend(
+                record.to_context_item() for record in memory_records
+            )
+            context_result = self.context_builder.build(
+                ContextBuildRequest(
+                    run_id=run_context.run_id,
+                    agent_id="core_router",
+                    items=tuple(context_items),
+                    max_input_tokens=self.model_context_window,
+                    reserved_output_tokens=self.max_tokens,
+                )
+            )
+            messages = self.context_builder.bind_messages(
+                context_result.included_items,
+                separate_data_messages=True,
+            )
+            if memory_injection_report_out is not None:
+                accepted = sum(
+                    1
+                    for item in context_result.included_items
+                    if item.source_type is ContextSourceType.MEMORY_RETRIEVAL
+                )
+                supplied = len(memory_records)
+                memory_injection_report_out.append(
+                    MemoryInjectionReport(
+                        target="PLANNING",
+                        supplied_count=supplied,
+                        accepted_count=accepted,
+                        dropped_count=supplied - accepted,
+                    )
+                )
+        else:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_request},
+            ]
         capabilities = TaskCapabilityRequirements(
             requires_multi_agent=True,
             risk_level=RiskLevel.LOW,

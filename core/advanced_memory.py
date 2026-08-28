@@ -251,6 +251,13 @@ _SQL_SELECT_LTM_PARTITION = (
     "AND memory_type = ? AND logical_key = ? "
     "ORDER BY created_at ASC, memory_id ASC"
 )
+# WP4-B retrieval 窄读 primitive：固定 ACTIVE+SEMANTIC+agent/scope partition，
+# bounded LIMIT；SQL 不接受任意 where/order/prompt 参数。
+_SQL_SELECT_LTM_ACTIVE_SEMANTIC_SCOPE = (
+    "SELECT * FROM long_term_memory WHERE agent_id = ? AND memory_scope = ? "
+    "AND memory_type = ? AND status = ? "
+    "ORDER BY created_at DESC, memory_id ASC LIMIT ?"
+)
 # WP3-B forget targeting allowlist：同 agent/scope/type 下现有 distinct key。
 _SQL_SELECT_LTM_DISTINCT_KEYS = (
     "SELECT DISTINCT logical_key FROM long_term_memory "
@@ -282,6 +289,40 @@ class LifecycleOperation(str, Enum):
     NO_CHANGE = "NO_CHANGE"
     SUPERSEDE = "SUPERSEDE"
     FORGET = "FORGET"
+
+
+@dataclass(frozen=True)
+class ActiveSemanticScopeRead:
+    """WP4-B 窄读 primitive 的只读结果。
+
+    ``records`` 是已通过 domain validation 的 ACTIVE SEMANTIC rows；
+    ``malformed_count`` 是无法安全投影而被丢弃的 row 数（safe evidence，
+    不含正文）。本类型只是读取投影，不是新的 Authority。
+    """
+
+    records: Tuple[SemanticMemoryRecord, ...]
+    malformed_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.records, tuple) or any(
+            not isinstance(r, SemanticMemoryRecord) for r in self.records
+        ):
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "records 必须是 SemanticMemoryRecord tuple",
+            )
+        if isinstance(self.malformed_count, bool) or not isinstance(
+            self.malformed_count, int
+        ):
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "malformed_count 必须是非负整数",
+            )
+        if self.malformed_count < 0:
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "malformed_count 必须是非负整数",
+            )
 
 
 @dataclass(frozen=True)
@@ -845,6 +886,58 @@ class AdvancedMemoryStore:
             ) from None
         return [self._row_to_record(row) for row in rows]
 
+    def list_active_semantic_for_scope(
+        self,
+        agent_id: str,
+        memory_scope: str,
+        *,
+        candidate_limit: int,
+    ) -> ActiveSemanticScopeRead:
+        """WP4-B retrieval 窄读 primitive（Store 不做 ranking / scoring）。
+
+        固定约束：``agent_id`` exact、``memory_scope`` exact、
+        ``memory_type=SEMANTIC``、``status=ACTIVE``，并带 bounded
+        ``candidate_limit``。SQL 不接受任意 WHERE / ORDER BY / prompt 参数。
+        无法安全投影的 malformed 历史 row 被丢弃并计入 ``malformed_count``，
+        不阻塞其余候选。FORGOTTEN / SUPERSEDED row 由 SQL 谓词天然排除。
+        """
+        _require_non_empty(agent_id, "agent_id")
+        _require_non_empty(memory_scope, "memory_scope")
+        if isinstance(candidate_limit, bool) or not isinstance(
+            candidate_limit, int
+        ) or candidate_limit <= 0:
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "candidate_limit 必须是正整数",
+            )
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    _SQL_SELECT_LTM_ACTIVE_SEMANTIC_SCOPE,
+                    [
+                        agent_id,
+                        memory_scope,
+                        MemoryType.SEMANTIC.value,
+                        MemoryStatus.ACTIVE.value,
+                        candidate_limit,
+                    ],
+                ).fetchall()
+        except sqlite3.Error:
+            raise MemoryDomainError(
+                MemoryErrorCode.PERSISTENCE_FAILED
+            ) from None
+        records: List[SemanticMemoryRecord] = []
+        malformed = 0
+        for row in rows:
+            try:
+                records.append(self._row_to_record(row))
+            except (MemoryDomainError, ValueError, TypeError):
+                # malformed 历史 row：drop candidate，safe evidence，不阻塞其余候选。
+                malformed += 1
+        return ActiveSemanticScopeRead(
+            records=tuple(records), malformed_count=malformed
+        )
+
     # ------------------------------------------------------------------
     # WP3-B Lifecycle（keyed resolution + forget；BEGIN IMMEDIATE 内闭环）
     # ------------------------------------------------------------------
@@ -1332,6 +1425,7 @@ class AdvancedMemoryStore:
 
 
 __all__ = [
+    "ActiveSemanticScopeRead",
     "AdvancedMemoryStore",
     "FORGET_TOMBSTONE_TEXT",
     "LONG_TERM_MEMORY_TABLE",
