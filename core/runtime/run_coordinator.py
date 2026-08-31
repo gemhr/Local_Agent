@@ -44,6 +44,16 @@ from core.runtime.semantic_memory_formation import (
     SemanticMemoryFormation,
     UnifiedFormationExtractionAdapter,
 )
+from core.runtime.episodic_memory_formation import (
+    EpisodeEvidenceInput,
+    EpisodicMemoryFormation,
+    SpecialistEpisodeEvidenceInput,
+    SpecialistEpisodicMemoryFormation,
+)
+from core.runtime.episodic_evaluation import (
+    EpisodicEvaluationObserver,
+    observe_episodic_retrieval,
+)
 from core.runtime.memory_lifecycle import UnifiedForgetProposalAdapter
 from core.runtime.multi_agent_driver import MultiAgentDriver
 from core.runtime.plan_graph import PlanGraphValidationError, PlanGraphValidator
@@ -66,10 +76,13 @@ from core.runtime.memory_retrieval import (
     MemoryRetrievalErrorCode,
     MemoryRetrievalService,
 )
+from core.runtime.memory_authorization import MemoryAccessPrincipal
+from core.runtime.model_context import ContextSourceType, MemoryContextRecord, MemoryProvenance
+from core.runtime.project_memory import ProjectSemanticMemoryService, ProjectSemanticMemoryStore
 from core.runtime.agent_registry import AgentRegistryError
 from core.runtime.plan_compiler import PlanCompileError
 from core.runtime.run_registry import ActiveRunControlHandle, RunHandle, RunRegistry
-from core.runtime.scheduler import SchedulerError, SchedulerSnapshot, SerialScheduler
+from core.runtime.scheduler import SchedulerError, SchedulerSnapshot, SerialScheduler, StepClaim
 from core.runtime.state import AgentState, RunStatus, StepStatus, StopReason
 from core.runtime.state_machine import (
     AgentStateMachine,
@@ -279,6 +292,7 @@ class RunCoordinator:
         step_result_max_entries: int = 16,
         fault_controller: FaultInjectionController | None = None,
         memory_retrieval_service: MemoryRetrievalService | None = None,
+        episodic_evaluation_observer: EpisodicEvaluationObserver | None = None,
     ) -> "RunCoordinator":
         """构造尚无 Plan/Scheduler/Checkpoint 的动态规划 Runtime。"""
         if not isinstance(plan_resolver, PlanResolver):
@@ -296,6 +310,15 @@ class RunCoordinator:
         ):
             raise TypeError(
                 "memory_retrieval_service 必须是 MemoryRetrievalService 或 None"
+            )
+        if episodic_evaluation_observer is not None and not (
+            callable(getattr(episodic_evaluation_observer, "on_evidence", None))
+            and callable(
+                getattr(episodic_evaluation_observer, "on_formation", None)
+            )
+        ):
+            raise TypeError(
+                "episodic_evaluation_observer 必须实现 on_evidence/on_formation"
             )
         if (
             isinstance(planning_timeout_seconds, bool)
@@ -359,6 +382,7 @@ class RunCoordinator:
         self._memory_retrieval_service = memory_retrieval_service
         self._memory_context_bundle: MemoryContextBundle | None = None
         self._memory_retrieval_observation: _MemoryRetrievalObservation | None = None
+        self._episodic_evaluation_observer = episodic_evaluation_observer
         return self
 
     def _initialize_base(
@@ -418,6 +442,7 @@ class RunCoordinator:
         self._memory_retrieval_service = None
         self._memory_context_bundle = None
         self._memory_retrieval_observation = None
+        self._episodic_evaluation_observer = None
 
         self._start_lock = threading.Lock()
         self._started = False
@@ -536,6 +561,9 @@ class RunCoordinator:
             memory_writer = RunFinalMemoryWriter(
                 self._multi_agent_driver._router,
                 entry_agent_id=self._planning_request.selected_agent_id,
+                requester=MemoryAccessPrincipal(
+                    self._planning_request.selected_agent_id
+                ),
                 user_request=self._planning_request.user_request,
                 persist=self._persist,
                 run_id=self.run_context.run_id,
@@ -557,6 +585,9 @@ class RunCoordinator:
             if isinstance(db_path, str) and db_path.strip():
                 semantic_formation = SemanticMemoryFormation(
                     entry_agent_id=self._planning_request.selected_agent_id,
+                    requester=MemoryAccessPrincipal(
+                        self._planning_request.selected_agent_id
+                    ),
                     user_request=self._planning_request.user_request,
                     memory_store=AdvancedMemoryStore(db_path),
                     extraction_model=UnifiedFormationExtractionAdapter(
@@ -681,6 +712,37 @@ class RunCoordinator:
             )
         return MemoryRetrievalService(AdvancedMemoryStore(db_path))
 
+    def _build_project_memory_service(self) -> ProjectSemanticMemoryService:
+        router = getattr(self._multi_agent_driver, "_router", None) if self._multi_agent_driver is not None else None
+        db_path = getattr(getattr(router, "memory_manager", None), "db_path", None)
+        if not isinstance(db_path, str) or not db_path.strip():
+            raise MemoryRetrievalError(MemoryRetrievalErrorCode.UNAVAILABLE, "Project Memory authority 不可用")
+        return ProjectSemanticMemoryService(ProjectSemanticMemoryStore(db_path), AdvancedMemoryStore(db_path))
+
+    def _retrieve_project_memory_context(self, bundle: MemoryContextBundle, entry_agent_id: str) -> MemoryContextBundle:
+        """PROJECT read 独立于 PRIVATE read；授权失败前绝不访问 Project Store。"""
+        project = self.run_context.project_identity
+        grants = self.run_context.project_grants
+        if project is None:
+            return bundle
+        grant = next((item for item in grants if item.agent_id == entry_agent_id), None)
+        records, authorization = self._build_project_memory_service().read(
+            requester=MemoryAccessPrincipal(entry_agent_id), project=project, grant=grant,
+        )
+        if not authorization.allowed:
+            return bundle
+        projected = tuple(
+            MemoryContextRecord(
+                provenance=MemoryProvenance(record.memory_id, "PROJECT_SEMANTIC", record.memory_id),
+                source_type=ContextSourceType.PROJECT_MEMORY_RETRIEVAL,
+                content=record.canonical_text,
+                created_at=datetime.fromisoformat(record.created_at),
+                priority=695,
+            )
+            for record in records
+        )
+        return replace(bundle, project_records=projected, project_candidate_count=len(records), project_selected_count=len(projected))
+
     def _retrieve_memory_context(self) -> None:
         """单次 canonical retrieval：entry agent + DIRECT scope + original query。
 
@@ -703,12 +765,20 @@ class RunCoordinator:
             if service is None:
                 service = self._build_memory_retrieval_service()
             bundle = service.retrieve(
-                agent_id=entry_agent_id,
+                requester=MemoryAccessPrincipal(entry_agent_id),
+                target_owner_agent_id=entry_agent_id,
                 memory_scope=MEMORY_DIRECT_SCOPE,
                 query=self._planning_request.user_request,
             )
+            bundle = self._retrieve_project_memory_context(bundle, entry_agent_id)
             self.run_context.raise_if_inactive()
             self._memory_context_bundle = bundle
+            # WP6-E isolated evaluation seam: observation-only projection of the
+            # real bundle (selected/supplied).  No-op unless an evaluation
+            # collector is explicitly installed by the isolated evaluation path.
+            observe_episodic_retrieval(
+                run_id=self.run_context.run_id, bundle=bundle
+            )
             self._memory_retrieval_observation = _MemoryRetrievalObservation(
                 bundle=bundle,
                 status="SUCCEEDED",
@@ -815,6 +885,9 @@ class RunCoordinator:
                     planning_injected=observation.planning_injected,
                     direct_entry_supplied=observation.direct_entry_supplied,
                     safe_error_code=observation.safe_error_code,
+                    episodic_candidate_count=bundle.episodic_candidate_count,
+                    episodic_selected_count=bundle.episodic_selected_count,
+                    episodic_context_record_count=bundle.episodic_selected_count,
                 ),
                 component="run_coordinator",
                 ignore_run_cancellation=True,
@@ -1247,6 +1320,8 @@ class RunCoordinator:
                     "state_event_transitions_in_flight"
                 ):
                     decision = self._finalize_once(decision)
+                    await self._run_specialist_episodic_formation()
+                    await self._run_episodic_formation(decision)
                     try:
                         await self._emit_terminal_events(decision)
                     except Exception:
@@ -1760,6 +1835,102 @@ class RunCoordinator:
             )
         except (EventChannelClosedError, RuntimeError):
             return
+
+    async def _run_episodic_formation(
+        self, decision: RunFinalizationDecision
+    ) -> None:
+        """WP6-C canonical post-terminal/pre-cleanup observer.
+
+        The observer is deliberately best-effort.  It receives only typed Run
+        facts and cannot mutate ``decision``, OutputGate or AgentState.
+        """
+        if (
+            not self._dynamic
+            or not self._persist
+            or self._planning_request is None
+            or self._multi_agent_driver is None
+            or self.plan is None
+        ):
+            return
+        try:
+            router = self._multi_agent_driver._router
+            memory_manager = getattr(router, "memory_manager", None)
+            db_path = getattr(memory_manager, "db_path", None)
+            if not isinstance(db_path, str) or not db_path.strip():
+                return
+            attempt = self._output_gate.last_attempt if self._output_gate else None
+            delivery_status = (
+                attempt.delivery_status.value
+                if attempt is not None
+                else "NOT_DELIVERED"
+            )
+            source = EpisodeEvidenceInput(
+                run_id=self.run_context.run_id,
+                agent_id=self._planning_request.selected_agent_id,
+                memory_scope=MEMORY_DIRECT_SCOPE,
+                user_request=self._planning_request.user_request,
+                plan_goal=self.plan.task_summary,
+                agent_state=self.agent_state,
+                terminal_status=decision.status,
+                stop_reason=decision.stop_reason,
+                delivery_status=delivery_status,
+            )
+            observer = self._episodic_evaluation_observer
+            if observer is not None:
+                observer.on_evidence(source)
+            result = await EpisodicMemoryFormation(
+                AdvancedMemoryStore(db_path),
+                self.event_emitter,
+                requester=MemoryAccessPrincipal(
+                    self._planning_request.selected_agent_id
+                ),
+            ).run_formation(source)
+            if observer is not None:
+                observer.on_formation(result)
+        except Exception:
+            return
+
+    async def _run_specialist_episodic_formation(self) -> None:
+        """Post-terminal best-effort projection for committed delegated steps.
+
+        A failed step without a committed ``StepResult`` is intentionally
+        skipped: it has no verified producer evidence and must not be turned
+        into an invented specialist experience.
+        """
+        if not (self._dynamic and self._persist and self.plan and self._planning_request and self._multi_agent_driver and self._invocation_bindings):
+            return
+        router = self._multi_agent_driver._router
+        db_path = getattr(getattr(router, "memory_manager", None), "db_path", None)
+        if not isinstance(db_path, str) or not db_path.strip():
+            return
+        entry_agent_id = self._planning_request.selected_agent_id
+        for step in self.plan.steps:
+            state = self.agent_state.steps.get(step.step_id)
+            if (
+                step.preferred_agent == entry_agent_id
+                or step.execution_kind is ExecutionKind.SYNTHESIS
+                or state is None
+                or state.status is not StepStatus.SUCCEEDED
+            ):
+                continue
+            try:
+                binding = self._invocation_bindings.resolve_for_step(step.step_id, expected_agent_id=step.preferred_agent)
+                registration = self._multi_agent_driver._registry.resolve(step.preferred_agent)
+                claim = StepClaim(self.plan.plan_id, self.plan.version, step.step_id, state.started_at or self.run_context.created_at, step.capability_requirements, step.preferred_agent)
+                MultiAgentDriver._verify_triple_identity(claim=claim, plan_step=step, binding_agent_id=binding.agent_id, registration=registration)
+                producer_agent_id = self._step_result_store.committed_producer_agent_id(step.step_id) if self._step_result_store else None
+                if producer_agent_id != step.preferred_agent:
+                    continue
+                await SpecialistEpisodicMemoryFormation(AdvancedMemoryStore(db_path), self.event_emitter).run_formation(
+                    SpecialistEpisodeEvidenceInput(
+                        run_id=self.run_context.run_id, step_id=step.step_id,
+                        specialist_agent_id=step.preferred_agent, memory_scope=MEMORY_DIRECT_SCOPE,
+                        user_request=self._planning_request.user_request, step_name=step.title,
+                        step_status=state.status.value,
+                    )
+                )
+            except Exception:
+                continue
 
     async def _emit_terminal_events(
         self, decision: RunFinalizationDecision

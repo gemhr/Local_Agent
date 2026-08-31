@@ -12,6 +12,7 @@ import time
 import uuid
 
 from core.runtime.cancellation import CancellationSource, CancellationToken
+from core.runtime.project_memory import ProjectIdentity, ProjectMemoryGrant
 
 LEGACY_DEFAULT_SESSION_ID = "legacy-default"
 
@@ -132,6 +133,8 @@ class RunContext:
         self._clock = clock
         self._budget_ledger = None
         self._activity_tracker = None
+        self._project_identity: ProjectIdentity | None = None
+        self._project_grants: tuple[ProjectMemoryGrant, ...] = ()
 
     @property
     def budget_ledger(self):
@@ -155,6 +158,31 @@ class RunContext:
         if getattr(tracker, "run_id", None) != self.run_id:
             raise ValueError("RuntimeActivityTracker run_id mismatch")
         self._activity_tracker = tracker
+
+    @property
+    def project_identity(self) -> ProjectIdentity | None:
+        return self._project_identity
+
+    @property
+    def project_grants(self) -> tuple[ProjectMemoryGrant, ...]:
+        return self._project_grants
+
+    def attach_project_memory_access(
+        self, project_identity: ProjectIdentity | None, project_grants: tuple[ProjectMemoryGrant, ...] = (),
+    ) -> None:
+        """仅由可信 Runtime request boundary 注入一次，不序列化到诊断数据。"""
+        if self._project_identity is not None or self._project_grants:
+            raise RuntimeError("RunContext 已绑定 Project Memory access")
+        if project_identity is not None and not isinstance(project_identity, ProjectIdentity):
+            raise TypeError("project_identity 必须是 ProjectIdentity 或 None")
+        if not isinstance(project_grants, tuple) or any(not isinstance(g, ProjectMemoryGrant) for g in project_grants):
+            raise TypeError("project_grants 必须是 ProjectMemoryGrant tuple")
+        if project_identity is None and project_grants:
+            raise ValueError("缺少 project_identity 时不得注入 grant")
+        if project_identity is not None and any(g.project_id != project_identity.project_id for g in project_grants):
+            raise ValueError("Project grant scope 与 ProjectIdentity 不匹配")
+        self._project_identity = project_identity
+        self._project_grants = project_grants
 
     @classmethod
     def create(

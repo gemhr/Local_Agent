@@ -34,13 +34,20 @@ from core.advanced_memory import (
     MemoryErrorCode,
     MemoryStatus,
     MemoryType,
+    EpisodicMemoryRecord,
     SemanticMemoryRecord,
 )
 from core.runtime.model_context import (
     ContextSourceType,
     ContextTrustLevel,
+    EpisodicMemoryContextRecord,
     MemoryContextRecord,
     MemoryProvenance,
+)
+from core.runtime.memory_authorization import (
+    MemoryAccessAuthorizer,
+    MemoryAccessPrincipal,
+    MemoryAuthorizationResult,
 )
 
 #: 与 AgentRouter.DIRECT_MEMORY_SCOPE 一致的既有 scope 常量（不新建 identity）。
@@ -55,6 +62,8 @@ DEFAULT_CANDIDATE_LIMIT = 64
 DEFAULT_TOP_K = 5
 DEFAULT_MAX_MEMORY_CONTEXT_CHARS = 2000
 DEFAULT_MAX_MEMORY_RECORD_CHARS = 600
+EPISODIC_MAX_SELECTED = 3
+EPISODIC_MAX_CONTEXT_CHARS = 1200
 
 
 class MemoryRetrievalErrorCode:
@@ -143,6 +152,17 @@ class MemoryRetrievalEvidence:
 
 
 @dataclass(frozen=True)
+class EpisodicMemorySelection:
+    """内部 selection evidence；不得写入 prompt 或 runtime event。"""
+    memory_id: str
+    lexical_match_score: int
+    rank: int
+    selected: bool
+    canonical_text: str
+    drop_reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class MemoryContextBundle:
     """run-scoped immutable retrieval projection（不是 string，不是可变
     message list，不持有 DB connection 或 callable）。
@@ -166,13 +186,36 @@ class MemoryContextBundle:
     registered_selected_count: int
     open_selected_count: int
     schema_version: int = MEMORY_RETRIEVAL_SCHEMA_VERSION
+    episodic_records: Tuple[EpisodicMemoryContextRecord, ...] = ()
+    episodic_evidence: Tuple[EpisodicMemorySelection, ...] = ()
+    episodic_candidate_count: int = 0
+    episodic_selected_count: int = 0
+    episodic_budget_used_chars: int = 0
+    project_records: Tuple[MemoryContextRecord, ...] = ()
+    project_candidate_count: int = 0
+    project_selected_count: int = 0
+    authorization: MemoryAuthorizationResult | None = None
 
     @property
     def record_count(self) -> int:
-        return len(self.records)
+        return len(self.records) + len(self.project_records) + len(self.episodic_records)
+
+    @property
+    def semantic_records(self) -> Tuple[MemoryContextRecord, ...]:
+        return self.records
+
+    @property
+    def all_records(self) -> Tuple[MemoryContextRecord | EpisodicMemoryContextRecord, ...]:
+        """固定注入顺序：PRIVATE Semantic → PROJECT Semantic → Episodic。"""
+        return self.records + self.project_records + self.episodic_records
 
     @classmethod
-    def empty(cls, entry_agent_id: str, memory_scope: str) -> "MemoryContextBundle":
+    def empty(
+        cls,
+        entry_agent_id: str,
+        memory_scope: str,
+        authorization: MemoryAuthorizationResult | None = None,
+    ) -> "MemoryContextBundle":
         return cls(
             records=(),
             evidence=(),
@@ -188,6 +231,7 @@ class MemoryContextBundle:
             budget_used_chars=0,
             registered_selected_count=0,
             open_selected_count=0,
+            authorization=authorization,
         )
 
 
@@ -230,6 +274,7 @@ class MemoryRetrievalService:
         top_k: int = DEFAULT_TOP_K,
         max_memory_context_chars: int = DEFAULT_MAX_MEMORY_CONTEXT_CHARS,
         max_memory_record_chars: int = DEFAULT_MAX_MEMORY_RECORD_CHARS,
+        authorizer: MemoryAccessAuthorizer | None = None,
     ) -> None:
         if not isinstance(memory_store, AdvancedMemoryStore):
             raise MemoryRetrievalError(
@@ -247,12 +292,104 @@ class MemoryRetrievalService:
         self._max_memory_record_chars = _require_positive_int(
             max_memory_record_chars, "max_memory_record_chars"
         )
+        if authorizer is not None and not isinstance(authorizer, MemoryAccessAuthorizer):
+            raise TypeError("authorizer 必须是 MemoryAccessAuthorizer 或 None")
+        self._authorizer = authorizer or MemoryAccessAuthorizer()
 
     # ------------------------------------------------------------------
     # Public entry（每 Run 最多调用一次；禁止第二次 retrieval）
+    def _retrieve_episodic(
+        self, *, owner_agent_id: str, memory_scope: str, query: str,
+    ) -> tuple[Tuple[EpisodicMemoryContextRecord, ...], Tuple[EpisodicMemorySelection, ...], int, int, int]:
+        """只读 EPISODIC narrow read；canonical_text 是唯一匹配来源。"""
+        try:
+            read = self._memory_store.list_active_episodic_for_scope(
+                owner_agent_id, memory_scope, candidate_limit=self._candidate_limit
+            )
+        except MemoryDomainError as exc:
+            code = MemoryRetrievalErrorCode.UNAVAILABLE if exc.error_code == MemoryErrorCode.PERSISTENCE_FAILED else MemoryRetrievalErrorCode.FAILED
+            raise MemoryRetrievalError(code, "Episodic Memory authority read failed") from None
+        query_tokens = tuple(dict.fromkeys(_tokenize(query)))
+        candidates: list[tuple[EpisodicMemoryRecord, int]] = []
+        for record in read.records:
+            if (record.memory_type is not MemoryType.EPISODIC or record.status is not MemoryStatus.ACTIVE
+                    or record.agent_id != owner_agent_id or record.memory_scope != memory_scope):
+                continue
+            candidates.append((record, sum(token in set(_tokenize(record.canonical_text)) for token in query_tokens)))
+        ranked = sorted(candidates, key=lambda item: (-item[1], -item[0].created_at.timestamp(), item[0].memory_id))
+        records: list[EpisodicMemoryContextRecord] = []
+        evidence: list[EpisodicMemorySelection] = []
+        used = 0
+        for rank, (record, score) in enumerate(ranked, start=1):
+            reason: str | None = None
+            if score <= 0:
+                reason = "NO_LEXICAL_MATCH"
+            elif len(records) >= EPISODIC_MAX_SELECTED:
+                reason = "TOP_K_EXCEEDED"
+            elif len(record.canonical_text) > self._max_memory_record_chars:
+                reason = "RECORD_CHAR_BUDGET_EXCEEDED"
+            elif used + len(record.canonical_text) > EPISODIC_MAX_CONTEXT_CHARS:
+                reason = "CONTEXT_CHAR_BUDGET_EXCEEDED"
+            selected = reason is None
+            evidence.append(EpisodicMemorySelection(record.memory_id, score, rank, selected, record.canonical_text, reason))
+            if not selected:
+                continue
+            used += len(record.canonical_text)
+            records.append(EpisodicMemoryContextRecord(
+                provenance=MemoryProvenance(record.memory_id, record.memory_type.value, record.memory_id),
+                content=record.canonical_text, created_at=record.created_at,
+            ))
+        return tuple(records), tuple(evidence), len(read.records) + read.malformed_count, len(records), used
+
     # ------------------------------------------------------------------
 
     def retrieve(
+        self,
+        *,
+        memory_scope: str,
+        query: str,
+        requester: MemoryAccessPrincipal | None = None,
+        target_owner_agent_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> MemoryContextBundle:
+        """授权后执行两个独立 typed pipeline；拒绝时绝不触达 Store。
+
+        ``agent_id`` 仅作为历史 target 参数别名保留；它永远不会被转换成
+        requester authorization proof。canonical Coordinated Runtime 必须传入
+        typed ``requester`` 和明确的 ``target_owner_agent_id``；requester 缺失
+        时 fail closed。
+        """
+        owner_agent_id = target_owner_agent_id if target_owner_agent_id is not None else agent_id
+        decision = self._authorizer.authorize_private_read(
+            requester,
+            owner_agent_id,
+            memory_scope,
+            requested_memory_scope=memory_scope,
+        )
+        if not decision.allowed:
+            return MemoryContextBundle.empty(owner_agent_id or "", memory_scope, decision)
+        semantic_error: MemoryRetrievalError | None = None
+        try:
+            semantic = self._retrieve_semantic(agent_id=owner_agent_id, memory_scope=memory_scope, query=query)
+        except MemoryRetrievalError as exc:
+            semantic_error = exc
+            semantic = MemoryContextBundle.empty(owner_agent_id or "", memory_scope, decision)
+        except Exception:
+            semantic_error = MemoryRetrievalError(MemoryRetrievalErrorCode.FAILED, "Long-term Memory retrieval failed")
+            semantic = MemoryContextBundle.empty(owner_agent_id or "", memory_scope, decision)
+        try:
+            episodic = self._retrieve_episodic(owner_agent_id=owner_agent_id, memory_scope=memory_scope, query=query)
+        except Exception:
+            episodic = ((), (), 0, 0, 0)
+        if semantic_error is not None and not episodic[0]:
+            raise semantic_error
+        return MemoryContextBundle(
+            **{**semantic.__dict__, "episodic_records": episodic[0], "episodic_evidence": episodic[1],
+               "episodic_candidate_count": episodic[2], "episodic_selected_count": episodic[3],
+               "episodic_budget_used_chars": episodic[4], "authorization": decision}
+        )
+
+    def _retrieve_semantic(
         self,
         *,
         agent_id: str,
@@ -466,6 +603,8 @@ __all__ = [
     "DEFAULT_MAX_MEMORY_CONTEXT_CHARS",
     "DEFAULT_MAX_MEMORY_RECORD_CHARS",
     "DEFAULT_TOP_K",
+    "EPISODIC_MAX_CONTEXT_CHARS",
+    "EPISODIC_MAX_SELECTED",
     "MEMORY_DIRECT_SCOPE",
     "MEMORY_RETRIEVAL_SCHEMA_VERSION",
     "MemoryContextBundle",
@@ -473,6 +612,7 @@ __all__ = [
     "MemoryRetrievalError",
     "MemoryRetrievalErrorCode",
     "MemoryRetrievalEvidence",
+    "EpisodicMemorySelection",
     "MemoryRetrievalService",
     "RANKING_METHOD",
     "RETRIEVAL_METHOD",

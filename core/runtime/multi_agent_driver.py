@@ -231,12 +231,12 @@ class MultiAgentDriver:
         binding_agent_id: str,
         registration: AgentRegistration,
     ) -> None:
-        if (
-            claim.preferred_agent
-            != plan_step.preferred_agent
-            != binding_agent_id
-            != registration.agent_id
-        ):
+        if len({
+            claim.preferred_agent,
+            plan_step.preferred_agent,
+            binding_agent_id,
+            registration.agent_id,
+        }) != 1:
             raise MultiAgentDriverError(
                 MultiAgentDriverErrorCode.REGISTRY_MISMATCH,
                 "PlanStep/Binding/Registry 三方 Agent 不一致",

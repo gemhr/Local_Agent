@@ -177,3 +177,7 @@ Handoff 只传递任务上下文和证据，不替代源码、Git Diff、测试�
 - 运维与恢复：`docs/runtime/runtime_operations_runbook.md`、`docs/runtime/runtime_recovery_runbook.md`、`docs/runtime/stage2_5_operations_runbook.md`
 - Fault 与 Trace：`docs/runtime/stage2_5_fault_injection_catalog_v2.md`、`docs/runtime/stage2_5_trace_contract_v1.md`
 - 已知限制与证据：`docs/runtime/stage2_known_limitations_and_next_stage.md`、`docs/runtime/stage2_runtime_evidence_manifest.md`
+
+## 长时间运行任务与后台进程
+
+当任务启动了仍属于当前任务范围的长时间运行命令、测试、评估、服务或后台进程时，不得仅因进程已成功启动就结束当前任务。只要工具提供可继续查询的 process/session handle，就应保持该会话并周期性轮询其状态，在进程退出、达到明确 terminal state、确认需要用户介入，或发生无法继续的 blocker 后，才允许输出最终结果并结束本轮。禁止仅回复“已在后台运行，完成后继续”后直接结束任务。

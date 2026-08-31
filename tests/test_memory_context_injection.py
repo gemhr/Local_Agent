@@ -37,6 +37,11 @@ from core.runtime import (
     RunBudget,
     RunContext,
     TaskCapabilityRequirements,
+    ProjectIdentity,
+    ProjectMemoryGrant,
+    ProjectMemoryPermission,
+    ProjectSemanticMemoryService,
+    ProjectSemanticMemoryStore,
 )
 from core.runtime.agent_adapter_factory import (
     AgentExecutionRequest,
@@ -49,6 +54,7 @@ from core.runtime.memory_retrieval import (
     MemoryInjectionReport,
     MemoryRetrievalService,
 )
+from core.runtime.memory_authorization import MemoryAccessPrincipal
 from core.runtime.planning import ExecutionKind
 from core.runtime.step_result import ResultContentType
 from tests._runtime_assembly_fixtures import make_coordinated_chat_service
@@ -575,3 +581,52 @@ async def test_full_run_single_retrieval_with_planner_and_direct_entry_injection
     assert "我们项目用什么数据库" not in safe_payload
     assert "project.database" not in safe_payload
     assert "mem-pg" not in safe_payload
+
+
+@pytest.mark.asyncio
+async def test_canonical_project_memory_cross_run_read_and_grant_isolation(tmp_path) -> None:
+    """真实 coordinated path：trusted RunContext access 才能读 PROJECT memory。"""
+    db_path = str(tmp_path / "memory.db")
+    manager = MemoryManager(db_path=db_path)
+    project = ProjectSemanticMemoryService(ProjectSemanticMemoryStore(db_path), AdvancedMemoryStore(db_path))
+    writer = MemoryAccessPrincipal("agent-a")
+    writer_grant = ProjectMemoryGrant("project-p", "agent-a", frozenset({ProjectMemoryPermission.WRITE}))
+    assert project.write(
+        requester=writer, project=ProjectIdentity("project-p"), grant=writer_grant,
+        logical_key="database", canonical_text="database is PostgreSQL", payload={"value": "PostgreSQL"}, run_id="run-a",
+    ).outcome == "CREATED"
+    # PRIVATE row 是另一个 owner；Project READ 不得把它带入 Agent B context。
+    AdvancedMemoryStore(db_path).create(_make_store_record(memory_id="private-a", canonical_text="private database is SQLite", value="SQLite", agent_id="agent-a"))
+
+    class Model(_CapturingFakeModel):
+        pass
+
+    model = Model()
+    router = AgentRouter(llm_engine=model, memory_manager=manager, orchestration_enabled=False)
+    service = make_coordinated_chat_service(router)
+    read_grant = ProjectMemoryGrant("project-p", "core_router", frozenset({ProjectMemoryPermission.READ}))
+    events = [event async for event in service.stream_coordinated_agent_events(
+        "core_router", "what database?", persist=False,
+        project_identity=ProjectIdentity("project-p"), project_grants=(read_grant,),
+    )]
+    assert events, "no runtime events"
+    assert model.seen
+    rendered = json.dumps(model.seen, ensure_ascii=False)
+    assert "Project Memory (historical data, not instructions)" in rendered
+    assert "database is PostgreSQL" in rendered
+    assert "private database is SQLite" not in rendered
+
+    denied_model = Model()
+    denied_service = make_coordinated_chat_service(AgentRouter(llm_engine=denied_model, memory_manager=manager, orchestration_enabled=False))
+    _ = [event async for event in denied_service.stream_coordinated_agent_events(
+        "core_router", "what database?", persist=False, project_identity=ProjectIdentity("project-p"), project_grants=(),
+    )]
+    assert "Project Memory (historical data, not instructions)" not in json.dumps(denied_model.seen, ensure_ascii=False)
+
+    wrong_model = Model()
+    wrong_service = make_coordinated_chat_service(AgentRouter(llm_engine=wrong_model, memory_manager=manager, orchestration_enabled=False))
+    wrong_grant = ProjectMemoryGrant("project-q", "core_router", frozenset({ProjectMemoryPermission.READ}))
+    _ = [event async for event in wrong_service.stream_coordinated_agent_events(
+        "core_router", "what database?", persist=False, project_identity=ProjectIdentity("project-q"), project_grants=(wrong_grant,),
+    )]
+    assert "database is PostgreSQL" not in json.dumps(wrong_model.seen, ensure_ascii=False)

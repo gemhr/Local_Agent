@@ -41,6 +41,9 @@ from core.runtime import (
     BlockingTaskKind,
     BoundedBlockingExecutor,
     process_legacy_step_executor,
+    FaultInjectionController,
+    ProjectIdentity,
+    ProjectMemoryGrant,
 )
 
 
@@ -280,6 +283,55 @@ class ChatService:
         result = results[0]
         return output if result.status.value == "SUCCEEDED" else None, result
 
+    async def run_coordinated_agent_evaluation(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        run_id: str | None = None,
+        timeout_seconds: float | None = None,
+        budget: RunBudget | None = None,
+        persist: bool = True,
+        fault_controller=None,
+        episodic_evaluation_observer=None,
+        evaluation_plan_resolver=None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
+    ) -> tuple[str | None, RunCoordinatorResult]:
+        """Isolated evaluation-only entry mirroring ``run_coordinated_agent``.
+
+        ``fault_controller`` and ``episodic_evaluation_observer`` are only ever
+        provided by the isolated evaluation execution path through its strict
+        typed control.  The normal production path never calls this method and
+        never supplies either seam.
+        """
+        events: list[RuntimeEvent] = []
+        results: list[RunCoordinatorResult] = []
+        async for event in self.stream_coordinated_agent_events_evaluation(
+            agent_id,
+            query,
+            run_id=run_id,
+            timeout_seconds=timeout_seconds,
+            budget=budget,
+            persist=persist,
+            fault_controller=fault_controller,
+            episodic_evaluation_observer=episodic_evaluation_observer,
+            evaluation_plan_resolver=evaluation_plan_resolver,
+            project_identity=project_identity,
+            project_grants=project_grants,
+            _result_out=results,
+        ):
+            events.append(event)
+        output = "".join(
+            event.payload.text
+            for event in events
+            if isinstance(event.payload, OutputDeltaPayload)
+        )
+        if not results:
+            raise RuntimeError("Coordinated Runtime 未返回结构化结果")
+        result = results[0]
+        return output if result.status.value == "SUCCEEDED" else None, result
+
     async def stream_coordinated_agent_events(
         self,
         agent_id: str,
@@ -291,6 +343,8 @@ class ChatService:
         persist: bool = True,
         _result_out: list[RunCoordinatorResult] | None = None,
         _cancellation_intent: list[CancellationReason] | None = None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
     ) -> AsyncIterator[RuntimeEvent]:
         """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
         if self._coordinated_runtime_factory is None:
@@ -306,12 +360,59 @@ class ChatService:
             persist=persist,
             result_out=_result_out,
             cancellation_intent=_cancellation_intent,
+            project_identity=project_identity,
+            project_grants=project_grants,
         )
         try:
             async for event in events:
                 yield event
         finally:
             await events.aclose()
+
+    async def _create_coordinated_scope(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        run_id: str | None,
+        timeout_seconds: float | None,
+        budget: RunBudget | None,
+        persist: bool,
+        fault_controller: FaultInjectionController | None = None,
+        episodic_evaluation_observer=None,
+        evaluation_plan_resolver=None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
+    ):
+        factory = self._coordinated_runtime_factory
+        if factory is None:
+            raise ChatRuntimeTransportError(
+                "RUNTIME_CONFIGURATION_ERROR"
+            ) from None
+        try:
+            return await factory.create_run_scope(
+                agent_id,
+                query,
+                run_id=run_id,
+                timeout_seconds=timeout_seconds,
+                budget=budget,
+                persist=persist,
+                fault_controller=fault_controller,
+                episodic_evaluation_observer=episodic_evaluation_observer,
+                evaluation_plan_resolver=evaluation_plan_resolver,
+                project_identity=project_identity,
+                project_grants=project_grants,
+            )
+        except asyncio.CancelledError:
+            raise
+        except RuntimeAdmissionRejectedError:
+            raise ChatRuntimeTransportError(
+                "RUNTIME_SHUTTING_DOWN"
+            ) from None
+        except Exception:
+            raise ChatRuntimeTransportError(
+                "RUNTIME_SCOPE_CREATION_FAILED"
+            ) from None
 
     async def _stream_factory_coordinated_events(
         self,
@@ -324,32 +425,125 @@ class ChatService:
         persist: bool,
         result_out: list[RunCoordinatorResult] | None,
         cancellation_intent: list[CancellationReason] | None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
     ) -> AsyncIterator[RuntimeEvent]:
-        """Run the sole production coordinated event path through the factory."""
-        factory = self._coordinated_runtime_factory
-        if factory is None:
-            raise ChatRuntimeTransportError(
-                "RUNTIME_CONFIGURATION_ERROR"
-            ) from None
+        """Run the sole production coordinated event path through the factory.
+
+        The production path never supplies a fault controller or any isolated
+        evaluation observer; those seams exist only on the explicit evaluation
+        entry ``stream_coordinated_agent_events_evaluation``.
+        """
+        scope = await self._create_coordinated_scope(
+            agent_id,
+            query,
+            run_id=run_id,
+            timeout_seconds=timeout_seconds,
+            budget=budget,
+            persist=persist,
+            project_identity=project_identity,
+            project_grants=project_grants,
+        )
+        consumer = self._consume_scope_events(
+            scope,
+            result_out=result_out,
+            cancellation_intent=cancellation_intent,
+        )
         try:
-            scope = await factory.create_run_scope(
-                agent_id,
-                query,
-                run_id=run_id,
-                timeout_seconds=timeout_seconds,
-                budget=budget,
-                persist=persist,
-            )
-        except asyncio.CancelledError:
-            raise
-        except RuntimeAdmissionRejectedError:
-            raise ChatRuntimeTransportError(
-                "RUNTIME_SHUTTING_DOWN"
-            ) from None
-        except Exception:
-            raise ChatRuntimeTransportError(
-                "RUNTIME_SCOPE_CREATION_FAILED"
-            ) from None
+            async for event in consumer:
+                yield event
+        finally:
+            await consumer.aclose()
+
+    async def _stream_factory_coordinated_events_evaluation(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        run_id: str | None,
+        timeout_seconds: float | None,
+        budget: RunBudget | None,
+        persist: bool,
+        fault_controller: FaultInjectionController | None,
+        episodic_evaluation_observer=None,
+        evaluation_plan_resolver=None,
+        result_out: list[RunCoordinatorResult] | None,
+        cancellation_intent: list[CancellationReason] | None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
+    ) -> AsyncIterator[RuntimeEvent]:
+        """Isolated evaluation-only factory path (strict typed control only)."""
+        scope = await self._create_coordinated_scope(
+            agent_id,
+            query,
+            run_id=run_id,
+            timeout_seconds=timeout_seconds,
+            budget=budget,
+            persist=persist,
+            fault_controller=fault_controller,
+            episodic_evaluation_observer=episodic_evaluation_observer,
+            evaluation_plan_resolver=evaluation_plan_resolver,
+            project_identity=project_identity,
+            project_grants=project_grants,
+        )
+        consumer = self._consume_scope_events(
+            scope,
+            result_out=result_out,
+            cancellation_intent=cancellation_intent,
+        )
+        try:
+            async for event in consumer:
+                yield event
+        finally:
+            await consumer.aclose()
+
+    async def stream_coordinated_agent_events_evaluation(
+        self,
+        agent_id: str,
+        query: str,
+        *,
+        run_id: str | None = None,
+        timeout_seconds: float | None = None,
+        budget: RunBudget | None = None,
+        persist: bool = True,
+        fault_controller: FaultInjectionController | None = None,
+        episodic_evaluation_observer=None,
+        evaluation_plan_resolver=None,
+        _result_out: list[RunCoordinatorResult] | None = None,
+        _cancellation_intent: list[CancellationReason] | None = None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
+    ) -> AsyncIterator[RuntimeEvent]:
+        """Isolated evaluation-only event stream mirroring the production path."""
+        events = self._stream_factory_coordinated_events_evaluation(
+            agent_id,
+            query,
+            run_id=run_id,
+            timeout_seconds=timeout_seconds,
+            budget=budget,
+            persist=persist,
+            fault_controller=fault_controller,
+            episodic_evaluation_observer=episodic_evaluation_observer,
+            evaluation_plan_resolver=evaluation_plan_resolver,
+            result_out=_result_out,
+            cancellation_intent=_cancellation_intent,
+            project_identity=project_identity,
+            project_grants=project_grants,
+        )
+        try:
+            async for event in events:
+                yield event
+        finally:
+            await events.aclose()
+
+    async def _consume_scope_events(
+        self,
+        scope,
+        *,
+        result_out: list[RunCoordinatorResult] | None,
+        cancellation_intent: list[CancellationReason] | None,
+    ) -> AsyncIterator[RuntimeEvent]:
+        """Shared producer-task + single-consumer channel lifecycle."""
 
         async def produce() -> None:
             try:

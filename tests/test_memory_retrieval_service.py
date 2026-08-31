@@ -28,6 +28,7 @@ from core.runtime.memory_retrieval import (
     MemoryRetrievalErrorCode,
     MemoryRetrievalService,
 )
+from core.runtime.memory_authorization import MemoryAccessPrincipal
 from core.runtime.model_context import ContextSourceType, ContextTrustLevel
 
 
@@ -83,7 +84,8 @@ def service(store: AdvancedMemoryStore, **kw) -> MemoryRetrievalService:
 
 def retrieve(store: AdvancedMemoryStore, query: str, **kw) -> MemoryContextBundle:
     return service(store, **kw).retrieve(
-        agent_id="core_router",
+        requester=MemoryAccessPrincipal("core_router"),
+        target_owner_agent_id="core_router",
         memory_scope=MEMORY_DIRECT_SCOPE,
         query=query,
     )

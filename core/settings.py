@@ -36,7 +36,7 @@ SCRIPT_ROLE = "SCRIPT"
 ALLOWED_ROLES = frozenset({SERVER_ROLE, CLIENT_ROLE, SCRIPT_ROLE})
 
 _MODEL_PROFILE_NAMES = frozenset({"fast", "balanced", "deep"})
-_VALID_BACKENDS = frozenset({"local", "remote", "hybrid"})
+_VALID_BACKENDS = frozenset({"local", "remote", "hybrid", "scripted"})
 
 # 安全低基数 identifier：不能是 URL、路径或自由文本。
 ENVIRONMENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -125,6 +125,24 @@ class EnvironmentProfile(str, Enum):
                 "LOCAL_AGENT_ENVIRONMENT_PROFILE",
                 "unknown_profile",
             ) from None
+
+
+class RuntimeProfile(str, Enum):
+    """冻结于 Composition Root 的运行用途；不能由请求覆盖。"""
+
+    PRODUCTION = "PRODUCTION"
+    EPISODIC_EVALUATION_LAYER1 = "EPISODIC_EVALUATION_LAYER1"
+
+    @classmethod
+    def parse(cls, value: object) -> "RuntimeProfile":
+        if value is None:
+            return cls.PRODUCTION
+        if not isinstance(value, str) or not value.strip():
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, "LOCAL_AGENT_RUNTIME_PROFILE", "invalid_profile")
+        try:
+            return cls(value.strip().upper())
+        except ValueError:
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, "LOCAL_AGENT_RUNTIME_PROFILE", "unknown_profile") from None
 
 
 def _env_strict_bool(name: str, default: bool) -> bool:
@@ -219,7 +237,7 @@ def _env_model_profile() -> str:
 
 
 def _env_backend() -> str:
-    """LLM backend 严格枚举：local/remote/hybrid。"""
+    """LLM backend 严格枚举。scripted 仅可由 evaluation runtime profile 使用。"""
     raw = os.getenv("LOCAL_AGENT_LLM_BACKEND")
     if raw is None:
         return "remote"
@@ -544,6 +562,12 @@ def validate_role_configuration(settings: "Settings", *, role: str) -> None:
 
 def _validate_server_role(settings: "Settings") -> None:
     backend = settings.llm_backend
+    if settings.runtime_profile is RuntimeProfile.EPISODIC_EVALUATION_LAYER1:
+        if backend != "scripted":
+            raise SettingsValidationError(STARTUP_CONFIGURATION_ERROR, "LOCAL_AGENT_LLM_BACKEND", "evaluation_profile_requires_scripted_backend")
+        return
+    if backend == "scripted":
+        raise SettingsValidationError(STARTUP_CONFIGURATION_ERROR, "LOCAL_AGENT_LLM_BACKEND", "scripted_backend_requires_evaluation_profile")
     if backend not in {"remote", "hybrid"}:
         return
     endpoint = settings.remote_api_base_url
@@ -574,6 +598,7 @@ class Settings:
 
     project_root: str
     environment_profile: EnvironmentProfile
+    runtime_profile: RuntimeProfile
     api_host: str
     api_port: int
     api_base_url: str
@@ -666,6 +691,7 @@ class Settings:
         environment_profile = EnvironmentProfile.parse(
             os.getenv("LOCAL_AGENT_ENVIRONMENT_PROFILE")
         )
+        runtime_profile = RuntimeProfile.parse(os.getenv("LOCAL_AGENT_RUNTIME_PROFILE"))
         api_host = os.getenv("LOCAL_AGENT_API_HOST", "127.0.0.1").strip()
         api_port = _env_strict_int(
             "LOCAL_AGENT_API_PORT", 8000, minimum=1, maximum=65535
@@ -726,6 +752,10 @@ class Settings:
         }
         preset = presets[profile_name]
         llm_backend = _env_backend()
+        if runtime_profile is RuntimeProfile.EPISODIC_EVALUATION_LAYER1:
+            if os.getenv("LOCAL_AGENT_LLM_BACKEND") not in {None, "", "scripted", "SCRIPTED"}:
+                raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, "LOCAL_AGENT_LLM_BACKEND", "evaluation_profile_forbids_provider_backend")
+            llm_backend = "scripted"
         remote_only_max_tokens = {
             "fast": 2048,
             "balanced": 4096,
@@ -859,6 +889,7 @@ class Settings:
         return cls(
             project_root=project_root,
             environment_profile=environment_profile,
+            runtime_profile=runtime_profile,
             api_host=api_host,
             api_port=api_port,
             api_base_url=api_base_url,

@@ -33,6 +33,7 @@ class RuntimeEventType(str, Enum):
     OUTPUT_DELTA = "OUTPUT_DELTA"
     STEP_COMPLETED = "STEP_COMPLETED"
     MEMORY_FORMATION_COMPLETED = "MEMORY_FORMATION_COMPLETED"
+    EPISODIC_MEMORY_FORMATION_COMPLETED = "EPISODIC_MEMORY_FORMATION_COMPLETED"
     MEMORY_LIFECYCLE_RESOLVED = "MEMORY_LIFECYCLE_RESOLVED"
     MEMORY_RETRIEVAL_COMPLETED = "MEMORY_RETRIEVAL_COMPLETED"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
@@ -481,6 +482,40 @@ class MemoryFormationCompletedPayload:
 
 
 @dataclass(frozen=True, slots=True)
+class EpisodicMemoryFormationCompletedPayload:
+    """WP6-C safe projection；永远不携带 episode 正文或 raw evidence。"""
+
+    origin_run_id: str
+    outcome: str
+    memory_id: str | None
+    lesson_status: str
+    safe_reason: str | None = None
+    episode_kind: str = "RUN"
+    origin_step_id: str | None = None
+    verified_performer_agent_id: str | None = None
+    owner_match: bool = True
+
+    def __post_init__(self) -> None:
+        _require_text(self.origin_run_id, "origin_run_id")
+        if self.outcome not in {"CREATED", "REUSED", "SKIPPED", "FAILED"}:
+            raise ValueError("未知 episodic formation outcome")
+        if self.memory_id is not None:
+            _require_text(self.memory_id, "memory_id")
+        if self.lesson_status not in {"ABSENT", "ACCEPTED", "REJECTED", "ERROR"}:
+            raise ValueError("未知 lesson_status")
+        if self.safe_reason is not None:
+            _require_text(self.safe_reason, "safe_reason")
+        if self.episode_kind not in {"RUN", "STEP"}:
+            raise ValueError("未知 episode_kind")
+        if self.origin_step_id is not None:
+            _require_text(self.origin_step_id, "origin_step_id")
+        if self.verified_performer_agent_id is not None:
+            _require_text(self.verified_performer_agent_id, "verified_performer_agent_id")
+        if not isinstance(self.owner_match, bool):
+            raise TypeError("owner_match 必须是 bool")
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryRetrievalCompletedPayload:
     """WP4-B Long-term Memory retrieval 的安全 outcome 投影。
 
@@ -510,6 +545,9 @@ class MemoryRetrievalCompletedPayload:
     planning_injected: bool
     direct_entry_supplied: bool
     safe_error_code: str | None = None
+    episodic_candidate_count: int = 0
+    episodic_selected_count: int = 0
+    episodic_context_record_count: int = 0
 
     def __post_init__(self) -> None:
         _require_text(self.retrieval_method, "retrieval_method")
@@ -529,6 +567,9 @@ class MemoryRetrievalCompletedPayload:
             "registered_selected_count",
             "open_selected_count",
             "duration_ms",
+            "episodic_candidate_count",
+            "episodic_selected_count",
+            "episodic_context_record_count",
         ):
             _require_index(getattr(self, name), name)
         for name in ("planning_injected", "direct_entry_supplied"):
@@ -710,6 +751,7 @@ RuntimeEventPayload: TypeAlias = (
     | OutputDeltaPayload
     | StepCompletedPayload
     | MemoryFormationCompletedPayload
+    | EpisodicMemoryFormationCompletedPayload
     | MemoryLifecycleResolvedPayload
     | MemoryRetrievalCompletedPayload
     | BudgetExhaustedPayload
@@ -735,6 +777,7 @@ _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
     RuntimeEventType.OUTPUT_DELTA: OutputDeltaPayload,
     RuntimeEventType.STEP_COMPLETED: StepCompletedPayload,
     RuntimeEventType.MEMORY_FORMATION_COMPLETED: MemoryFormationCompletedPayload,
+    RuntimeEventType.EPISODIC_MEMORY_FORMATION_COMPLETED: EpisodicMemoryFormationCompletedPayload,
     RuntimeEventType.MEMORY_LIFECYCLE_RESOLVED: MemoryLifecycleResolvedPayload,
     RuntimeEventType.MEMORY_RETRIEVAL_COMPLETED: MemoryRetrievalCompletedPayload,
     RuntimeEventType.BUDGET_EXHAUSTED: BudgetExhaustedPayload,
@@ -865,6 +908,10 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "persistence_duration_ms",
         "candidate_outcomes",
     ),
+    EpisodicMemoryFormationCompletedPayload: (
+        "origin_run_id", "outcome", "memory_id", "lesson_status", "safe_reason",
+        "episode_kind", "origin_step_id", "verified_performer_agent_id", "owner_match",
+    ),
     MemoryLifecycleResolvedPayload: (
         "exchange_id",
         "agent_id",
@@ -903,6 +950,9 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "planning_injected",
         "direct_entry_supplied",
         "safe_error_code",
+        "episodic_candidate_count",
+        "episodic_selected_count",
+        "episodic_context_record_count",
     ),
     BudgetExhaustedPayload: ("component", "dimension", "safe_error_code"),
     TimeoutPayload: ("component", "safe_error_code"),

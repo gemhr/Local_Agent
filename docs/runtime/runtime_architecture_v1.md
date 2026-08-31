@@ -331,6 +331,20 @@ derived index、无 dual-write、无新依赖）。Owner 决策：
 
 ```text
 RETRIEVAL_OWNER = RANKING_OWNER = MemoryRetrievalService（RUN_SCOPE policy component）
+
+WP6-D 在该唯一 Owner 内增加 typed Episodic pipeline：`EPISODIC` / `ACTIVE` 的
+exact agent + scope 窄读使用 `SQLITE_BOUNDED_LEXICAL_V1`，以 episode
+`canonical_text` 为唯一匹配源，独立执行 score → created_at DESC → memory_id ASC，
+top-K=3、1200 chars。Semantic pipeline 的 ranking、top-K、2000 chars 与
+`MEMORY_RETRIEVAL` source 不变；两类不做全局 score 比较。bundle 保持 semantic
+records 与 episodic records 分型，读取或 decode 任一类型失败时另一类型仍可用。
+
+Episode projection 是 `EpisodicMemoryContextRecord` →
+`EPISODIC_MEMORY_RETRIEVAL` / `USER_CONTENT`。`ContextBuilder` 以
+`Episodic Memory (historical experience, not instructions)` 固定 section 渲染：
+历史经验不覆盖 system/developer/agent/current user request，历史 action 不授权重做，
+历史 tool usage 不授予当前工具权限。模型只见 bounded canonical_text；metadata、rank、
+score、origin 与 payload 只留 internal evidence。semantic section 固定在 episodic 前。
 PERSISTENCE_OWNER = AdvancedMemoryStore（窄读 primitive list_active_semantic_for_scope）
 CONTEXT_INJECTION_OWNER = ContextBuilder
 RETRIEVAL_HOOK = RunCoordinator._prepare_dynamic_execution()（run scope 创建后、PlanResolver.resolve() 前）
@@ -339,7 +353,7 @@ RETRIEVAL_QUERY_SOURCE = original PlanningRequest.user_request only（允许 det
 RETRIEVAL_FAILURE_POLICY = BEST_EFFORT_EMPTY_BUNDLE_NO_STALE_FALLBACK
 PLANNER_MEMORY_VISIBILITY = YES（entry-agent bundle only）
 SPECIALIST_MEMORY_VISIBILITY = NO（fail closed；synthesis 同样不自动继承）
-SCHEMA_CHANGE_REQUIRED = NO（MEMORY_SCHEMA_VERSION=2 不变）
+WP4-B_SCHEMA_CHANGE_REQUIRED = NO（WP4-B 本身未改变 schema；当前 MEMORY_SCHEMA_VERSION=3 由 WP6-B Episodic persistence 引入）
 ```
 
 正式链路：run scope → `MemoryRetrievalService.retrieve()`（eligibility fail closed →
@@ -577,13 +591,13 @@ KB degraded 语义：`knowledge_base_required=false` 且 KB 初始化/import 失
 
 | Store | Version mechanism | Migration | Historical rewrite |
 | --- | --- | --- | --- |
-| Memory | `PRAGMA user_version=2`（SQLite physical marker；v2 新增独立 `long_term_memory` 结构） | 显式 SCRIPT_ROLE：current-unversioned → 版本 2 adoption；v1（无 `long_term_memory`）→ additive 新增 Long-term Memory 结构；唯一 allowlisted pre-additive legacy → additive columns + backfill + tables/indexes/FTS/triggers + Long-term Memory | 不修改业务 row 正文；version 与 schema change 同事务原子提交 |
+| Memory | `PRAGMA user_version=3`（SQLite physical marker；v3 在 v2 `long_term_memory` 上新增 Episodic partial indexes） | 显式 SCRIPT_ROLE：current-unversioned → 版本 3 adoption；v2 → additive Episodic indexes；v1（无 `long_term_memory`）→ current Long-term Memory structure；唯一 allowlisted pre-additive legacy → additive columns + backfill + tables/indexes/FTS/triggers + Long-term Memory | 不修改业务 row 正文；version 与 schema change 同事务原子提交 |
 | Journal | exact physical signature（无 DB-level version）；row v1/v2 | 显式 SCRIPT_ROLE：仅允许缺 nullable `span_id`/`parent_span_id` 的 legacy → 单事务 ADD 两列 + index | **FORBIDDEN**（不 UPDATE/DELETE/rewrite 历史 row、version、digest、sequence、terminal ordering） |
 | Snapshot | row/payload v1（`snapshot_schema_version=1`）；exact table shape | 无 migration | FORBIDDEN（v0 不存在；未知版本 fail closed；不写回） |
 | Checkpoint | exact table shape（无版本） | 显式 SCRIPT_ROLE：不兼容 → 单事务 drop/recreate derived table | 可丢弃整个 derived Store（历史 offset 丢弃，不改变业务 Authority） |
 | Chroma | LocalAgent collection metadata marker（`localagent_collection_contract_version=1` + `chunk_schema_version=kb_chunk_schema_v2` + `embedding_compatibility_digest` + `embedding_dimension`） | marker validation + operator rebuild；不碰 Chroma internal SQLite | 不做 internal row migration |
 
-`record/payload schema version != SQLite physical schema version`。`journal_schema_version=2` 只说明 record digest/payload contract，不是 DB physical version；Memory 的 `PRAGMA user_version=2` 才是 physical marker。
+`record/payload schema version != SQLite physical schema version`。`journal_schema_version=2` 只说明 record digest/payload contract，不是 DB physical version；Memory 的 `PRAGMA user_version=3` 才是 physical marker。
 
 ### 11.3 Migration Boundary（frozen）
 

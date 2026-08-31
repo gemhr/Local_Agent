@@ -99,10 +99,10 @@ def _memory_legacy(path: Path) -> Path:
 
 
 def _memory_future(path: Path) -> Path:
-    """未来/未知版本（v3）：CURRENT 之外 must fail closed。"""
+    """未来/未知版本（v4）：CURRENT 之外 must fail closed。"""
     _memory_v2(path)
     with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA user_version = 3")
+        conn.execute("PRAGMA user_version = 6")
     return path
 
 
@@ -209,12 +209,12 @@ def test_memory_absent_is_new_and_does_not_create_file(tmp_path: Path) -> None:
     assert not target.exists()
 
 
-def test_memory_v2_is_current_and_unchanged(tmp_path: Path) -> None:
+def test_memory_current_is_current_and_unchanged(tmp_path: Path) -> None:
     path = _memory_v2(tmp_path / "m.db")
     before = path.read_bytes()
     result = memory_preflight(str(path), mode=PreflightMode.FULL)
     assert result.status is PreflightStatus.CURRENT
-    assert result.detected_version == "2"
+    assert result.detected_version == "5"
     after = path.read_bytes()
     assert after == before
 
@@ -226,7 +226,7 @@ def test_memory_v1_is_migration_required(tmp_path: Path) -> None:
     assert result.status is PreflightStatus.MIGRATION_REQUIRED
     assert result.action.value == "MIGRATE"
     assert result.detected_version == "1"
-    assert result.target_version == "2"
+    assert result.target_version == "5"
     assert path.read_bytes() == before
 
 
@@ -613,7 +613,8 @@ def test_memory_current_semantic_formatting_variation_is_current(tmp_path: Path)
     的 current schema 不得被误判 unsupported。"""
     path = _memory_current_formatted_variant(tmp_path / "m.db")
     result = memory_preflight(str(path), mode=PreflightMode.FULL)
-    assert result.status is PreflightStatus.CURRENT
+    assert result.status is PreflightStatus.MIGRATION_REQUIRED
+    assert result.detected_version == "2"
 
 
 def _journal_malformed(path: Path) -> Path:

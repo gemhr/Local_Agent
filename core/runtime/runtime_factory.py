@@ -16,6 +16,7 @@ from core.runtime.application_services import (
 from core.runtime.cancellation import CancellationReason
 from core.runtime.budget import BudgetLedger, RunBudget
 from core.runtime.context import LEGACY_DEFAULT_SESSION_ID, create_run_context
+from core.runtime.project_memory import ProjectIdentity, ProjectMemoryGrant
 from core.runtime.event_channel import RuntimeEventChannel
 from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
 from core.runtime.fault_injection import FaultInjectionController
@@ -398,6 +399,10 @@ class CoordinatedRuntimeFactory:
         budget: RunBudget | None = None,
         persist: bool = True,
         fault_controller: FaultInjectionController | None = None,
+        episodic_evaluation_observer=None,
+        evaluation_plan_resolver=None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
     ) -> CoordinatedRunScope:
         """默认 Coordinated 入口：始终经过动态 PlanResolver。"""
         return await self._create_run_scope(
@@ -410,6 +415,10 @@ class CoordinatedRuntimeFactory:
             budget=budget,
             persist=persist,
             fault_controller=fault_controller,
+            episodic_evaluation_observer=episodic_evaluation_observer,
+            evaluation_plan_resolver=evaluation_plan_resolver,
+            project_identity=project_identity,
+            project_grants=project_grants,
             static_plan=None,
         )
 
@@ -426,6 +435,9 @@ class CoordinatedRuntimeFactory:
         budget: RunBudget | None = None,
         persist: bool = True,
         fault_controller: FaultInjectionController | None = None,
+        episodic_evaluation_observer=None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
     ) -> CoordinatedRunScope:
         """仅供可信内部 Plan、测试和兼容路径使用。"""
         plan = trusted_plan or self._router.build_single_agent_plan(agent_id, query)
@@ -450,6 +462,9 @@ class CoordinatedRuntimeFactory:
             budget=budget,
             persist=persist,
             fault_controller=fault_controller,
+            episodic_evaluation_observer=episodic_evaluation_observer,
+            project_identity=project_identity,
+            project_grants=project_grants,
             static_plan=plan,
         )
 
@@ -465,7 +480,11 @@ class CoordinatedRuntimeFactory:
         budget: RunBudget | None,
         persist: bool,
         fault_controller: FaultInjectionController | None,
+        episodic_evaluation_observer=None,
         static_plan: Plan | None,
+        evaluation_plan_resolver=None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
     ) -> CoordinatedRunScope:
         """Create one identity set and clean up any partially built transport."""
         if self._services.lifecycle_state is not RuntimeLifecycleState.READY:
@@ -475,6 +494,15 @@ class CoordinatedRuntimeFactory:
             FaultInjectionController,
         ):
             raise TypeError("fault_controller must be FaultInjectionController or None")
+        if episodic_evaluation_observer is not None and not (
+            callable(getattr(episodic_evaluation_observer, "on_evidence", None))
+            and callable(
+                getattr(episodic_evaluation_observer, "on_formation", None)
+            )
+        ):
+            raise TypeError(
+                "episodic_evaluation_observer must implement on_evidence/on_formation"
+            )
         channel: RuntimeEventChannel | None = None
         registered_channel = False
         gauge_provider = getattr(
@@ -490,6 +518,7 @@ class CoordinatedRuntimeFactory:
                 run_id=run_id,
                 timeout_seconds=timeout_seconds,
             )
+            run_context.attach_project_memory_access(project_identity, project_grants)
             ledger = BudgetLedger(
                 budget or RunBudget(),
                 deadline_remaining=run_context.remaining_seconds,
@@ -583,7 +612,7 @@ class CoordinatedRuntimeFactory:
                     event_emitter=emitter,
                     fault_controller=fault_controller,
                 )
-                resolver = PlanResolver(
+                resolver = evaluation_plan_resolver or PlanResolver(
                     DEFAULT_AGENT_REGISTRY,
                     PlanCompiler(DEFAULT_AGENT_REGISTRY),
                     planning_model,
@@ -609,6 +638,7 @@ class CoordinatedRuntimeFactory:
                     step_result_run_total_chars=self._step_result_run_total_chars,
                     step_result_max_entries=self._step_result_max_entries,
                     fault_controller=fault_controller,
+                    episodic_evaluation_observer=episodic_evaluation_observer,
                 )
                 multi_agent_driver = MultiAgentDriver(
                     router=self._router,
