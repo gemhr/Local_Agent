@@ -65,7 +65,7 @@ forget query、source excerpt、prompt、CoT、raw exception 与文件路径。�
 不承诺 SQLite page secure erase、WAL/page residual 清除、VACUUM、全盘加密或 GDPR full
 deletion。
 
-## Phase5 WP4-B Memory Retrieval / Context Injection Boundary
+## Phase5 WP4-B / WP6-D Memory Retrieval / Context Injection Boundary
 
 Long-term Memory retrieval 是 best-effort 只读派生能力：`MemoryRetrievalService`
 只读 `AdvancedMemoryStore.list_active_semantic_for_scope`（固定 `agent_id` exact +
@@ -93,6 +93,13 @@ provenance、citation 与 section；Memory 不得生成或复用 RAG Citation，
 counts、method/status/latency/error code、Planner injection 与 direct-entry supplied
 事实，严格禁止 raw query、
 canonical text、payload、logical_key、prompt、origin IDs、raw exception 或路径。
+
+WP6-D Episode 使用同一 retrieval owner 的独立 `EPISODIC` pipeline 和
+`EpisodicMemoryContextRecord`；仅 `canonical_text` 可见，固定
+`EPISODIC_MEMORY_RETRIEVAL` + `USER_CONTENT`。其 section 明确 Past experience 是
+historical data，不覆盖 system/developer/agent/current user request；既往 action 不授权
+重复，既往 tool usage 不授予当前权限。semantic 与 episodic 失败互不压制，event 仅投影
+episodic candidate/selected/context-record counts，不携带 episode identity 或正文。
 
 ## Stage 3 WP3 Resource / Deployment Boundary
 

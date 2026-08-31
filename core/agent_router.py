@@ -48,6 +48,7 @@ from core.runtime import (
     ToolResourceExtractorCatalog, ToolResourceExtractorDescriptor,
 )
 from core.runtime.memory_retrieval import MemoryInjectionReport
+from core.runtime.episodic_evaluation import observe_episodic_injection
 
 if TYPE_CHECKING:
     from core.knowledge_base.vector_db_manager import VectorDBManager
@@ -884,7 +885,7 @@ class AgentRouter:
 
         memory_supplied = 0
         memory_records = (
-            tuple(memory_context_bundle.records)
+            tuple(memory_context_bundle.all_records)
             if memory_context_bundle is not None
             else ()
         )
@@ -1052,7 +1053,7 @@ class AgentRouter:
             accepted = sum(
                 1
                 for item in context_result.included_items
-                if item.source_type is ContextSourceType.MEMORY_RETRIEVAL
+                if item.source_type in {ContextSourceType.MEMORY_RETRIEVAL, ContextSourceType.EPISODIC_MEMORY_RETRIEVAL}
             )
             memory_injection_report_out.append(
                 MemoryInjectionReport(
@@ -1061,6 +1062,13 @@ class AgentRouter:
                     accepted_count=accepted,
                     dropped_count=memory_supplied - accepted,
                 )
+            )
+        if memory_context_bundle is not None:
+            # WP6-E isolated evaluation seam: observe only accepted episodic
+            # items from the real DIRECT_ENTRY ContextBuilder result. No-op
+            # unless an evaluation collector is explicitly installed.
+            observe_episodic_injection(
+                target="DIRECT_ENTRY", context_result=context_result
             )
         return self.context_builder.bind_messages(
             context_result.included_items,
@@ -1863,7 +1871,7 @@ class AgentRouter:
             "synthesis_required=false；其他专业任务必须设置 synthesis_required=true。"
         )
         memory_records = (
-            tuple(memory_context_bundle.records)
+            tuple(memory_context_bundle.all_records)
             if memory_context_bundle is not None
             else ()
         )
@@ -1899,6 +1907,12 @@ class AgentRouter:
                     reserved_output_tokens=self.max_tokens,
                 )
             )
+            # WP6-E isolated evaluation seam: observe only accepted episodic
+            # items from the real Planner ContextBuilder result. No-op unless an
+            # evaluation collector is explicitly installed by the isolated path.
+            observe_episodic_injection(
+                target="PLANNING", context_result=context_result
+            )
             messages = self.context_builder.bind_messages(
                 context_result.included_items,
                 separate_data_messages=True,
@@ -1907,7 +1921,7 @@ class AgentRouter:
                 accepted = sum(
                     1
                     for item in context_result.included_items
-                    if item.source_type is ContextSourceType.MEMORY_RETRIEVAL
+                    if item.source_type in {ContextSourceType.MEMORY_RETRIEVAL, ContextSourceType.EPISODIC_MEMORY_RETRIEVAL}
                 )
                 supplied = len(memory_records)
                 memory_injection_report_out.append(

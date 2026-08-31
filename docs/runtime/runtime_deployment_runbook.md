@@ -142,7 +142,7 @@ $env:LOCAL_AGENT_WIKI_COOKIE="<secret-store-reference>"
 
 | 数据 | 默认路径 | 分类 | Schema/version | 说明 |
 | --- | --- | --- | --- | --- |
-| Memory DB | `data/database/agent_memory.db` | Durable State（required） | Memory SQLite `PRAGMA user_version=2`（v2 含 `long_term_memory`） | 业务 Memory（Conversation History + Advanced Long-term Memory 独立结构）；startup preflight 通过后才构造；初始化失败 fail fast |
+| Memory DB | `data/database/agent_memory.db` | Durable State（required） | Memory SQLite `PRAGMA user_version=3`（v3 含 `long_term_memory` 与 Episodic partial indexes） | 业务 Memory（Conversation History + Advanced Long-term Memory 独立结构）；startup preflight 通过后才构造；初始化失败 fail fast |
 | Runtime Event Journal | `data/database/runtime_event_journal.db` | Durable State（required） | Journal exact physical signature（无 DB-level version）；row v1/v2 | append-only；损坏/追加失败 fail closed；legacy 缺 span 列需显式 migrate |
 | Observability checkpoint | `data/database/runtime_observability_checkpoint.db` | Rebuildable derived state（startup required） | Checkpoint exact table shape（无版本） | 不兼容时显式 recreate；backup optional |
 | Snapshot DB | `data/database/runtime_snapshots.db` | Durable State（opt-in） | Snapshot v1（`snapshot_schema_version=1`） | 仅 `LOCAL_AGENT_SNAPSHOT_ENABLED=true` 时装配；无 migration |

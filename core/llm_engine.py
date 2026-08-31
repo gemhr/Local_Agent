@@ -35,6 +35,70 @@ class RemoteLLMError(RuntimeError):
         super().__init__(safe_message)
 
 
+class ScriptedEvaluationLLMEngine:
+    """Layer1 专用、无网络的 target-owned deterministic model backend."""
+
+    SCRIPT_ID = "EPISODIC_LAYER1_SCRIPT_V1"
+
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        enable_thinking: bool | None = None,
+    ) -> Generator[str, None, None]:
+        system = "\n".join(
+            message.get("content", "") for message in messages if message.get("role") == "system"
+        )
+        request = "\n".join(
+            message.get("content", "") for message in messages if message.get("role") == "user"
+        )
+        if "长期记忆候选提取器" in system:
+            yield '{"schema_version":1,"candidates":[]}'
+        elif "遗忘目标提取器" in system:
+            yield '{"schema_version":1,"logical_key":null,"source_excerpt":"","safe_reason":"EXPLICIT_FORGET"}'
+        elif "无需工具时仅输出" in system:
+            yield "NO_TOOL"
+        elif "LocalAgent Planner" in system:
+            request_lower = request.lower()
+            if "安全审计" in request and "哪些" not in request:
+                steps = ("audit_list", "rotation_review")
+            elif "环境" in request and "状态" in request:
+                steps = ("env_status",)
+            else:
+                rules = (
+                (("发布清单", "release checklist"), ("release_list", "rollback_plan")),
+                (("数据库迁移", "database migration"), ("migrate_plan",)),
+                (("数据库配置", "备份", "database configuration", "backup"), ("config_check", "backup_review")),
+                (("安全审计", "security audit"), ("audit_summary",)),
+                (("api_key", "私钥", "权限", "access"), ("access_review",)),
+                (("恢复摘要", "恢复方案", "恢复流程", "recovery summary"), ("recovery_summary",)),
+                (("fixture_env_probe", "环境检查", "environment probe"), ("env_probe",)),
+                (("环境状态", "环境的状态", "environment status"), ("env_status",)),
+                (("部署方式", "deploy method"), ("deploy_probe",)),
+                (("复制", "故障恢复", "replication"), ("replication_check",)),
+                (("部署", "发布", "deploy"), ("deploy_answer",)),
+                )
+                steps = next(
+                    (names for terms, names in rules if any(term.lower() in request_lower for term in terms)),
+                    ("answer",),
+                )
+            tasks = ",".join(
+                '{"task_id":"' + step + '","agent_id":"code_expert","instruction":"deterministic evaluation task"}'
+                for step in steps
+            )
+            yield (
+                '{"schema_version":1,"decision":"DELEGATE","tasks":['
+                + tasks
+                + '],"synthesis_required":true}'
+            )
+        else:
+            yield "Layer1 deterministic completion."
+
+    def get_token_count(self, text: str) -> int:
+        return len(text.encode("utf-8"))
+
+
 class LocalLLMEngine:
     """封装 llama-cpp 的模型加载与流式生成能力。"""
 

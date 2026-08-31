@@ -51,12 +51,30 @@ from core.runtime.agent_loop import (
 from core.runtime.model_context import (
     ContextBuilder, ContextBuildRequest, ContextBuildResult, ContextBudgetExceededError, ContextDropRecord,
     ContextItem, ContextSourceType, ContextStats, ContextTrustLevel, DeterministicTokenEstimator,
-    MemoryContextRecord, MemoryProvenance, ModelContextRequirements, TokenEstimator,
+    EpisodicMemoryContextRecord, MemoryContextRecord, MemoryProvenance, ModelContextRequirements, TokenEstimator,
 )
 from core.runtime.memory_retrieval import (
     MEMORY_DIRECT_SCOPE, MEMORY_RETRIEVAL_SCHEMA_VERSION, MemoryContextBundle,
-    MemoryInjectionReport, MemoryRetrievalError, MemoryRetrievalErrorCode,
+    EpisodicMemorySelection, MemoryInjectionReport, MemoryRetrievalError, MemoryRetrievalErrorCode,
     MemoryRetrievalService, RANKING_METHOD, RETRIEVAL_METHOD,
+)
+from core.runtime.memory_authorization import (
+    MemoryAccessAuthorizer,
+    MemoryAccessPrincipal,
+    MemoryAuthorizationDecision,
+    MemoryAuthorizationError,
+    MemoryAuthorizationErrorCode,
+    MemoryAuthorizationObservation,
+    MemoryAuthorizationOperation,
+    MemoryAuthorizationReason,
+    MemoryAuthorizationResult,
+    MemoryVisibility,
+    PrivateMemoryAuthorizationPolicy,
+)
+from core.runtime.project_memory import (
+    ProjectIdentity, ProjectMemoryAuthorizationResult, ProjectMemoryGrant,
+    ProjectMemoryPermission, ProjectMemoryReason, ProjectMemoryMutation,
+    ProjectSemanticMemoryService, ProjectSemanticMemoryStore, ProjectSemanticRecord,
 )
 from core.runtime.planning import ExecutionKind, OutputPolicy, Plan, PlanSource, PlanStep, PlanValidator, RiskLevel, TaskCapabilityRequirements, create_single_step_plan
 from core.runtime.plan_graph import PlanGraph, PlanGraphValidationError, PlanGraphValidator
@@ -192,11 +210,20 @@ __all__ = [
     "OperationTimeoutError", "OperationType", "effective_timeout_seconds",
     "ContextBuilder", "ContextBuildRequest", "ContextBuildResult", "ContextBudgetExceededError",
     "ContextDropRecord", "ContextItem", "ContextSourceType", "ContextStats", "ContextTrustLevel",
-    "DeterministicTokenEstimator", "MemoryContextRecord", "MemoryProvenance",
+    "DeterministicTokenEstimator", "EpisodicMemoryContextRecord", "MemoryContextRecord", "MemoryProvenance",
     "ModelContextRequirements", "TokenEstimator",
     "MEMORY_DIRECT_SCOPE", "MEMORY_RETRIEVAL_SCHEMA_VERSION", "MemoryContextBundle",
-    "MemoryInjectionReport", "MemoryRetrievalError", "MemoryRetrievalErrorCode",
+    "EpisodicMemorySelection", "MemoryInjectionReport", "MemoryRetrievalError", "MemoryRetrievalErrorCode",
     "MemoryRetrievalService", "RANKING_METHOD", "RETRIEVAL_METHOD",
+    "MemoryAccessAuthorizer", "MemoryAccessPrincipal",
+    "MemoryAuthorizationDecision", "MemoryAuthorizationError",
+    "MemoryAuthorizationErrorCode",
+    "MemoryAuthorizationObservation", "MemoryAuthorizationOperation",
+    "MemoryAuthorizationReason", "MemoryAuthorizationResult",
+    "MemoryVisibility", "PrivateMemoryAuthorizationPolicy",
+    "ProjectIdentity", "ProjectMemoryAuthorizationResult", "ProjectMemoryGrant",
+    "ProjectMemoryPermission", "ProjectMemoryReason", "ProjectMemoryMutation",
+    "ProjectSemanticMemoryService", "ProjectSemanticMemoryStore", "ProjectSemanticRecord",
     "ExecutionKind", "OutputPolicy", "Plan", "PlanSource", "PlanStep", "PlanValidator", "RiskLevel", "TaskCapabilityRequirements", "create_single_step_plan",
     "PlanGraph", "PlanGraphValidationError", "PlanGraphValidator",
     "AgentRegistration", "AgentRegistry", "AgentRegistryError", "AgentRegistryErrorCode", "DEFAULT_AGENT_REGISTRY", "ResultContentType",

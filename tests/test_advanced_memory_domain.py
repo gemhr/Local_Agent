@@ -61,8 +61,8 @@ def test_valid_semantic_record_constructs() -> None:
     assert mem.origin.origin_run_id == "run-1"
 
 
-def test_enum_vocabulary_is_frozen_to_semantic_and_triple_status() -> None:
-    assert [member.value for member in MemoryType] == ["SEMANTIC"]
+def test_enum_vocabulary_contains_semantic_and_episodic_with_triple_status() -> None:
+    assert [member.value for member in MemoryType] == ["SEMANTIC", "EPISODIC"]
     assert [member.value for member in MemoryStatus] == [
         "ACTIVE",
         "SUPERSEDED",

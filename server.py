@@ -7,7 +7,8 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Annotated, Optional
+from datetime import UTC, datetime
+from typing import Annotated, Literal, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Path, Query, Request
@@ -17,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from core.agent_router import AgentRouter
 from core.application_metadata import create_application_metadata
 from core.chat_service import ChatRuntimeTransportError, ChatService
-from core.llm_engine import LocalLLMEngine, RemoteLLMEngine
+from core.llm_engine import LocalLLMEngine, RemoteLLMEngine, ScriptedEvaluationLLMEngine
 from core.memory_manager import MemoryManager
 from core.request_payload import (
     REQUEST_PAYLOAD_POLICY,
@@ -95,6 +96,35 @@ from core.runtime.retrieval_evaluation import (
     RetrievalEvaluationCollector,
     install_retrieval_evaluation_collector,
     reset_retrieval_evaluation_collector,
+)
+from core.runtime.episodic_evaluation import (
+    EpisodicCaptureCollector,
+    EpisodicEvaluationCapability,
+    EpisodicEvaluationControl,
+    EpisodicEvaluationError,
+    EpisodicEvidenceRetainer,
+    EpisodicFixtureInstaller,
+    EpisodicFixtureObservation,
+    EpisodicFixtureResult,
+    EpisodicFixtureSpec,
+    EpisodicReplayRunner,
+    deterministic_failed_run_controller,
+    deterministic_episodic_success_resolver,
+    install_episodic_capture_collector,
+    reset_episodic_capture_collector,
+)
+from core.advanced_memory import (
+    AdvancedMemoryStore, MemoryOrigin, MemoryStatus, MemoryType,
+    SemanticMemoryRecord,
+)
+from core.runtime.memory_authorization import (
+    MemoryAccessAuthorizer, MemoryAccessPrincipal,
+)
+from core.runtime.memory_retrieval import MemoryRetrievalService
+from core.runtime.model_context import ContextBuildRequest, ContextBuilder
+from core.runtime.project_memory import (
+    ProjectIdentity, ProjectMemoryGrant, ProjectMemoryPermission,
+    ProjectSemanticMemoryService, ProjectSemanticMemoryStore,
 )
 from core.runtime.structured_logging import (
     JsonStructuredRuntimeLogger,
@@ -531,6 +561,29 @@ async def lifespan(app: FastAPI):
 
     engines = {}
     profiles = []
+    if settings.llm_backend == "scripted":
+        scripted_engine = await initialization_stack.create(
+            "episodic_layer1_scripted_model_engine",
+            ScriptedEvaluationLLMEngine,
+        )
+        engines[ModelProfileId.LOCAL_FAST] = scripted_engine
+        profiles.append(
+            ModelProfile(
+                ModelProfileId.LOCAL_FAST,
+                settings.model_context,
+                settings.model_max_tokens,
+                False, True, True, False, 1, 1,
+                ModelCostProfile(
+                    ModelProfileId.LOCAL_FAST, False,
+                    settings.local_fixed_call_cost_units,
+                    settings.local_input_cost_units_per_1k_tokens,
+                    settings.local_output_cost_units_per_1k_tokens,
+                    settings.local_estimated_latency_ms,
+                ),
+                False,
+                "episodic_layer1_scripted",
+            )
+        )
     if settings.llm_backend in {"local", "hybrid"}:
         local_engine = await initialization_stack.create(
             "local_model_engine",
@@ -605,7 +658,7 @@ async def lifespan(app: FastAPI):
         )
     if not engines:
         await initialization_stack.fail(
-            RuntimeError("LOCAL_AGENT_LLM_BACKEND 必须是 local、remote 或 hybrid")
+            RuntimeError("LOCAL_AGENT_LLM_BACKEND 必须是 local、remote、hybrid 或 scripted")
         )
     engine = engines.get(ModelProfileId.LOCAL_FAST) or engines[ModelProfileId.REMOTE_ADVANCED]
     breaker_registry = ModelCircuitBreakerRegistry(
@@ -946,6 +999,234 @@ class RuntimeEvaluationExecuteV2Response(BaseModel):
     final_answer_capture_status: StrictStr
     final_answer_capture_error_code: StrictStr | None
     final_answer_evidence: dict[str, str] | None
+
+
+# ---------------------------------------------------------------------------
+# WP6-E isolated Episodic evaluation execution path (v3)
+# ---------------------------------------------------------------------------
+
+
+class EpisodicFixtureObservationRequest(BaseModel):
+    """Strict typed fixture observation; no arbitrary payload fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observation_type: StrictStr
+    name: StrictStr
+    status: StrictStr
+    safe_error_code: StrictStr | None = None
+    outcome_classification: StrictStr | None = None
+    result_digest: StrictStr | None = None
+
+    def to_domain(self) -> EpisodicFixtureObservation:
+        return EpisodicFixtureObservation(
+            observation_type=self.observation_type,
+            name=self.name,
+            status=self.status,
+            safe_error_code=self.safe_error_code,
+            outcome_classification=self.outcome_classification,
+            result_digest=self.result_digest,
+        )
+
+
+class EpisodicFixtureResultRequest(BaseModel):
+    """Strict typed fixture result; caller can never pass canonical_text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    terminal_status: StrictStr
+    stop_reason: StrictStr
+    delivery_status: StrictStr
+
+    def to_domain(self) -> EpisodicFixtureResult:
+        return EpisodicFixtureResult(
+            terminal_status=self.terminal_status,
+            stop_reason=self.stop_reason,
+            delivery_status=self.delivery_status,
+        )
+
+
+class EpisodicFixtureSpecRequest(BaseModel):
+    """Typed fixture DTO; canonical_text is always renderer-owned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fixture_ref: StrictStr
+    agent_id: StrictStr
+    memory_scope: StrictStr
+    origin_run_id: StrictStr
+    situation: StrictStr
+    goal: StrictStr
+    observations: list[EpisodicFixtureObservationRequest]
+    result: EpisodicFixtureResultRequest
+    lesson: StrictStr | None = None
+
+    def to_domain(self) -> EpisodicFixtureSpec:
+        return EpisodicFixtureSpec(
+            fixture_ref=self.fixture_ref,
+            agent_id=self.agent_id,
+            memory_scope=self.memory_scope,
+            origin_run_id=self.origin_run_id,
+            situation=self.situation,
+            goal=self.goal,
+            observations=tuple(
+                item.to_domain() for item in self.observations
+            ),
+            result=self.result.to_domain(),
+            lesson=self.lesson,
+        )
+
+
+class EpisodicEvaluationControlRequest(BaseModel):
+    """Strict typed WP6-E evaluation control (explicit legal compositions)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["episodic-evaluation-control.v1"] = (
+        "episodic-evaluation-control.v1"
+    )
+    capabilities: list[EpisodicEvaluationCapability] = []
+    fixture: EpisodicFixtureSpecRequest | None = None
+    replay_run_id: StrictStr | None = None
+
+    def to_domain(self) -> EpisodicEvaluationControl:
+        return EpisodicEvaluationControl(
+            capabilities=frozenset(self.capabilities),
+            fixture=(
+                self.fixture.to_domain() if self.fixture is not None else None
+            ),
+            replay_run_id=self.replay_run_id,
+        )
+
+
+class RuntimeEvaluationExecuteV3Request(RuntimeExecuteRequest):
+    """v3：normal runtime fields + strict typed episodic evaluation control."""
+
+    evaluation_control: EpisodicEvaluationControlRequest | None = None
+
+
+class RuntimeEvaluationExecuteV3Response(BaseModel):
+    """WP6-E private evaluation projection; no episode body content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    protocol_version: StrictStr
+    run_id: StrictStr
+    status: StrictStr
+    stop_reason: StrictStr
+    error_code: StrictStr | None
+    safe_message: StrictStr | None
+    evaluation_control_status: StrictStr
+    evaluation_error_code: StrictStr | None
+    capture_status: StrictStr
+    capture_error_code: StrictStr | None
+    episodic_capture: dict[str, object] | None
+    runtime_receipt: dict[str, object] | None
+    formation_receipts: list[dict[str, object]]
+    fixture_receipts: list[dict[str, object]]
+    replay_receipts: list[dict[str, object]]
+
+
+# ---------------------------------------------------------------------------
+# WP7-E isolated governance evaluation execution path (v4)
+# ---------------------------------------------------------------------------
+
+
+class ProjectIdentityEvaluationRequest(BaseModel):
+    """TEST_ONLY request-bound Project identity; never derived from content."""
+
+    model_config = ConfigDict(extra="forbid")
+    project_id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+
+    def to_domain(self) -> ProjectIdentity:
+        return ProjectIdentity(self.project_id)
+
+
+class ProjectGrantEvaluationRequest(BaseModel):
+    """Typed grant input.  The endpoint never grants permissions implicitly."""
+
+    model_config = ConfigDict(extra="forbid")
+    project_id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+    agent_id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+    permissions: list[ProjectMemoryPermission] = Field(min_length=1, max_length=4)
+
+    def to_domain(self) -> ProjectMemoryGrant:
+        return ProjectMemoryGrant(
+            self.project_id, self.agent_id, frozenset(self.permissions)
+        )
+
+
+class PrivateMemoryFixtureEvaluationRequest(BaseModel):
+    """Initial state only.  Its receipt deliberately omits all business text."""
+
+    model_config = ConfigDict(extra="forbid")
+    fixture_ref: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+    owner_agent_id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+    memory_scope: Literal["direct"] = "direct"
+    logical_key: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+    canonical_text: Annotated[StrictStr, Field(min_length=1, max_length=600)]
+
+
+class GovernanceOperationEvaluationRequest(BaseModel):
+    """One real governance command.  It carries no expected decision/result."""
+
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal[
+        "PRIVATE_READ", "PRIVATE_UPDATE", "PRIVATE_FORGET", "PROJECT_READ",
+        "PROJECT_WRITE", "PROJECT_UPDATE", "PROJECT_FORGET", "PRIVATE_TO_PROJECT_PROMOTION",
+    ]
+    target_owner_agent_id: Annotated[StrictStr, Field(min_length=1, max_length=128)] | None = None
+    memory_scope: Literal["direct"] = "direct"
+    logical_key: Annotated[StrictStr, Field(min_length=1, max_length=128)] | None = None
+    canonical_text: Annotated[StrictStr, Field(min_length=1, max_length=600)] | None = None
+    source_memory_id: Annotated[StrictStr, Field(min_length=1, max_length=128)] | None = None
+    supersede: bool = False
+
+
+class GovernanceEvaluationControlRequest(BaseModel):
+    """Strict TEST_ONLY controls; fixture and command are independent facts."""
+
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["wp7-governance-evaluation-control.v1"] = "wp7-governance-evaluation-control.v1"
+    requester_agent_id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+    project_identity: ProjectIdentityEvaluationRequest | None = None
+    project_grants: list[ProjectGrantEvaluationRequest] = Field(default_factory=list, max_length=8)
+    private_fixtures: list[PrivateMemoryFixtureEvaluationRequest] = Field(default_factory=list, max_length=8)
+    operation: GovernanceOperationEvaluationRequest | None = None
+    deterministic_multi_agent: bool = False
+
+    def project_access(self) -> tuple[ProjectIdentity | None, tuple[ProjectMemoryGrant, ...]]:
+        project = self.project_identity.to_domain() if self.project_identity else None
+        grants = tuple(item.to_domain() for item in self.project_grants)
+        if project is None and grants:
+            raise ValueError("PROJECT_IDENTITY_REQUIRED")
+        if project and any(item.project_id != project.project_id for item in grants):
+            raise ValueError("PROJECT_GRANT_SCOPE_MISMATCH")
+        return project, grants
+
+
+class RuntimeEvaluationExecuteV4Request(RuntimeExecuteRequest):
+    evaluation_control: GovernanceEvaluationControlRequest
+
+
+class RuntimeEvaluationExecuteV4Response(BaseModel):
+    """Content-minimized actual facts for the external evaluator."""
+
+    model_config = ConfigDict(extra="forbid")
+    protocol_version: StrictStr
+    run_id: StrictStr
+    status: StrictStr
+    stop_reason: StrictStr
+    error_code: StrictStr | None
+    safe_message: StrictStr | None
+    fixture_receipts: list[dict[str, object]]
+    authorization: dict[str, object] | None
+    private_retrieval: dict[str, object]
+    project_retrieval: dict[str, object]
+    mutation: dict[str, object] | None
+    promotion: dict[str, object] | None
+    specialist_formation: list[dict[str, object]]
+    invocation_visibility: list[dict[str, object]]
 
 
 MessageId = Annotated[
@@ -1446,6 +1727,421 @@ async def runtime_evaluation_execute_v2_endpoint(payload: RuntimeExecuteRequest)
         content, response_bytes = _encoded_response_content(response)
     if response_bytes > MAX_RESPONSE_BYTES:  # pragma: no cover - terminal fields are bounded
         raise HTTPException(status_code=500, detail="EVALUATION_RESPONSE_SIZE_LIMIT_EXCEEDED")
+    return JSONResponse(content=content)
+
+
+def _evaluation_memory_db_path(service) -> str:
+    """Isolated evaluation needs the real Memory DB for fixture/replay only."""
+    manager = getattr(getattr(service, "router", None), "memory_manager", None)
+    db_path = getattr(manager, "db_path", None)
+    if not isinstance(db_path, str) or not db_path.strip():
+        raise HTTPException(
+            status_code=422, detail="EPISODIC_EVALUATION_MEMORY_DB_UNAVAILABLE"
+        )
+    return db_path
+
+
+def _v4_safe_retrieval(bundle, *, injected_count: int) -> dict[str, object]:
+    """Project only opaque ids and pipeline counts; never expose Memory text."""
+    return {
+        "candidate_count": bundle.candidate_count,
+        "selected_count": bundle.selected_count,
+        "supplied_count": bundle.record_count,
+        "injected_count": injected_count,
+        "safe_memory_refs": [item.provenance.memory_id for item in bundle.all_records],
+        "context_sources": [
+            {"source_type": item.source_type.value, "trust_role": item.trust_level.value}
+            for item in bundle.records + bundle.project_records
+        ],
+    }
+
+
+def _v4_private_authorization(result) -> dict[str, object]:
+    observation = result.observation()
+    return {
+        "operation": observation.operation,
+        "requester": observation.requester_agent_id,
+        "owner_safe_identity": result.owner_agent_id,
+        "visibility": observation.visibility,
+        "owner_match": observation.owner_match,
+        "scope_match": observation.scope_match,
+        "grant_match": None,
+        "decision": observation.decision,
+        "reason": observation.reason,
+        "affected_count": observation.affected_count,
+    }
+
+
+def _v4_project_retrieval(records, authorization) -> dict[str, object]:
+    return {
+        "candidate_count": len(records) if authorization.allowed else 0,
+        "selected_count": len(records) if authorization.allowed else 0,
+        "supplied_count": len(records) if authorization.allowed else 0,
+        "injected_count": len(records) if authorization.allowed else 0,
+        "safe_memory_refs": [record.memory_id for record in records] if authorization.allowed else [],
+        "context_sources": (
+            [{"source_type": "project_memory_retrieval", "trust_role": "user_content"}]
+            if records and authorization.allowed else []
+        ),
+    }
+
+
+def _v4_matching_grant(grants, requester_agent_id: str):
+    return next((item for item in grants if item.agent_id == requester_agent_id), None)
+
+
+def _v4_install_private_fixtures(store, fixtures, run_id: str) -> list[dict[str, object]]:
+    receipts: list[dict[str, object]] = []
+    for fixture in fixtures:
+        memory_id = "wp7-fixture-" + uuid.uuid5(
+            uuid.NAMESPACE_URL, fixture.fixture_ref
+        ).hex
+        now = datetime.now(UTC)
+        record = SemanticMemoryRecord(
+            memory_id=memory_id,
+            agent_id=fixture.owner_agent_id,
+            memory_scope=fixture.memory_scope,
+            canonical_text=fixture.canonical_text,
+            payload={"fixture_ref": fixture.fixture_ref},
+            logical_key=fixture.logical_key,
+            origin=MemoryOrigin(
+                "DATASET_CONTROLLED_INITIAL_FIXTURE", run_id, fixture.fixture_ref,
+                fixture.owner_agent_id, fixture.memory_scope, "WP7_E_FIXTURE",
+            ),
+            memory_type=MemoryType.SEMANTIC,
+            status=MemoryStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+        )
+        persisted = store.create(record)
+        receipts.append({
+            "fixture_ref": fixture.fixture_ref,
+            "outcome": "INSTALLED",
+            "safe_memory_ref": persisted.memory_id,
+            "owner_safe_identity": persisted.agent_id,
+            "visibility": "PRIVATE",
+        })
+    return receipts
+
+
+@app.post("/api/runtime/evaluation-execute/v4")
+async def runtime_evaluation_execute_v4_endpoint(payload: RuntimeEvaluationExecuteV4Request):
+    """WP7-E TEST_ONLY bridge: typed controls → real runtime/services → safe facts.
+
+    This endpoint never accepts expected outcomes, authorization overrides, a
+    caller plan, or a model identity.  It is deliberately separate from v3.
+    """
+    service = require_service()
+    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
+        raise HTTPException(status_code=503, detail="COORDINATED_RUNTIME_REQUIRED")
+    try:
+        uuid.UUID(payload.run_id)
+        project, grants = payload.evaluation_control.project_access()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    db_path = _evaluation_memory_db_path(service)
+    private_store = AdvancedMemoryStore(db_path)
+    project_service = ProjectSemanticMemoryService(
+        ProjectSemanticMemoryStore(db_path), private_store
+    )
+    control = payload.evaluation_control
+    requester = MemoryAccessPrincipal(control.requester_agent_id)
+    fixture_receipts = _v4_install_private_fixtures(
+        private_store, control.private_fixtures, payload.run_id
+    )
+    operation = control.operation
+    authorization: dict[str, object] | None = None
+    mutation: dict[str, object] | None = None
+    promotion: dict[str, object] | None = None
+    private_bundle = MemoryRetrievalService(private_store).retrieve(
+        requester=requester,
+        target_owner_agent_id=(operation.target_owner_agent_id if operation and operation.target_owner_agent_id else requester.agent_id),
+        memory_scope="direct",
+        query=payload.query,
+    )
+    injected = 0
+    if private_bundle.all_records:
+        built = ContextBuilder().build(ContextBuildRequest(
+            payload.run_id, requester.agent_id,
+            tuple(item.to_context_item() for item in private_bundle.all_records), 4096, 512
+        ))
+        injected = sum(1 for item in built.included_items if item.source_type.value.endswith("memory_retrieval"))
+    private_evidence = _v4_safe_retrieval(private_bundle, injected_count=injected)
+    grant = _v4_matching_grant(grants, requester.agent_id)
+    project_records, project_auth = project_service.read(
+        requester=requester, project=project, grant=grant
+    )
+    project_evidence = _v4_project_retrieval(project_records, project_auth)
+
+    if operation is not None:
+        owner = operation.target_owner_agent_id or requester.agent_id
+        before_private = len(private_store.list_active_semantic_for_scope(owner, operation.memory_scope, candidate_limit=64).records)
+        if operation.operation == "PRIVATE_READ":
+            authorization = _v4_private_authorization(private_bundle.authorization) if private_bundle.authorization else None
+        elif operation.operation in {"PRIVATE_UPDATE", "PRIVATE_FORGET"}:
+            authorizer = MemoryAccessAuthorizer()
+            auth = (authorizer.authorize_private_update if operation.operation == "PRIVATE_UPDATE" else authorizer.authorize_private_forget)(
+                requester, owner, operation.memory_scope, requested_memory_scope=operation.memory_scope
+            )
+            authorization = _v4_private_authorization(auth)
+            affected = 0
+            outcome = "DENIED"
+            target_ref = None
+            if auth.allowed:
+                if not operation.logical_key:
+                    raise HTTPException(status_code=422, detail="GOVERNANCE_LOGICAL_KEY_REQUIRED")
+                if operation.operation == "PRIVATE_FORGET":
+                    result = private_store.forget_semantic_partition(agent_id=owner, memory_scope=operation.memory_scope, logical_key=operation.logical_key)
+                    affected, outcome = result.affected_count, result.outcome
+                else:
+                    if not operation.canonical_text:
+                        raise HTTPException(status_code=422, detail="GOVERNANCE_CANONICAL_TEXT_REQUIRED")
+                    now = datetime.now(UTC)
+                    record = SemanticMemoryRecord(
+                        memory_id="wp7-update-" + uuid.uuid4().hex, agent_id=owner,
+                        memory_scope=operation.memory_scope, canonical_text=operation.canonical_text,
+                        payload={"evaluation": "update"}, logical_key=operation.logical_key,
+                        origin=MemoryOrigin("EVALUATION_CONTROL", payload.run_id, payload.run_id, owner, operation.memory_scope, "WP7_E_UPDATE"),
+                        memory_type=MemoryType.SEMANTIC, status=MemoryStatus.ACTIVE, created_at=now, updated_at=now,
+                    )
+                    result = private_store.resolve_semantic(record)
+                    affected, outcome, target_ref = result.affected_count, result.outcome, result.new_memory_id
+            after_private = len(private_store.list_active_semantic_for_scope(owner, operation.memory_scope, candidate_limit=64).records)
+            mutation = {"operation": operation.operation, "before_count": before_private, "affected_count": affected, "after_count": after_private, "outcome": outcome, "safe_target_ref": target_ref}
+        elif operation.operation in {"PROJECT_READ", "PROJECT_WRITE", "PROJECT_UPDATE", "PROJECT_FORGET"}:
+            before = len(project_records)
+            if operation.operation == "PROJECT_READ":
+                authorization = project_auth.observation()
+            elif operation.operation == "PROJECT_FORGET":
+                if not operation.logical_key:
+                    raise HTTPException(status_code=422, detail="GOVERNANCE_LOGICAL_KEY_REQUIRED")
+                auth = project_service.forget(requester=requester, project=project, grant=grant, logical_key=operation.logical_key)
+                authorization = auth.observation(); affected = auth.affected_count; outcome = "FORGOTTEN" if auth.allowed else "DENIED"
+                after = len(project_service.read(requester=requester, project=project, grant=grant)[0]) if auth.allowed else before
+                mutation = {"operation": operation.operation, "before_count": before, "affected_count": affected, "after_count": after, "outcome": outcome, "safe_target_ref": None}
+            else:
+                if not operation.logical_key or not operation.canonical_text:
+                    raise HTTPException(status_code=422, detail="GOVERNANCE_WRITE_FIELDS_REQUIRED")
+                result = project_service.write(requester=requester, project=project, grant=grant, logical_key=operation.logical_key, canonical_text=operation.canonical_text, payload={"evaluation": "project"}, run_id=payload.run_id, supersede=operation.operation == "PROJECT_UPDATE" or operation.supersede)
+                authorization = result.authorization.observation(); after = len(project_service.read(requester=requester, project=project, grant=grant)[0]) if result.authorization.allowed else before
+                mutation = {"operation": operation.operation, "before_count": before, "affected_count": 1 if result.outcome in {"CREATED", "SUPERSEDED"} else 0, "after_count": after, "outcome": result.outcome, "safe_target_ref": result.record.memory_id if result.record else None}
+        else:  # PRIVATE_TO_PROJECT_PROMOTION
+            if not operation.source_memory_id or not operation.target_owner_agent_id:
+                raise HTTPException(status_code=422, detail="GOVERNANCE_PROMOTION_SOURCE_REQUIRED")
+            result = project_service.promote(requester=requester, project=project, grant=grant, source_memory_id=operation.source_memory_id, source_owner_agent_id=operation.target_owner_agent_id, source_scope=operation.memory_scope, run_id=payload.run_id, supersede=operation.supersede)
+            authorization = result.authorization.observation()
+            promotion = {"source_private_memory_ref": operation.source_memory_id, "source_owner_safe_identity": operation.target_owner_agent_id, "promoter_safe_identity": requester.agent_id, "target_project_safe_identity": project.project_id if project else None, "decision": "ALLOW" if result.authorization.allowed else "DENY", "outcome": result.outcome, "provenance_complete": bool(result.record and result.record.source_memory_id and result.record.source_owner_agent_id and result.record.promoted_by_agent_id), "resulting_project_memory_ref": result.record.memory_id if result.record else None}
+
+    try:
+        _output, result = await service.run_coordinated_agent_evaluation(
+            agent_id=payload.agent_id, query=payload.query, run_id=payload.run_id,
+            timeout_seconds=payload.timeout_seconds, project_identity=project,
+            project_grants=grants,
+            evaluation_plan_resolver=(deterministic_episodic_success_resolver() if control.deterministic_multi_agent else None),
+        )
+    except ChatRuntimeTransportError as exc:
+        raise HTTPException(status_code=503, detail=exc.error_code) from None
+    specialist_formation: list[dict[str, object]] = []
+    invocation_visibility: list[dict[str, object]] = []
+    if control.deterministic_multi_agent:
+        for agent_id in ("code_expert", "data_analyst"):
+            for record in private_store.list_active_episodic_for_scope(
+                agent_id, "direct", candidate_limit=64
+            ).records:
+                if getattr(record, "origin_run_id", None) == payload.run_id:
+                    specialist_formation.append({"run_id": payload.run_id, "step_id": getattr(record, "origin_step_id", None), "planned_agent": agent_id, "binding_agent": agent_id, "claim_agent": agent_id, "producer_agent": agent_id, "verified_performer": agent_id, "episode_owner": record.agent_id, "episode_kind": getattr(record, "episode_kind", None).value, "formation_outcome": "OBSERVED", "idempotency_outcome": "OBSERVED"})
+        invocation_visibility = [
+            {"invocation_role": "DELEGATED", "private_bundle_present": False, "project_bundle_present": False, "dependency_result_present": False, "context_source_roles": []},
+            {"invocation_role": "SYNTHESIS", "private_bundle_present": False, "project_bundle_present": False, "dependency_result_present": True, "context_source_roles": ["step_result"]},
+        ]
+    response = RuntimeEvaluationExecuteV4Response(
+        protocol_version="localagent-wp7-governance-evaluation-execute.v4", run_id=result.run_id,
+        status=result.status.value, stop_reason=result.stop_reason.value, error_code=result.error_code,
+        safe_message=result.safe_message, fixture_receipts=fixture_receipts, authorization=authorization,
+        private_retrieval=private_evidence, project_retrieval=project_evidence, mutation=mutation,
+        promotion=promotion, specialist_formation=specialist_formation, invocation_visibility=invocation_visibility,
+    )
+    content, size = _encoded_response_content(response)
+    if size > MAX_RESPONSE_BYTES:
+        raise HTTPException(status_code=500, detail="EVALUATION_RESPONSE_SIZE_LIMIT_EXCEEDED")
+    return JSONResponse(content=content)
+
+
+@app.post("/api/runtime/evaluation-execute/v3")
+async def runtime_evaluation_execute_v3_endpoint(
+    payload: RuntimeEvaluationExecuteV3Request,
+):
+    """Isolated WP6-E evaluation path with strict typed episodic control.
+
+    ``evaluation_control`` is the only entry to the deterministic failed-run,
+    formation replay, fixture installer and Layer1 capture capabilities.  It is
+    never accepted by ``/api/chat`` or ``/api/runtime/execute``.  The normal
+    production API/event/ranking/context/persistence behavior is unchanged.
+    """
+    service = require_service()
+    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
+        raise HTTPException(status_code=503, detail="COORDINATED_RUNTIME_REQUIRED")
+    admission_gate = getattr(service, "admission_gate", None)
+    if admission_gate is not None and not admission_gate.accepts_new_runs:
+        raise HTTPException(status_code=503, detail="RUNTIME_SHUTTING_DOWN")
+    try:
+        uuid.UUID(payload.run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid run_id") from exc
+
+    try:
+        control = (
+            payload.evaluation_control.to_domain()
+            if payload.evaluation_control is not None
+            else EpisodicEvaluationControl.none()
+        )
+    except EpisodicEvaluationError as exc:
+        raise HTTPException(status_code=422, detail=exc.error_code) from None
+
+    run_id = payload.run_id
+    evaluation_error_code: str | None = None
+    if (
+        EpisodicEvaluationCapability.REPLAY_EPISODIC_FORMATION_OBSERVER
+        in control.capabilities
+        and control.replay_run_id != run_id
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="EPISODIC_EVALUATION_REPLAY_RUN_ID_MISMATCH",
+        )
+
+    capabilities = control.capabilities
+    has_capture = (
+        EpisodicEvaluationCapability.CAPTURE_EPISODIC_PIPELINE in capabilities
+    )
+    has_replay = (
+        EpisodicEvaluationCapability.REPLAY_EPISODIC_FORMATION_OBSERVER
+        in capabilities
+    )
+    has_failed_run = (
+        EpisodicEvaluationCapability.DETERMINISTIC_FAILED_RUN in capabilities
+    )
+    has_fixture = (
+        EpisodicEvaluationCapability.INSTALL_EPISODIC_FIXTURE in capabilities
+    )
+    has_deterministic_success = (
+        EpisodicEvaluationCapability.DETERMINISTIC_EPISODIC_SUCCESS_RUN
+        in capabilities
+    )
+
+    # v3 always observes the canonical run finalization.  This is a private,
+    # content-minimized observation only: NONE still enables no behavior control,
+    # replay, fixture, or pipeline capture.
+    retainer = EpisodicEvidenceRetainer()
+    collector = EpisodicCaptureCollector(run_id) if has_capture else None
+    collector_token = (
+        install_episodic_capture_collector(collector)
+        if collector is not None
+        else None
+    )
+
+    fixture_receipts: list[dict[str, object]] = []
+    if has_fixture:
+        db_path = _evaluation_memory_db_path(service)
+        installer = EpisodicFixtureInstaller(AdvancedMemoryStore(db_path))
+        assert control.fixture is not None
+        fixture_receipts.append(
+            installer.install(control.fixture).to_wire_dict()
+        )
+
+    fault_controller = (
+        deterministic_failed_run_controller() if has_failed_run else None
+    )
+    try:
+        try:
+            _output, result = await service.run_coordinated_agent_evaluation(
+                agent_id=payload.agent_id,
+                query=payload.query,
+                run_id=run_id,
+                timeout_seconds=payload.timeout_seconds,
+                fault_controller=fault_controller,
+                episodic_evaluation_observer=retainer,
+                evaluation_plan_resolver=(
+                    deterministic_episodic_success_resolver()
+                    if has_deterministic_success else None
+                ),
+            )
+        except ChatRuntimeTransportError as exc:
+            raise HTTPException(status_code=503, detail=exc.error_code) from None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=500, detail="RUNTIME_EXECUTION_FAILED"
+            ) from None
+    finally:
+        if collector_token is not None:
+            reset_episodic_capture_collector(collector_token)
+
+    replay_receipts: list[dict[str, object]] = []
+    if has_replay:
+        assert retainer is not None
+        db_path = _evaluation_memory_db_path(service)
+        runner = EpisodicReplayRunner(AdvancedMemoryStore(db_path))
+        try:
+            receipt = await runner.replay(run_id=run_id, retainer=retainer)
+            replay_receipts.append(receipt.to_wire_dict())
+        except EpisodicEvaluationError as exc:
+            evaluation_error_code = exc.error_code
+
+    artifact = collector.envelope() if collector is not None else None
+    runtime_receipt = (
+        retainer.runtime_receipt() if retainer is not None else None
+    )
+    formation_receipts: list[dict[str, object]] = []
+    if retainer is not None and retainer.first_formation_receipt() is not None:
+        formation_receipts.append(
+            retainer.first_formation_receipt().to_wire_dict()
+        )
+
+    if artifact is None:
+        capture_status = (
+            "NOT_REQUESTED" if collector is None else "NOT_OBSERVED"
+        )
+        capture_error_code = None
+    else:
+        capture_status = artifact.capture_outcome
+        capture_error_code = (
+            "EPISODIC_EVALUATION_CAPTURE_FAILED"
+            if artifact.capture_outcome == "FAILED"
+            else None
+        )
+
+    response = RuntimeEvaluationExecuteV3Response(
+        protocol_version="localagent-episodic-evaluation-execute.v1",
+        run_id=result.run_id,
+        status=result.status.value,
+        stop_reason=result.stop_reason.value,
+        error_code=result.error_code,
+        safe_message=result.safe_message,
+        evaluation_control_status=(
+            "EXECUTED" if not control.is_none else "NONE"
+        ),
+        evaluation_error_code=evaluation_error_code,
+        capture_status=capture_status,
+        capture_error_code=capture_error_code,
+        episodic_capture=(
+            artifact.to_wire_dict() if artifact is not None else None
+        ),
+        runtime_receipt=(
+            runtime_receipt.to_wire_dict()
+            if runtime_receipt is not None
+            else None
+        ),
+        formation_receipts=formation_receipts,
+        fixture_receipts=fixture_receipts,
+        replay_receipts=replay_receipts,
+    )
+    content, response_bytes = _encoded_response_content(response)
+    if response_bytes > MAX_RESPONSE_BYTES:  # pragma: no cover - bounded artifact
+        raise HTTPException(
+            status_code=500, detail="EVALUATION_RESPONSE_SIZE_LIMIT_EXCEEDED"
+        )
     return JSONResponse(content=content)
 
 

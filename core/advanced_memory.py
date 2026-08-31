@@ -33,9 +33,10 @@ LONG_TERM_MEMORY_TABLE = "long_term_memory"
 
 
 class MemoryType(str, Enum):
-    """WP1 v1 只冻结 SEMANTIC；EPISODIC 由 WP6 显式扩展，PROCEDURAL 不入 enum。"""
+    """Long-term Memory 的已批准类型；PROCEDURAL 不入 enum。"""
 
     SEMANTIC = "SEMANTIC"
+    EPISODIC = "EPISODIC"
 
 
 class MemoryStatus(str, Enum):
@@ -57,6 +58,7 @@ class MemoryErrorCode:
     PERSISTENCE_FAILED = "MEMORY_PERSISTENCE_FAILED"
     MALFORMED_KEYED_PAYLOAD = "MEMORY_MALFORMED_KEYED_PAYLOAD"
     FORGET_INVALID_TARGET = "MEMORY_FORGET_INVALID_TARGET"
+    EPISODE_ORIGIN_CONFLICT = "MEMORY_EPISODE_ORIGIN_CONFLICT"
 
 
 _MEMORY_ERROR_MESSAGES = {
@@ -73,6 +75,9 @@ _MEMORY_ERROR_MESSAGES = {
     ),
     MemoryErrorCode.FORGET_INVALID_TARGET: (
         "forget target logical_key is not a valid existing partition key"
+    ),
+    MemoryErrorCode.EPISODE_ORIGIN_CONFLICT: (
+        "episode origin_run_id already belongs to a different record"
     ),
 }
 
@@ -176,9 +181,14 @@ class SemanticMemoryRecord:
                 MemoryType,
                 self.memory_type,
                 MemoryErrorCode.UNSUPPORTED_TYPE,
-                "v1 只支持 SEMANTIC memory_type",
+                "SemanticMemoryRecord 只支持 SEMANTIC memory_type",
             ),
         )
+        if self.memory_type is not MemoryType.SEMANTIC:
+            raise MemoryDomainError(
+                MemoryErrorCode.UNSUPPORTED_TYPE,
+                "SemanticMemoryRecord 只支持 SEMANTIC memory_type",
+            )
         object.__setattr__(
             self,
             "status",
@@ -217,6 +227,203 @@ class SemanticMemoryRecord:
         _require_utc(self.updated_at, "updated_at")
 
 
+EPISODIC_PAYLOAD_SCHEMA_VERSION = 2
+_EPISODE_MAX_TEXT_CHARS = 400
+_EPISODE_MAX_OBSERVATIONS = 8
+_EPISODE_MAX_NAME_CHARS = 80
+_EPISODE_MAX_DIGEST_CHARS = 128
+
+
+class EpisodeGoalAuthority(str, Enum):
+    USER_PROVIDED = "USER_PROVIDED"
+    RUNTIME_OBSERVED_PLAN_GOAL = "RUNTIME_OBSERVED_PLAN_GOAL"
+
+
+class EpisodeKind(str, Enum):
+    """Episode 的受限 subject；不引入泛化 provenance graph。"""
+
+    RUN = "RUN"
+    STEP = "STEP"
+
+
+@dataclass(frozen=True)
+class EpisodeSituation:
+    text: str
+
+    def __post_init__(self) -> None:
+        _require_bounded_text(self.text, "situation.text")
+
+
+@dataclass(frozen=True)
+class EpisodeGoal:
+    text: str
+    authority: EpisodeGoalAuthority
+
+    def __post_init__(self) -> None:
+        _require_bounded_text(self.text, "goal.text")
+        object.__setattr__(
+            self,
+            "authority",
+            _parse_enum(
+                EpisodeGoalAuthority,
+                self.authority,
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "goal.authority 不合法",
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class EpisodeObservation:
+    observation_type: str
+    name: str
+    status: str
+    safe_error_code: Optional[str] = None
+    outcome_classification: Optional[str] = None
+    result_digest: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        for name in ("observation_type", "name", "status"):
+            _require_bounded_text(getattr(self, name), f"observation.{name}", _EPISODE_MAX_NAME_CHARS)
+        for name in ("safe_error_code", "outcome_classification", "result_digest"):
+            value = getattr(self, name)
+            if value is not None:
+                _require_bounded_text(value, f"observation.{name}", _EPISODE_MAX_DIGEST_CHARS)
+
+
+@dataclass(frozen=True)
+class EpisodeResult:
+    terminal_status: str
+    stop_reason: str
+    delivery_status: str
+    delivered_result_digest: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        for name in ("terminal_status", "stop_reason", "delivery_status"):
+            _require_bounded_text(getattr(self, name), f"result.{name}", _EPISODE_MAX_NAME_CHARS)
+        if self.delivered_result_digest is not None:
+            _require_bounded_text(
+                self.delivered_result_digest,
+                "result.delivered_result_digest",
+                _EPISODE_MAX_DIGEST_CHARS,
+            )
+
+
+def _require_bounded_text(value: Any, name: str, limit: int = _EPISODE_MAX_TEXT_CHARS) -> str:
+    text = _require_non_empty(value, name)
+    if len(text) > limit:
+        raise MemoryDomainError(
+            MemoryErrorCode.INVALID_ARGUMENT, f"{name} 超过长度上限"
+        )
+    return text
+
+
+@dataclass(frozen=True)
+class EpisodicMemoryRecord:
+    """Append-only、typed 的 Episodic Memory record。
+
+    ``canonical_text`` 始终由 LocalAgent 的 renderer 从 accepted typed fields
+    生成；调用方不能把任意 model prose 作为 authoritative canonical text。
+    """
+
+    memory_id: str
+    agent_id: str
+    memory_scope: str
+    origin_run_id: str
+    situation: EpisodeSituation
+    goal: EpisodeGoal
+    observations: Tuple[EpisodeObservation, ...]
+    result: EpisodeResult
+    origin: MemoryOrigin
+    episode_kind: EpisodeKind = EpisodeKind.RUN
+    origin_step_id: Optional[str] = None
+    lesson: Optional[str] = None
+    memory_type: MemoryType = MemoryType.EPISODIC
+    status: MemoryStatus = MemoryStatus.ACTIVE
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    canonical_text: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        for name in ("memory_id", "agent_id", "memory_scope", "origin_run_id"):
+            _require_non_empty(getattr(self, name), name)
+        object.__setattr__(self, "episode_kind", _parse_enum(
+            EpisodeKind, self.episode_kind, MemoryErrorCode.INVALID_ARGUMENT,
+            "未知 episode_kind",
+        ))
+        if self.episode_kind is EpisodeKind.RUN and self.origin_step_id is not None:
+            raise MemoryDomainError(MemoryErrorCode.INVALID_ARGUMENT, "RUN episode 不得带 origin_step_id")
+        if self.episode_kind is EpisodeKind.STEP:
+            _require_non_empty(self.origin_step_id, "origin_step_id")
+        object.__setattr__(
+            self, "memory_type", _parse_enum(MemoryType, self.memory_type,
+            MemoryErrorCode.UNSUPPORTED_TYPE, "未知 memory_type")
+        )
+        if self.memory_type is not MemoryType.EPISODIC:
+            raise MemoryDomainError(MemoryErrorCode.UNSUPPORTED_TYPE, "EpisodicMemoryRecord 只支持 EPISODIC")
+        object.__setattr__(
+            self, "status", _parse_enum(MemoryStatus, self.status,
+            MemoryErrorCode.UNSUPPORTED_STATUS, "未知 memory status")
+        )
+        if self.status is not MemoryStatus.ACTIVE:
+            raise MemoryDomainError(MemoryErrorCode.PUBLIC_CREATE_ACTIVE_ONLY, "Episode 只允许 ACTIVE")
+        if not isinstance(self.situation, EpisodeSituation) or not isinstance(self.goal, EpisodeGoal):
+            raise MemoryDomainError(MemoryErrorCode.INVALID_ARGUMENT, "episode situation/goal 必须为 typed DTO")
+        if not isinstance(self.observations, tuple) or len(self.observations) > _EPISODE_MAX_OBSERVATIONS or any(not isinstance(item, EpisodeObservation) for item in self.observations):
+            raise MemoryDomainError(MemoryErrorCode.INVALID_ARGUMENT, "episode observations 必须是有界 EpisodeObservation tuple")
+        if not isinstance(self.result, EpisodeResult) or not isinstance(self.origin, MemoryOrigin):
+            raise MemoryDomainError(MemoryErrorCode.INVALID_ARGUMENT, "episode result/origin 必须为 typed DTO")
+        if self.origin.origin_run_id != self.origin_run_id:
+            raise MemoryDomainError(MemoryErrorCode.INVALID_ARGUMENT, "origin_run_id 必须与 origin 一致")
+        if self.lesson is not None:
+            _require_bounded_text(self.lesson, "lesson")
+        _require_utc(self.created_at, "created_at")
+        _require_utc(self.updated_at, "updated_at")
+        object.__setattr__(self, "canonical_text", render_episode_canonical_text(self))
+
+    def to_payload(self) -> Dict[str, Any]:
+        return {
+            "schema_version": EPISODIC_PAYLOAD_SCHEMA_VERSION,
+            "episode_kind": self.episode_kind.value,
+            "origin_step_id": self.origin_step_id,
+            "situation": {"text": self.situation.text},
+            "goal": {"text": self.goal.text, "authority": self.goal.authority.value},
+            "observations": [
+                {
+                    "observation_type": item.observation_type, "name": item.name,
+                    "status": item.status, "safe_error_code": item.safe_error_code,
+                    "outcome_classification": item.outcome_classification,
+                    "result_digest": item.result_digest,
+                }
+                for item in self.observations
+            ],
+            "result": {
+                "terminal_status": self.result.terminal_status,
+                "stop_reason": self.result.stop_reason,
+                "delivery_status": self.result.delivery_status,
+                "delivered_result_digest": self.result.delivered_result_digest,
+            },
+            "lesson": self.lesson,
+        }
+
+
+def render_episode_canonical_text(record: EpisodicMemoryRecord) -> str:
+    """渲染 bounded, deterministic, provenance-free episode text。"""
+    observations = "; ".join(
+        f"{item.observation_type}:{item.name}={item.status}"
+        for item in record.observations
+    ) or "none"
+    parts = [
+        f"Situation: {record.situation.text}",
+        f"Goal: {record.goal.text}",
+        f"Observations: {observations}",
+        f"Result: {record.result.terminal_status}/{record.result.stop_reason}/{record.result.delivery_status}",
+    ]
+    if record.lesson is not None:
+        parts.append(f"Lesson: {record.lesson}")
+    return "\n".join(parts)[:_EPISODE_MAX_TEXT_CHARS * 3]
+
+
 def _canonical_json(payload: Dict[str, Any]) -> str:
     """确定性 JSON 序列化：sort_keys + 紧凑分隔符，避免 key 顺序漂移。"""
     return json.dumps(
@@ -230,20 +437,37 @@ def _parse_utc(value: str) -> datetime:
 
 # 静态 SQL 常量：scanner 要求 execute 语句必须是字面量或模块级常量。
 _SQL_SELECT_LTM_AGENT = (
-    "SELECT * FROM long_term_memory WHERE agent_id = ? "
+    "SELECT * FROM long_term_memory WHERE agent_id = ? AND memory_type = ? "
     "ORDER BY created_at DESC, memory_id ASC"
 )
 _SQL_SELECT_LTM_AGENT_SCOPE = (
-    "SELECT * FROM long_term_memory WHERE agent_id = ? AND memory_scope = ? "
+    "SELECT * FROM long_term_memory WHERE agent_id = ? AND memory_scope = ? AND memory_type = ? "
     "ORDER BY created_at DESC, memory_id ASC"
 )
 _SQL_SELECT_LTM_AGENT_ACTIVE = (
-    "SELECT * FROM long_term_memory WHERE agent_id = ? AND status = ? "
+    "SELECT * FROM long_term_memory WHERE agent_id = ? AND status = ? AND memory_type = ? "
     "ORDER BY created_at DESC, memory_id ASC"
 )
 _SQL_SELECT_LTM_AGENT_SCOPE_ACTIVE = (
     "SELECT * FROM long_term_memory WHERE agent_id = ? AND memory_scope = ? "
-    "AND status = ? ORDER BY created_at DESC, memory_id ASC"
+    "AND status = ? AND memory_type = ? ORDER BY created_at DESC, memory_id ASC"
+)
+_SQL_SELECT_LTM_EPISODE_ID_SCOPE = (
+    "SELECT * FROM long_term_memory WHERE memory_id = ? AND agent_id = ? "
+    "AND memory_scope = ? AND memory_type = ?"
+)
+_SQL_SELECT_LTM_EPISODE_RUN = (
+    "SELECT * FROM long_term_memory WHERE memory_type = ? AND origin_run_id = ? "
+    "AND COALESCE(json_extract(payload, '$.episode_kind'), 'RUN') = 'RUN'"
+)
+_SQL_SELECT_LTM_EPISODE_STEP = (
+    "SELECT * FROM long_term_memory WHERE memory_type = ? AND origin_run_id = ? "
+    "AND agent_id = ? AND json_extract(payload, '$.episode_kind') = 'STEP' "
+    "AND json_extract(payload, '$.origin_step_id') = ?"
+)
+_SQL_SELECT_LTM_ACTIVE_EPISODIC_SCOPE = (
+    "SELECT * FROM long_term_memory WHERE agent_id = ? AND memory_scope = ? "
+    "AND memory_type = ? AND status = ? ORDER BY created_at DESC, memory_id ASC LIMIT ?"
 )
 # WP3-B keyed lifecycle partition read（status-inclusive；deterministic order）。
 _SQL_SELECT_LTM_PARTITION = (
@@ -319,6 +543,30 @@ class ActiveSemanticScopeRead:
                 "malformed_count 必须是非负整数",
             )
         if self.malformed_count < 0:
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "malformed_count 必须是非负整数",
+            )
+
+
+@dataclass(frozen=True)
+class ActiveEpisodicScopeRead:
+    """WP6-B persistence 窄读结果；不做 ranking 或 context injection。"""
+
+    records: Tuple[EpisodicMemoryRecord, ...]
+    malformed_count: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.records, tuple) or any(
+            not isinstance(record, EpisodicMemoryRecord) for record in self.records
+        ):
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "records 必须是 EpisodicMemoryRecord tuple",
+            )
+        if isinstance(self.malformed_count, bool) or not isinstance(
+            self.malformed_count, int
+        ) or self.malformed_count < 0:
             raise MemoryDomainError(
                 MemoryErrorCode.INVALID_ARGUMENT,
                 "malformed_count 必须是非负整数",
@@ -786,7 +1034,20 @@ class AdvancedMemoryStore:
                 MemoryErrorCode.PERSISTENCE_FAILED
             ) from None
 
-    def _insert_row(self, conn: sqlite3.Connection, record: SemanticMemoryRecord) -> None:
+    def _insert_row(
+        self, conn: sqlite3.Connection, record: SemanticMemoryRecord | EpisodicMemoryRecord
+    ) -> None:
+        payload = (
+            record.payload
+            if isinstance(record, SemanticMemoryRecord)
+            else record.to_payload()
+        )
+        logical_key = record.logical_key if isinstance(record, SemanticMemoryRecord) else None
+        superseded_by_memory_id = (
+            record.superseded_by_memory_id
+            if isinstance(record, SemanticMemoryRecord)
+            else None
+        )
         conn.execute(
             """
             INSERT INTO long_term_memory (
@@ -804,8 +1065,8 @@ class AdvancedMemoryStore:
                 record.agent_id,
                 record.memory_scope,
                 record.canonical_text,
-                _canonical_json(record.payload),
-                record.logical_key,
+                _canonical_json(payload),
+                logical_key,
                 record.origin.origin_type,
                 record.origin.origin_run_id,
                 record.origin.origin_exchange_id,
@@ -814,7 +1075,7 @@ class AdvancedMemoryStore:
                 record.origin.formation_method,
                 record.created_at.isoformat(),
                 record.updated_at.isoformat(),
-                record.superseded_by_memory_id,
+                superseded_by_memory_id,
             ),
         )
 
@@ -865,20 +1126,20 @@ class AdvancedMemoryStore:
                 if memory_scope is not None and active_only:
                     rows = conn.execute(
                         _SQL_SELECT_LTM_AGENT_SCOPE_ACTIVE,
-                        [agent_id, memory_scope, MemoryStatus.ACTIVE.value],
+                        [agent_id, memory_scope, MemoryStatus.ACTIVE.value, MemoryType.SEMANTIC.value],
                     ).fetchall()
                 elif memory_scope is not None:
                     rows = conn.execute(
-                        _SQL_SELECT_LTM_AGENT_SCOPE, [agent_id, memory_scope]
+                        _SQL_SELECT_LTM_AGENT_SCOPE, [agent_id, memory_scope, MemoryType.SEMANTIC.value]
                     ).fetchall()
                 elif active_only:
                     rows = conn.execute(
                         _SQL_SELECT_LTM_AGENT_ACTIVE,
-                        [agent_id, MemoryStatus.ACTIVE.value],
+                        [agent_id, MemoryStatus.ACTIVE.value, MemoryType.SEMANTIC.value],
                     ).fetchall()
                 else:
                     rows = conn.execute(
-                        _SQL_SELECT_LTM_AGENT, [agent_id]
+                        _SQL_SELECT_LTM_AGENT, [agent_id, MemoryType.SEMANTIC.value]
                     ).fetchall()
         except sqlite3.Error:
             raise MemoryDomainError(
@@ -937,6 +1198,106 @@ class AdvancedMemoryStore:
         return ActiveSemanticScopeRead(
             records=tuple(records), malformed_count=malformed
         )
+
+    # ------------------------------------------------------------------
+    # WP6-B Episodic persistence（append-only；不接入 formation/retrieval）
+    # ------------------------------------------------------------------
+
+    def create_or_get_episode(
+        self, record: EpisodicMemoryRecord
+    ) -> EpisodicMemoryRecord:
+        """按 typed RUN/STEP identity 幂等创建 Episode。"""
+        if not isinstance(record, EpisodicMemoryRecord):
+            raise TypeError("create_or_get_episode 需要 EpisodicMemoryRecord")
+        try:
+            with self._transaction() as conn:
+                if record.episode_kind is EpisodeKind.RUN:
+                    query, params = _SQL_SELECT_LTM_EPISODE_RUN, [MemoryType.EPISODIC.value, record.origin_run_id]
+                else:
+                    query, params = _SQL_SELECT_LTM_EPISODE_STEP, [MemoryType.EPISODIC.value, record.origin_run_id, record.agent_id, record.origin_step_id]
+                existing = conn.execute(query, params).fetchone()
+                if existing is not None:
+                    existing_record = self._row_to_episode(existing)
+                    if (
+                        existing_record.agent_id != record.agent_id
+                        or existing_record.memory_scope != record.memory_scope
+                    ):
+                        raise MemoryDomainError(
+                            MemoryErrorCode.EPISODE_ORIGIN_CONFLICT,
+                            "origin_run_id 已属于不同 episode partition",
+                        )
+                    return existing_record
+                if self._fetch_row(conn, record.memory_id) is not None:
+                    raise MemoryDomainError(
+                        MemoryErrorCode.DUPLICATE_CONFLICT,
+                        "memory_id 已存在，拒绝覆盖",
+                    )
+                self._insert_row(conn, record)
+                return record
+        except MemoryDomainError:
+            raise
+        except sqlite3.Error:
+            raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+
+    def get_episode(
+        self, memory_id: str, agent_id: str, memory_scope: str
+    ) -> EpisodicMemoryRecord:
+        _require_non_empty(memory_id, "memory_id")
+        _require_non_empty(agent_id, "agent_id")
+        _require_non_empty(memory_scope, "memory_scope")
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    _SQL_SELECT_LTM_EPISODE_ID_SCOPE,
+                    [memory_id, agent_id, memory_scope, MemoryType.EPISODIC.value],
+                ).fetchone()
+        except sqlite3.Error:
+            raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+        if row is None:
+            raise MemoryDomainError(MemoryErrorCode.NOT_FOUND)
+        return self._row_to_episode(row)
+
+    def get_episode_by_origin_run_id(
+        self, origin_run_id: str, agent_id: str, memory_scope: str
+    ) -> EpisodicMemoryRecord:
+        _require_non_empty(origin_run_id, "origin_run_id")
+        _require_non_empty(agent_id, "agent_id")
+        _require_non_empty(memory_scope, "memory_scope")
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    _SQL_SELECT_LTM_EPISODE_RUN,
+                    [MemoryType.EPISODIC.value, origin_run_id],
+                ).fetchone()
+        except sqlite3.Error:
+            raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+        if row is None:
+            raise MemoryDomainError(MemoryErrorCode.NOT_FOUND)
+        return self._row_to_episode(row)
+
+    def list_active_episodic_for_scope(
+        self, agent_id: str, memory_scope: str, *, candidate_limit: int
+    ) -> ActiveEpisodicScopeRead:
+        _require_non_empty(agent_id, "agent_id")
+        _require_non_empty(memory_scope, "memory_scope")
+        if isinstance(candidate_limit, bool) or not isinstance(candidate_limit, int) or candidate_limit <= 0:
+            raise MemoryDomainError(MemoryErrorCode.INVALID_ARGUMENT, "candidate_limit 必须是正整数")
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    _SQL_SELECT_LTM_ACTIVE_EPISODIC_SCOPE,
+                    [agent_id, memory_scope, MemoryType.EPISODIC.value, MemoryStatus.ACTIVE.value, candidate_limit],
+                ).fetchall()
+        except sqlite3.Error:
+            raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+        records: List[EpisodicMemoryRecord] = []
+        malformed = 0
+        for row in rows:
+            try:
+                records.append(self._row_to_episode(row))
+            except (MemoryDomainError, ValueError, TypeError):
+                malformed += 1
+        return ActiveEpisodicScopeRead(tuple(records), malformed)
 
     # ------------------------------------------------------------------
     # WP3-B Lifecycle（keyed resolution + forget；BEGIN IMMEDIATE 内闭环）
@@ -1423,8 +1784,87 @@ class AdvancedMemoryStore:
             superseded_by_memory_id=row["superseded_by_memory_id"],
         )
 
+    @staticmethod
+    def _row_to_episode(row: sqlite3.Row) -> EpisodicMemoryRecord:
+        if row["memory_type"] != MemoryType.EPISODIC.value:
+            raise MemoryDomainError(
+                MemoryErrorCode.UNSUPPORTED_TYPE,
+                "episodic API 只接受 EPISODIC row",
+            )
+        if row["logical_key"] is not None or row["superseded_by_memory_id"] is not None:
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "episodic row 不得携带 logical_key 或 supersede relation",
+            )
+        try:
+            payload = json.loads(row["payload"])
+            if not isinstance(payload, dict) or payload.get("schema_version") not in {1, 2}:
+                raise ValueError
+            expected = {"schema_version", "situation", "goal", "observations", "result", "lesson"}
+            if payload["schema_version"] == 2:
+                expected |= {"episode_kind", "origin_step_id"}
+            if set(payload) != expected:
+                raise ValueError
+            situation = payload["situation"]
+            goal = payload["goal"]
+            result = payload["result"]
+            observations = payload["observations"]
+            if (
+                not isinstance(situation, dict) or set(situation) != {"text"}
+                or not isinstance(goal, dict) or set(goal) != {"text", "authority"}
+                or not isinstance(result, dict) or set(result) != {
+                    "terminal_status", "stop_reason", "delivery_status", "delivered_result_digest"
+                }
+                or not isinstance(observations, list)
+                or payload["lesson"] is not None and not isinstance(payload["lesson"], str)
+            ):
+                raise ValueError
+            typed_observations = []
+            for item in observations:
+                if not isinstance(item, dict) or set(item) != {
+                    "observation_type", "name", "status", "safe_error_code",
+                    "outcome_classification", "result_digest",
+                }:
+                    raise ValueError
+                typed_observations.append(EpisodeObservation(**item))
+            record = EpisodicMemoryRecord(
+                memory_id=row["memory_id"],
+                agent_id=row["agent_id"],
+                memory_scope=row["memory_scope"],
+                origin_run_id=row["origin_run_id"],
+                episode_kind=payload.get("episode_kind", EpisodeKind.RUN.value),
+                origin_step_id=payload.get("origin_step_id"),
+                situation=EpisodeSituation(**situation),
+                goal=EpisodeGoal(**goal),
+                observations=tuple(typed_observations),
+                result=EpisodeResult(**result),
+                lesson=payload["lesson"],
+                origin=MemoryOrigin(
+                    origin_type=row["origin_type"],
+                    origin_run_id=row["origin_run_id"],
+                    origin_exchange_id=row["origin_exchange_id"],
+                    origin_agent_id=row["origin_agent_id"],
+                    origin_memory_scope=row["origin_memory_scope"],
+                    formation_method=row["formation_method"],
+                ),
+                created_at=_parse_utc(row["created_at"]),
+                updated_at=_parse_utc(row["updated_at"]),
+            )
+        except (KeyError, TypeError, ValueError, MemoryDomainError):
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "episodic payload 不符合 schema v1",
+            ) from None
+        if row["status"] != MemoryStatus.ACTIVE.value or row["canonical_text"] != record.canonical_text:
+            raise MemoryDomainError(
+                MemoryErrorCode.INVALID_ARGUMENT,
+                "episodic row lifecycle 或 canonical_text 不合法",
+            )
+        return record
+
 
 __all__ = [
+    "ActiveEpisodicScopeRead",
     "ActiveSemanticScopeRead",
     "AdvancedMemoryStore",
     "FORGET_TOMBSTONE_TEXT",
@@ -1438,6 +1878,14 @@ __all__ = [
     "MemoryStatus",
     "MemoryTransition",
     "MemoryType",
+    "EPISODIC_PAYLOAD_SCHEMA_VERSION",
+    "EpisodeGoal",
+    "EpisodeGoalAuthority",
+    "EpisodeObservation",
+    "EpisodeResult",
+    "EpisodeSituation",
+    "EpisodicMemoryRecord",
     "SemanticMemoryRecord",
+    "render_episode_canonical_text",
     "typed_values_equal",
 ]

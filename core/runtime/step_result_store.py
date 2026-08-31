@@ -573,6 +573,14 @@ class StepResultStore:
                 and store_entry.status is StoreEntryStatus.READABLE
             )
 
+    def committed_producer_agent_id(self, step_id: str) -> str | None:
+        """Post-terminal safe identity evidence; never exposes result content."""
+        with self._lock:
+            entry = self._entries.get(step_id)
+            if entry is None or entry.status is not StoreEntryStatus.READABLE:
+                return None
+            return entry.producer_agent_id
+
     def read_final_content(self, step_id: str) -> str:
         """Delivered-only read for the run-level final Memory writer.
 

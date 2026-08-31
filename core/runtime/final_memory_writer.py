@@ -29,6 +29,11 @@ from core.memory_manager import (
     MemoryExchangeErrorCode,
 )
 from core.runtime.step_result_store import StepResultStore
+from core.runtime.memory_authorization import (
+    MemoryAccessAuthorizer,
+    MemoryAccessPrincipal,
+    MemoryAuthorizationError,
+)
 from core.runtime.trace_contract import (
     RUNTIME_FINAL_MEMORY_COMMIT_SPAN,
     set_span_attributes,
@@ -83,6 +88,7 @@ class RunFinalMemoryWriter:
         router,
         *,
         entry_agent_id: str,
+        requester: MemoryAccessPrincipal | None = None,
         user_request: str,
         persist: bool,
         run_id: str | None = None,
@@ -91,6 +97,8 @@ class RunFinalMemoryWriter:
     ) -> None:
         if not isinstance(entry_agent_id, str) or not entry_agent_id.strip():
             raise ValueError("entry_agent_id 不能为空")
+        if requester is not None and not isinstance(requester, MemoryAccessPrincipal):
+            raise TypeError("requester 必须是 MemoryAccessPrincipal 或 None")
         if not isinstance(user_request, str) or not user_request.strip():
             raise ValueError("user_request 不能为空")
         if type(persist) is not bool:
@@ -101,6 +109,8 @@ class RunFinalMemoryWriter:
             raise ValueError("run_id 必须是非空字符串")
         self._router = router
         self._entry_agent_id = entry_agent_id.strip()
+        self._requester = requester or MemoryAccessPrincipal(self._entry_agent_id)
+        self._authorizer = MemoryAccessAuthorizer()
         self._user_request = user_request
         self._persist = persist
         self._run_id = run_id
@@ -156,6 +166,22 @@ class RunFinalMemoryWriter:
             )
             raise RuntimeError("router 没有可用的 memory_manager")
         scope = getattr(self._router, "DIRECT_MEMORY_SCOPE", "direct")
+        authorization = self._authorizer.authorize_private_create(
+            self._requester,
+            self._entry_agent_id,
+            scope,
+            requested_memory_scope=scope,
+        )
+        if not authorization.allowed:
+            self._record_memory_outcome(
+                status=FinalMemoryCommitStatus.FAILED,
+                error_code=authorization.reason,
+                duration_ms=0,
+                span=None,
+                user_write_status="NOT_ATTEMPTED",
+                assistant_write_status="NOT_ATTEMPTED",
+            )
+            raise MemoryAuthorizationError(authorization)
         started = time.monotonic()
         span = None
         if self._span_recorder is not None:

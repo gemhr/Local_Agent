@@ -32,9 +32,11 @@ from core.runtime.tool_governance import (
     ToolPolicy,
     ToolPolicyCatalog,
 )
+from core.llm_engine import ScriptedEvaluationLLMEngine
 from core.settings import (
     SETTINGS_SECURITY_POLICY_ERROR,
     STARTUP_CONFIGURATION_ERROR,
+    RuntimeProfile,
     Settings,
     SettingsValidationError,
     validate_role_configuration,
@@ -639,7 +641,7 @@ async def test_memory_unsupported_blocks_ready(monkeypatch, tmp_path) -> None:
     manager = MemoryManager(db_path=str(db_path))
     manager.add_message("a", "user", "hello")
     with sqlite3.connect(db_path) as conn:
-        conn.execute("PRAGMA user_version = 3")
+            conn.execute("PRAGMA user_version = 4")
     monkeypatch.setattr(server, "settings", settings)
     app = FastAPI()
     with pytest.raises(RuntimeInitializationError) as captured:
@@ -729,7 +731,7 @@ async def test_quick_check_failed_blocks_ready(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_all_current_preflight_reaches_ready_and_sets_memory_v2(
+async def test_all_current_preflight_reaches_ready_and_sets_memory_v3(
     monkeypatch, tmp_path
 ) -> None:
     """happy path：全新/current persistence → READY，且 constructor 新建 v2。"""
@@ -746,7 +748,7 @@ async def test_all_current_preflight_reaches_ready_and_sets_memory_v2(
             is True
         )
     with sqlite3.connect(settings.memory_db_path) as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 2
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 3
 
 
 # ---- WP1-D P1 remediation：malformed physical signature startup fail-closed ----
@@ -1083,3 +1085,178 @@ def test_lifespan_agentevalops_disabled_preserves_no_exporter() -> None:
 def test_agentevalops_settings_no_fault_surface() -> None:
     fields = {field.name.lower() for field in Settings.__dataclass_fields__.values()}
     assert not any("fault" in name or "chaos" in name for name in fields)
+
+
+# ---- WP6-E Layer1 runtime profile + scripted backend（G2 frozen contract）----
+
+
+def test_runtime_profile_unknown_profile_fails_closed() -> None:
+    """unknown runtime profile -> fail closed。"""
+    with pytest.raises(SettingsValidationError, match="unknown_profile"):
+        RuntimeProfile.parse("BOGUS_PROFILE")
+    with pytest.raises(SettingsValidationError, match="invalid_profile"):
+        RuntimeProfile.parse("  ")
+
+
+def test_runtime_profile_production_default_unchanged(monkeypatch) -> None:
+    """normal production profile behavior unchanged：默认 PRODUCTION，remote 仍需 URL。"""
+    monkeypatch.delenv("LOCAL_AGENT_RUNTIME_PROFILE", raising=False)
+    assert RuntimeProfile.parse(None) is RuntimeProfile.PRODUCTION
+    settings = _load(monkeypatch, LOCAL_AGENT_REMOTE_API_BASE_URL=None)
+    with pytest.raises(SettingsValidationError) as captured:
+        validate_role_configuration(settings, role="SERVER")
+    assert captured.value.safe_error_code == STARTUP_CONFIGURATION_ERROR
+
+
+def test_layer1_profile_does_not_require_remote_url(monkeypatch) -> None:
+    """Layer1 profile 不要求 remote API URL。"""
+    settings = _load(
+        monkeypatch,
+        LOCAL_AGENT_RUNTIME_PROFILE="EPISODIC_EVALUATION_LAYER1",
+        LOCAL_AGENT_LLM_BACKEND="scripted",
+        LOCAL_AGENT_REMOTE_API_BASE_URL=None,
+    )
+    assert settings.runtime_profile is RuntimeProfile.EPISODIC_EVALUATION_LAYER1
+    assert settings.llm_backend == "scripted"
+    validate_role_configuration(settings, role="SERVER")  # 不抛 required_for_remote_backend
+
+
+def test_layer1_profile_does_not_require_remote_key(monkeypatch) -> None:
+    """Layer1 profile 不要求 remote API key。"""
+    monkeypatch.delenv("LOCAL_AGENT_REMOTE_API_KEY", raising=False)
+    settings = _load(
+        monkeypatch,
+        LOCAL_AGENT_RUNTIME_PROFILE="EPISODIC_EVALUATION_LAYER1",
+        LOCAL_AGENT_LLM_BACKEND="scripted",
+        LOCAL_AGENT_REMOTE_API_BASE_URL="https://example.test/v1",
+    )
+    validate_role_configuration(settings, role="SERVER")
+
+
+def test_layer1_profile_forbids_provider_backend(monkeypatch) -> None:
+    """Layer1 profile 强制 scripted backend，拒绝 remote/hybrid（zero network composition）。"""
+    with pytest.raises(SettingsValidationError, match="evaluation_profile_forbids_provider_backend"):
+        _load(
+            monkeypatch,
+            LOCAL_AGENT_RUNTIME_PROFILE="EPISODIC_EVALUATION_LAYER1",
+            LOCAL_AGENT_LLM_BACKEND="remote",
+            LOCAL_AGENT_REMOTE_API_BASE_URL="https://example.test/v1",
+        )
+    settings = _load(
+        monkeypatch,
+        LOCAL_AGENT_RUNTIME_PROFILE="EPISODIC_EVALUATION_LAYER1",
+        LOCAL_AGENT_LLM_BACKEND=None,
+        LOCAL_AGENT_REMOTE_API_BASE_URL="https://example.test/v1",
+    )
+    assert settings.llm_backend == "scripted"
+
+
+def test_scripted_backend_requires_evaluation_profile(monkeypatch) -> None:
+    """PRODUCTION profile 不允许 scripted backend（fail closed）。"""
+    settings = _load(
+        monkeypatch,
+        LOCAL_AGENT_RUNTIME_PROFILE=None,
+        LOCAL_AGENT_LLM_BACKEND="scripted",
+        LOCAL_AGENT_REMOTE_API_BASE_URL="https://example.test/v1",
+    )
+    with pytest.raises(SettingsValidationError, match="scripted_backend_requires_evaluation_profile"):
+        validate_role_configuration(settings, role="SERVER")
+
+
+def test_startup_profile_not_request_switchable() -> None:
+    """request 不能切换 startup profile：profile 只在 Settings.load 由 env 读取。"""
+    source = inspect.getsource(Settings)
+    assert "LOCAL_AGENT_RUNTIME_PROFILE" in source
+    # ChatRequest / RuntimeExecuteRequest 没有 runtime_profile 字段（structural）。
+    chat_fields = set(server.ChatRequest.model_fields)
+    assert "runtime_profile" not in chat_fields
+    assert "evaluation_profile" not in chat_fields
+
+
+def test_layer1_profile_composition_builds_only_scripted_engine() -> None:
+    """Layer1 scripted backend 只构造 ScriptedEvaluationLLMEngine，不构造 RemoteLLMEngine。"""
+    source = inspect.getsource(server.lifespan)
+    assert "ScriptedEvaluationLLMEngine" in source
+    assert "RemoteLLMEngine(" in source
+    assert source.index('if settings.llm_backend == "scripted"') < source.index(
+        'if settings.llm_backend in {"local", "hybrid"}'
+    )
+    assert source.index('if settings.llm_backend in {"local", "hybrid"}') < source.index(
+        'if settings.llm_backend in {"remote", "hybrid"}'
+    )
+
+
+def test_layer1_scripted_profile_supports_specialist_and_synthesis_capabilities() -> None:
+    """脚本评估 profile 可执行 code_expert 与 structured synthesis，生产分支不变。"""
+    source = inspect.getsource(server.lifespan)
+    scripted_branch = source.split('if settings.llm_backend == "scripted"', 1)[1].split(
+        'if settings.llm_backend in {"local", "hybrid"}', 1
+    )[0]
+    assert "False, True, True, False, 1, 1" in scripted_branch
+
+
+def test_scripted_engine_does_not_perform_network_io() -> None:
+    """ScriptedEvaluationLLMEngine.generate 是纯确定性生成器，不 import/call 任何 HTTP client。"""
+    import inspect as _inspect
+
+    engine = ScriptedEvaluationLLMEngine()
+    messages = [
+        {"role": "system", "content": "LocalAgent Planner"},
+        {"role": "user", "content": "整理发布清单"},
+    ]
+    output = list(engine.generate(messages))
+    assert output and all(isinstance(item, str) and item.strip() for item in output)
+    source = _inspect.getsource(ScriptedEvaluationLLMEngine)
+    for forbidden in ("httpx", "requests", "socket", "urllib"):
+        assert forbidden not in source
+
+
+def test_repeated_scripted_inputs_deterministic() -> None:
+    """repeated scripted inputs deterministic：同输入 -> 同输出序列。"""
+    engine = ScriptedEvaluationLLMEngine()
+    messages = [
+        {"role": "system", "content": "LocalAgent Planner"},
+        {"role": "user", "content": "整理项目生产环境的发布清单"},
+    ]
+    first = list(engine.generate(messages))
+    for _ in range(3):
+        assert list(engine.generate(messages)) == first
+    semantic = [
+        {"role": "system", "content": "长期记忆候选提取器"},
+        {"role": "user", "content": "x"},
+    ]
+    assert list(engine.generate(semantic)) == ['{"schema_version":1,"candidates":[]}']
+
+
+def test_scripted_planner_uses_compilable_synthesis_for_code_expert() -> None:
+    """单个 code_expert task 仍须满足 PlanCompiler 的 synthesis 约束。"""
+    engine = ScriptedEvaluationLLMEngine()
+    output = "".join(
+        engine.generate(
+            [
+                {"role": "system", "content": "LocalAgent Planner"},
+                    {"role": "user", "content": "项目生产环境的部署方式是什么"},
+            ]
+        )
+    )
+    assert '"task_id":"deploy_probe"' in output
+    assert '"synthesis_required":true' in output
+
+
+def test_scripted_profile_routes_bounded_request_semantics_without_scenario_id() -> None:
+    engine = ScriptedEvaluationLLMEngine()
+    cases = {
+        "整理发布清单和回滚方案": ('"task_id":"release_list"', '"task_id":"rollback_plan"'),
+        "核对数据库配置及备份策略": ('"task_id":"config_check"', '"task_id":"backup_review"'),
+        "mysql 主从复制中断的恢复流程是什么": ('"task_id":"recovery_summary"',),
+        "检查部署环境的状态并汇报结果": ('"task_id":"env_status"',),
+    }
+    for request, expected_task_ids in cases.items():
+        output = "".join(engine.generate([{"role": "system", "content": "LocalAgent Planner"}, {"role": "user", "content": request}]))
+        assert all(task_id in output for task_id in expected_task_ids)
+        assert "E0" not in output and "scenario" not in output.lower()
+
+
+def test_scripted_profile_returns_no_tool_for_tool_planner() -> None:
+    engine = ScriptedEvaluationLLMEngine()
+    assert list(engine.generate([{"role": "system", "content": "无需工具时仅输出 NO_TOOL"}, {"role": "user", "content": "x"}])) == ["NO_TOOL"]

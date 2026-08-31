@@ -66,6 +66,10 @@ from core.runtime.memory_lifecycle import (
     ForgetProposalModel,
     has_explicit_forget_cue,
 )
+from core.runtime.memory_authorization import (
+    MemoryAccessAuthorizer,
+    MemoryAccessPrincipal,
+)
 from core.runtime.predicate_registry import (
     CanonicalPredicateRegistry,
     PredicateResolution,
@@ -144,6 +148,7 @@ class SemanticFormationErrorCode(str, Enum):
     CANCELLED = "FORMATION_CANCELLED"
     INTERNAL_ERROR = "FORMATION_INTERNAL_ERROR"
     FORGET_NOT_ATTEMPTED = "FORMATION_FORGET_NOT_ATTEMPTED"
+    PRIVATE_MEMORY_ACCESS_DENIED = "PRIVATE_MEMORY_ACCESS_DENIED"
 
 
 class FormationCandidateOutcomeCode(str, Enum):
@@ -623,6 +628,7 @@ class SemanticMemoryFormation:
         self,
         *,
         entry_agent_id: str,
+        requester: MemoryAccessPrincipal | None = None,
         user_request: str,
         memory_store: AdvancedMemoryStore,
         extraction_model: FormationExtractionModel,
@@ -635,6 +641,8 @@ class SemanticMemoryFormation:
     ) -> None:
         if not isinstance(entry_agent_id, str) or not entry_agent_id.strip():
             raise ValueError("entry_agent_id 不能为空")
+        if requester is not None and not isinstance(requester, MemoryAccessPrincipal):
+            raise TypeError("requester 必须是 MemoryAccessPrincipal 或 None")
         if not isinstance(user_request, str) or not user_request.strip():
             raise ValueError("user_request 不能为空")
         if not callable(getattr(memory_store, "resolve_semantic", None)):
@@ -654,6 +662,8 @@ class SemanticMemoryFormation:
         if not isinstance(memory_scope, str) or not memory_scope.strip():
             raise ValueError("memory_scope 不能为空")
         self._entry_agent_id = entry_agent_id.strip()
+        self._requester = requester or MemoryAccessPrincipal(self._entry_agent_id)
+        self._authorizer = MemoryAccessAuthorizer()
         self._user_request = user_request
         self._memory_store = memory_store
         self._extraction_model = extraction_model
@@ -809,6 +819,17 @@ class SemanticMemoryFormation:
         ):
             return self._immediate_failure(
                 receipt, SemanticFormationErrorCode.IDENTITY_INVALID
+            )
+        authorization = self._authorizer.authorize_private_create(
+            self._requester,
+            self._entry_agent_id,
+            self._memory_scope,
+            requested_memory_scope=receipt.memory_scope,
+        )
+        if not authorization.allowed:
+            return self._immediate_failure(
+                receipt,
+                SemanticFormationErrorCode.PRIVATE_MEMORY_ACCESS_DENIED,
             )
         if _is_obviously_non_persistent_source(self._user_request):
             return self._build_result(
@@ -1005,6 +1026,19 @@ class SemanticMemoryFormation:
 
         bounded retry：仅 retryable persistence failure，且复用同一 record。
         """
+        authorization = self._authorizer.authorize_private_update(
+            self._requester,
+            record.agent_id,
+            record.memory_scope,
+            requested_memory_scope=receipt.memory_scope,
+        )
+        if not authorization.allowed:
+            return FormationCandidateOutcome(
+                ordinal,
+                FormationCandidateOutcomeCode.PERSIST_FAILED,
+                authorization.reason,
+                None,
+            )
         attempts_left = 1 + FORMATION_PERSISTENCE_RETRY_LIMIT
         while True:
             completion, interrupted = await self._await_blocking_safe_boundary(
@@ -1084,6 +1118,22 @@ class SemanticMemoryFormation:
         任何 fail-closed（无模型、无精确成员、malformed、ambiguous、目标缺失）
         都返回 typed outcome 且零 mutation；logical_key 绝不进入 result/event。
         """
+        authorization = self._authorizer.authorize_private_forget(
+            self._requester,
+            self._entry_agent_id,
+            self._memory_scope,
+            requested_memory_scope=receipt.memory_scope,
+        )
+        if not authorization.allowed:
+            return await self._build_observed_forget_result(
+                receipt,
+                operation=LifecycleOperation.FORGET.value,
+                outcome="DENIED",
+                affected=0,
+                safe_reason=authorization.reason,
+                safe_error_code=SemanticFormationErrorCode.PRIVATE_MEMORY_ACCESS_DENIED,
+                total_started=total_started,
+            )
         if self._forget_model is None:
             return await self._build_observed_forget_result(
                 receipt,

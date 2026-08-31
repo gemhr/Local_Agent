@@ -157,7 +157,7 @@ def test_memory_legacy_migrates_to_v2_and_preserves_rows(tmp_path: Path) -> None
     memory_result = next(r for r in outcome.results if r.store_id.value == "MEMORY")
     assert memory_result.committed is True
 
-    assert _user_version(path) == 2
+    assert _user_version(path) == 5
     columns = _memory_columns(path)
     assert {"memory_scope", "exchange_id", "run_id", "sequence"} <= columns
     assert "message_exchanges" in _memory_tables(path)
@@ -178,7 +178,7 @@ def test_memory_current_unversioned_adoption(tmp_path: Path) -> None:
         _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
         backup_confirmed=True,
     )
-    assert _user_version(path) == 2
+    assert _user_version(path) == 5
 
 
 def test_memory_migration_rollback_on_partial_failure(tmp_path: Path, monkeypatch) -> None:
@@ -210,7 +210,7 @@ def test_memory_migration_rollback_on_partial_failure(tmp_path: Path, monkeypatc
         _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
         backup_confirmed=True,
     )
-    assert _user_version(path) == 2
+    assert _user_version(path) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ def test_memory_v1_migrates_to_v2_and_preserves_conversation(tmp_path: Path) -> 
     memory_result = next(r for r in outcome.results if r.store_id.value == "MEMORY")
     assert memory_result.committed is True
 
-    assert _user_version(path) == 2
+    assert _user_version(path) == 5
     assert "long_term_memory" in _memory_tables(path)
     with sqlite3.connect(path) as conn:
         # conversation rows 保留
@@ -308,7 +308,7 @@ def test_memory_v1_to_v2_rollback_on_failure(tmp_path: Path, monkeypatch) -> Non
         _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
         backup_confirmed=True,
     )
-    assert _user_version(path) == 2
+    assert _user_version(path) == 5
     assert "long_term_memory" in _memory_tables(path)
 
 
@@ -324,7 +324,7 @@ def test_memory_v1_unversioned_migrates_to_v2(tmp_path: Path) -> None:
         _paths(path, _journal_current(tmp_path / "j.db"), None, _checkpoint_current(tmp_path / "c.db")),
         backup_confirmed=True,
     )
-    assert _user_version(path) == 2
+    assert _user_version(path) == 5
     assert "long_term_memory" in _memory_tables(path)
 
 
@@ -484,7 +484,7 @@ def test_partial_completion_then_rerun_is_safe(tmp_path: Path, monkeypatch) -> N
     monkeypatch.undo()
 
     # Memory 已 commit；Journal 仍 legacy。rerun 从实际 facts 继续。
-    assert _user_version(memory) == 2
+    assert _user_version(memory) == 5
     rerun = run_persistence_migration(
         _paths(memory, journal, None, checkpoint), backup_confirmed=True
     )
@@ -506,13 +506,13 @@ def test_unsupported_anywhere_prevents_all_mutation(tmp_path: Path) -> None:
     checkpoint = _checkpoint_current(tmp_path / "checkpoint.db")
     # future memory（user_version=3）→ UNSUPPORTED
     with sqlite3.connect(memory) as conn:
-        conn.execute("PRAGMA user_version = 3")
+        conn.execute("PRAGMA user_version = 6")
     with pytest.raises(PersistenceError):
         run_persistence_migration(
             _paths(memory, journal, None, checkpoint), backup_confirmed=True
         )
     # 零 mutation：legacy memory 保持 legacy
-    assert _user_version(memory) == 3
+    assert _user_version(memory) == 6
     assert "memory_scope" not in _memory_columns(memory)
 
 
@@ -561,7 +561,7 @@ def test_restore_newer_memory_fails_closed_without_mutation(tmp_path: Path) -> N
     且不修改 fixture。"""
     memory = _memory_v2(tmp_path / "memory.db")
     with sqlite3.connect(memory) as conn:
-        conn.execute("PRAGMA user_version = 3")
+        conn.execute("PRAGMA user_version = 6")
     before = memory.read_bytes()
     results = run_persistence_preflight(
         _paths(
