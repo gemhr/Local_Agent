@@ -10,6 +10,6 @@ N8,Tool Registry,Capability,340,380,220,64,#f59e0b
 N9,MemoryManager SQLite,Capability,600,380,260,64,#f59e0b
 N10,Document Loader,Knowledge,80,560,220,64,#8b5cf6
 N11,VectorDBManager,Knowledge,340,560,220,64,#8b5cf6
-N12,ChromaDB + BGE,Knowledge,600,560,260,64,#8b5cf6
+N12,ChromaDB + Qwen3-Embedding-0.6B,Knowledge,600,560,260,64,#8b5cf6
 N13,Local KB Files,Knowledge,900,560,220,64,#8b5cf6
 N14,Final Answer,Interaction,860,80,200,56,#0f172a

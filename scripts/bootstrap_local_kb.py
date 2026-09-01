@@ -33,9 +33,16 @@ def _positive_int(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="将本地知识文档写入 Chroma 向量库。")
+    parser = argparse.ArgumentParser(description="构建本地知识库检索 generation。")
     parser.add_argument("--source-dir", help="知识文档目录；默认读取 Settings。")
     parser.add_argument("--collection", help="Chroma Collection 名称。")
+    parser.add_argument(
+        "--build-purpose",
+        choices=("production", "development"),
+        default="production",
+        help="production 使用 Settings chunk 参数并允许发布 active.json；"
+        "development 允许覆盖 chunk 参数但不能发布 active.json。",
+    )
     parser.add_argument(
         "--rebuild", action="store_true", help="入库前清空当前 Collection。"
     )
@@ -47,10 +54,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-files", type=_positive_int, help="最多处理的文件数。")
     parser.add_argument(
-        "--chunk-size", type=_positive_int, default=1400, help="Chunk 目标字符数。"
+        "--chunk-size",
+        type=_positive_int,
+        default=None,
+        help="Chunk 目标字符数；production 模式禁止提供（使用 Settings）。",
     )
     parser.add_argument(
-        "--chunk-overlap", type=int, default=180, help="相邻 Chunk 重叠字符数。"
+        "--chunk-overlap",
+        type=int,
+        default=None,
+        help="相邻 Chunk 重叠字符数；production 模式禁止提供（使用 Settings）。",
     )
     parser.add_argument(
         "--ingest-batch-size", type=_positive_int, default=32, help="单次向量化写入数。"
@@ -67,12 +80,23 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.chunk_overlap < 0:
+    if args.chunk_overlap is not None and args.chunk_overlap < 0:
         parser.error("--chunk-overlap 不能小于 0")
-    if args.chunk_overlap >= args.chunk_size:
+    if (
+        args.chunk_size is not None
+        and args.chunk_overlap is not None
+        and args.chunk_overlap >= args.chunk_size
+    ):
         parser.error("--chunk-overlap 必须小于 --chunk-size")
 
     settings = Settings.load()
+    if args.build_purpose == "production" and (
+        args.chunk_size is not None or args.chunk_overlap is not None
+    ):
+        parser.error(
+            "production 构建禁止提供 --chunk-size/--chunk-overlap；"
+            "chunk policy 唯一 authority 是 Settings（LOCAL_AGENT_KB_CHUNK_SIZE/OVERLAP）。"
+        )
     source_dir = Path(args.source_dir or settings.local_knowledge_base_dir).resolve()
     collection_name = args.collection or settings.knowledge_collection_name
     if not source_dir.is_dir():
@@ -86,14 +110,79 @@ def main(argv: Sequence[str] | None = None) -> int:
     extension_counts = Counter(path.suffix.lower() for path in files)
     print(f"[KB] 文档目录: {source_dir}")
     print(f"[KB] Collection: {collection_name}")
+    print(f"[KB] Build Purpose: {args.build_purpose}")
     print(f"[KB] Dry Run: {args.dry_run}")
-    print(f"[KB] Chunk 参数: size={args.chunk_size}, overlap={args.chunk_overlap}")
+    chunk_size = (
+        settings.knowledge_chunk_size
+        if args.chunk_size is None
+        else args.chunk_size
+    )
+    chunk_overlap = (
+        settings.knowledge_chunk_overlap
+        if args.chunk_overlap is None
+        else args.chunk_overlap
+    )
+    print(f"[KB] Chunk 参数: size={chunk_size}, overlap={chunk_overlap}")
     print(f"[KB] 支持文件数: {len(files)}")
     for suffix, count in sorted(extension_counts.items()):
         print(f"[KB] 文件类型 {suffix}: {count}")
     if not files:
         print("[KB] 没有发现可处理文件。")
         return 0
+
+    if args.build_purpose == "production" and not args.dry_run:
+        from core.knowledge_base.production_build import (
+            BUILD_PURPOSE_PRODUCTION,
+            build_production_generation,
+        )
+
+        try:
+            result = build_production_generation(
+                source_dir=source_dir,
+                logical_collection_name=collection_name,
+                chroma_dir=settings.chroma_dir,
+                embedding_model_path=settings.embedding_model_path,
+                chunk_size=settings.knowledge_chunk_size,
+                chunk_overlap=settings.knowledge_chunk_overlap,
+                embedding_batch_size=settings.embedding_batch_size,
+                query_prompt_name=settings.embedding_query_prompt_name or None,
+                purpose=BUILD_PURPOSE_PRODUCTION,
+                publish_active=True,
+            )
+            print(f"[KB] 生产 generation 构建完成: {result.generation_id}")
+            print(f"[KB] Dense collection: {result.dense_collection_name}")
+            print(f"[KB] active.json 已发布: {result.active_published}")
+            return 0
+        except Exception as exc:  # noqa: BLE001 - CLI 顶层错误报告
+            print(f"[KB] 生产 build 失败（旧 active 保持不变）: {exc}")
+            return 1
+
+    if args.build_purpose == "development" and not args.dry_run:
+        from core.knowledge_base.production_build import (
+            BUILD_PURPOSE_DEVELOPMENT,
+            build_production_generation,
+        )
+
+        try:
+            result = build_production_generation(
+                source_dir=source_dir,
+                logical_collection_name=collection_name,
+                chroma_dir=settings.chroma_dir,
+                embedding_model_path=settings.embedding_model_path,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                embedding_batch_size=settings.embedding_batch_size,
+                query_prompt_name=settings.embedding_query_prompt_name or None,
+                purpose=BUILD_PURPOSE_DEVELOPMENT,
+                publish_active=False,
+            )
+            print(f"[KB] 开发 generation 构建完成: {result.generation_id}")
+            print(f"[KB] Dense collection: {result.dense_collection_name}")
+            print(f"[KB] active.json 未发布（development 禁止）: {result.active_published}")
+            return 0
+        except Exception as exc:  # noqa: BLE001 - CLI 顶层错误报告
+            print(f"[KB] 开发 build 失败: {exc}")
+            return 1
 
     manager = None
     if not args.dry_run:
@@ -142,8 +231,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue
             chunks = split_documents(
                 documents,
-                chunk_size=args.chunk_size,
-                chunk_overlap=args.chunk_overlap,
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
                 ingest_batch_id=batch_id,
             )
             if not chunks:

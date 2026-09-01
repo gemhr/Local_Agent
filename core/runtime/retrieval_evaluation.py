@@ -21,6 +21,7 @@ from core.runtime.retrieval_contract import (
 )
 
 ARTIFACT_SCHEMA_VERSION = "rag-evaluation-artifact.v1"
+ARTIFACT_SCHEMA_VERSION_V2 = "rag-evaluation-artifact.v2"
 MAX_ARTIFACTS_PER_RUN = 16
 MAX_RETRIEVED_ITEMS = 64
 MAX_RANKED_ITEMS = 64
@@ -50,12 +51,19 @@ class RetrievalEvaluationChannel(str, Enum):
     VECTOR_ORIGINAL_QUERY = "VECTOR_ORIGINAL_QUERY"
     VECTOR_ORIGINAL_AND_REWRITTEN = "VECTOR_ORIGINAL_AND_REWRITTEN"
     KEYWORD = "KEYWORD"
+    # Stage5-Phase6-WP1 artifact v2：Hybrid 语义通道（WP1 只建立 schema/plumbing，
+    # BASELINE 不产生这些值）。
+    BM25 = "BM25"
+    RRF = "RRF"
 
 
 class RetrievalEvaluationScoreKind(str, Enum):
     VECTOR_NORMALIZED_RELEVANCE = "VECTOR_NORMALIZED_RELEVANCE"
     KEYWORD_FIXED_HEURISTIC = "KEYWORD_FIXED_HEURISTIC"
     HEURISTIC_RERANK = "HEURISTIC_RERANK"
+    # Stage5-Phase6-WP1 artifact v2：Hybrid 评分语义（WP1 只建立 schema/plumbing）。
+    BM25_RAW_SCORE = "BM25_RAW_SCORE"
+    RRF_SCORE = "RRF_SCORE"
 
 
 class RetrievalEvaluationCaptureStatus(str, Enum):
@@ -281,9 +289,13 @@ class RetrievalEvaluationSnapshot:
     degradation_reasons: tuple[str, ...]
     error: RetrievalEvaluationError | None
     budget_usage: RetrievalEvaluationBudgetUsage
+    # Stage5-Phase6-WP1 artifact v2：snapshot 级 Hybrid 能力字段（仅 schema/plumbing；
+    # BASELINE producer 不填充 BM25/RRF 通道值）。
+    retrieval_strategy: str | None = None
+    provenance_sha256: str | None = None
 
     def to_wire_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "artifact_id": self.artifact_id,
             "run_id": self.run_id,
@@ -305,6 +317,11 @@ class RetrievalEvaluationSnapshot:
             "error": self.error.to_wire_dict() if self.error else None,
             "budget_usage": self.budget_usage.to_wire_dict(),
         }
+        if self.retrieval_strategy is not None:
+            payload["retrieval_strategy"] = self.retrieval_strategy
+        if self.provenance_sha256 is not None:
+            payload["provenance_sha256"] = self.provenance_sha256
+        return payload
 
 
 @dataclass(slots=True)
@@ -324,11 +341,13 @@ class RetrievalEvaluationCaptureBuilder:
         invocation_index: int,
         invocation: RetrievalInvocation,
         max_context_chars: int,
+        retrieval_strategy: str = "BASELINE",
     ) -> None:
         self.run_id = run_id
         self.invocation_index = invocation_index
         self.invocation = invocation
         self.max_context_chars = max_context_chars
+        self.retrieval_strategy = retrieval_strategy
         self.rewritten_query = invocation.original_query
         self._observations: dict[str, _Observation] = {}
         self._retrieved: tuple[RetrievalEvaluationCandidateItem, ...] = ()
@@ -585,6 +604,7 @@ class RetrievalEvaluationCaptureBuilder:
                 document_reads=result.budget_usage.document_reads,
                 context_chars=result.budget_usage.context_chars,
             ),
+            retrieval_strategy=self.retrieval_strategy,
         )
 
 

@@ -168,7 +168,7 @@ def make_unified_rewrite_router(
 
 class ExplicitVectorDB:
     collection_name = "local-kb"
-    embedding_model_id = "fake-bge"
+    embedding_model_id = "fake-qwen3-embedding-0.6b"
 
     def __init__(self, *, embedding_failure: bool = False, empty: bool = False):
         self.embedding_failure = embedding_failure

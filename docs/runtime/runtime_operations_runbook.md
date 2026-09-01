@@ -19,6 +19,7 @@
 7. 执行 Offline Fake 或已批准的安全 smoke test；本地 RC smoke 不要求访问生产外部服务。
 8. 检查 Journal 可追加/读取、Observability health、Trace health 与进程内 gauges。
 9. 确认默认 Runtime 为 `COORDINATED`，请求只读取一次 mode。
+10. 检索策略（`LOCAL_AGENT_RETRIEVAL_STRATEGY`）在 startup 捕获一次：`BASELINE` 保持既有 v1 collection 行为；`HYBRID_RRF` 在 Router 构造前执行完整 active-generation provenance 校验（active.json schema → locator containment → manifest/provenance digest → Dense v2 marker → embedding asset-tree digest → BM25 artifact digest/冻结契约 → 共享 provenance 精确相等）。WP1 边界内即使校验通过也以 `RETRIEVAL_STRATEGY_NOT_IMPLEMENTED` 安全失败（Hybrid query 接线在 WP2），不回退 baseline；校验失败按 `knowledge_base_required` 决定 fail/degraded。启动绝不自动 rebuild、不重建 BM25 artifact、不修改 active.json。
 
 启动失败时禁止切换 Runtime 后重跑同一请求。配置异常保持 `SettingsValidationError` 固定安全码（`SETTINGS_PARSE_ERROR`/`SETTINGS_VALIDATION_ERROR`/`SETTINGS_SECURITY_POLICY_ERROR`/`STARTUP_CONFIGURATION_ERROR`），资源失败保持 `RUNTIME_INITIALIZATION_FAILED`；错误对象和日志不输出原始路径、密钥或 Provider URL。Legacy rollback 是修改 `CHAT_RUNTIME_MODE` 后重启并只影响新请求，不是某次失败后的动态动作。
 
@@ -301,6 +302,45 @@ binary-only rollback after schema migration = UNSAFE / NOT ASSUMED
 downgrade migration                         = NOT_IMPLEMENTED
 automatic deployment rollback               = NOT_IMPLEMENTED
 ```
+
+## KB Generation Build / Rollback Runbook（WP1）
+
+```text
+生产 generation 构建（默认 --build-purpose=production）：
+  uv run python scripts/bootstrap_local_kb.py
+  使用 Settings chunk policy（LOCAL_AGENT_KB_CHUNK_SIZE/OVERLAP）；
+  production 模式禁止 --chunk-size/--chunk-overlap（parser error）。
+
+开发 generation（不写 active.json，manifest 标记 purpose=development）：
+  uv run python scripts/bootstrap_local_kb.py --build-purpose=development --chunk-size 800 --chunk-overlap 100
+
+布局：
+  <LOCAL_AGENT_CHROMA_DIR>/localagent_retrieval/<collection_key>/
+    active.json
+    generations/<generation_id>/
+      retrieval_index_manifest.json
+      bm25_index.json
+      artifact_metadata.json
+
+发布契约：
+  - 每个 generation 使用独立物理 Dense collection：la_{collection_key}_g_{uuidhex}
+  - active.json 发布为原子替换（write temp → flush → fsync → os.replace）
+  - 失败 build 保持旧 active.json 不变；部分构建的 generation 不可达，可 operator 清理
+  - 启动绝不自动 rebuild / 重建 BM25 artifact / 修改 active.json
+```
+
+回滚（显式操作，无自动切换）：
+
+```text
+HYBRID_RRF 回滚到 BASELINE：
+  stop Server → LOCAL_AGENT_RETRIEVAL_STRATEGY=BASELINE → start（v1/v2 collection 均可 baseline 使用）
+
+切换/回退到另一个 generation：
+  operator 用同一协议写一份新的已校验 active descriptor（指向既有 validated generation）
+  → 旧 generation 保持可读，可手动清理（out of scope for WP1）
+```
+
+`HYBRID_RRF` 在 WP1 边界内即使 provenance 校验通过也以 `RETRIEVAL_STRATEGY_NOT_IMPLEMENTED` 安全失败；Hybrid query 接线在 WP2。v1 collection 对 Hybrid 是 `REBUILD_REQUIRED`（显式 rebuild，不自动迁移）。
 
 ## Migration vs Recovery
 

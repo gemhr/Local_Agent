@@ -41,10 +41,10 @@
     <node TEXT="知识层">
       <node TEXT="Document Loader">
         <node TEXT="md/txt/pdf/docx/xlsx/csv"/>
-        <node TEXT="chunk metadata schema v1"/>
+        <node TEXT="chunk metadata schema v2"/>
       </node>
       <node TEXT="VectorDBManager">
-        <node TEXT="BGE Embedding"/>
+        <node TEXT="Qwen3-Embedding-0.6B"/>
         <node TEXT="Chroma 分批 upsert"/>
       </node>
       <node TEXT="Local Knowledge Base">

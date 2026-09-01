@@ -182,7 +182,11 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_EVENT_JOURNAL_DB_PATH` | `data/database/runtime_event_journal.db` | Coordinated Runtime SQLite Journal |
 | `LOCAL_AGENT_SNAPSHOT_ENABLED` | `false` | 严格布尔值；启用 Snapshot 与 Recovery validation |
 | `LOCAL_AGENT_MEMORY_DB_PATH` | `data/database/agent_memory.db` | 业务 Memory SQLite 路径 |
-| `LOCAL_AGENT_CHROMA_DIR` | `chroma_db` | Chroma 持久化目录 |
+| `LOCAL_AGENT_CHROMA_DIR` | `chroma_db` | Chroma 持久化目录（含 `localagent_retrieval/<collection_key>/` generation 布局） |
+| `LOCAL_AGENT_KB_COLLECTION` | `huawei_wiki_collection` | 逻辑 KB collection 标签（非物理 generation 定位器） |
+| `LOCAL_AGENT_KB_CHUNK_SIZE` | `1400` | 生产 chunk policy chunk size；production 构建唯一 authority，production CLI 禁止覆盖 |
+| `LOCAL_AGENT_KB_CHUNK_OVERLAP` | `180` | 生产 chunk policy overlap；必须 `< chunk_size`（否则 fail closed） |
+| `LOCAL_AGENT_RETRIEVAL_STRATEGY` | `BASELINE` | 检索策略：`BASELINE`（默认）或 `HYBRID_RRF`（需要 v2 generation；WP1 边界内安全失败 `RETRIEVAL_STRATEGY_NOT_IMPLEMENTED`，Hybrid query 接线在 WP2） |
 | `LOCAL_AGENT_KB_REQUIRED` | Profile 默认：`LOCAL=0`、`TEST=0`、`PRODUCTION=1` | PRODUCTION 默认 KB 失败阻止启动；显式 `false` 才允许 degraded |
 | `LOCAL_AGENT_EMBEDDING_MODEL_PATH` | `data/models/Qwen3-Embedding-0.6B` | 本地 embedding 模型目录；相对路径按项目根目录解析，仅离线加载 |
 | `LOCAL_AGENT_BLOCKING_MAX_WORKERS` / `LOCAL_AGENT_BLOCKING_MAX_PENDING_TASKS` | `4` / `8` | 三个 lifespan 有界 executor 的统一容量 |
@@ -253,9 +257,24 @@ Invoke-WebRequest `
 本地知识库脚本：
 
 ```powershell
+# 生产 generation 构建（默认 --build-purpose=production）：
+# 使用 Settings chunk policy（LOCAL_AGENT_KB_CHUNK_SIZE/OVERLAP），
+# 构建隔离的 Dense collection + BM25 artifact，全量验证后原子发布 active.json。
+# production 模式禁止提供 --chunk-size/--chunk-overlap。
 uv run python scripts/bootstrap_local_kb.py
+
+# 开发 generation（允许覆盖 chunk 参数；不写 active.json，manifest 标记 purpose=development）：
+uv run python scripts/bootstrap_local_kb.py --build-purpose=development --chunk-size 800 --chunk-overlap 100
+
 uv run python scripts/query_local_kb.py "检索问题"
 ```
+
+生产 generation 说明：
+
+- 每个 generation 是独立的物理 Dense Chroma collection（`la_{collection_key}_g_{uuidhex}`）与不可变 generation 目录（`<LOCAL_AGENT_CHROMA_DIR>/localagent_retrieval/<collection_key>/generations/<generation_id>/`）。
+- `active.json` 是 active-generation 指针，发布为原子替换（write temp → fsync → os.replace）；失败 build 保持旧 active 不变。
+- `LOCAL_AGENT_RETRIEVAL_STRATEGY=BASELINE`（默认）继续使用现有 v1 collection 行为；`HYBRID_RRF` 需要完整 v2 generation（v1 collection 必须显式 rebuild），且 WP1 边界内以 `RETRIEVAL_STRATEGY_NOT_IMPLEMENTED` 安全失败——Hybrid query 执行在 WP2 接线。
+- 启动绝不自动 rebuild / 重建 BM25 artifact / 修改 active.json；回滚是显式的 active-generation / 配置操作。
 
 ## 8. 数据与安全边界
 

@@ -627,8 +627,9 @@ Chroma internal schema migration = NOT_LOCAL_SCHEMA_OWNER
 
 LocalAgent 不读取/不修改 Chroma internal SQLite schema。LocalAgent 拥有 collection/chunk/embedding compatibility contract：
 空 collection 可初始化 marker；非空缺 marker / digest / dimension mismatch → REBUILD_REQUIRED（required KB 阻止 READY，显式 optional KB 允许 READY_DEGRADED）。Startup 绝不自动 clear/rebuild。
-`bootstrap_local_kb.py --rebuild` 是唯一 operator-triggered destructive rebuild：invalidate/remove marker → destructive clear → ingest complete source → verify → **最后发布匹配 marker**；任何失败不得保留“看似有效”的旧 marker。
+`bootstrap_local_kb.py` 是唯一 operator-triggered build：`--build-purpose=production`（默认）使用 Settings chunk policy，构建隔离 generation（物理 Dense collection + BM25 artifact），全量验证后原子发布 active.json；`--build-purpose=development` 允许 chunk 覆盖但 manifest 标记 `purpose=development` 且禁止写 active.json。
 `embedding_compatibility_digest` 是 configured compatibility descriptor digest（embedding identity / normalization / query prompt 的 canonical JSON → SHA-256），不是 model artifact 的 cryptographic attestation；raw path 不持久化。
+Stage5-Phase6-WP1（检索 provenance 契约）：Chroma marker 演进到 v2（`localagent_collection_contract_version=2`）。v2 增加 `generation_id`、`provenance_contract_version`、`provenance_sha256`、`corpus_id`、`source_manifest_sha256`、`chunk_policy_sha256`、`chunk_manifest_sha256`、document/chunk counts、`embedding_asset_tree_sha256`。v1 collection 对 BASELINE 仍合法；对 HYBRID_RRF 一律 REBUILD_REQUIRED（不自动迁移、不从 chunk rows 推断 provenance）。`LOCAL_AGENT_RETRIEVAL_STRATEGY`（默认 BASELINE）在 lifespan 捕获一次；HYBRID_RRF 需要完整 v2 generation，WP1 边界内校验通过仍以 `RETRIEVAL_STRATEGY_NOT_IMPLEMENTED` 安全失败（Hybrid query 接线在 WP2）。完整描述见 `runtime_operations_runbook.md` 的 KB Generation Build / Rollback Runbook。
 
 ### 11.5 Backup / Restore / Rollback Contract
 

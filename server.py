@@ -139,7 +139,12 @@ from core.runtime.tool_governance import (
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from core.runtime.agent_evalops_trace_exporter import AgentEvalOpsTraceExporter
 from core.runtime.trace_export_dispatcher import TraceExportDispatcher
-from core.settings import SERVER_ROLE, Settings, validate_role_configuration
+from core.settings import (
+    SERVER_ROLE,
+    RetrievalStrategy,
+    Settings,
+    validate_role_configuration,
+)
 from tools.registry import register_all_tools
 
 # WP4-C：AgentEvalOps trace export dispatcher 的 code-owned bounded queue 容量
@@ -477,12 +482,30 @@ async def lifespan(app: FastAPI):
     )
     db_manager = None
     knowledge_base_error = None
+    hybrid_validated_generation = None
     if VectorDBManager is not None:
         try:
+            collection_name = settings.knowledge_collection_name
+            hybrid_descriptor = None
+            if settings.retrieval_strategy is RetrievalStrategy.HYBRID_RRF:
+                from core.runtime.hybrid_provenance_validator import (
+                    HybridProvenanceValidationError,
+                    load_active_hybrid_descriptor,
+                )
+
+                try:
+                    hybrid_descriptor = load_active_hybrid_descriptor(
+                        chroma_dir=settings.chroma_dir,
+                        logical_collection_name=settings.knowledge_collection_name,
+                    )
+                except HybridProvenanceValidationError as exc:
+                    knowledge_base_error = exc.safe_error_code
+                    raise _ChromaRebuildRequiredError() from exc
+                collection_name = hybrid_descriptor.dense_collection_name
             db_manager = VectorDBManager(
                 db_persist_dir=settings.chroma_dir,
                 local_model_path=settings.embedding_model_path,
-                collection_name=settings.knowledge_collection_name,
+                collection_name=collection_name,
                 embedding_batch_size=settings.embedding_batch_size,
                 query_prompt_name=settings.embedding_query_prompt_name or None,
             )
@@ -490,11 +513,70 @@ async def lifespan(app: FastAPI):
             # 允许 startup marker initialization；非空不匹配/缺 marker →
             # REBUILD_REQUIRED（required KB 阻止 READY，optional KB 走 degraded）。
             # startup 绝不自动 clear / rebuild。
-            chroma_preflight = db_manager.collection_preflight()
-            if chroma_preflight.status is PreflightStatus.NEW:
-                db_manager.publish_collection_marker()
-            elif chroma_preflight.status is PreflightStatus.REBUILD_REQUIRED:
-                raise _ChromaRebuildRequiredError()
+            if settings.retrieval_strategy is RetrievalStrategy.HYBRID_RRF:
+                # WP1：HYBRID_RRF 在 Router 构造前完成完整 provenance 校验；
+                # WP2 尚未接线 Hybrid query graph，因此校验成功后仍以
+                # RETRIEVAL_STRATEGY_NOT_IMPLEMENTED 安全失败，绝不路由 Hybrid。
+                from core.runtime.hybrid_provenance_validator import (
+                    RETRIEVAL_STRATEGY_NOT_IMPLEMENTED,
+                    HybridProvenanceValidationError,
+                    validate_active_hybrid_generation,
+                )
+
+                try:
+                    hybrid_validated_generation = validate_active_hybrid_generation(
+                        db_manager=db_manager,
+                        chroma_dir=settings.chroma_dir,
+                        logical_collection_name=settings.knowledge_collection_name,
+                        embedding_model_path=settings.embedding_model_path,
+                        descriptor=hybrid_descriptor,
+                    )
+                except HybridProvenanceValidationError as exc:
+                    knowledge_base_error = exc.safe_error_code
+                    if settings.knowledge_base_required:
+                        await initialization_stack.fail(
+                            RuntimeInitializationError("knowledge_base")
+                        )
+                    logger.warning(
+                        "Hybrid retrieval provenance validation failed safely",
+                        extra={
+                            "safe_error_code": knowledge_base_error,
+                            "component": "knowledge_base",
+                            "phase": "initialization",
+                            "status": "FAILED",
+                            "configured": True,
+                            "storage_type": "chroma",
+                            "retrieval_strategy": "HYBRID_RRF",
+                        },
+                    )
+                else:
+                    # 校验通过：WP2 尚未实现 query graph，因此本 WP 边界内
+                    # HYBRID_RRF 仍不能 READY（安全失败，不选 baseline）。
+                    knowledge_base_error = RETRIEVAL_STRATEGY_NOT_IMPLEMENTED
+                    if settings.knowledge_base_required:
+                        await initialization_stack.fail(
+                            RuntimeInitializationError("knowledge_base")
+                        )
+                    logger.warning(
+                        "Hybrid retrieval strategy not implemented in WP1",
+                        extra={
+                            "safe_error_code": RETRIEVAL_STRATEGY_NOT_IMPLEMENTED,
+                            "component": "knowledge_base",
+                            "phase": "initialization",
+                            "status": "FAILED",
+                            "configured": True,
+                            "storage_type": "chroma",
+                            "retrieval_strategy": "HYBRID_RRF",
+                        },
+                    )
+                if knowledge_base_error is not None:
+                    raise _ChromaRebuildRequiredError()
+            else:
+                chroma_preflight = db_manager.collection_preflight()
+                if chroma_preflight.status is PreflightStatus.NEW:
+                    db_manager.publish_collection_marker()
+                elif chroma_preflight.status is PreflightStatus.REBUILD_REQUIRED:
+                    raise _ChromaRebuildRequiredError()
             logger.info(
                 "Knowledge base runtime initialized",
                 extra={
@@ -504,11 +586,16 @@ async def lifespan(app: FastAPI):
                     "configured": True,
                     "storage_type": "chroma",
                     "document_count": db_manager.count(),
-                    "collection_status": chroma_preflight.status.value,
+                    "collection_status": (
+                        "current"
+                        if settings.retrieval_strategy is RetrievalStrategy.HYBRID_RRF
+                        else chroma_preflight.status.value
+                    ),
                 },
             )
         except _ChromaRebuildRequiredError:
-            knowledge_base_error = "KNOWLEDGE_BASE_REBUILD_REQUIRED"
+            if knowledge_base_error is None:
+                knowledge_base_error = "KNOWLEDGE_BASE_REBUILD_REQUIRED"
             if settings.knowledge_base_required:
                 await initialization_stack.fail(
                     RuntimeInitializationError("knowledge_base")
