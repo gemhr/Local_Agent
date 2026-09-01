@@ -145,6 +145,28 @@ class RuntimeProfile(str, Enum):
             raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, "LOCAL_AGENT_RUNTIME_PROFILE", "unknown_profile") from None
 
 
+class RetrievalStrategy(str, Enum):
+    """生产检索策略（WP1 冻结：默认 BASELINE，不做隐式选择）。"""
+
+    BASELINE = "BASELINE"
+    HYBRID_RRF = "HYBRID_RRF"
+
+    @classmethod
+    def parse(cls, value: object) -> "RetrievalStrategy":
+        if value is None:
+            return cls.BASELINE
+        if not isinstance(value, str) or not value.strip():
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR, "LOCAL_AGENT_RETRIEVAL_STRATEGY", "invalid_strategy"
+            )
+        try:
+            return cls(value.strip().upper())
+        except ValueError:
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR, "LOCAL_AGENT_RETRIEVAL_STRATEGY", "unknown_strategy"
+            ) from None
+
+
 def _env_strict_bool(name: str, default: bool) -> bool:
     """显式 bool 严格解析：只接受 1/0/true/false，其余显式值 fail closed。"""
     raw = os.getenv(name)
@@ -652,6 +674,9 @@ class Settings:
     runtime_component_close_timeout_seconds: float
     metrics_tool_name_allowlist: tuple[str, ...]
     knowledge_collection_name: str
+    knowledge_chunk_size: int
+    knowledge_chunk_overlap: int
+    retrieval_strategy: RetrievalStrategy
     rag_top_k: int
     rag_min_score: float
     rag_doc_max_chars: int
@@ -812,6 +837,19 @@ class Settings:
                 SETTINGS_VALIDATION_ERROR,
                 "LOCAL_AGENT_STEP_RESULT_RUN_TOTAL_CHARS",
                 "run_total_below_per_result",
+            )
+
+        knowledge_chunk_size = _env_strict_int(
+            "LOCAL_AGENT_KB_CHUNK_SIZE", 1400, minimum=1
+        )
+        knowledge_chunk_overlap = _env_strict_int(
+            "LOCAL_AGENT_KB_CHUNK_OVERLAP", 180, minimum=0
+        )
+        if knowledge_chunk_overlap >= knowledge_chunk_size:
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_KB_CHUNK_OVERLAP",
+                "overlap_not_below_size",
             )
 
         # DEPRECATED env 只产生一次安全 warning，不改变行为。
@@ -1059,6 +1097,11 @@ class Settings:
             ),
             knowledge_collection_name=os.getenv(
                 "LOCAL_AGENT_KB_COLLECTION", "huawei_wiki_collection"
+            ),
+            knowledge_chunk_size=knowledge_chunk_size,
+            knowledge_chunk_overlap=knowledge_chunk_overlap,
+            retrieval_strategy=RetrievalStrategy.parse(
+                os.getenv("LOCAL_AGENT_RETRIEVAL_STRATEGY")
             ),
             rag_top_k=_env_strict_int(
                 "LOCAL_AGENT_RAG_TOP_K", preset["rag_top_k"], minimum=1

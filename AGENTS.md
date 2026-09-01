@@ -47,6 +47,7 @@
 - 以 Windows PowerShell 和 `uv` 为标准工作流；Python 版本以 `pyproject.toml` 为准。
 - 不手工创建虚拟环境，不执行 `source`，不使用裸 `python server.py` 绕过项目环境。
 - `pyproject.toml` 当前含本机 wheel 引用，这是已有的环境专属依赖；不得为让另一台机器安装通过而擅自改写，调整它必须作为明确的依赖任务审查。
+- 如果要真实启动后端调用模型，就读取"D:\PythonProject\Local_Agent\.ai\setup.md"这个文件，其中包含了必须要提前写入的环境变量，写入后就可以正确启动。
 
 ```powershell
 uv sync

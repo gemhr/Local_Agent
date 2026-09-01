@@ -27,12 +27,27 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 
 
-MARKER_COLLECTION_CONTRACT_VERSION = 1
+MARKER_COLLECTION_CONTRACT_VERSION = 2
+MARKER_CONTRACT_V1 = 1
 _MARKER_KEYS = (
     "localagent_collection_contract_version",
     "chunk_schema_version",
     "embedding_compatibility_digest",
     "embedding_dimension",
+)
+_V2_MARKER_KEYS = (
+    "generation_id",
+    "provenance_contract_version",
+    "provenance_sha256",
+    "corpus_id",
+    "source_manifest_sha256",
+    "chunk_policy_sha256",
+    "chunk_manifest_sha256",
+    "document_count",
+    "chunk_count",
+    "embedding_asset_tree_sha256",
+    "normalize_embeddings",
+    "query_prompt_name",
 )
 _EMBEDDING_DIMENSION_PROBE_TEXT = "localagent-embedding-dimension-probe"
 
@@ -150,6 +165,86 @@ class VectorDBManager:
             "embedding_dimension": self.embedding_dimension(),
         }
 
+    # ------------------------------------------------------------------
+    # WP1 v2 Hybrid-compatible generation marker
+    # ------------------------------------------------------------------
+
+    def expected_v2_collection_marker(
+        self,
+        *,
+        generation_id: str,
+        provenance_contract_version: str,
+        provenance_sha256: str,
+        corpus_id: str,
+        source_manifest_sha256: str,
+        chunk_policy_sha256: str,
+        chunk_manifest_sha256: str,
+        document_count: int,
+        chunk_count: int,
+        embedding_asset_tree_sha256: str,
+    ) -> Dict[str, Any]:
+        """构造完整 v2 marker（v1 字段 + 冻结的 v2 provenance 字段）。"""
+        marker = self.expected_collection_marker()
+        marker.update(
+            {
+                "generation_id": generation_id,
+                "provenance_contract_version": provenance_contract_version,
+                "provenance_sha256": provenance_sha256,
+                "corpus_id": corpus_id,
+                "source_manifest_sha256": source_manifest_sha256,
+                "chunk_policy_sha256": chunk_policy_sha256,
+                "chunk_manifest_sha256": chunk_manifest_sha256,
+                "document_count": int(document_count),
+                "chunk_count": int(chunk_count),
+                "embedding_asset_tree_sha256": embedding_asset_tree_sha256,
+                "normalize_embeddings": True,
+                "query_prompt_name": self._query_prompt_name or "",
+            }
+        )
+        return marker
+
+    def read_v2_collection_marker(self) -> Dict[str, Any]:
+        """读取 v2 marker 字段；缺失或非 dict 返回空 dict。"""
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None:
+            return {}
+        metadata = dict(collection.metadata or {})
+        return {key: metadata[key] for key in _V2_MARKER_KEYS if key in metadata}
+
+    def marker_contract_version(self) -> int | None:
+        """当前 collection marker 的契约版本；无 marker 返回 None。"""
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None:
+            return None
+        metadata = dict(collection.metadata or {})
+        value = metadata.get("localagent_collection_contract_version")
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value
+
+    def _v2_marker_matches(
+        self,
+        expected: Dict[str, Any],
+    ) -> tuple[bool, list[str]]:
+        """v2 marker 全等比较；返回 (ok, mismatched keys)。
+
+        只比较 v2 冻结字段（含 v1 基础字段），忽略非 LocalAgent 元数据。
+        """
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None:
+            return False, list(expected)
+        metadata = dict(collection.metadata or {})
+        all_marker_keys = _MARKER_KEYS + _V2_MARKER_KEYS
+        missing = [key for key in all_marker_keys if key not in metadata]
+        if missing:
+            return False, missing
+        mismatched = [
+            key
+            for key in all_marker_keys
+            if key in expected and metadata.get(key) != expected[key]
+        ]
+        return not mismatched, mismatched
+
     def read_collection_marker(self) -> Dict[str, Any]:
         collection = getattr(self.vector_store, "_collection", None)
         if collection is None:
@@ -161,17 +256,35 @@ class VectorDBManager:
 
     def publish_collection_marker(self) -> None:
         """整体 metadata replace（read-modify-merge）：保留非 LocalAgent 元数据，
-        只写入本 WP 的 marker 字段。"""
+        只写入 v1 基础 marker 字段。"""
         collection = getattr(self.vector_store, "_collection", None)
         if collection is None:
             raise RuntimeError("collection unavailable")
         existing = dict(collection.metadata or {})
-        merged = {key: value for key, value in existing.items() if key not in _MARKER_KEYS}
+        merged = {
+            key: value
+            for key, value in existing.items()
+            if key not in _MARKER_KEYS and key not in _V2_MARKER_KEYS
+        }
         merged.update(self.expected_collection_marker())
         collection.modify(metadata=merged)
 
+    def publish_v2_collection_marker(self, expected: Dict[str, Any]) -> None:
+        """发布完整 v2 marker（read-modify-merge，保留非 LocalAgent 元数据）。"""
+        collection = getattr(self.vector_store, "_collection", None)
+        if collection is None:
+            raise RuntimeError("collection unavailable")
+        existing = dict(collection.metadata or {})
+        merged = {
+            key: value
+            for key, value in existing.items()
+            if key not in _MARKER_KEYS and key not in _V2_MARKER_KEYS
+        }
+        merged.update(expected)
+        collection.modify(metadata=merged)
+
     def remove_collection_marker(self) -> None:
-        """只移除 LocalAgent marker 字段，保留其他元数据。
+        """只移除 LocalAgent marker 字段（v1+v2），保留其他元数据。
 
         Chroma 不允许空 metadata dict；若移除后 metadata 为空，写入 sentinel
         invalid marker，保证 collection 不再“看起来有效”（后续 preflight 判定
@@ -182,7 +295,9 @@ class VectorDBManager:
             return
         existing = dict(collection.metadata or {})
         merged = {
-            key: value for key, value in existing.items() if key not in _MARKER_KEYS
+            key: value
+            for key, value in existing.items()
+            if key not in _MARKER_KEYS and key not in _V2_MARKER_KEYS
         }
         if not merged:
             collection.modify(
@@ -191,9 +306,23 @@ class VectorDBManager:
             return
         collection.modify(metadata=merged)
 
-    def collection_preflight(self) -> PersistencePreflightResult:
-        """Startup marker validation。空 collection 允许初始化 marker；
-        非空缺 marker / mismatch → REBUILD_REQUIRED；匹配 → CURRENT。"""
+    def collection_preflight(
+        self,
+        *,
+        hybrid_required: bool = False,
+        expected_v2_marker: Dict[str, Any] | None = None,
+    ) -> PersistencePreflightResult:
+        """Startup marker validation（WP1 strategy-aware）。
+
+        - 空 collection：NEW/INITIALIZE（仍允许初始化 v1 marker）。
+        - 非空 collection：
+          - baseline（``hybrid_required=False``）：v1 或 v2 marker 都维持 CURRENT；
+            v1 是 legacy baseline 合法，v2 是已验证 generation 合法；缺 marker /
+            mismatch → REBUILD_REQUIRED。
+          - hybrid（``hybrid_required=True``）：只接受完整 v2 marker 且与
+            ``expected_v2_marker`` 全等；v1 collection 一律 REBUILD_REQUIRED，
+            绝不从 chunk rows 推断 provenance（无自动迁移/重建）。
+        """
         collection = getattr(self.vector_store, "_collection", None)
         if collection is None:
             return PersistencePreflightResult(
@@ -221,8 +350,45 @@ class VectorDBManager:
                 detected_version="unmarked",
                 target_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
             )
+        if hybrid_required:
+            if self.marker_contract_version() != MARKER_COLLECTION_CONTRACT_VERSION:
+                return PersistencePreflightResult(
+                    store_id=StoreId.CHROMA,
+                    status=PreflightStatus.REBUILD_REQUIRED,
+                    action=MigrationAction.REBUILD,
+                    detected_version="v1-incompatible",
+                    target_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+                )
+            if expected_v2_marker is None:
+                raise ValueError("hybrid preflight requires expected_v2_marker")
+            ok, mismatched = self._v2_marker_matches(expected_v2_marker)
+            if not ok:
+                return PersistencePreflightResult(
+                    store_id=StoreId.CHROMA,
+                    status=PreflightStatus.REBUILD_REQUIRED,
+                    action=MigrationAction.REBUILD,
+                    detected_version="v2-mismatch",
+                    target_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+                )
+            return PersistencePreflightResult(
+                store_id=StoreId.CHROMA,
+                status=PreflightStatus.CURRENT,
+                action=MigrationAction.NONE,
+                detected_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+                target_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+            )
         expected = self.expected_collection_marker()
         if marker != expected:
+            # baseline：v1 marker 合法（legacy baseline）；v2 marker 已是
+            # 已验证 generation（v1 digest 字段与 expected 不一致是预期）。
+            if self.marker_contract_version() in (MARKER_CONTRACT_V1, MARKER_COLLECTION_CONTRACT_VERSION):
+                return PersistencePreflightResult(
+                    store_id=StoreId.CHROMA,
+                    status=PreflightStatus.CURRENT,
+                    action=MigrationAction.NONE,
+                    detected_version=str(self.marker_contract_version()),
+                    target_version=str(MARKER_COLLECTION_CONTRACT_VERSION),
+                )
             return PersistencePreflightResult(
                 store_id=StoreId.CHROMA,
                 status=PreflightStatus.REBUILD_REQUIRED,

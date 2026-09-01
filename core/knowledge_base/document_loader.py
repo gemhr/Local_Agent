@@ -45,6 +45,33 @@ EXCLUDED_DIRECTORY_NAMES = {
 }
 SCHEMA_VERSION = "kb_chunk_schema_v2"
 
+# Stage5-Phase6-WP1：冻结的稳定 splitter / content-format refs（只导出，不改变切分行为）。
+SPLITTER_REF = "structure-aware-splitter.v2"
+CHUNK_CONTENT_FORMAT_REF = "kb-content-format.v1"
+
+
+def chunk_policy_from(
+    *,
+    chunk_size: int,
+    chunk_overlap: int,
+    chunk_schema_version: str = SCHEMA_VERSION,
+    splitter_ref: str = SPLITTER_REF,
+    chunk_content_format_ref: str = CHUNK_CONTENT_FORMAT_REF,
+) -> dict[str, object]:
+    """构造 canonical chunk policy descriptor（由生产 build 使用）。
+
+    只描述 chunk 策略，不执行切分；校验与 ``retrieval_index_provenance`` 一致。
+    """
+    from core.knowledge_base.retrieval_index_provenance import build_chunk_policy_descriptor
+
+    return build_chunk_policy_descriptor(
+        chunk_schema_version=chunk_schema_version,
+        splitter_ref=splitter_ref,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        chunk_content_format_ref=chunk_content_format_ref,
+    )
+
 
 def _normalize_text(text: str) -> str:
     """统一换行和尾部空白，同时保留代码与配置的行首缩进。"""

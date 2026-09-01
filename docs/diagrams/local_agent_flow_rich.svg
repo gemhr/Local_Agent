@@ -138,7 +138,7 @@
 
   <rect x="420" y="805" width="260" height="120" rx="12" fill="url(#boxPurple)" filter="url(#shadow)"/>
   <text x="550" y="842" text-anchor="middle" font-family="Segoe UI, Arial" font-size="18" fill="white" font-weight="700">VectorDBManager</text>
-  <text x="550" y="865" text-anchor="middle" font-family="Segoe UI, Arial" font-size="13" fill="#ede9fe">BGE Embedding + Chroma</text>
+  <text x="550" y="865" text-anchor="middle" font-family="Segoe UI, Arial" font-size="13" fill="#ede9fe">Qwen3-Embedding-0.6B + Chroma</text>
   <text x="550" y="887" text-anchor="middle" font-family="Segoe UI, Arial" font-size="13" fill="#ede9fe">分批 upsert + 去重写入</text>
 
   <rect x="755" y="805" width="290" height="120" rx="12" fill="url(#boxPurple)" filter="url(#shadow)"/>

@@ -813,3 +813,55 @@ def test_artifact_count_limit_fail_closed_partial() -> None:
     assert capture_status is RetrievalEvaluationCaptureStatus.PARTIAL
     assert error_code == "RAG_EVALUATION_ARTIFACT_LIMIT_EXCEEDED"
     assert len(snapshots) == MAX_ARTIFACTS_PER_RUN
+
+
+# ---------------------------------------------------------------------------
+# Stage5-Phase6-WP1 artifact v2 schema/plumbing（producer 侧）
+# ---------------------------------------------------------------------------
+
+
+def test_v2_schema_constants_and_enums_exist() -> None:
+    from core.runtime.retrieval_evaluation import (
+        ARTIFACT_SCHEMA_VERSION_V2,
+        RetrievalEvaluationChannel,
+        RetrievalEvaluationScoreKind,
+    )
+
+    assert ARTIFACT_SCHEMA_VERSION_V2 == "rag-evaluation-artifact.v2"
+    assert RetrievalEvaluationChannel.BM25.value == "BM25"
+    assert RetrievalEvaluationChannel.RRF.value == "RRF"
+    assert RetrievalEvaluationScoreKind.BM25_RAW_SCORE.value == "BM25_RAW_SCORE"
+    assert RetrievalEvaluationScoreKind.RRF_SCORE.value == "RRF_SCORE"
+
+
+def test_baseline_snapshot_carries_truthful_strategy() -> None:
+    """BASELINE producer 必须诚实标记 retrieval_strategy=BASELINE，且不填充
+    BM25/RRF 通道值（不伪造 Hybrid 执行事实）。"""
+    invocation = RetrievalInvocation.create(
+        "q",
+        collection_names=("kb",),
+        top_k=1,
+        rerank_top_k=1,
+        requested_timeout_seconds=2.0,
+        retrieval_id="baseline",
+    )
+    builder = RetrievalEvaluationCaptureBuilder(
+        run_id="r", invocation_index=1, invocation=invocation, max_context_chars=32_768
+    )
+    candidate = _candidate("c0", 0.9, 1)
+    builder.observe_candidates(
+        [candidate], RetrievalEvaluationChannel.VECTOR_REWRITTEN_QUERY
+    )
+    builder.capture_retrieved([candidate])
+    builder.capture_ranked([candidate], reranked=True)
+    result = _synthetic_result(invocation, (_chunk("c0"),))
+    snapshot = builder.finalize(result)
+    assert snapshot.retrieval_strategy == "BASELINE"
+    assert snapshot.provenance_sha256 is None
+    wire = snapshot.to_wire_dict()
+    assert wire["retrieval_strategy"] == "BASELINE"
+    assert "provenance_sha256" not in wire
+    channels = set()
+    for item in snapshot.retrieved_items:
+        channels.update(item.retrieval_channels)
+    assert "BM25" not in channels and "RRF" not in channels
