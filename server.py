@@ -327,6 +327,27 @@ class _ChromaRebuildRequiredError(RuntimeError):
     """内部信号：Chroma collection 缺 marker 或 marker mismatch，需 operator rebuild。"""
 
 
+def _retrieval_evaluation_collector(run_id: str):
+    """构造携带真实 strategy / provenance 身份的 evaluation sidecar collector。
+
+    provenance 只在 validated Hybrid generation 存在时填充；BASELINE 不伪造
+    Hybrid provenance（truthful emission，WP2 冻结 §22）。
+    """
+    generation = (
+        application_runtime_services.hybrid_validated_generation
+        if application_runtime_services is not None
+        else None
+    )
+    provenance_sha256 = (
+        generation.provenance_sha256 if generation is not None else None
+    )
+    return RetrievalEvaluationCollector(
+        run_id,
+        retrieval_strategy=settings.retrieval_strategy.value,
+        provenance_sha256=provenance_sha256,
+    )
+
+
 def _publish_compatibility_handles(app: FastAPI, service, services) -> None:
     """Publish identical application-scope compatibility handles."""
     global application_runtime_services, chat_service
@@ -499,7 +520,22 @@ async def lifespan(app: FastAPI):
                         logical_collection_name=settings.knowledge_collection_name,
                     )
                 except HybridProvenanceValidationError as exc:
-                    knowledge_base_error = exc.safe_error_code
+                    # WP2 冻结（decision §17）：Hybrid 依赖不可用 → 请求路径
+                    # 统一 fail closed 为 HYBRID_STRATEGY_UNAVAILABLE；具体
+                    # 原因只进 startup safe log。
+                    knowledge_base_error = "HYBRID_STRATEGY_UNAVAILABLE"
+                    logger.warning(
+                        "Hybrid active descriptor validation failed safely",
+                        extra={
+                            "safe_error_code": exc.safe_error_code,
+                            "component": "knowledge_base",
+                            "phase": "initialization",
+                            "status": "FAILED",
+                            "configured": True,
+                            "storage_type": "chroma",
+                            "retrieval_strategy": "HYBRID_RRF",
+                        },
+                    )
                     raise _ChromaRebuildRequiredError() from exc
                 collection_name = hybrid_descriptor.dense_collection_name
             db_manager = VectorDBManager(
@@ -514,11 +550,10 @@ async def lifespan(app: FastAPI):
             # REBUILD_REQUIRED（required KB 阻止 READY，optional KB 走 degraded）。
             # startup 绝不自动 clear / rebuild。
             if settings.retrieval_strategy is RetrievalStrategy.HYBRID_RRF:
-                # WP1：HYBRID_RRF 在 Router 构造前完成完整 provenance 校验；
-                # WP2 尚未接线 Hybrid query graph，因此校验成功后仍以
-                # RETRIEVAL_STRATEGY_NOT_IMPLEMENTED 安全失败，绝不路由 Hybrid。
+                # WP2：HYBRID_RRF 在 Router 构造前完成完整 provenance 校验；
+                # 校验成功后构造 application-scoped Hybrid 依赖（已打开的
+                # generation Dense manager + 已加载 BM25 index），生产可达。
                 from core.runtime.hybrid_provenance_validator import (
-                    RETRIEVAL_STRATEGY_NOT_IMPLEMENTED,
                     HybridProvenanceValidationError,
                     validate_active_hybrid_generation,
                 )
@@ -532,7 +567,7 @@ async def lifespan(app: FastAPI):
                         descriptor=hybrid_descriptor,
                     )
                 except HybridProvenanceValidationError as exc:
-                    knowledge_base_error = exc.safe_error_code
+                    knowledge_base_error = "HYBRID_STRATEGY_UNAVAILABLE"
                     if settings.knowledge_base_required:
                         await initialization_stack.fail(
                             RuntimeInitializationError("knowledge_base")
@@ -540,7 +575,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(
                         "Hybrid retrieval provenance validation failed safely",
                         extra={
-                            "safe_error_code": knowledge_base_error,
+                            "safe_error_code": exc.safe_error_code,
                             "component": "knowledge_base",
                             "phase": "initialization",
                             "status": "FAILED",
@@ -550,25 +585,7 @@ async def lifespan(app: FastAPI):
                         },
                     )
                 else:
-                    # 校验通过：WP2 尚未实现 query graph，因此本 WP 边界内
-                    # HYBRID_RRF 仍不能 READY（安全失败，不选 baseline）。
-                    knowledge_base_error = RETRIEVAL_STRATEGY_NOT_IMPLEMENTED
-                    if settings.knowledge_base_required:
-                        await initialization_stack.fail(
-                            RuntimeInitializationError("knowledge_base")
-                        )
-                    logger.warning(
-                        "Hybrid retrieval strategy not implemented in WP1",
-                        extra={
-                            "safe_error_code": RETRIEVAL_STRATEGY_NOT_IMPLEMENTED,
-                            "component": "knowledge_base",
-                            "phase": "initialization",
-                            "status": "FAILED",
-                            "configured": True,
-                            "storage_type": "chroma",
-                            "retrieval_strategy": "HYBRID_RRF",
-                        },
-                    )
+                    logger.info("Hybrid retrieval dependencies validated", extra={"component": "knowledge_base", "phase": "initialization", "status": "COMPLETED", "retrieval_strategy": "HYBRID_RRF"})
                 if knowledge_base_error is not None:
                     raise _ChromaRebuildRequiredError()
             else:
@@ -797,6 +814,8 @@ async def lifespan(app: FastAPI):
             tool_registry=tool_registry,
             tool_governance_service=tool_governance_service,
             resource_authorization_service=resource_authorization_service,
+            retrieval_strategy=settings.retrieval_strategy.value,
+            hybrid_generation=hybrid_validated_generation,
         ),
     )
     runtime_metrics = InMemoryMetricsRecorder(
@@ -882,6 +901,7 @@ async def lifespan(app: FastAPI):
                 router.tool_execution_service.concurrency_controller,
             ),
             run_registry=run_registry,
+            hybrid_validated_generation=hybrid_validated_generation,
             coordinated_step_executor=coordinated_step_executor,
             legacy_step_executor=legacy_step_executor,
             trace_export_dispatcher=trace_export_dispatcher,
@@ -1658,7 +1678,7 @@ async def runtime_evaluation_execute_endpoint(payload: RuntimeExecuteRequest):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
 
-    collector = RetrievalEvaluationCollector(payload.run_id)
+    collector = _retrieval_evaluation_collector(payload.run_id)
     token = install_retrieval_evaluation_collector(collector)
     try:
         try:
@@ -1751,7 +1771,7 @@ async def runtime_evaluation_execute_v2_endpoint(payload: RuntimeExecuteRequest)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
 
-    collector = RetrievalEvaluationCollector(payload.run_id)
+    collector = _retrieval_evaluation_collector(payload.run_id)
     token = install_retrieval_evaluation_collector(collector)
     try:
         try:

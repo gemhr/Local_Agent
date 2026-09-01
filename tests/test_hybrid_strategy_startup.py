@@ -1,8 +1,4 @@
-"""Stage5-Phase6-WP1 HYBRID_RRF startup boundary focused tests.
-
-验证：WP1 不使 Hybrid query execution 生产可达。HYBRID_RRF 在完整 provenance
-校验后仍以 RETRIEVAL_STRATEGY_NOT_IMPLEMENTED 安全失败；BASELINE 保持现状。
-"""
+"""HYBRID_RRF 启动边界与降级 fail-closed 合同测试。"""
 
 from __future__ import annotations
 
@@ -16,9 +12,9 @@ from core.knowledge_base.production_build import (
     BUILD_PURPOSE_PRODUCTION,
     build_production_generation,
 )
+from core.agent_router import AgentRouter
 from core.runtime.application_services import RuntimeLifecycleState
 from core.runtime.hybrid_provenance_validator import (
-    RETRIEVAL_STRATEGY_NOT_IMPLEMENTED,
     HybridProvenanceValidationError,
     ValidatedHybridGeneration,
     validate_active_hybrid_generation,
@@ -112,7 +108,7 @@ def _build_valid_generation(tmp_path: Path):
     return chroma_dir, model, result, manager
 
 
-def test_valid_provenance_reaches_boundary_then_not_implemented(
+def test_valid_provenance_retains_bm25_runtime_dependency(
     tmp_path, _fake_dense
 ) -> None:
     chroma_dir, model, result, manager = _build_valid_generation(tmp_path)
@@ -124,8 +120,8 @@ def test_valid_provenance_reaches_boundary_then_not_implemented(
     )
     assert validated.generation_id == result.generation_id
     assert validated.dense_collection_name == result.dense_collection_name
-    # WP1 边界：校验通过，但 strategy 尚未实现 query graph。
-    assert RETRIEVAL_STRATEGY_NOT_IMPLEMENTED == "RETRIEVAL_STRATEGY_NOT_IMPLEMENTED"
+    # WP2：完整校验同时保留 application-scoped 的已加载 BM25 artifact。
+    assert validated.bm25_artifact.index is not None
 
 
 def test_missing_active_descriptor_fails_validation(tmp_path, _fake_dense) -> None:
@@ -145,8 +141,8 @@ def test_missing_active_descriptor_fails_validation(tmp_path, _fake_dense) -> No
     assert captured.value.safe_error_code == "ACTIVE_GENERATION_DESCRIPTOR_MISSING"
 
 
-def test_valid_generation_no_bm25_query_path_reachable(tmp_path, _fake_dense) -> None:
-    """WP1 边界：validation 只返回只读依赖，不构造可查询的 hybrid retriever。"""
+def test_valid_generation_exposes_only_loaded_bm25_dependency(tmp_path, _fake_dense) -> None:
+    """validator 仅提供已验证依赖，不承担 query/fusion 编排。"""
     chroma_dir, model, result, manager = _build_valid_generation(tmp_path)
     validated = validate_active_hybrid_generation(
         db_manager=manager,
@@ -154,10 +150,29 @@ def test_valid_generation_no_bm25_query_path_reachable(tmp_path, _fake_dense) ->
         logical_collection_name="kb",
         embedding_model_path=model,
     )
-    # 校验结果没有 .search/.retrieve/BM25 执行接口。
+    assert validated.bm25_artifact.index is not None
+    # 校验结果仍没有 Router/adapter 的查询或 fusion 接口。
     assert not hasattr(validated, "search")
     assert not hasattr(validated, "retrieve")
     assert not hasattr(validated, "fuse")
+
+
+def test_hybrid_invocation_caps_dense_candidate_budget_at_eight() -> None:
+    captured = []
+
+    class CaptureService:
+        def execute(self, invocation, **kwargs):
+            captured.append(invocation)
+            return "result"
+
+    router = object.__new__(AgentRouter)
+    router.retrieval_execution_service = CaptureService()
+    router.db_manager = SimpleNamespace(collection_name="kb")
+    router.retrieval_strategy = "HYBRID_RRF"
+    router.rag_top_k = 8
+
+    assert router._execute_knowledge_retrieval("query") == "result"
+    assert captured[0].top_k == 8
 
 
 def _fake_validated_generation() -> ValidatedHybridGeneration:
@@ -172,6 +187,7 @@ def _fake_validated_generation() -> ValidatedHybridGeneration:
         artifact_metadata_path=Path("generations/g/artifact_metadata.json"),
         provenance=SimpleNamespace(),
         expected_v2_marker={},
+        bm25_artifact=SimpleNamespace(index=SimpleNamespace()),
     )
 
 
@@ -187,7 +203,7 @@ def _set_db_paths(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LOCAL_AGENT_REMOTE_API_BASE_URL", "https://example.test/v1")
 
 
-def test_lifespan_hybrid_required_fails_with_not_implemented(
+def test_lifespan_hybrid_required_no_longer_fails_as_not_implemented(
     tmp_path, monkeypatch
 ) -> None:
     import asyncio
@@ -216,17 +232,20 @@ def test_lifespan_hybrid_required_fails_with_not_implemented(
     monkeypatch.setattr(server, "settings", settings)
     app = FastAPI()
 
-    with pytest.raises(Exception) as excinfo:
-        async def _run():
-            async with server.lifespan(app):
-                pass
+    async def _run():
+        async with server.lifespan(app):
+            return (
+                app.state.runtime_lifecycle_state,
+                app.state.chat_service.router.retrieval_execution_service,
+            )
 
-        asyncio.run(_run())
-    # runtime 初始化失败（knowledge_base 组件）→ 不会 READY。
-    assert "knowledge_base" in str(excinfo.value) or "RuntimeInitializationError" in str(excinfo.value)
+    state, service = asyncio.run(_run())
+    assert state is RuntimeLifecycleState.READY
+    assert service is not None
+    assert service.adapter.retrieval_strategy == "HYBRID_RRF"
 
 
-def test_lifespan_hybrid_optional_degrades_with_not_implemented(
+def test_lifespan_hybrid_optional_degrades_fail_closed_when_dependencies_unavailable(
     tmp_path, monkeypatch
 ) -> None:
     import asyncio
@@ -237,11 +256,10 @@ def test_lifespan_hybrid_optional_degrades_with_not_implemented(
 
     from core.runtime import hybrid_provenance_validator
 
-    monkeypatch.setattr(
-        hybrid_provenance_validator,
-        "validate_active_hybrid_generation",
-        lambda **kwargs: _fake_validated_generation(),
-    )
+    def _unavailable(**kwargs):
+        raise HybridProvenanceValidationError("BM25_ARTIFACT_INVALID", "invalid")
+
+    monkeypatch.setattr(hybrid_provenance_validator, "validate_active_hybrid_generation", _unavailable)
     monkeypatch.setattr(
         hybrid_provenance_validator,
         "load_active_hybrid_descriptor",
@@ -264,7 +282,7 @@ def test_lifespan_hybrid_optional_degrades_with_not_implemented(
             )
 
     state, kb_degraded, kb_error = asyncio.run(_run())
-    # optional KB：允许 degraded 启动；knowledge_base_error 记录未实现错误。
+    # optional KB：允许 degraded 启动；请求边界使用 Hybrid unavailable safe code。
     assert state is RuntimeLifecycleState.READY
     assert kb_degraded is True
-    assert kb_error == RETRIEVAL_STRATEGY_NOT_IMPLEMENTED
+    assert kb_error == "HYBRID_STRATEGY_UNAVAILABLE"

@@ -80,6 +80,7 @@ _GLOBAL_ALLOWED_LABELS = frozenset(
         "model_profile",
         "retry_disposition",
         "retrieval_stage",
+        "retrieval_strategy",
         "cancellation_reason",
         "side_effect_state",
         "runtime_mode",
@@ -325,7 +326,7 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
         ),
         _descriptor("runtime_model_attempts_total", MetricType.COUNTER, "Model Attempt 数", "attempts", "model_profile"),
         _descriptor("runtime_tool_attempts_total", MetricType.COUNTER, "Tool Attempt 数", "attempts", "tool_name"),
-        _descriptor("runtime_retrievals_total", MetricType.COUNTER, "Retrieval 数", "retrievals"),
+        _descriptor("runtime_retrievals_total", MetricType.COUNTER, "Retrieval 数", "retrievals", "retrieval_strategy"),
         _descriptor("runtime_planning_total", MetricType.COUNTER, "Planning resolution count", "resolutions", "planning_source", "status"),
         MetricDescriptor(
             name="runtime_multi_agent_runs_total",
@@ -512,7 +513,7 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
         ),
         _descriptor("runtime_model_duration_seconds", MetricType.HISTOGRAM, "Model Attempt 时长", "seconds", "status", "model_profile"),
         _descriptor("runtime_tool_duration_seconds", MetricType.HISTOGRAM, "Tool Attempt 时长", "seconds", "status", "tool_name"),
-        _descriptor("runtime_retrieval_duration_seconds", MetricType.HISTOGRAM, "Retrieval 时长", "seconds", "status"),
+        _descriptor("runtime_retrieval_duration_seconds", MetricType.HISTOGRAM, "Retrieval 时长", "seconds", "status", "retrieval_strategy"),
         _descriptor("runtime_planning_duration_seconds", MetricType.HISTOGRAM, "Planning resolution duration", "seconds", "planning_source", "status"),
         _descriptor("runtime_retrieval_stage_duration_seconds", MetricType.HISTOGRAM, "Retrieval Stage 时长", "seconds", "status", "retrieval_stage"),
         _descriptor("runtime_journal_append_duration_seconds", MetricType.HISTOGRAM, "Journal 追加时长", "seconds"),
@@ -932,7 +933,14 @@ class RuntimeMetricsProjector:
                 )
             self._project_component_outcome("tool", payload)
         elif event_type is RuntimeEventType.RETRIEVAL_STARTED:
-            self.recorder.increment_counter("runtime_retrievals_total")
+            self.recorder.increment_counter(
+                "runtime_retrievals_total",
+                labels={
+                    "retrieval_strategy": str(
+                        payload.get("retrieval_strategy") or "BASELINE"
+                    )
+                },
+            )
         elif event_type is RuntimeEventType.RETRIEVAL_STAGE_COMPLETED:
             duration = self._duration_seconds(payload)
             if duration is not None:
@@ -950,7 +958,12 @@ class RuntimeMetricsProjector:
                 self.recorder.observe_histogram(
                     "runtime_retrieval_duration_seconds",
                     duration,
-                    labels={"status": self._status(payload)},
+                    labels={
+                        "status": self._status(payload),
+                        "retrieval_strategy": str(
+                            payload.get("retrieval_strategy") or "BASELINE"
+                        ),
+                    },
                 )
             self._project_component_outcome("retrieval", payload)
         elif event_type is RuntimeEventType.MEMORY_FORMATION_COMPLETED:

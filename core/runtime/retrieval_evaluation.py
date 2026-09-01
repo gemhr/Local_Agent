@@ -118,6 +118,10 @@ class RetrievalEvaluationCandidateItem:
     section: str | None = None
     sheet: str | None = None
     content_hash: str | None = None
+    # WP2 Hybrid v2 optional channel ranks（缺失代表旧 producer/v1 兼容工件）。
+    dense_channel_rank: int | None = None
+    bm25_channel_rank: int | None = None
+    rrf_fused_rank: int | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -133,9 +137,17 @@ class RetrievalEvaluationCandidateItem:
             raise ValueError("evaluation ranks must be positive")
         if self.rerank_rank is not None and self.rerank_rank <= 0:
             raise ValueError("rerank_rank must be positive")
+        for name in (
+            "dense_channel_rank",
+            "bm25_channel_rank",
+            "rrf_fused_rank",
+        ):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive")
 
     def to_wire_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "document_id": self.document_id,
             "chunk_id": self.chunk_id,
             "rank": self.rank,
@@ -153,6 +165,14 @@ class RetrievalEvaluationCandidateItem:
             "content_hash": self.content_hash,
             "selected": self.selected,
         }
+        # Optional v2 ranks：仅在有值时发射（v1/旧 v2 工件保持字段缺失）。
+        if self.dense_channel_rank is not None:
+            payload["dense_channel_rank"] = self.dense_channel_rank
+        if self.bm25_channel_rank is not None:
+            payload["bm25_channel_rank"] = self.bm25_channel_rank
+        if self.rrf_fused_rank is not None:
+            payload["rrf_fused_rank"] = self.rrf_fused_rank
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +273,8 @@ class RetrievalEvaluationBudgetUsage:
     embedding_calls: int
     vector_queries: int
     keyword_queries: int
+    bm25_queries: int
+    rrf_fusions: int
     document_reads: int
     context_chars: int
 
@@ -262,6 +284,8 @@ class RetrievalEvaluationBudgetUsage:
             "embedding_calls": self.embedding_calls,
             "vector_queries": self.vector_queries,
             "keyword_queries": self.keyword_queries,
+            "bm25_queries": self.bm25_queries,
+            "rrf_fusions": self.rrf_fusions,
             "document_reads": self.document_reads,
             "context_chars": self.context_chars,
         }
@@ -342,16 +366,20 @@ class RetrievalEvaluationCaptureBuilder:
         invocation: RetrievalInvocation,
         max_context_chars: int,
         retrieval_strategy: str = "BASELINE",
+        provenance_sha256: str | None = None,
     ) -> None:
         self.run_id = run_id
         self.invocation_index = invocation_index
         self.invocation = invocation
         self.max_context_chars = max_context_chars
         self.retrieval_strategy = retrieval_strategy
+        self.provenance_sha256 = provenance_sha256
         self.rewritten_query = invocation.original_query
         self._observations: dict[str, _Observation] = {}
         self._retrieved: tuple[RetrievalEvaluationCandidateItem, ...] = ()
         self._ranked: tuple[RetrievalEvaluationCandidateItem, ...] = ()
+        # WP2：BM25 channel 输入证据（与 Dense 证据行共存于 retrieved_items）。
+        self._bm25_evidence: tuple[RetrievalEvaluationCandidateItem, ...] = ()
         self.capture_error_code: str | None = None
 
     def _fail(self, code: str) -> None:
@@ -464,6 +492,105 @@ class RetrievalEvaluationCaptureBuilder:
         except Exception:  # noqa: BLE001 - capture 失败必须与 Runtime 隔离
             self._fail("RAG_EVALUATION_RANKED_CAPTURE_FAILED")
 
+    def capture_bm25_evidence(self, evidence_rows: Sequence) -> None:
+        """记录 BM25 channel 输入证据（raw score，不与 Dense score 合并）。
+
+        同一 ``(document_id, chunk_id)`` 可同时存在 Dense 与 BM25 证据行——
+        这是 frozen decision §21 的合法 multi-channel retrieved 语义。
+        """
+        try:
+            if len(evidence_rows) > MAX_RANKED_ITEMS:
+                raise ValueError
+            if self.retrieval_strategy != "HYBRID_RRF":
+                raise ValueError
+            projected = []
+            for offset, row in enumerate(evidence_rows, start=1):
+                _bounded_scalar(row.document_id, "document_id")
+                _bounded_scalar(row.chunk_id, "chunk_id")
+                projected.append(
+                    RetrievalEvaluationCandidateItem(
+                        document_id=row.document_id,
+                        chunk_id=row.chunk_id,
+                        rank=len(self._retrieved) + offset,
+                        retrieval_rank=row.rank,
+                        retrieval_score=float(row.raw_score),
+                        retrieval_score_kind=(
+                            RetrievalEvaluationScoreKind.BM25_RAW_SCORE.value
+                        ),
+                        retrieval_channels=(RetrievalEvaluationChannel.BM25.value,),
+                        source=RetrievalEvaluationSource(
+                            source_type="bm25_sparse_index",
+                            collection=self.invocation.collection_names[0],
+                            display_name=row.chunk_id,
+                            document_version="bm25",
+                        ),
+                        selected=False,
+                        bm25_channel_rank=row.rank,
+                    )
+                )
+            self._bm25_evidence = tuple(projected)
+        except Exception:  # noqa: BLE001 - capture 失败必须与 Runtime 隔离
+            self._fail("RAG_EVALUATION_SPARSE_EVIDENCE_CAPTURE_FAILED")
+
+    def capture_hybrid_ranked(self, fusion_result) -> None:
+        """记录唯一 fused ranking（RRF_SCORE + 参与通道 + optional ranks）。"""
+        try:
+            if self.retrieval_strategy != "HYBRID_RRF":
+                raise ValueError
+            candidates = list(fusion_result.candidates)
+            if len(candidates) > MAX_RANKED_ITEMS:
+                raise ValueError
+            facts_by_candidate = {
+                fact.candidate_id: fact for fact in fusion_result.ranked_facts
+            }
+            projected: list[RetrievalEvaluationCandidateItem] = []
+            for index, candidate in enumerate(candidates, start=1):
+                fact = facts_by_candidate.get(candidate.candidate_id)
+                if fact is None:
+                    raise ValueError
+                observation = self._observations.get(candidate.candidate_id)
+                channels: list[str] = []
+                if observation is not None:
+                    channels.extend(item.value for item in observation.channels)
+                if fact.bm25_channel_rank is not None:
+                    channels.append(RetrievalEvaluationChannel.BM25.value)
+                channels.append(RetrievalEvaluationChannel.RRF.value)
+                metadata = candidate.metadata
+                sheet = metadata.get("sheet_name")
+                content_hash = metadata.get("content_hash")
+                projected.append(
+                    RetrievalEvaluationCandidateItem(
+                        document_id=candidate.source_id,
+                        chunk_id=candidate.chunk_id,
+                        rank=index,
+                        retrieval_rank=candidate.original_rank,
+                        retrieval_score=float(candidate.reranked_score),
+                        retrieval_score_kind=(
+                            RetrievalEvaluationScoreKind.RRF_SCORE.value
+                        ),
+                        retrieval_channels=tuple(dict.fromkeys(channels)),
+                        source=RetrievalEvaluationSource(
+                            source_type=candidate.source.source_type,
+                            collection=candidate.source.collection,
+                            display_name=candidate.source.display_name,
+                            document_version=candidate.source.document_version,
+                        ),
+                        selected=False,
+                        page=candidate.source.page,
+                        section=candidate.source.section_path or None,
+                        sheet=sheet if isinstance(sheet, str) else None,
+                        content_hash=(
+                            content_hash if isinstance(content_hash, str) else None
+                        ),
+                        dense_channel_rank=fact.dense_channel_rank,
+                        bm25_channel_rank=fact.bm25_channel_rank,
+                        rrf_fused_rank=index,
+                    )
+                )
+            self._ranked = tuple(projected)
+        except Exception:  # noqa: BLE001 - capture 失败必须与 Runtime 隔离
+            self._fail("RAG_EVALUATION_HYBRID_RANKED_CAPTURE_FAILED")
+
     def finalize(self, result: RetrievalExecutionResult) -> RetrievalEvaluationSnapshot:
         if self.capture_error_code is not None:
             raise _capture_error(self.capture_error_code)
@@ -512,7 +639,7 @@ class RetrievalEvaluationCaptureBuilder:
                     else None
                 ),
             )
-            for item in self._retrieved
+            for item in self._retrieved + self._bm25_evidence
         )
         ranked = tuple(
             replace(
@@ -577,7 +704,11 @@ class RetrievalEvaluationCaptureBuilder:
         for reason in result.degradation_reasons:
             _bounded_scalar(reason, "degradation_reason")
         return RetrievalEvaluationSnapshot(
-            schema_version=ARTIFACT_SCHEMA_VERSION,
+            schema_version=(
+                ARTIFACT_SCHEMA_VERSION_V2
+                if self.retrieval_strategy == "HYBRID_RRF"
+                else ARTIFACT_SCHEMA_VERSION
+            ),
             artifact_id=f"rag-eval://{self.run_id}/{self.invocation.retrieval_id}",
             run_id=self.run_id,
             attempt_id=self.run_id,
@@ -601,19 +732,30 @@ class RetrievalEvaluationCaptureBuilder:
                 embedding_calls=result.budget_usage.embedding_calls,
                 vector_queries=result.budget_usage.vector_queries,
                 keyword_queries=result.budget_usage.keyword_queries,
+                bm25_queries=result.budget_usage.bm25_queries,
+                rrf_fusions=result.budget_usage.rrf_fusions,
                 document_reads=result.budget_usage.document_reads,
                 context_chars=result.budget_usage.context_chars,
             ),
             retrieval_strategy=self.retrieval_strategy,
+            provenance_sha256=self.provenance_sha256,
         )
 
 
 class RetrievalEvaluationCollector:
     """单 request、单 run 的并发安全 collector。"""
 
-    def __init__(self, run_id: str) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        *,
+        retrieval_strategy: str = "BASELINE",
+        provenance_sha256: str | None = None,
+    ) -> None:
         UUID(run_id)
         self.run_id = run_id
+        self.retrieval_strategy = retrieval_strategy
+        self.provenance_sha256 = provenance_sha256
         self._lock = threading.Lock()
         self._next_index = 1
         self._started_ids: set[str] = set()
@@ -665,6 +807,8 @@ class RetrievalEvaluationCollector:
             invocation_index=index,
             invocation=invocation,
             max_context_chars=max_context_chars,
+            retrieval_strategy=self.retrieval_strategy,
+            provenance_sha256=self.provenance_sha256,
         )
 
     def complete(

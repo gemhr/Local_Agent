@@ -25,6 +25,8 @@ _DIMENSIONS = (
     "embedding_calls",
     "vector_queries",
     "keyword_queries",
+    "bm25_queries",
+    "rrf_fusions",
     "document_reads",
     "context_chars",
 )
@@ -42,6 +44,8 @@ _LIMITS = {
     "embedding_calls": "max_embedding_calls",
     "vector_queries": "max_vector_queries",
     "keyword_queries": "max_keyword_queries",
+    "bm25_queries": "max_bm25_queries",
+    "rrf_fusions": "max_rrf_fusions",
     "document_reads": "max_document_reads",
     "context_chars": "max_context_chars",
 }
@@ -52,6 +56,7 @@ class RunBudget:
     max_input_tokens: int|None=None; max_output_tokens: int|None=None; max_total_tokens: int|None=None; max_cost_units: int|None=None
     max_elapsed_seconds: float|None=None; max_concurrency: int|None=None; max_retries: int|None=None
     max_retrieval_calls: int|None=None; max_embedding_calls: int|None=None; max_vector_queries: int|None=None; max_keyword_queries: int|None=None
+    max_bm25_queries: int|None=None; max_rrf_fusions: int|None=None
     max_document_reads: int|None=None; max_context_chars: int|None=None
     def __post_init__(self):
         for item in fields(self):
@@ -66,7 +71,7 @@ class RunBudget:
 @dataclass(frozen=True, slots=True)
 class BudgetUsage:
     step_starts:int=0; model_calls:int=0; remote_model_calls:int=0; tool_calls:int=0; input_tokens:int=0; output_tokens:int=0; total_tokens:int=0; cost_units:int=0; retries:int=0
-    retrieval_calls:int=0; embedding_calls:int=0; vector_queries:int=0; keyword_queries:int=0; document_reads:int=0; context_chars:int=0
+    retrieval_calls:int=0; embedding_calls:int=0; vector_queries:int=0; keyword_queries:int=0; bm25_queries:int=0; rrf_fusions:int=0; document_reads:int=0; context_chars:int=0
     _allow_independent_total: bool=False
     def __post_init__(self):
         for name in _DIMENSIONS:

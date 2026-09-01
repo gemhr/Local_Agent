@@ -638,6 +638,34 @@ class VectorDBManager:
                         return documents
         return documents
 
+    def get_chunk_by_identity(self, document_id: str, chunk_id: str) -> Document | None:
+        """按 active Dense generation 的语义身份获取完整 Chroma 元数据。
+
+        只使用公开 Chroma collection API；返回 None 表示该 identity 在当前
+        generation 中不存在。调用方（Hybrid materialization mapping）负责把
+        identity 不匹配/metadata 无效转换为 RRF_FUSION_FAILED。
+        """
+        if not document_id or not chunk_id:
+            return None
+        getter = getattr(self.vector_store, "get", None)
+        if not callable(getter):
+            return None
+        with self._vector_query_lock:
+            result = getter(ids=[chunk_id], include=["documents", "metadatas"])
+        ids = result.get("ids", []) if result else []
+        texts = result.get("documents", []) if result else []
+        metadatas = result.get("metadatas", []) if result else []
+        if len(ids) != 1 or len(texts) != 1 or len(metadatas) != 1:
+            return None
+        metadata = metadatas[0] or {}
+        if (
+            str(ids[0]) != chunk_id
+            or str(metadata.get("chunk_id", "")) != chunk_id
+            or str(metadata.get("doc_id", "")) != document_id
+        ):
+            return None
+        return Document(page_content=str(texts[0]), metadata=metadata)
+
     def search(
         self,
         query: str,

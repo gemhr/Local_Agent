@@ -19,7 +19,7 @@
 7. 执行 Offline Fake 或已批准的安全 smoke test；本地 RC smoke 不要求访问生产外部服务。
 8. 检查 Journal 可追加/读取、Observability health、Trace health 与进程内 gauges。
 9. 确认默认 Runtime 为 `COORDINATED`，请求只读取一次 mode。
-10. 检索策略（`LOCAL_AGENT_RETRIEVAL_STRATEGY`）在 startup 捕获一次：`BASELINE` 保持既有 v1 collection 行为；`HYBRID_RRF` 在 Router 构造前执行完整 active-generation provenance 校验（active.json schema → locator containment → manifest/provenance digest → Dense v2 marker → embedding asset-tree digest → BM25 artifact digest/冻结契约 → 共享 provenance 精确相等）。WP1 边界内即使校验通过也以 `RETRIEVAL_STRATEGY_NOT_IMPLEMENTED` 安全失败（Hybrid query 接线在 WP2），不回退 baseline；校验失败按 `knowledge_base_required` 决定 fail/degraded。启动绝不自动 rebuild、不重建 BM25 artifact、不修改 active.json。
+10. 检索策略（`LOCAL_AGENT_RETRIEVAL_STRATEGY`）在 startup 捕获一次：`BASELINE` 保持既有 v1 collection 行为；`HYBRID_RRF` 在 Router 构造前执行完整 active-generation provenance 校验（active.json schema → locator containment → manifest/provenance digest → Dense v2 marker → embedding asset-tree digest → BM25 artifact digest/冻结契约 → 共享 provenance 精确相等），并保留该已加载 BM25 index 为 APPLICATION_SCOPE 依赖。Hybrid 已生产可达：Dense rewritten/original 结果先合并为单一 8 条 channel，BM25 是唯一 sparse channel（无 Chroma keyword），两者串行 RRF 融合（每 channel 8、union 16、fused 8），最终仅按 fused rank 取 `rag_top_k`，不对 RRF 分数应用 `rag_min_score`。任一必需通道/融合/物化失败均 fail closed 且不回退 baseline；optional KB 仅允许 startup degraded，Hybrid 请求仍以 `HYBRID_STRATEGY_UNAVAILABLE` 失败。启动绝不自动 rebuild、不重建 BM25 artifact、不修改 active.json。
 
 启动失败时禁止切换 Runtime 后重跑同一请求。配置异常保持 `SettingsValidationError` 固定安全码（`SETTINGS_PARSE_ERROR`/`SETTINGS_VALIDATION_ERROR`/`SETTINGS_SECURITY_POLICY_ERROR`/`STARTUP_CONFIGURATION_ERROR`），资源失败保持 `RUNTIME_INITIALIZATION_FAILED`；错误对象和日志不输出原始路径、密钥或 Provider URL。Legacy rollback 是修改 `CHAT_RUNTIME_MODE` 后重启并只影响新请求，不是某次失败后的动态动作。
 
@@ -340,7 +340,7 @@ HYBRID_RRF 回滚到 BASELINE：
   → 旧 generation 保持可读，可手动清理（out of scope for WP1）
 ```
 
-`HYBRID_RRF` 在 WP1 边界内即使 provenance 校验通过也以 `RETRIEVAL_STRATEGY_NOT_IMPLEMENTED` 安全失败；Hybrid query 接线在 WP2。v1 collection 对 Hybrid 是 `REBUILD_REQUIRED`（显式 rebuild，不自动迁移）。
+`HYBRID_RRF` 已在 WP2 接线并保持生产可达、非默认。BM25-only fused winner 通过 active Dense generation 的精确 `(document_id, chunk_id)` lookup 获取权威正文和 citation metadata；缺失、身份不符或 metadata 不合法均为 `RRF_FUSION_FAILED`。Evaluation Artifact v2 将 pre-fusion Dense/BM25 evidence 与唯一的 RRF ranked items 分开表示，并附带可选通道 rank；跨通道同一 identity 的 retrieved evidence 合法。v1 collection 对 Hybrid 是 `REBUILD_REQUIRED`（显式 rebuild，不自动迁移）。
 
 ## Migration vs Recovery
 

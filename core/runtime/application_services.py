@@ -226,6 +226,7 @@ class ApplicationRuntimeServices:
     blocking_executors: tuple[object, ...]
     worker_trackers: tuple[object, ...]
     run_registry: object
+    hybrid_validated_generation: object | None = None
     admission_gate: RuntimeAdmissionGate = field(
         default_factory=RuntimeAdmissionGate
     )
