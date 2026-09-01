@@ -276,7 +276,8 @@ def test_completed_only_replay_restores_every_duration_histogram():
         {"status": "SUCCEEDED", "tool_name": "known"},
     ) == (0.25,)
     assert snap.histogram(
-        "runtime_retrieval_duration_seconds", {"status": "SUCCEEDED"}
+        "runtime_retrieval_duration_seconds",
+        {"status": "SUCCEEDED", "retrieval_strategy": "BASELINE"},
     ) == (0.375,)
     assert snap.histogram(
         "runtime_step_duration_seconds",

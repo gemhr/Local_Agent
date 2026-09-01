@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Stage5-Phase6-WP1 生产 provenance / active-generation 启动校验器。
+"""Stage5-Phase6-WP2 生产 provenance / active-generation 启动校验器。
 
 由 ``server.py::lifespan`` 在 Router 构造前调用；是唯一允许判断 Dense/BM25
-兼容性的组件。WP1 只做校验与“已构造 application-scoped 依赖”的准备；WP2 才
-接线 query graph。HYBRID_RRF 校验通过后仍以 ``RETRIEVAL_STRATEGY_NOT_IMPLEMENTED``
-安全失败，绝不把请求路由到 Hybrid。
+兼容性的组件。WP2 起，校验成功即构造 application-scoped Hybrid 依赖：
+保留已加载并验证的 ``ProductionBm25Artifact``（含 ``.index``）供 Hybrid
+adapter 注入；degraded 场景由 Router 请求路径 fail closed（不回退 baseline）。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from core.knowledge_base.production_bm25_artifact import (
+    ProductionBm25Artifact,
     validate_production_bm25_artifact,
 )
 from core.knowledge_base.retrieval_index_provenance import (
@@ -29,8 +30,6 @@ from core.knowledge_base.retrieval_index_provenance import (
     embedding_asset_tree_digest,
 )
 from core.knowledge_base.vector_db_manager import VectorDBManager
-
-RETRIEVAL_STRATEGY_NOT_IMPLEMENTED = "RETRIEVAL_STRATEGY_NOT_IMPLEMENTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +46,7 @@ class ValidatedHybridGeneration:
     artifact_metadata_path: Path
     provenance: RetrievalIndexProvenance
     expected_v2_marker: dict[str, Any]
+    bm25_artifact: ProductionBm25Artifact
 
 
 class HybridProvenanceValidationError(RuntimeError):
@@ -186,12 +186,12 @@ def validate_active_hybrid_generation(
         artifact_metadata_path=artifact_metadata_path,
         provenance=provenance,
         expected_v2_marker=expected_v2_marker,
+        bm25_artifact=bm25,
     )
 
 
 __all__ = [
     "HybridProvenanceValidationError",
-    "RETRIEVAL_STRATEGY_NOT_IMPLEMENTED",
     "ValidatedHybridGeneration",
     "load_active_hybrid_descriptor",
     "validate_active_hybrid_generation",

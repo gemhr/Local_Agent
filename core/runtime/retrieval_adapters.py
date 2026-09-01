@@ -383,6 +383,38 @@ class RuntimeKnowledgeRetrievalAdapter:
             original_content_hash=content_digest(candidate.text),
         )
 
+    def _candidate_from_row(
+        self,
+        document: object,
+        provider_score: float | None,
+        rank: int,
+        *,
+        collection: str,
+        default_score: float,
+        score_semantics: VectorScoreSemantics,
+    ) -> RetrievalCandidate:
+        """把单个 store row 转换为语义候选；身份校验 fail closed。"""
+        text = str(getattr(document, "page_content", "") or "")
+        metadata = dict(getattr(document, "metadata", {}) or {})
+        score = (
+            default_score
+            if provider_score is None
+            else normalize_vector_score(provider_score, score_semantics)
+        )
+        source = self._source_from_metadata(metadata, text, collection)
+        candidate_id = hashlib.sha256(
+            f"{source.source_id}|{source.chunk_id}".encode("utf-8")
+        ).hexdigest()
+        return RetrievalCandidate(
+            candidate_id=candidate_id,
+            source=source,
+            score=score,
+            original_rank=rank,
+            metadata=metadata,
+            content_locator=f"chroma:{collection}:{source.chunk_id}",
+            text=text,
+        )
+
     def _to_candidates(
         self,
         rows: Sequence[tuple[object, float]],
@@ -395,26 +427,14 @@ class RuntimeKnowledgeRetrievalAdapter:
         candidates: list[RetrievalCandidate] = []
         for rank, row in enumerate(rows, start=1):
             document, provider_score = row
-            text = str(getattr(document, "page_content", "") or "")
-            metadata = dict(getattr(document, "metadata", {}) or {})
-            score = (
-                default_score
-                if provider_score is None
-                else normalize_vector_score(provider_score, score_semantics)
-            )
-            source = self._source_from_metadata(metadata, text, collection)
-            candidate_id = hashlib.sha256(
-                f"{source.source_id}|{source.chunk_id}".encode("utf-8")
-            ).hexdigest()
             candidates.append(
-                RetrievalCandidate(
-                    candidate_id=candidate_id,
-                    source=source,
-                    score=score,
-                    original_rank=rank,
-                    metadata=metadata,
-                    content_locator=f"chroma:{collection}:{source.chunk_id}",
-                    text=text,
+                self._candidate_from_row(
+                    document,
+                    provider_score,
+                    rank,
+                    collection=collection,
+                    default_score=default_score,
+                    score_semantics=score_semantics,
                 )
             )
         return candidates

@@ -90,6 +90,10 @@ from core.runtime.tracing import (
 
 T = TypeVar("T")
 
+# Retrieval strategy wire values（bounded、低基数；WP2 冻结事件/label 语义）。
+BASELINE_RETRIEVAL_STRATEGY_VALUE = "BASELINE"
+HYBRID_RETRIEVAL_STRATEGY_VALUE = "HYBRID_RRF"
+
 
 class _StageTimedOut(TimeoutError):
     def __init__(
@@ -170,6 +174,9 @@ class RetrievalExecutionService:
         self._trace_lock = threading.Lock()
         self._deferred_retrieval_spans: dict[str, object] = {}
         self._deferred_stage_contexts: dict[int, object] = {}
+        # WP2：deferred 完成事件所需的 per-retrieval Hybrid fusion 事实
+        # （call-local 结果的 application 级暂存；retrieval_id 唯一）。
+        self._deferred_hybrid_fusion: dict[str, object] = {}
 
     def execute(
         self,
@@ -484,6 +491,12 @@ class RetrievalExecutionService:
             if evaluation_capture is not None:
                 evaluation_capture.capture_retrieved(candidates)
             if not candidates:
+                if getattr(self.adapter, "hybrid_rrf", False):
+                    raise RetrievalAdapterError(
+                        RetrievalErrorCategory.FUSION_FAILED,
+                        "HYBRID_DENSE_CHANNEL_EMPTY",
+                        "Hybrid Dense channel is empty。",
+                    )
                 if evaluation_capture is not None:
                     evaluation_capture.capture_ranked(candidates, reranked=False)
                 usage = self._retrieval_usage_since(
@@ -506,32 +519,66 @@ class RetrievalExecutionService:
                 )
 
             reranked = False
+            hybrid_fusion = None
+            is_hybrid = bool(getattr(self.adapter, "hybrid_rrf", False))
             if self.adapter.has_reranker:
                 try:
-                    def rerank_candidates(timeout: float) -> list[RetrievalCandidate]:
-                        ranked = self._invoke_unbudgeted(
-                            context,
-                            lambda: self.adapter.rerank(
-                                rewritten_query,
-                                invocation.original_query,
-                                candidates,
-                            ),
-                            timeout,
-                            BlockingTaskKind.RERANK,
-                        )
-                        self._validate_rerank(candidates, ranked)
-                        return ranked
+                    if is_hybrid:
+                        def hybrid_rerank_operation(timeout: float):
+                            return self._invoke_unbudgeted(
+                                context,
+                                lambda: self._execute_hybrid_fusion(
+                                    context, rewritten_query, candidates
+                                ),
+                                timeout,
+                                BlockingTaskKind.RERANK,
+                            )
 
-                    candidates = self._run_stage(
-                        context,
-                        records,
-                        RetrievalStage.RERANK,
-                        input_count=len(candidates),
-                        budget_usage=RetrievalBudgetUsage(),
-                        operation=rerank_candidates,
-                        degradable=True,
-                    )
-                    reranked = True
+                        hybrid_fusion = self._run_stage(
+                            context,
+                            records,
+                            RetrievalStage.RERANK,
+                            input_count=len(candidates),
+                            budget_usage=RetrievalBudgetUsage(),
+                            operation=hybrid_rerank_operation,
+                            output_count_getter=lambda value: len(
+                                value.candidates
+                            ),
+                        )
+                        self._validate_rerank(
+                            candidates, hybrid_fusion.candidates
+                        )
+                        candidates = hybrid_fusion.candidates
+                        reranked = True
+                        with self._trace_lock:
+                            self._deferred_hybrid_fusion[
+                                invocation.retrieval_id
+                            ] = hybrid_fusion
+                    else:
+                        def rerank_candidates(timeout: float) -> list[RetrievalCandidate]:
+                            ranked = self._invoke_unbudgeted(
+                                context,
+                                lambda: self.adapter.rerank(
+                                    rewritten_query,
+                                    invocation.original_query,
+                                    candidates,
+                                ),
+                                timeout,
+                                BlockingTaskKind.RERANK,
+                            )
+                            self._validate_rerank(candidates, ranked)
+                            return ranked
+
+                        candidates = self._run_stage(
+                            context,
+                            records,
+                            RetrievalStage.RERANK,
+                            input_count=len(candidates),
+                            budget_usage=RetrievalBudgetUsage(),
+                            operation=rerank_candidates,
+                            degradable=True,
+                        )
+                        reranked = True
                 except RetrievalAdapterError as exc:
                     if exc.category != RetrievalErrorCategory.RERANK_FAILED:
                         raise
@@ -551,7 +598,15 @@ class RetrievalExecutionService:
                 )
 
             if evaluation_capture is not None:
-                evaluation_capture.capture_ranked(candidates, reranked=reranked)
+                if is_hybrid and hybrid_fusion is not None:
+                    evaluation_capture.capture_bm25_evidence(
+                        hybrid_fusion.bm25_evidence
+                    )
+                    evaluation_capture.capture_hybrid_ranked(hybrid_fusion)
+                else:
+                    evaluation_capture.capture_ranked(
+                        candidates, reranked=reranked
+                    )
 
             filtered = self._filter_candidates(candidates)
             if not filtered:
@@ -570,9 +625,13 @@ class RetrievalExecutionService:
                     (),
                     emit_completed=emit_completed_event,
                     event_emitter=event_emitter,
+                    hybrid_fusion=hybrid_fusion,
                 )
 
-            read_candidates = filtered[: self.spec.max_document_reads]
+            read_limit = self.spec.max_document_reads
+            if getattr(self.adapter, "hybrid_rrf", False):
+                read_limit = min(read_limit, invocation.rerank_top_k)
+            read_candidates = filtered[:read_limit]
             document_usage = RetrievalBudgetUsage(
                 document_reads=len(read_candidates)
             )
@@ -707,6 +766,7 @@ class RetrievalExecutionService:
                     (),
                     emit_completed=emit_completed_event,
                     event_emitter=event_emitter,
+                    hybrid_fusion=hybrid_fusion,
                 )
             context.raise_if_cancelled()
             return self._successful_result(
@@ -720,6 +780,7 @@ class RetrievalExecutionService:
                 chunks,
                 emit_completed=emit_completed_event,
                 event_emitter=event_emitter,
+                hybrid_fusion=hybrid_fusion,
             )
         except RunCancelledError:
             usage = self._retrieval_usage_since(
@@ -1351,6 +1412,35 @@ class RetrievalExecutionService:
             reservation, budget_usage, usage_source=UsageSource.ACTUAL
         )
 
+    def _execute_hybrid_fusion(
+        self,
+        context: RetrievalExecutionContext,
+        rewritten_query: str,
+        dense_candidates: Sequence[RetrievalCandidate],
+    ):
+        """在既有 RERANK slot 内执行 Hybrid fusion collaborator（WP2 §9/§12）。
+
+        记账回调按"操作开始才计数"语义把 bm25_queries/rrf_fusions/
+        document_reads 提交进 Run 预算账本；预算 Ledger 线程安全，可从
+        blocking worker 线程调用。
+        """
+        fuse = getattr(self.adapter, "fuse", None)
+        if (
+            fuse is None
+            or not getattr(self.adapter, "hybrid_rrf", False)
+            or not callable(fuse)
+        ):
+            raise RetrievalAdapterError(
+                RetrievalErrorCategory.STRATEGY_UNAVAILABLE,
+                "HYBRID_CHANNEL_MISSING",
+                "Hybrid fusion collaborator is unavailable.",
+            )
+
+        def charge(budget_usage: BudgetUsage) -> None:
+            self._charge_started_call(context, budget_usage, "hybrid_fusion")
+
+        return fuse(rewritten_query, dense_candidates, charge=charge)
+
     @staticmethod
     def _retrieval_usage_since(
         ledger: BudgetLedger,
@@ -1362,6 +1452,8 @@ class RetrievalExecutionService:
             embedding_calls=current.embedding_calls - baseline.embedding_calls,
             vector_queries=current.vector_queries - baseline.vector_queries,
             keyword_queries=current.keyword_queries - baseline.keyword_queries,
+            bm25_queries=current.bm25_queries - baseline.bm25_queries,
+            rrf_fusions=current.rrf_fusions - baseline.rrf_fusions,
             document_reads=current.document_reads - baseline.document_reads,
             context_chars=current.context_chars - baseline.context_chars,
         )
@@ -1390,6 +1482,8 @@ class RetrievalExecutionService:
     def _filter_candidates(
         self, candidates: Sequence[RetrievalCandidate]
     ) -> list[RetrievalCandidate]:
+        if getattr(self.adapter, "hybrid_rrf", False):
+            return list(candidates)
         if not candidates:
             return []
         best = max(candidate.effective_score for candidate in candidates)
@@ -1400,11 +1494,39 @@ class RetrievalExecutionService:
             if candidate.effective_score >= floor
         ]
 
-    @staticmethod
     def _validate_rerank(
+        self,
         original: Sequence[RetrievalCandidate],
         ranked: Sequence[RetrievalCandidate],
     ) -> None:
+        if getattr(self.adapter, "hybrid_rrf", False):
+            # Hybrid fusion 输出校验：fused rank 连续、raw RRF score 在位、
+            # (document_id, chunk_id) 语义身份唯一（WP2 冻结合同 §18）。
+            if not ranked:
+                raise RetrievalAdapterError(
+                    RetrievalErrorCategory.FUSION_FAILED,
+                    "RRF_FUSION_FAILED",
+                    "Hybrid RRF output is empty.",
+                )
+            ranks = [item.reranked_rank for item in ranked]
+            if (
+                any(rank is None for rank in ranks)
+                or ranks != list(range(1, len(ranked) + 1))
+                or any(item.reranked_score is None for item in ranked)
+            ):
+                raise RetrievalAdapterError(
+                    RetrievalErrorCategory.FUSION_FAILED,
+                    "RRF_FUSION_FAILED",
+                    "Hybrid RRF output is invalid.",
+                )
+            identities = [(item.source_id, item.chunk_id) for item in ranked]
+            if len(set(identities)) != len(identities):
+                raise RetrievalAdapterError(
+                    RetrievalErrorCategory.FUSION_FAILED,
+                    "RRF_FUSION_FAILED",
+                    "Hybrid RRF output contains duplicate identity.",
+                )
+            return
         original_by_id = {item.candidate_id: item for item in original}
         ranked_by_id = {item.candidate_id: item for item in ranked}
         if (
@@ -1499,7 +1621,14 @@ class RetrievalExecutionService:
                 transformations.append(RetrievalTransformation.NORMALIZED)
             candidate = document.candidate
             if candidate.reranked_rank is not None:
-                transformations.append(RetrievalTransformation.RERANKED)
+                # WP2：Hybrid 融合必须与 baseline heuristic rerank 可区分
+                # （frozen decision §20：RRF_FUSED vs RERANKED）。
+                if getattr(self.adapter, "hybrid_rrf", False):
+                    transformations.append(
+                        RetrievalTransformation.RRF_FUSED
+                    )
+                else:
+                    transformations.append(RetrievalTransformation.RERANKED)
             allowed = min(self.spec.max_single_chunk_chars, remaining)
             if allowed <= 0:
                 break
@@ -1598,6 +1727,7 @@ class RetrievalExecutionService:
         *,
         emit_completed: bool = True,
         event_emitter: StepEventEmitter | None,
+        hybrid_fusion=None,
     ) -> RetrievalExecutionResult:
         if chunks:
             status = (
@@ -1621,7 +1751,10 @@ class RetrievalExecutionService:
         )
         if emit_completed:
             self._emit_completed_result(
-                result, event_emitter=event_emitter, ignore_failure=False
+                result,
+                event_emitter=event_emitter,
+                ignore_failure=False,
+                hybrid_fusion=hybrid_fusion,
             )
         return result
 
@@ -1639,6 +1772,7 @@ class RetrievalExecutionService:
         *,
         emit_completed: bool = True,
         event_emitter: StepEventEmitter | None,
+        hybrid_fusion=None,
     ) -> RetrievalExecutionResult:
         result = self._build_result(
             invocation,
@@ -1654,7 +1788,10 @@ class RetrievalExecutionService:
         )
         if emit_completed:
             self._emit_completed_result(
-                result, event_emitter=event_emitter, ignore_failure=True
+                result,
+                event_emitter=event_emitter,
+                ignore_failure=True,
+                hybrid_fusion=hybrid_fusion,
             )
         return result
 
@@ -1785,6 +1922,17 @@ class RetrievalExecutionService:
                     query_digest=invocation.query_digest,
                     collection_count=len(invocation.collection_names),
                     top_k=invocation.top_k,
+                    retrieval_strategy=(
+                        HYBRID_RETRIEVAL_STRATEGY_VALUE
+                        if getattr(self.adapter, "hybrid_rrf", False)
+                        else BASELINE_RETRIEVAL_STRATEGY_VALUE
+                    ),
+                    generation_id=getattr(
+                        self.adapter, "hybrid_generation_id", None
+                    ),
+                    provenance_sha256=getattr(
+                        self.adapter, "hybrid_provenance_sha256", None
+                    ),
                 ),
                 component="retrieval_execution",
             )
@@ -1884,9 +2032,19 @@ class RetrievalExecutionService:
         *,
         event_emitter: StepEventEmitter | None,
         ignore_failure: bool,
+        hybrid_fusion=None,
     ) -> None:
         if event_emitter is None:
             return
+        is_hybrid = bool(getattr(self.adapter, "hybrid_rrf", False))
+        if is_hybrid:
+            with self._trace_lock:
+                if hybrid_fusion is None:
+                    hybrid_fusion = self._deferred_hybrid_fusion.pop(
+                        result.retrieval_id, None
+                    )
+                else:
+                    self._deferred_hybrid_fusion.pop(result.retrieval_id, None)
         from core.runtime.events import (
             RetrievalBudgetPayload,
             RetrievalCompletedPayload,
@@ -1909,6 +2067,48 @@ class RetrievalExecutionService:
             worker_terminated=result.worker_terminated,
             execution_detached=result.execution_detached,
             background_work_pending=result.background_work_pending,
+            retrieval_strategy=(
+                HYBRID_RETRIEVAL_STRATEGY_VALUE
+                if is_hybrid
+                else BASELINE_RETRIEVAL_STRATEGY_VALUE
+            ),
+            generation_id=getattr(
+                self.adapter, "hybrid_generation_id", None
+            ),
+            provenance_sha256=getattr(
+                self.adapter, "hybrid_provenance_sha256", None
+            ),
+            dense_candidate_count=(
+                hybrid_fusion.dense_candidate_count
+                if hybrid_fusion is not None
+                else None
+            ),
+            bm25_candidate_count=(
+                hybrid_fusion.bm25_candidate_count
+                if hybrid_fusion is not None
+                else None
+            ),
+            rrf_fused_count=(
+                hybrid_fusion.rrf_fused_count
+                if hybrid_fusion is not None
+                else None
+            ),
+            dense_latency_ms=next(
+                (
+                    record.duration_ms
+                    for record in result.stage_records
+                    if record.stage is RetrievalStage.RETRIEVE
+                    and record.status
+                    is not RetrievalStageStatus.SKIPPED
+                ),
+                None,
+            ),
+            bm25_latency_ms=(
+                hybrid_fusion.bm25_latency_ms if hybrid_fusion is not None else None
+            ),
+            rrf_latency_ms=(
+                hybrid_fusion.rrf_latency_ms if hybrid_fusion is not None else None
+            ),
         )
         try:
             event_emitter.emit_from_worker(

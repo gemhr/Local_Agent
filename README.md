@@ -186,7 +186,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_KB_COLLECTION` | `huawei_wiki_collection` | 逻辑 KB collection 标签（非物理 generation 定位器） |
 | `LOCAL_AGENT_KB_CHUNK_SIZE` | `1400` | 生产 chunk policy chunk size；production 构建唯一 authority，production CLI 禁止覆盖 |
 | `LOCAL_AGENT_KB_CHUNK_OVERLAP` | `180` | 生产 chunk policy overlap；必须 `< chunk_size`（否则 fail closed） |
-| `LOCAL_AGENT_RETRIEVAL_STRATEGY` | `BASELINE` | 检索策略：`BASELINE`（默认）或 `HYBRID_RRF`（需要 v2 generation；WP1 边界内安全失败 `RETRIEVAL_STRATEGY_NOT_IMPLEMENTED`，Hybrid query 接线在 WP2） |
+| `LOCAL_AGENT_RETRIEVAL_STRATEGY` | `BASELINE` | 检索策略：`BASELINE`（默认）或 `HYBRID_RRF`（需要已验证 v2 generation；Dense + BM25 经 RRF 后进入既有 context pipeline。依赖不可用时 fail closed，不回退 BASELINE） |
 | `LOCAL_AGENT_KB_REQUIRED` | Profile 默认：`LOCAL=0`、`TEST=0`、`PRODUCTION=1` | PRODUCTION 默认 KB 失败阻止启动；显式 `false` 才允许 degraded |
 | `LOCAL_AGENT_EMBEDDING_MODEL_PATH` | `data/models/Qwen3-Embedding-0.6B` | 本地 embedding 模型目录；相对路径按项目根目录解析，仅离线加载 |
 | `LOCAL_AGENT_BLOCKING_MAX_WORKERS` / `LOCAL_AGENT_BLOCKING_MAX_PENDING_TASKS` | `4` / `8` | 三个 lifespan 有界 executor 的统一容量 |
@@ -273,7 +273,7 @@ uv run python scripts/query_local_kb.py "检索问题"
 
 - 每个 generation 是独立的物理 Dense Chroma collection（`la_{collection_key}_g_{uuidhex}`）与不可变 generation 目录（`<LOCAL_AGENT_CHROMA_DIR>/localagent_retrieval/<collection_key>/generations/<generation_id>/`）。
 - `active.json` 是 active-generation 指针，发布为原子替换（write temp → fsync → os.replace）；失败 build 保持旧 active 不变。
-- `LOCAL_AGENT_RETRIEVAL_STRATEGY=BASELINE`（默认）继续使用现有 v1 collection 行为；`HYBRID_RRF` 需要完整 v2 generation（v1 collection 必须显式 rebuild），且 WP1 边界内以 `RETRIEVAL_STRATEGY_NOT_IMPLEMENTED` 安全失败——Hybrid query 执行在 WP2 接线。
+- `LOCAL_AGENT_RETRIEVAL_STRATEGY=BASELINE`（默认）继续使用现有 v1 collection 行为；`HYBRID_RRF` 已生产可达但不是默认值，需要完整 v2 generation（v1 collection 必须显式 rebuild）。Hybrid 将 rewritten/original Dense 结果合并为一个 8 条的 Dense channel，BM25 为唯一 sparse channel（不执行 Chroma keyword supplement），串行 RRF 融合后仅按 fused rank 选择最多 `rag_top_k` 条；RRF 分数不应用 `rag_min_score`。任一必需通道、融合或依赖失败均 fail closed，绝不回退 BASELINE。
 - 启动绝不自动 rebuild / 重建 BM25 artifact / 修改 active.json；回滚是显式的 active-generation / 配置操作。
 
 ## 8. 数据与安全边界

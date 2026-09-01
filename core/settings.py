@@ -852,6 +852,21 @@ class Settings:
                 "overlap_not_below_size",
             )
 
+        retrieval_strategy = RetrievalStrategy.parse(
+            os.getenv("LOCAL_AGENT_RETRIEVAL_STRATEGY")
+        )
+        rag_top_k = _env_strict_int(
+            "LOCAL_AGENT_RAG_TOP_K", preset["rag_top_k"], minimum=1
+        )
+        # WP2 冻结：HYBRID_RRF 的 RRF per-channel/fused 预算上限是 8；
+        # rag_top_k 只表示最终 context budget，超过 8 时 Hybrid 配置 fail closed。
+        if retrieval_strategy is RetrievalStrategy.HYBRID_RRF and rag_top_k > 8:
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_RAG_TOP_K",
+                "hybrid_rrf_top_k_above_budget",
+            )
+
         # DEPRECATED env 只产生一次安全 warning，不改变行为。
         _warn_deprecated_observability_timeout()
 
@@ -1100,12 +1115,8 @@ class Settings:
             ),
             knowledge_chunk_size=knowledge_chunk_size,
             knowledge_chunk_overlap=knowledge_chunk_overlap,
-            retrieval_strategy=RetrievalStrategy.parse(
-                os.getenv("LOCAL_AGENT_RETRIEVAL_STRATEGY")
-            ),
-            rag_top_k=_env_strict_int(
-                "LOCAL_AGENT_RAG_TOP_K", preset["rag_top_k"], minimum=1
-            ),
+            retrieval_strategy=retrieval_strategy,
+            rag_top_k=rag_top_k,
             rag_min_score=_env_strict_float(
                 "LOCAL_AGENT_RAG_MIN_SCORE", 0.55, minimum=0.0, maximum=1.0
             ),

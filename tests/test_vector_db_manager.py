@@ -139,6 +139,26 @@ def test_keyword_search_reads_matching_chroma_documents(monkeypatch, tmp_path) -
     }
 
 
+def test_get_chunk_by_identity_uses_public_vector_store_api(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(vector_module, "HuggingFaceEmbeddings", FakeEmbeddings)
+    monkeypatch.setattr(vector_module, "Chroma", FakeChroma)
+    manager = vector_module.VectorDBManager(str(tmp_path), str(tmp_path))
+    calls = []
+    manager.vector_store.get = lambda **kwargs: calls.append(kwargs) or {
+        "ids": ["chunk-1"],
+        "documents": ["authoritative text"],
+        "metadatas": [{"doc_id": "doc-1", "chunk_id": "chunk-1"}],
+    }
+
+    document = manager.get_chunk_by_identity("doc-1", "chunk-1")
+
+    assert document is not None
+    assert document.page_content == "authoritative text"
+    assert calls == [{"ids": ["chunk-1"], "include": ["documents", "metadatas"]}]
+
+
 def test_missing_local_embedding_model_path_fails_before_adapter_load(
     monkeypatch, tmp_path
 ) -> None:

@@ -108,6 +108,8 @@ class AgentRouter:
         circuit_breaker_registry: ModelCircuitBreakerRegistry | None = None,
         tool_execution_service: ToolExecutionService | None = None,
         retrieval_execution_service: RetrievalExecutionService | None = None,
+        retrieval_strategy: str = "BASELINE",
+        hybrid_generation: object | None = None,
         span_recorder=None,
         blocking_executor=None,
         tool_registry: ToolRegistry | None = None,
@@ -132,29 +134,65 @@ class AgentRouter:
         self.orchestration_enabled = orchestration_enabled
         self.orchestration_max_agents = orchestration_max_agents
         self.knowledge_base_error = knowledge_base_error
+        self.retrieval_strategy = retrieval_strategy
         if retrieval_execution_service is not None:
             self.retrieval_execution_service = retrieval_execution_service
         elif db_manager is not None:
-            retrieval_adapter = RuntimeKnowledgeRetrievalAdapter(
-                db_manager,
-                query_rewriter=self._rewrite_knowledge_query,
-                query_term_extractor=self._extract_query_terms,
-                candidate_scorer=self._score_rag_candidate,
-            )
-            candidate_limit = max(self.rag_top_k * 2, 8)
-            self.retrieval_execution_service = RetrievalExecutionService(
-                retrieval_adapter,
-                spec=RetrievalExecutionSpec(
-                    max_candidates=candidate_limit,
-                    max_context_chunks=self.rag_top_k,
-                    max_context_chars=self.rag_context_max_chars,
-                    max_single_chunk_chars=self.rag_doc_max_chars,
-                    max_document_reads=candidate_limit,
-                ),
-                minimum_score=self.rag_min_score,
-                blocking_executor=blocking_executor,
-                span_recorder=span_recorder,
-            )
+            if retrieval_strategy == "HYBRID_RRF":
+                if hybrid_generation is None:
+                    # WP2 冻结（decision §17）：Hybrid 依赖不可用时禁止构造
+                    # baseline retrieval service 作为可调用替代品；请求路径
+                    # fail closed（KnowledgeBaseUnavailableError）。
+                    self.retrieval_execution_service = None
+                else:
+                    from core.runtime.hybrid_retrieval_adapter import (
+                        HybridKnowledgeRetrievalAdapter,
+                    )
+
+                    retrieval_adapter = HybridKnowledgeRetrievalAdapter(
+                        db_manager,
+                        bm25_index=hybrid_generation.bm25_artifact.index,
+                        generation_id=hybrid_generation.generation_id,
+                        provenance_sha256=hybrid_generation.provenance_sha256,
+                        query_rewriter=self._rewrite_knowledge_query,
+                        query_term_extractor=self._extract_query_terms,
+                        candidate_scorer=self._score_rag_candidate,
+                    )
+                    candidate_limit = min(max(self.rag_top_k * 2, 8), 8)
+                    self.retrieval_execution_service = RetrievalExecutionService(
+                        retrieval_adapter,
+                        spec=RetrievalExecutionSpec(
+                            max_candidates=candidate_limit,
+                            max_context_chunks=self.rag_top_k,
+                            max_context_chars=self.rag_context_max_chars,
+                            max_single_chunk_chars=self.rag_doc_max_chars,
+                            max_document_reads=candidate_limit,
+                        ),
+                        minimum_score=self.rag_min_score,
+                        blocking_executor=blocking_executor,
+                        span_recorder=span_recorder,
+                    )
+            else:
+                retrieval_adapter = RuntimeKnowledgeRetrievalAdapter(
+                    db_manager,
+                    query_rewriter=self._rewrite_knowledge_query,
+                    query_term_extractor=self._extract_query_terms,
+                    candidate_scorer=self._score_rag_candidate,
+                )
+                candidate_limit = max(self.rag_top_k * 2, 8)
+                self.retrieval_execution_service = RetrievalExecutionService(
+                    retrieval_adapter,
+                    spec=RetrievalExecutionSpec(
+                        max_candidates=candidate_limit,
+                        max_context_chunks=self.rag_top_k,
+                        max_context_chars=self.rag_context_max_chars,
+                        max_single_chunk_chars=self.rag_doc_max_chars,
+                        max_document_reads=candidate_limit,
+                    ),
+                    minimum_score=self.rag_min_score,
+                    blocking_executor=blocking_executor,
+                    span_recorder=span_recorder,
+                )
         else:
             self.retrieval_execution_service = None
         default_cost = ModelCostProfile(
@@ -694,6 +732,14 @@ class AgentRouter:
     ) -> RetrievalExecutionResult:
         """通过唯一 Runtime Service 执行 Knowledge Expert 的真实检索。"""
         if self.retrieval_execution_service is None or self.db_manager is None:
+            if self.retrieval_strategy == "HYBRID_RRF":
+                # WP2 冻结（decision §17）：degraded Hybrid 对请求 fail closed，
+                # 绝不静默回退 baseline。safe code: HYBRID_STRATEGY_UNAVAILABLE。
+                raise KnowledgeBaseUnavailableError(
+                    "HYBRID_STRATEGY_UNAVAILABLE: Hybrid 检索依赖不可用，"
+                    "请求已 fail closed（不回退 baseline）。"
+                    "请检查服务启动日志中的 [KB Runtime] 初始化错误。"
+                )
             raise KnowledgeBaseUnavailableError(
                 "本地知识库当前不可用，请检查服务启动日志中的 [KB Runtime] 初始化错误。"
             )
@@ -709,7 +755,11 @@ class AgentRouter:
         collection_name = str(
             getattr(self.db_manager, "collection_name", "local_knowledge_base")
         )
-        candidate_k = max(self.rag_top_k * 2, 8)
+        candidate_k = (
+            min(max(self.rag_top_k * 2, 8), 8)
+            if self.retrieval_strategy == "HYBRID_RRF"
+            else max(self.rag_top_k * 2, 8)
+        )
         invocation = RetrievalInvocation.create(
             user_query,
             collection_names=(collection_name,),

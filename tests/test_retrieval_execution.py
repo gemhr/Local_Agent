@@ -227,6 +227,8 @@ def test_trace_retrieval_owns_only_executed_stage_spans() -> None:
         "embedding_calls": ledger_usage.embedding_calls,
         "vector_queries": ledger_usage.vector_queries,
         "keyword_queries": ledger_usage.keyword_queries,
+        "bm25_queries": ledger_usage.bm25_queries,
+        "rrf_fusions": ledger_usage.rrf_fusions,
         "document_reads": ledger_usage.document_reads,
         "context_chars": ledger_usage.context_chars,
     }

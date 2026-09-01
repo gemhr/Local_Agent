@@ -264,6 +264,8 @@ class RetrievalBudgetPayload:
     embedding_calls: int = 0
     vector_queries: int = 0
     keyword_queries: int = 0
+    bm25_queries: int = 0
+    rrf_fusions: int = 0
     document_reads: int = 0
     context_chars: int = 0
 
@@ -273,10 +275,28 @@ class RetrievalBudgetPayload:
             "embedding_calls",
             "vector_queries",
             "keyword_queries",
+            "bm25_queries",
+            "rrf_fusions",
             "document_reads",
             "context_chars",
         ):
             _require_index(getattr(self, name), name)
+
+
+# WP2 Hybrid：Journal 兼容的 budget_usage 字段集合。旧 v1/v2 记录只有 6 个
+# 既有维度；新记录增加 bm25_queries/rrf_fusions。读取端两者都必须接受。
+_RETRIEVAL_BUDGET_JOURNAL_FIELDS = (
+    "retrieval_calls",
+    "embedding_calls",
+    "vector_queries",
+    "keyword_queries",
+    "document_reads",
+    "context_chars",
+)
+_RETRIEVAL_BUDGET_JOURNAL_FIELDS_V2 = _RETRIEVAL_BUDGET_JOURNAL_FIELDS + (
+    "bm25_queries",
+    "rrf_fusions",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +305,9 @@ class RetrievalStartedPayload:
     query_digest: str
     collection_count: int
     top_k: int
+    retrieval_strategy: str | None = None
+    generation_id: str | None = None
+    provenance_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.retrieval_id, "retrieval_id")
@@ -295,6 +318,10 @@ class RetrievalStartedPayload:
         _require_index(self.top_k, "top_k")
         if self.top_k <= 0:
             raise ValueError("top_k 必须是正整数")
+        for name in ("retrieval_strategy", "generation_id", "provenance_sha256"):
+            value = getattr(self, name)
+            if value is not None:
+                _require_text(value, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +376,15 @@ class RetrievalCompletedPayload:
     worker_terminated: bool = True
     execution_detached: bool = False
     background_work_pending: bool = False
+    retrieval_strategy: str | None = None
+    generation_id: str | None = None
+    provenance_sha256: str | None = None
+    dense_candidate_count: int | None = None
+    bm25_candidate_count: int | None = None
+    rrf_fused_count: int | None = None
+    dense_latency_ms: int | None = None
+    bm25_latency_ms: int | None = None
+    rrf_latency_ms: int | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.retrieval_id, "retrieval_id")
@@ -364,6 +400,25 @@ class RetrievalCompletedPayload:
             raise TypeError("budget_usage 必须是 RetrievalBudgetPayload")
         if self.safe_error_code is not None:
             _require_text(self.safe_error_code, "safe_error_code")
+        for name in (
+            "retrieval_strategy",
+            "generation_id",
+            "provenance_sha256",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _require_text(value, name)
+        for name in (
+            "dense_candidate_count",
+            "bm25_candidate_count",
+            "rrf_fused_count",
+            "dense_latency_ms",
+            "bm25_latency_ms",
+            "rrf_latency_ms",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _require_index(value, name)
         for name in (
             "worker_terminated",
             "execution_detached",
@@ -852,6 +907,9 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "query_digest",
         "collection_count",
         "top_k",
+        "retrieval_strategy",
+        "generation_id",
+        "provenance_sha256",
     ),
     RetrievalStageCompletedPayload: (
         "stage",
@@ -878,6 +936,15 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "worker_terminated",
         "execution_detached",
         "background_work_pending",
+        "retrieval_strategy",
+        "generation_id",
+        "provenance_sha256",
+        "dense_candidate_count",
+        "bm25_candidate_count",
+        "rrf_fused_count",
+        "dense_latency_ms",
+        "bm25_latency_ms",
+        "rrf_latency_ms",
     ),
     StepCompletedPayload: (
         "status",
@@ -1055,6 +1122,24 @@ _LEGACY_OPTIONAL_JOURNAL_FIELDS: dict[
         }
     ),
     RuntimeEventType.BUDGET_EXHAUSTED: frozenset({"dimension"}),
+    # WP2 Hybrid：retrieval 事件新增的有界 safe 字段；旧 v1/v2 Journal 记录
+    # 没有这些字段，读取端必须继续接受。
+    RuntimeEventType.RETRIEVAL_STARTED: frozenset(
+        {"retrieval_strategy", "generation_id", "provenance_sha256"}
+    ),
+    RuntimeEventType.RETRIEVAL_COMPLETED: frozenset(
+        {
+            "retrieval_strategy",
+            "generation_id",
+            "provenance_sha256",
+            "dense_candidate_count",
+            "bm25_candidate_count",
+            "rrf_fused_count",
+            "dense_latency_ms",
+            "bm25_latency_ms",
+            "rrf_latency_ms",
+        }
+    ),
 }
 
 
@@ -1233,14 +1318,7 @@ def _to_journal_value(value: object) -> object:
     if isinstance(value, RetrievalBudgetPayload):
         return {
             name: getattr(value, name)
-            for name in (
-                "retrieval_calls",
-                "embedding_calls",
-                "vector_queries",
-                "keyword_queries",
-                "document_reads",
-                "context_chars",
-            )
+            for name in _RETRIEVAL_BUDGET_JOURNAL_FIELDS_V2
         }
     raise TypeError("Journal Payload 包含未允许的值类型")
 
@@ -1313,9 +1391,15 @@ def validate_journal_payload(
         "document_reads",
         "context_chars",
     }
+    budget_fields_v2 = budget_fields | {"bm25_queries", "rrf_fusions"}
     for name, value in safe_payload.items():
         if name == "budget_usage":
-            if not isinstance(value, dict) or set(value) != budget_fields:
+            # 旧 v1/v2 记录只有 6 个维度；新记录含 bm25_queries/rrf_fusions。
+            # 读取端必须同时接受两种形态（Journal 兼容合同）。
+            if not isinstance(value, dict) or set(value) not in (
+                budget_fields,
+                budget_fields_v2,
+            ):
                 raise ValueError("budget_usage 字段不匹配")
             for count in value.values():
                 if (

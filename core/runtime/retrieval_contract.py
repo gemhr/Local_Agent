@@ -53,6 +53,9 @@ class RetrievalErrorCategory(str, Enum):
     VECTOR_STORE_FAILED = "VECTOR_STORE_FAILED"
     DOCUMENT_LOAD_FAILED = "DOCUMENT_LOAD_FAILED"
     RERANK_FAILED = "RERANK_FAILED"
+    SPARSE_RETRIEVAL_FAILED = "SPARSE_RETRIEVAL_FAILED"
+    FUSION_FAILED = "FUSION_FAILED"
+    STRATEGY_UNAVAILABLE = "STRATEGY_UNAVAILABLE"
     CONTEXT_BUILD_FAILED = "CONTEXT_BUILD_FAILED"
     METADATA_INVALID = "METADATA_INVALID"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
@@ -68,6 +71,7 @@ class RetrievalTransformation(str, Enum):
     DEDUPLICATED = "DEDUPLICATED"
     TRUNCATED = "TRUNCATED"
     RERANKED = "RERANKED"
+    RRF_FUSED = "RRF_FUSED"
     CONTEXT_SELECTED = "CONTEXT_SELECTED"
 
 
@@ -315,6 +319,8 @@ class RetrievalBudgetUsage:
     embedding_calls: int = 0
     vector_queries: int = 0
     keyword_queries: int = 0
+    bm25_queries: int = 0
+    rrf_fusions: int = 0
     document_reads: int = 0
     context_chars: int = 0
 
@@ -324,6 +330,8 @@ class RetrievalBudgetUsage:
             "embedding_calls",
             "vector_queries",
             "keyword_queries",
+            "bm25_queries",
+            "rrf_fusions",
             "document_reads",
             "context_chars",
         ):
