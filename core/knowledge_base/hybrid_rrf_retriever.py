@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 RRF_ALGORITHM_REF = "rrf.v1"
@@ -13,6 +16,7 @@ BM25_CHANNEL_REF = "bm25-lucene-idf.v1"
 PER_CHANNEL_CANDIDATE_LIMIT = 8
 PRE_FUSION_UNION_MAX = 16
 FINAL_FUSED_CANDIDATE_LIMIT = 8
+PROFILE_SCHEMA_VERSION = "localagent-hybrid-rrf-profile.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,13 +71,87 @@ class _Accumulator:
     bm25: RrfChannelCandidate | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class HybridRrfProfile:
+    """evaluation-only 的有界加权 RRF profile。"""
+
+    candidate_id: str
+    profile_version: str
+    dense_weight: float
+    bm25_weight: float
+    rrf_k: int = RRF_K
+    final_top_k: int = FINAL_FUSED_CANDIDATE_LIMIT
+    algorithm_ref: str = "weighted_rrf.v1"
+    candidate_profile_sha256: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.candidate_id or not self.profile_version:
+            raise ValueError("hybrid RRF profile identity must be non-empty")
+        for name, value in (("dense_weight", self.dense_weight), ("bm25_weight", self.bm25_weight)):
+            if not math.isfinite(value) or value <= 0 or value > 2:
+                raise ValueError(f"{name} must be finite and in (0, 2]")
+        if not isinstance(self.rrf_k, int) or isinstance(self.rrf_k, bool) or self.rrf_k != RRF_K:
+            raise ValueError("hybrid RRF profile must use frozen rrf_k")
+        if not isinstance(self.final_top_k, int) or isinstance(self.final_top_k, bool) or not 1 <= self.final_top_k <= FINAL_FUSED_CANDIDATE_LIMIT:
+            raise ValueError("hybrid RRF profile final_top_k is invalid")
+        expected = self._digest()
+        if self.candidate_profile_sha256 and self.candidate_profile_sha256 != expected:
+            raise ValueError("candidate_profile_sha256 mismatch")
+        object.__setattr__(self, "candidate_profile_sha256", expected)
+
+    def _payload(self) -> dict[str, object]:
+        return {
+            "schema_version": PROFILE_SCHEMA_VERSION,
+            "candidate_id": self.candidate_id,
+            "profile_version": self.profile_version,
+            "algorithm_ref": self.algorithm_ref,
+            "rrf_k": self.rrf_k,
+            "dense_weight": self.dense_weight,
+            "bm25_weight": self.bm25_weight,
+            "final_top_k": self.final_top_k,
+        }
+
+    def _digest(self) -> str:
+        encoded = json.dumps(self._payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        return {**self._payload(), "candidate_profile_sha256": self.candidate_profile_sha256}
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> "HybridRrfProfile":
+        if payload.get("schema_version") != PROFILE_SCHEMA_VERSION:
+            raise ValueError("hybrid RRF profile schema mismatch")
+        return cls(
+            candidate_id=str(payload["candidate_id"]),
+            profile_version=str(payload["profile_version"]),
+            algorithm_ref=str(payload.get("algorithm_ref", "weighted_rrf.v1")),
+            rrf_k=int(payload.get("rrf_k", RRF_K)),
+            dense_weight=float(payload["dense_weight"]),
+            bm25_weight=float(payload["bm25_weight"]),
+            final_top_k=int(payload.get("final_top_k", FINAL_FUSED_CANDIDATE_LIMIT)),
+            candidate_profile_sha256=str(payload.get("candidate_profile_sha256", "")),
+        )
+
+
+def load_hybrid_rrf_profile(path: str | Path) -> HybridRrfProfile:
+    """加载并校验 evaluation-only profile。"""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("hybrid RRF profile must be an object")
+    return HybridRrfProfile.from_dict(payload)
+
+
 class HybridRrfRetriever:
     """消费冻结的 Current/BM25 排名，不混合原始 score。"""
 
-    def __init__(self, *, rrf_k: int = RRF_K) -> None:
+    def __init__(self, *, rrf_k: int = RRF_K, profile: HybridRrfProfile | None = None) -> None:
         if isinstance(rrf_k, bool) or not isinstance(rrf_k, int) or rrf_k <= 0:
             raise ValueError("rrf_k must be a positive integer")
         self.rrf_k = rrf_k
+        self.profile = profile
+        if profile is not None and profile.rrf_k != rrf_k:
+            raise ValueError("profile rrf_k mismatch")
 
     @staticmethod
     def _validate_channel(
@@ -122,7 +200,13 @@ class HybridRrfRetriever:
                 for candidate in (item.current, item.bm25)
                 if candidate is not None
             )
-            score = sum(1.0 / (self.rrf_k + rank) for rank in ranks)
+            dense_weight = self.profile.dense_weight if self.profile is not None else 1.0
+            bm25_weight = self.profile.bm25_weight if self.profile is not None else 1.0
+            score = 0.0
+            if item.current is not None:
+                score += dense_weight / (self.rrf_k + item.current.rank)
+            if item.bm25 is not None:
+                score += bm25_weight / (self.rrf_k + item.bm25.rank)
             if not math.isfinite(score) or score <= 0:
                 raise ValueError("RRF fused score must be finite and positive")
             scored.append((score, min(ranks), len(ranks), identity, item))
@@ -165,6 +249,9 @@ __all__ = [
     "PRE_FUSION_UNION_MAX",
     "RRF_ALGORITHM_REF",
     "RRF_K",
+    "PROFILE_SCHEMA_VERSION",
+    "HybridRrfProfile",
+    "load_hybrid_rrf_profile",
     "RrfChannelCandidate",
     "RrfFusedCandidate",
 ]

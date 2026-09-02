@@ -707,6 +707,7 @@ class Settings:
     evaluation_generation_pin_path: str = ""
     evaluation_rewrite_fixture_path: str = ""
     evaluation_identity_sha256: str = ""
+    evaluation_hybrid_profile_path: str = ""
 
     @classmethod
     def load(cls) -> "Settings":
@@ -853,6 +854,9 @@ class Settings:
         evaluation_identity_sha256 = os.getenv(
             "LOCAL_AGENT_EVALUATION_IDENTITY_SHA256", ""
         ).strip()
+        evaluation_hybrid_profile_path = os.getenv(
+            "LOCAL_AGENT_EVALUATION_HYBRID_PROFILE_PATH", ""
+        ).strip()
         if evaluation_mode and not evaluation_generation_pin_path:
             raise SettingsValidationError(
                 STARTUP_CONFIGURATION_ERROR,
@@ -888,6 +892,18 @@ class Settings:
         retrieval_strategy = RetrievalStrategy.parse(
             os.getenv("LOCAL_AGENT_RETRIEVAL_STRATEGY")
         )
+        if evaluation_hybrid_profile_path and not evaluation_mode:
+            raise SettingsValidationError(
+                STARTUP_CONFIGURATION_ERROR,
+                "LOCAL_AGENT_EVALUATION_HYBRID_PROFILE_PATH",
+                "requires_evaluation_mode",
+            )
+        if evaluation_hybrid_profile_path and retrieval_strategy is not RetrievalStrategy.HYBRID_RRF:
+            raise SettingsValidationError(
+                STARTUP_CONFIGURATION_ERROR,
+                "LOCAL_AGENT_EVALUATION_HYBRID_PROFILE_PATH",
+                "requires_hybrid_strategy",
+            )
         rag_top_k = _env_strict_int(
             "LOCAL_AGENT_RAG_TOP_K", preset["rag_top_k"], minimum=1
         )
@@ -1196,4 +1212,5 @@ class Settings:
             evaluation_generation_pin_path=evaluation_generation_pin_path,
             evaluation_rewrite_fixture_path=evaluation_rewrite_fixture_path,
             evaluation_identity_sha256=evaluation_identity_sha256,
+            evaluation_hybrid_profile_path=evaluation_hybrid_profile_path,
         )

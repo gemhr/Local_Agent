@@ -206,6 +206,7 @@ chat_service: Optional[ChatService] = None
 application_runtime_services: Optional[ApplicationRuntimeServices] = None
 evaluation_generation_pin: EvaluationGenerationPin | None = None
 evaluation_rewrite_fixture: EvaluationRewriteFixture | None = None
+evaluation_hybrid_rrf_profile = None
 evaluation_validated_generation = None
 logger = logging.getLogger(__name__)
 def _next_or_none(stream):
@@ -388,14 +389,21 @@ async def lifespan(app: FastAPI):
         None: 启动阶段创建服务，关闭阶段释放引用。
     """
     global application_runtime_services, chat_service
-    global evaluation_generation_pin, evaluation_rewrite_fixture, evaluation_validated_generation
+    global evaluation_generation_pin, evaluation_rewrite_fixture, evaluation_hybrid_rrf_profile, evaluation_validated_generation
 
     evaluation_generation_pin = None
     evaluation_rewrite_fixture = None
+    evaluation_hybrid_rrf_profile = None
     evaluation_validated_generation = None
     if settings.evaluation_mode:
         evaluation_generation_pin = load_generation_pin(settings.evaluation_generation_pin_path)
         evaluation_rewrite_fixture = load_rewrite_fixture(settings.evaluation_rewrite_fixture_path)
+        if settings.evaluation_hybrid_profile_path:
+            from core.knowledge_base.hybrid_rrf_retriever import load_hybrid_rrf_profile
+
+            evaluation_hybrid_rrf_profile = load_hybrid_rrf_profile(
+                settings.evaluation_hybrid_profile_path
+            )
         app.state.evaluation_generation_pin = evaluation_generation_pin.to_dict()
         app.state.evaluation_rewrite_fixture_id = evaluation_rewrite_fixture.fixture_id
         app.state.evaluation_identity_sha256 = settings.evaluation_identity_sha256
@@ -889,6 +897,11 @@ async def lifespan(app: FastAPI):
             resource_authorization_service=resource_authorization_service,
             retrieval_strategy=settings.retrieval_strategy.value,
             hybrid_generation=hybrid_validated_generation,
+            hybrid_rrf_profile=(
+                evaluation_hybrid_rrf_profile
+                if settings.evaluation_mode
+                else None
+            ),
         ),
     )
     runtime_metrics = InMemoryMetricsRecorder(

@@ -11,6 +11,7 @@ from core.knowledge_base.hybrid_rrf_retriever import (
     CURRENT_CHANNEL_REF,
     FINAL_FUSED_CANDIDATE_LIMIT,
     HybridRrfRetriever,
+    HybridRrfProfile,
     PER_CHANNEL_CANDIDATE_LIMIT,
     PRE_FUSION_UNION_MAX,
     RRF_ALGORITHM_REF,
@@ -113,3 +114,13 @@ def test_per_channel_and_final_candidate_budgets_fail_closed() -> None:
 def test_rrf_k_must_be_positive_integer() -> None:
     with pytest.raises(ValueError, match="rrf_k"):
         HybridRrfRetriever(rrf_k=0)
+
+
+def test_weighted_rrf_profile_is_bounded_and_changes_channel_contribution() -> None:
+    profile = HybridRrfProfile("hybrid-v2-test", "v1", 1.25, 0.75)
+    current = [_candidate("a", 1), _candidate("b", 2)]
+    bm25 = [_candidate("b", 1), _candidate("a", 2)]
+    fused = HybridRrfRetriever(profile=profile).fuse(current, bm25)
+    assert fused[0].stable_identity == ("doc-a", "chunk-a")
+    assert fused[0].rrf_score == pytest.approx(1.25 / 61 + 0.75 / 62)
+    assert HybridRrfProfile.from_dict(profile.to_dict()).candidate_profile_sha256 == profile.candidate_profile_sha256
