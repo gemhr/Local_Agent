@@ -35,6 +35,7 @@ class ActiveRunControlHandle:
         "_completed",
         "_force_abort_callback",
         "_active_step_count",
+        "_approval_controller_resolver",
     )
 
     def __init__(
@@ -47,6 +48,7 @@ class ActiveRunControlHandle:
         started_at: datetime | None = None,
         force_abort_callback: ForceAbortCallback | None = None,
         active_step_count: Callable[[], int] | None = None,
+        approval_controller_resolver: Callable[[], object | None] | None = None,
     ) -> None:
         if not isinstance(run_id, str) or not run_id.strip():
             raise ValueError("run_id must be a non-empty string")
@@ -62,6 +64,7 @@ class ActiveRunControlHandle:
         self._completed = threading.Event()
         self._force_abort_callback = force_abort_callback
         self._active_step_count = active_step_count
+        self._approval_controller_resolver = approval_controller_resolver
 
     @property
     def is_completed(self) -> bool:
@@ -93,6 +96,104 @@ class ActiveRunControlHandle:
         if self._force_abort_callback is not None:
             raise RuntimeError("force-abort callback is already bound")
         self._force_abort_callback = callback
+
+    def bind_approval_controller_resolver(
+        self, resolver: Callable[[], object | None]
+    ) -> None:
+        """绑定 run-scoped ToolApprovalController 解析器（不保存 business truth）。"""
+        if self._approval_controller_resolver is not None:
+            raise RuntimeError("approval controller resolver is already bound")
+        self._approval_controller_resolver = resolver
+
+    def approval_controller(self) -> object | None:
+        """返回当前 run 的 ToolApprovalController 或 None。"""
+        resolver = self._approval_controller_resolver
+        if resolver is None:
+            return None
+        try:
+            return resolver()
+        except Exception:
+            return None
+
+    async def decide_tool_approval(
+        self,
+        *,
+        approval_id: str,
+        invocation_id: str,
+        decision: object,
+        actor_id: str | None = None,
+    ) -> object:
+        """WP1 typed domain command forwarding（供 WP2 transport 调用）。
+
+        只转发给当前 run 的 controller，绝不保存 approval business payload。
+        不存在 controller 时返回 not-found/inactive typed result。
+        """
+        from core.runtime.approval import (
+            ApprovalCommandErrorCode,
+            ApprovalCommandResult,
+            ApprovalDecisionValue,
+            ApprovalStatus,
+            ToolApprovalController,
+        )
+
+        controller = self.approval_controller()
+        if controller is None:
+            return ApprovalCommandResult(
+                run_id=self.run_id,
+                approval_id=approval_id,
+                effective_status=ApprovalStatus.PENDING,
+                safe_error_code=ApprovalCommandErrorCode.UNKNOWN_APPROVAL.value,
+            )
+        if not isinstance(controller, ToolApprovalController):
+            raise TypeError("run 的 approval controller 类型非法")
+        if not isinstance(decision, ApprovalDecisionValue):
+            raise TypeError("decision 必须是 ApprovalDecisionValue")
+        if self.run_id != controller.run_id:
+            return ApprovalCommandResult(
+                run_id=self.run_id,
+                approval_id=approval_id,
+                effective_status=ApprovalStatus.PENDING,
+                safe_error_code=ApprovalCommandErrorCode.UNKNOWN_RUN.value,
+            )
+        return await controller.decide_async(
+            run_id=self.run_id,
+            approval_id=approval_id,
+            invocation_id=invocation_id,
+            decision=decision,
+            actor_id=actor_id,
+        )
+
+    async def approve_tool_approval(
+        self,
+        *,
+        approval_id: str,
+        invocation_id: str,
+        actor_id: str | None = None,
+    ) -> object:
+        from core.runtime.approval import ApprovalDecisionValue
+
+        return await self.decide_tool_approval(
+            approval_id=approval_id,
+            invocation_id=invocation_id,
+            decision=ApprovalDecisionValue.APPROVE,
+            actor_id=actor_id,
+        )
+
+    async def reject_tool_approval(
+        self,
+        *,
+        approval_id: str,
+        invocation_id: str,
+        actor_id: str | None = None,
+    ) -> object:
+        from core.runtime.approval import ApprovalDecisionValue
+
+        return await self.decide_tool_approval(
+            approval_id=approval_id,
+            invocation_id=invocation_id,
+            decision=ApprovalDecisionValue.REJECT,
+            actor_id=actor_id,
+        )
 
     def mark_completed(self) -> None:
         self._completed.set()
@@ -194,6 +295,70 @@ class RunRegistry:
     def cancel(self, run_id: str, reason: CancellationReason) -> bool | None:
         handle = self.get(run_id)
         return None if handle is None else handle.request_cancel(reason)
+
+    async def decide_tool_approval(
+        self,
+        run_id: str,
+        approval_id: str,
+        invocation_id: str,
+        decision: object,
+        actor_id: str | None = None,
+    ) -> object:
+        """Registry 级 typed command forwarding；不存在 handle 时返回 inactive。"""
+        handle = self.get(run_id)
+        if handle is None:
+            from core.runtime.approval import (
+                ApprovalCommandErrorCode,
+                ApprovalCommandResult,
+                ApprovalStatus,
+            )
+
+            return ApprovalCommandResult(
+                run_id=run_id,
+                approval_id=approval_id,
+                effective_status=ApprovalStatus.PENDING,
+                safe_error_code=ApprovalCommandErrorCode.UNKNOWN_APPROVAL.value,
+            )
+        return await handle.decide_tool_approval(
+            approval_id=approval_id,
+            invocation_id=invocation_id,
+            decision=decision,
+            actor_id=actor_id,
+        )
+
+    async def approve_tool_approval(
+        self,
+        run_id: str,
+        approval_id: str,
+        invocation_id: str,
+        actor_id: str | None = None,
+    ) -> object:
+        from core.runtime.approval import ApprovalDecisionValue
+
+        return await self.decide_tool_approval(
+            run_id,
+            approval_id,
+            invocation_id,
+            ApprovalDecisionValue.APPROVE,
+            actor_id=actor_id,
+        )
+
+    async def reject_tool_approval(
+        self,
+        run_id: str,
+        approval_id: str,
+        invocation_id: str,
+        actor_id: str | None = None,
+    ) -> object:
+        from core.runtime.approval import ApprovalDecisionValue
+
+        return await self.decide_tool_approval(
+            run_id,
+            approval_id,
+            invocation_id,
+            ApprovalDecisionValue.REJECT,
+            actor_id=actor_id,
+        )
 
     def unregister(self, run_id: str) -> bool:
         with self._lock:

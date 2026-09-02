@@ -30,6 +30,7 @@ from core.runtime.events import (
     StepCompletedPayload,
     StepStartedPayload,
 )
+from core.runtime.approval import ToolApprovalRejectedError
 from core.runtime.step_completion import StepCompletionResult, StepResultCommitter
 from core.runtime.fault_injection import (
     FaultInjectionController,
@@ -267,6 +268,21 @@ class ParallelExecutor:
                             ParallelExecutionInfrastructureError,
                         ):
                             raise
+                        except ToolApprovalRejectedError:
+                            self._approval_rejected_terminal(
+                                state, claim, outcomes
+                            )
+                            await self._emit_step_completed(
+                                claim,
+                                state,
+                                StepStatus.FAILED,
+                                "TOOL_APPROVAL_REJECTED",
+                                plan=plan,
+                            )
+                            if failure_mode == ParallelFailureMode.FAIL_FAST:
+                                fail_fast_triggered.set()
+                                raise _FailFastSignal() from None
+                            return
                         except Exception:
                             code = (
                                 self._driver_failure_code(plan, claim)
@@ -366,6 +382,17 @@ class ParallelExecutor:
                 raise
             except (ParallelExecutionInfrastructureError, _FailFastSignal):
                 raise
+            except ToolApprovalRejectedError:
+                self._approval_rejected_terminal(state, claim, outcomes)
+                await self._emit_step_completed(
+                    claim,
+                    state,
+                    StepStatus.FAILED,
+                    "TOOL_APPROVAL_REJECTED",
+                    plan=plan,
+                )
+                if failure_mode == ParallelFailureMode.FAIL_FAST:
+                    raise _FailFastSignal() from None
             except Exception:
                 code = (
                     self._driver_failure_code(plan, claim)
@@ -579,8 +606,17 @@ class ParallelExecutor:
 
     def _terminal(self, state: AgentState, claim: StepClaim, status: StepStatus, *, result: Any = None, error_code: str | None = None, error_message: str | None = None) -> StepExecutionOutcome:
         current = state.steps.get(claim.step_id)
-        if current is None or current.status != StepStatus.RUNNING:
-            raise ParallelExecutionInfrastructureError("STEP_NOT_RUNNING", "已 Claim 步骤未处于 RUNNING 状态")
+        if current is None:
+            raise ParallelExecutionInfrastructureError("STEP_MISSING", "已 Claim 步骤在状态机中缺失")
+        if current.status not in {StepStatus.RUNNING, StepStatus.WAITING_FOR_APPROVAL}:
+            raise ParallelExecutionInfrastructureError("STEP_NOT_RUNNING", "已 Claim 步骤未处于 RUNNING/WAITING 状态")
+        if (
+            current.status is StepStatus.WAITING_FOR_APPROVAL
+            and status is not StepStatus.CANCELLED
+        ):
+            # WAITING 只允许 cancellation 直接由 executor 收口；REJECT 走
+            # APPROVAL_REJECTED 专用 transition（由 controller bridge 完成）。
+            raise ParallelExecutionInfrastructureError("STEP_NOT_RUNNING", "WAITING Step 只能被取消收口")
         event_type = {StepStatus.SUCCEEDED: StepEventType.SUCCEEDED, StepStatus.FAILED: StepEventType.FAILED, StepStatus.CANCELLED: StepEventType.CANCELLED}[status]
         ended_at = max(datetime.now(UTC), state.updated_at, current.started_at or claim.claimed_at)
         self._state_machine.apply_step_event(state, StepStateEvent(event_type, claim.step_id, occurred_at=ended_at, error_code=error_code, error_message=error_message))
@@ -597,6 +633,15 @@ class ParallelExecutor:
             raise ParallelExecutionInfrastructureError(
                 "STEP_MISSING",
                 "已提交 Step 在状态机中缺失",
+            )
+        if status not in {
+            StepStatus.SUCCEEDED,
+            StepStatus.FAILED,
+            StepStatus.CANCELLED,
+        }:
+            raise ParallelExecutionInfrastructureError(
+                "STEP_NOT_TERMINAL",
+                "Outcome 只能使用 Step 终态",
             )
         ended_at = current.ended_at or max(
             datetime.now(UTC), current.started_at or claim.claimed_at
@@ -621,7 +666,21 @@ class ParallelExecutor:
         error_message: str | None,
     ) -> StepExecutionOutcome:
         current = state.steps.get(claim.step_id)
-        if current is not None and current.status is not StepStatus.RUNNING:
+        if current is None:
+            raise ParallelExecutionInfrastructureError(
+                "STEP_MISSING",
+                "已 Claim Step 在状态机中缺失",
+            )
+        if current.status is StepStatus.WAITING_FOR_APPROVAL:
+            # WAITING Step 是 active：cancel 时经状态机 WAITING->CANCELLED。
+            return self._terminal(
+                state,
+                claim,
+                StepStatus.CANCELLED,
+                error_code=error_code or "RUN_CANCELLED",
+                error_message=error_message,
+            )
+        if current.status is not StepStatus.RUNNING:
             return self._outcome_from_state(claim, state, current.status)
         return self._terminal(
             state,
@@ -630,6 +689,58 @@ class ParallelExecutor:
             error_code=error_code,
             error_message=error_message,
         )
+
+    def _approval_rejected_terminal(
+        self,
+        state: AgentState,
+        claim: StepClaim,
+        outcomes: dict[str, StepExecutionOutcome],
+    ) -> StepExecutionOutcome:
+        """REJECT 专用收口：WAITING -> FAILED(TOOL_APPROVAL_REJECTED)。
+
+        只有 AgentStateMachine 写 Step status；这里通过 APPROVAL_REJECTED
+        StepEvent 转移。Step 可能已被 coordinator settle 成终态（幂等返回）。
+        """
+        current = state.steps.get(claim.step_id)
+        if current is None:
+            raise ParallelExecutionInfrastructureError(
+                "STEP_MISSING",
+                "已 Claim Step 在状态机中缺失",
+            )
+        if current.status in {
+            StepStatus.FAILED,
+            StepStatus.CANCELLED,
+        }:
+            outcome = self._outcome_from_state(claim, state, current.status)
+            outcomes[claim.step_id] = outcome
+            return outcome
+        if current.status is not StepStatus.WAITING_FOR_APPROVAL:
+            raise ParallelExecutionInfrastructureError(
+                "STEP_NOT_WAITING",
+                "Approval Reject 只能收口 WAITING_FOR_APPROVAL Step",
+            )
+        ended_at = max(datetime.now(UTC), state.updated_at, current.started_at or claim.claimed_at)
+        self._state_machine.apply_step_event(
+            state,
+            StepStateEvent(
+                StepEventType.APPROVAL_REJECTED,
+                claim.step_id,
+                occurred_at=ended_at,
+                error_code="TOOL_APPROVAL_REJECTED",
+                error_message="Tool 调用已被拒绝审批",
+            ),
+        )
+        outcome = StepExecutionOutcome(
+            claim.step_id,
+            StepStatus.FAILED,
+            current.started_at or claim.claimed_at,
+            ended_at,
+            None,
+            "TOOL_APPROVAL_REJECTED",
+            "Tool 调用已被拒绝审批",
+        )
+        outcomes[claim.step_id] = outcome
+        return outcome
 
     @staticmethod
     def _driver_failure_code(plan: Plan | None, claim: StepClaim) -> str:
@@ -643,7 +754,11 @@ class ParallelExecutor:
 
     async def _cancel_claims(self, claims: tuple[StepClaim, ...], state: AgentState, error_code: str, message: str) -> None:
         for claim in claims:
-            if state.steps.get(claim.step_id) and state.steps[claim.step_id].status == StepStatus.RUNNING:
+            step = state.steps.get(claim.step_id)
+            if step is not None and step.status in {
+                StepStatus.RUNNING,
+                StepStatus.WAITING_FOR_APPROVAL,
+            }:
                 self._terminal(state, claim, StepStatus.CANCELLED, error_code=error_code, error_message=message)
                 await self._emit_step_completed(
                     claim, state, StepStatus.CANCELLED, error_code
@@ -652,7 +767,10 @@ class ParallelExecutor:
     async def _cancel_unfinished(self, claims: tuple[StepClaim, ...], outcomes: dict[str, StepExecutionOutcome], state: AgentState) -> None:
         for claim in claims:
             current = state.steps.get(claim.step_id)
-            if current is not None and current.status is not StepStatus.RUNNING:
+            if current is not None and current.status not in {
+                StepStatus.RUNNING,
+                StepStatus.WAITING_FOR_APPROVAL,
+            }:
                 continue
             if claim.step_id not in outcomes:
                 outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.CANCELLED, error_code="STEP_CANCELLED", error_message="步骤执行已取消")

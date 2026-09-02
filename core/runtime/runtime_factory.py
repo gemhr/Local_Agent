@@ -58,6 +58,7 @@ class CoordinatedSingleAgentDriver:
         persist: bool,
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
+        approval_controller=None,
     ) -> None:
         self._router = router
         self._user_query = user_query
@@ -65,6 +66,7 @@ class CoordinatedSingleAgentDriver:
         self._persist = persist
         self._event_emitter = event_emitter
         self._fault_controller = fault_controller
+        self._approval_controller = approval_controller
         self.emits_user_output = True
         self.output: str | None = None
         self.invocation_result: ModelInvocationResult | None = None
@@ -82,6 +84,7 @@ class CoordinatedSingleAgentDriver:
             invocation_result_out=invocation_results,
             event_emitter=self._event_emitter,
             fault_controller=self._fault_controller,
+            approval_controller=self._approval_controller,
         )
         self.invocation_result = (
             invocation_results[0] if invocation_results else None
@@ -141,6 +144,9 @@ class ResolvedSingleStepDriver:
             event_emitter=self._event_emitter.for_step(claim.step_id),
             fault_controller=self._fault_controller,
             memory_context_bundle=memory_context_bundle,
+            approval_controller=getattr(
+                self._coordinator, "tool_approval_controller", None
+            ),
         )
         self.invocation_result = invocation_results[0] if invocation_results else None
         return self.output
@@ -596,6 +602,7 @@ class CoordinatedRuntimeFactory:
                     snapshot_store=snapshot_store,
                     metrics_recorder=self._services.runtime_metrics_recorder,
                 )
+                approval_controller = coordinator._ensure_tool_approval_controller()
                 driver = CoordinatedSingleAgentDriver(
                     self._router,
                     user_query=query,
@@ -603,6 +610,7 @@ class CoordinatedRuntimeFactory:
                     persist=persist,
                     event_emitter=emitter.for_step("answer"),
                     fault_controller=fault_controller,
+                    approval_controller=approval_controller,
                 )
                 plan = static_plan
             else:

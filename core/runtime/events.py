@@ -27,6 +27,8 @@ class RuntimeEventType(str, Enum):
     MODEL_COMPLETED = "MODEL_COMPLETED"
     TOOL_STARTED = "TOOL_STARTED"
     TOOL_COMPLETED = "TOOL_COMPLETED"
+    TOOL_APPROVAL_REQUESTED = "TOOL_APPROVAL_REQUESTED"
+    TOOL_APPROVAL_DECIDED = "TOOL_APPROVAL_DECIDED"
     RETRIEVAL_STARTED = "RETRIEVAL_STARTED"
     RETRIEVAL_STAGE_COMPLETED = "RETRIEVAL_STAGE_COMPLETED"
     RETRIEVAL_COMPLETED = "RETRIEVAL_COMPLETED"
@@ -254,6 +256,70 @@ class ToolCompletedPayload:
         if self.execution_detached and not self.resource_release_pending:
             raise ValueError("Detached Worker 必须等待资源清理")
         _validate_tool_evidence_fields(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolApprovalRequestedPayload:
+    """Tool Approval Request 的 Journal 安全投影（不包含 raw 内容）。"""
+
+    approval_id: str
+    tool_name: str
+    invocation_identity_digest: str
+    arguments_digest: str
+    idempotency_key_digest: str | None = None
+    risk_level: str | None = None
+    risk_facts: str = ""
+
+    def __post_init__(self) -> None:
+        _require_text(self.approval_id, "approval_id")
+        _require_text(self.tool_name, "tool_name")
+        _validate_sha256_digest(self.invocation_identity_digest, "invocation_identity_digest")
+        _validate_sha256_digest(self.arguments_digest, "arguments_digest")
+        if self.idempotency_key_digest is not None:
+            _validate_sha256_digest(
+                self.idempotency_key_digest, "idempotency_key_digest"
+            )
+        if self.risk_level is not None:
+            _require_text(self.risk_level, "risk_level")
+        if not isinstance(self.risk_facts, str):
+            raise TypeError("risk_facts 必须是稳定字符串表示")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolApprovalDecidedPayload:
+    """Tool Approval 决定/失效的 Journal 安全投影。
+
+    ``decision_status`` 只允许 APPROVED / REJECTED（人类决定）以及
+    INVALIDATED_CANCELLED / INVALIDATED_TIMEOUT（Runtime lifecycle fact）。
+    Human Decision 与 Runtime invalidation 在 domain model 内不混淆。
+    """
+
+    approval_id: str
+    invocation_identity_digest: str
+    decision_status: str
+    actor_id_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.approval_id, "approval_id")
+        _validate_sha256_digest(self.invocation_identity_digest, "invocation_identity_digest")
+        if self.decision_status not in {
+            "APPROVED",
+            "REJECTED",
+            "INVALIDATED_CANCELLED",
+            "INVALIDATED_TIMEOUT",
+        }:
+            raise ValueError("未知 approval decision_status")
+        if self.actor_id_digest is not None:
+            _validate_sha256_digest(self.actor_id_digest, "actor_id_digest")
+
+
+def _validate_sha256_digest(value: str, field_name: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -800,6 +866,8 @@ RuntimeEventPayload: TypeAlias = (
     | ModelCompletedPayload
     | ToolStartedPayload
     | ToolCompletedPayload
+    | ToolApprovalRequestedPayload
+    | ToolApprovalDecidedPayload
     | RetrievalStartedPayload
     | RetrievalStageCompletedPayload
     | RetrievalCompletedPayload
@@ -826,6 +894,8 @@ _PAYLOAD_TYPES: dict[RuntimeEventType, type[RuntimeEventPayload]] = {
     RuntimeEventType.MODEL_COMPLETED: ModelCompletedPayload,
     RuntimeEventType.TOOL_STARTED: ToolStartedPayload,
     RuntimeEventType.TOOL_COMPLETED: ToolCompletedPayload,
+    RuntimeEventType.TOOL_APPROVAL_REQUESTED: ToolApprovalRequestedPayload,
+    RuntimeEventType.TOOL_APPROVAL_DECIDED: ToolApprovalDecidedPayload,
     RuntimeEventType.RETRIEVAL_STARTED: RetrievalStartedPayload,
     RuntimeEventType.RETRIEVAL_STAGE_COMPLETED: RetrievalStageCompletedPayload,
     RuntimeEventType.RETRIEVAL_COMPLETED: RetrievalCompletedPayload,
@@ -901,6 +971,21 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "resource_release_pending",
         "duration_ms",
         "status",
+    ),
+    ToolApprovalRequestedPayload: (
+        "approval_id",
+        "tool_name",
+        "invocation_identity_digest",
+        "arguments_digest",
+        "idempotency_key_digest",
+        "risk_level",
+        "risk_facts",
+    ),
+    ToolApprovalDecidedPayload: (
+        "approval_id",
+        "invocation_identity_digest",
+        "decision_status",
+        "actor_id_digest",
     ),
     RetrievalStartedPayload: (
         "retrieval_id",
