@@ -360,7 +360,9 @@ class AgentRouter:
                     "你必须优先依据本地知识库信源回答。",
                     "如果用户消息包含【系统提供的参考资料】，请优先使用资料内容并在答案末尾增加“参考来源：”列表。",
                     "参考来源格式固定为“[序号] 文件路径或来源名”。",
-                    "如果没有可用本地信源，只能明确说明“未找到对应信源”，不得使用通用知识补写事实。",
+                    "当上下文包含 knowledge_retrieval_status=EMPTY 时，必须承认本次没有找到可用的本地检索证据。",
+                    "不得声称没有提供的本地知识库资料支持了回答，不得编造引用或来源。",
+                    "对于必须依赖本地知识库证据的问题，只能给出有界的无证据答复；不得使用通用知识补写事实。",
                 ]
             )
         if allow_delegation and agent_id == "core_router":
@@ -952,11 +954,16 @@ class AgentRouter:
                 fault_controller=fault_controller,
             )
             if retrieval_result.status == RetrievalExecutionStatus.EMPTY:
-                self._emit_deferred_retrieval_events(
-                    retrieval_result, event_emitter=event_emitter
-                )
-                raise KnowledgeSourceNotFoundError(
-                    "未找到足够相关的本地知识库信源，知识专家已停止回答。"
+                context_items.append(
+                    ContextItem(
+                        f"{agent_id}-retrieval-empty",
+                        ContextSourceType.RUNTIME_STATE,
+                        ContextTrustLevel.TRUSTED_RUNTIME,
+                        "knowledge_retrieval_status=EMPTY",
+                        900,
+                        now,
+                        mandatory=True,
+                    )
                 )
             if retrieval_result.status == RetrievalExecutionStatus.CANCELLED:
                 self._emit_deferred_retrieval_events(

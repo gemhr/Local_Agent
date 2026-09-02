@@ -703,6 +703,10 @@ class Settings:
     agentevalops_project_id: str = ""
     agentevalops_connect_timeout_seconds: float = 0.5
     agentevalops_total_deadline_seconds: float = 3.0
+    evaluation_mode: bool = False
+    evaluation_generation_pin_path: str = ""
+    evaluation_rewrite_fixture_path: str = ""
+    evaluation_identity_sha256: str = ""
 
     @classmethod
     def load(cls) -> "Settings":
@@ -837,6 +841,35 @@ class Settings:
                 SETTINGS_VALIDATION_ERROR,
                 "LOCAL_AGENT_STEP_RESULT_RUN_TOTAL_CHARS",
                 "run_total_below_per_result",
+            )
+
+        evaluation_mode = _env_strict_bool("LOCAL_AGENT_EVALUATION_MODE", False)
+        evaluation_generation_pin_path = os.getenv(
+            "LOCAL_AGENT_EVALUATION_GENERATION_PIN_PATH", ""
+        ).strip()
+        evaluation_rewrite_fixture_path = os.getenv(
+            "LOCAL_AGENT_EVALUATION_REWRITE_FIXTURE_PATH", ""
+        ).strip()
+        evaluation_identity_sha256 = os.getenv(
+            "LOCAL_AGENT_EVALUATION_IDENTITY_SHA256", ""
+        ).strip()
+        if evaluation_mode and not evaluation_generation_pin_path:
+            raise SettingsValidationError(
+                STARTUP_CONFIGURATION_ERROR,
+                "LOCAL_AGENT_EVALUATION_GENERATION_PIN_PATH",
+                "required_when_evaluation_mode_enabled",
+            )
+        if evaluation_mode and not evaluation_rewrite_fixture_path:
+            raise SettingsValidationError(
+                STARTUP_CONFIGURATION_ERROR,
+                "LOCAL_AGENT_EVALUATION_REWRITE_FIXTURE_PATH",
+                "required_when_evaluation_mode_enabled",
+            )
+        if evaluation_mode and not evaluation_identity_sha256:
+            raise SettingsValidationError(
+                STARTUP_CONFIGURATION_ERROR,
+                "LOCAL_AGENT_EVALUATION_IDENTITY_SHA256",
+                "required_when_evaluation_mode_enabled",
             )
 
         knowledge_chunk_size = _env_strict_int(
@@ -1159,4 +1192,8 @@ class Settings:
             agentevalops_project_id=agentevalops_project_id,
             agentevalops_connect_timeout_seconds=agentevalops_connect_timeout_seconds,
             agentevalops_total_deadline_seconds=agentevalops_total_deadline_seconds,
+            evaluation_mode=evaluation_mode,
+            evaluation_generation_pin_path=evaluation_generation_pin_path,
+            evaluation_rewrite_fixture_path=evaluation_rewrite_fixture_path,
+            evaluation_identity_sha256=evaluation_identity_sha256,
         )

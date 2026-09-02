@@ -19,6 +19,7 @@ from core.runtime.retrieval_contract import (
     RetrievalStage,
     RetrievalStageStatus,
 )
+from core.runtime.evaluation_controls import EvaluationRewriteFixture, canonical_sha256
 
 ARTIFACT_SCHEMA_VERSION = "rag-evaluation-artifact.v1"
 ARTIFACT_SCHEMA_VERSION_V2 = "rag-evaluation-artifact.v2"
@@ -317,6 +318,11 @@ class RetrievalEvaluationSnapshot:
     # BASELINE producer 不填充 BM25/RRF 通道值）。
     retrieval_strategy: str | None = None
     provenance_sha256: str | None = None
+    generation_id: str | None = None
+    identity_sha256: str | None = None
+    rewrite_fixture_id: str | None = None
+    query_digest: str | None = None
+    rewritten_query_digest: str | None = None
 
     def to_wire_dict(self) -> dict[str, object]:
         payload = {
@@ -345,6 +351,13 @@ class RetrievalEvaluationSnapshot:
             payload["retrieval_strategy"] = self.retrieval_strategy
         if self.provenance_sha256 is not None:
             payload["provenance_sha256"] = self.provenance_sha256
+        for key in (
+            "generation_id", "identity_sha256", "rewrite_fixture_id",
+            "query_digest", "rewritten_query_digest",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                payload[key] = value
         return payload
 
 
@@ -367,6 +380,10 @@ class RetrievalEvaluationCaptureBuilder:
         max_context_chars: int,
         retrieval_strategy: str = "BASELINE",
         provenance_sha256: str | None = None,
+        generation_id: str | None = None,
+        identity_sha256: str | None = None,
+        rewrite_fixture_id: str | None = None,
+        rewrite_fixture: EvaluationRewriteFixture | None = None,
     ) -> None:
         self.run_id = run_id
         self.invocation_index = invocation_index
@@ -374,6 +391,10 @@ class RetrievalEvaluationCaptureBuilder:
         self.max_context_chars = max_context_chars
         self.retrieval_strategy = retrieval_strategy
         self.provenance_sha256 = provenance_sha256
+        self.generation_id = generation_id
+        self.identity_sha256 = identity_sha256
+        self.rewrite_fixture_id = rewrite_fixture_id
+        self.rewrite_fixture = rewrite_fixture
         self.rewritten_query = invocation.original_query
         self._observations: dict[str, _Observation] = {}
         self._retrieved: tuple[RetrievalEvaluationCandidateItem, ...] = ()
@@ -393,6 +414,16 @@ class RetrievalEvaluationCaptureBuilder:
             self.rewritten_query = value
         except Exception:  # noqa: BLE001 - capture 失败必须与 Runtime 隔离
             self._fail("RAG_EVALUATION_REWRITE_CAPTURE_FAILED")
+
+    def replay_rewritten_query(self, original_query: str) -> str:
+        """evaluation-only 模式回放固定 rewrite，不接受 request-level override。"""
+        if self.rewrite_fixture is None:
+            return original_query
+        try:
+            return self.rewrite_fixture.resolve(case_id=None, query=original_query).rewritten_query
+        except ValueError as exc:
+            self._fail("RAG_EVALUATION_REWRITE_FIXTURE_MISMATCH")
+            raise RuntimeError("rewrite fixture mismatch") from exc
 
     def observe_candidates(
         self,
@@ -739,6 +770,11 @@ class RetrievalEvaluationCaptureBuilder:
             ),
             retrieval_strategy=self.retrieval_strategy,
             provenance_sha256=self.provenance_sha256,
+            generation_id=self.generation_id,
+            identity_sha256=self.identity_sha256,
+            rewrite_fixture_id=self.rewrite_fixture_id,
+            query_digest=canonical_sha256(self.invocation.original_query),
+            rewritten_query_digest=canonical_sha256(self.rewritten_query),
         )
 
 
@@ -751,11 +787,17 @@ class RetrievalEvaluationCollector:
         *,
         retrieval_strategy: str = "BASELINE",
         provenance_sha256: str | None = None,
+        generation_id: str | None = None,
+        identity_sha256: str | None = None,
+        rewrite_fixture: EvaluationRewriteFixture | None = None,
     ) -> None:
         UUID(run_id)
         self.run_id = run_id
         self.retrieval_strategy = retrieval_strategy
         self.provenance_sha256 = provenance_sha256
+        self.generation_id = generation_id
+        self.identity_sha256 = identity_sha256
+        self.rewrite_fixture = rewrite_fixture
         self._lock = threading.Lock()
         self._next_index = 1
         self._started_ids: set[str] = set()
@@ -809,6 +851,10 @@ class RetrievalEvaluationCollector:
             max_context_chars=max_context_chars,
             retrieval_strategy=self.retrieval_strategy,
             provenance_sha256=self.provenance_sha256,
+            generation_id=self.generation_id,
+            identity_sha256=self.identity_sha256,
+            rewrite_fixture_id=(self.rewrite_fixture.fixture_id if self.rewrite_fixture else None),
+            rewrite_fixture=self.rewrite_fixture,
         )
 
     def complete(

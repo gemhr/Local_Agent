@@ -97,16 +97,19 @@ def test_knowledge_expert_fails_closed_without_db_manager() -> None:
         router._build_messages("讲讲 CDT", "knowledge_expert")
 
 
-def test_knowledge_expert_fails_closed_without_relevant_sources() -> None:
+def test_knowledge_expert_continues_with_typed_empty_context() -> None:
     router = AgentRouter(
         llm_engine=RewriteLLM(),
         memory_manager=FakeMemory(),
         db_manager=EmptyDB(),
     )
 
-    with pytest.raises(KnowledgeSourceNotFoundError, match="已停止回答"):
-        router._build_messages("讲讲 CDT", "knowledge_expert")
+    messages = router._build_messages("讲讲 CDT", "knowledge_expert")
+    combined = "\n".join(message["content"] for message in messages)
 
+    assert "knowledge_retrieval_status=EMPTY" in combined
+    assert "Retrieved Documents" not in combined
+    assert "没有找到可用的本地检索证据" in combined
     prompt = router._build_system_prompt("knowledge_expert")
     assert "不得使用通用知识补写事实" in prompt
 
@@ -156,8 +159,10 @@ def test_rag_minimum_score_rejects_untrusted_candidates() -> None:
         rag_min_score=0.90,
     )
 
-    with pytest.raises(KnowledgeSourceNotFoundError):
-        router._build_messages("讲讲 CDT", "knowledge_expert")
+    messages = router._build_messages("讲讲 CDT", "knowledge_expert")
+    combined = "\n".join(message["content"] for message in messages)
+    assert "knowledge_retrieval_status=EMPTY" in combined
+    assert "Retrieved Documents" not in combined
 
 
 def test_single_knowledge_delegate_bypasses_core_synthesis(monkeypatch) -> None:

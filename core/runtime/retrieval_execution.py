@@ -355,6 +355,9 @@ class RetrievalExecutionService:
                     degradation_reasons.append(exc.safe_error_code)
                     self._mark_last_record_degraded(records)
 
+            if evaluation_capture is not None and evaluation_capture.rewrite_fixture is not None:
+                rewritten_query = evaluation_capture.replay_rewritten_query(invocation.original_query)
+
             if evaluation_capture is not None:
                 evaluation_capture.capture_rewritten_query(rewritten_query)
 
