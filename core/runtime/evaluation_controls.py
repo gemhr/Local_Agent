@@ -136,9 +136,9 @@ class EvaluationRewriteFixture:
     fixture_id: str = field(init=False)
 
     def __post_init__(self) -> None:
-        if len(self.entries) != 24:
-            raise ValueError("evaluation rewrite fixture must contain 24 entries")
-        if len({item.case_id for item in self.entries}) != 24:
+        if len(self.entries) not in (24, 44):
+            raise ValueError("evaluation rewrite fixture must contain 24 or 44 entries")
+        if len({item.case_id for item in self.entries}) != len(self.entries):
             raise ValueError("rewrite fixture case ids must be unique")
         payload = {
             "fixture_version": self.fixture_version,

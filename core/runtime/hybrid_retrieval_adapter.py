@@ -24,6 +24,7 @@ from typing import Callable, Sequence
 from core.knowledge_base.bm25_sparse_index import Bm25SparseIndex
 from core.knowledge_base.hybrid_rrf_retriever import (
     HybridRrfRetriever,
+    HybridRrfProfile,
     RrfChannelCandidate,
 )
 from core.runtime.budget import BudgetUsage
@@ -134,13 +135,14 @@ class HybridKnowledgeRetrievalAdapter(RuntimeKnowledgeRetrievalAdapter):
         bm25_index: Bm25SparseIndex,
         generation_id: str,
         provenance_sha256: str,
+        hybrid_rrf_profile: HybridRrfProfile | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         if bm25_index is None:
             raise ValueError("HybridKnowledgeRetrievalAdapter requires bm25_index")
         self._bm25_index = bm25_index
-        self._rrf = HybridRrfRetriever()
+        self._rrf = HybridRrfRetriever(profile=hybrid_rrf_profile)
         self.has_reranker = True
         self.hybrid_generation_id = generation_id
         self.hybrid_provenance_sha256 = provenance_sha256
