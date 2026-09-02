@@ -13,8 +13,18 @@ from typing import TYPE_CHECKING, Callable, Generator, Mapping, Optional
 from core.memory_manager import MemoryManager
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from core.runtime.tool_registry import ToolRegistry
+from core.runtime.tool_contract import ToolInvocation
+from core.runtime.approval import (
+    ApprovalCommandErrorCode,
+    ApprovalCommandResult,
+    ApprovalError,
+    ApprovalStatus,
+    ToolApprovalController,
+    ToolApprovalRejectedError,
+)
 from core.runtime.tool_governance import (
     ToolGovernanceContext,
+    ToolGovernanceDecision,
     ToolGovernanceError,
     ToolGovernanceErrorCode,
     ToolGovernanceOutcome,
@@ -1296,6 +1306,83 @@ class AgentRouter:
         )
         return self._parse_tool_call(planner_response)
 
+    def _await_tool_approval(
+        self,
+        *,
+        agent_id: str,
+        invocation: ToolInvocation,
+        invocation_decision: object,
+        step_id: str,
+        run_context: RunContext,
+        event_emitter: StepEventEmitter | None,
+        approval_controller: ToolApprovalController | None,
+    ) -> ApprovalCommandResult:
+        """Governance APPROVAL_REQUIRED -> run-scoped HITL 审批等待。
+
+        只有该方法返回 APPROVED（且后续 claim_execution 成功）时，原 frozen
+        invocation 才会进入 resource authorization / ToolExecutionService。任何
+        其它结果都零 ToolExecution：
+
+        - controller 缺失 / Requested evidence 无法可靠发布 -> fail closed，
+          抛回 governance denial（绝不降级为 ALLOW）；
+        - REJECTED -> Step 以 TOOL_APPROVAL_REJECTED 失败；
+        - INVALIDATED_CANCELLED / INVALIDATED_TIMEOUT -> 沿用既有
+          cancel/deadline 传播，late approve 零执行。
+        """
+        if approval_controller is None:
+            raise ToolGovernanceError(
+                ToolGovernanceErrorCode.APPROVAL_REQUIRED,
+                governance_denial_message(
+                    ToolGovernanceErrorCode.APPROVAL_REQUIRED.value
+                ),
+            )
+        if not isinstance(invocation_decision, ToolGovernanceDecision):
+            raise TypeError(
+                "invocation_decision 必须是 ToolGovernanceDecision"
+            )
+        risk_facts = tuple(
+            fact.value if hasattr(fact, "value") else str(fact)
+            for fact in invocation_decision.risk_facts
+        )
+        request = approval_controller.request_approval(
+            step_id=step_id,
+            invocation=invocation,
+            tool_name=invocation.tool_name,
+            risk_level=(
+                invocation_decision.risk_level.value
+                if invocation_decision.risk_level is not None
+                else None
+            ),
+            risk_facts=risk_facts,
+            event_emitter=event_emitter,
+        )
+        wait_result = approval_controller.wait_for_decision(
+            approval_id=request.approval_id
+        )
+        if wait_result.effective_status in {
+            ApprovalStatus.APPROVED,
+            ApprovalStatus.EXECUTION_CLAIMED,
+        }:
+            claim = approval_controller.claim_execution(
+                approval_id=request.approval_id, invocation=invocation
+            )
+            if claim.ok:
+                return claim
+            raise ApprovalError(
+                ApprovalCommandErrorCode.CLAIM_NOT_APPROVED,
+                "Tool Approval claim 未成功；工具不执行",
+            )
+        if wait_result.effective_status is ApprovalStatus.REJECTED:
+            raise ToolApprovalRejectedError(
+                "Tool 调用已被拒绝审批（TOOL_APPROVAL_REJECTED）"
+            )
+        if wait_result.effective_status is ApprovalStatus.INVALIDATED_TIMEOUT:
+            from core.runtime.context import RunDeadlineExceededError
+
+            raise RunDeadlineExceededError("approval wait exceeded run deadline")
+        # INVALIDATED_CANCELLED / 其它 -> 沿用既有取消传播。
+        raise RunCancelledError("RUN_CANCELLED")
+
     def _prepare_answer_messages(
         self,
         agent_id: str,
@@ -1309,6 +1396,7 @@ class AgentRouter:
         fault_controller: FaultInjectionController | None = None,
         memory_context_bundle=None,
         memory_injection_report_out: list | None = None,
+        approval_controller: object | None = None,
     ) -> list[dict[str, str]]:
         """构建回答消息，并在需要时注入工具观察结果。"""
         if run_context is not None:
@@ -1411,10 +1499,28 @@ class AgentRouter:
             governance_context, registration, invocation, execution_spec
         )
         if invocation_decision.outcome is not ToolGovernanceOutcome.ALLOW:
-            raise ToolGovernanceError(
-                ToolGovernanceErrorCode(invocation_decision.safe_error_code),
-                governance_denial_message(invocation_decision.safe_error_code),
-            )
+            if (
+                invocation_decision.outcome
+                is ToolGovernanceOutcome.APPROVAL_REQUIRED
+            ):
+                self._await_tool_approval(
+                    agent_id=agent_id,
+                    invocation=invocation,
+                    invocation_decision=invocation_decision,
+                    step_id=step_id,
+                    run_context=active_context,
+                    event_emitter=event_emitter,
+                    approval_controller=approval_controller,
+                )
+            else:
+                raise ToolGovernanceError(
+                    ToolGovernanceErrorCode(
+                        invocation_decision.safe_error_code
+                    ),
+                    governance_denial_message(
+                        invocation_decision.safe_error_code
+                    ),
+                )
         # 既有 WP2 单元测试使用 ``__new__`` 构造最小 Router 桩；真实构造器与
         # production lifespan 始终注入该 Authority。缺失属性仅兼容该历史桩。
         resource_service = getattr(self, "resource_authorization_service", None)
@@ -1532,6 +1638,7 @@ class AgentRouter:
         raise_security_denial: bool = False,
         memory_context_bundle=None,
         memory_injection_report_out: list | None = None,
+        approval_controller: ToolApprovalController | None = None,
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
@@ -1547,6 +1654,7 @@ class AgentRouter:
                 fault_controller=fault_controller,
                 memory_context_bundle=memory_context_bundle,
                 memory_injection_report_out=memory_injection_report_out,
+                approval_controller=approval_controller,
             )
         except (ToolGovernanceError, ResourceAuthorizationError) as denied:
             # WP2-B：governance non-ALLOW 直接返回固定 safe denial 作为本步业务
@@ -1782,6 +1890,7 @@ class AgentRouter:
         raise_security_denial: bool = False,
         memory_context_bundle=None,
         memory_injection_report_out: list | None = None,
+        approval_controller: ToolApprovalController | None = None,
     ) -> str:
         """执行一次非流式智能体调用。"""
         if run_context is not None:
@@ -1807,6 +1916,7 @@ class AgentRouter:
             raise_security_denial=raise_security_denial,
             memory_context_bundle=memory_context_bundle,
             memory_injection_report_out=memory_injection_report_out,
+            approval_controller=approval_controller,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -1834,6 +1944,7 @@ class AgentRouter:
         raise_security_denial: bool = False,
         memory_context_bundle=None,
         memory_injection_report_out: list | None = None,
+        approval_controller: ToolApprovalController | None = None,
     ) -> str:
         """供 RunCoordinator Driver 使用的真实单 Agent 非流式业务入口。
 
@@ -1855,6 +1966,7 @@ class AgentRouter:
             raise_security_denial=raise_security_denial,
             memory_context_bundle=memory_context_bundle,
             memory_injection_report_out=memory_injection_report_out,
+            approval_controller=approval_controller,
         )
 
     def complete_context_items(

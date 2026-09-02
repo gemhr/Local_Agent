@@ -180,6 +180,9 @@ class MultiAgentDriver:
                 plan_step=plan_step,
                 claim_agent_id=claim.preferred_agent,
             ),
+            approval_controller=getattr(
+                self._coordinator, "tool_approval_controller", None
+            ),
         )
         if (
             plan_step.execution_kind is ExecutionKind.SYNTHESIS

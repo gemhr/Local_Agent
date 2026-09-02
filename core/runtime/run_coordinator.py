@@ -91,6 +91,11 @@ from core.runtime.state_machine import (
     StepEventType,
     StepStateEvent,
 )
+from core.runtime.approval import (
+    ApprovalStatus,
+    AgentStateApprovalBridge,
+    ToolApprovalController,
+)
 from core.runtime.event_channel import EventChannelClosedError
 from core.runtime.event_emitter import RunEventEmitter
 from core.runtime.events import (
@@ -443,6 +448,7 @@ class RunCoordinator:
         self._memory_context_bundle = None
         self._memory_retrieval_observation = None
         self._episodic_evaluation_observer = None
+        self._tool_approval_controller: ToolApprovalController | None = None
 
         self._start_lock = threading.Lock()
         self._started = False
@@ -479,6 +485,84 @@ class RunCoordinator:
     @property
     def output_gate(self) -> OutputGate | None:
         return self._output_gate
+
+    @property
+    def tool_approval_controller(self) -> ToolApprovalController | None:
+        """Run-scoped ToolApprovalController；执行开始前惰性装配。
+
+        Coordinator 是该 controller 的 lifecycle owner：创建与失效都发生在
+        Run 边界内，绝不跨 Run 共享 mutable approval truth。
+        """
+        return self._tool_approval_controller
+
+    def _ensure_tool_approval_controller(self) -> ToolApprovalController | None:
+        """在需要时创建唯一 run-scoped controller。
+
+        只有 Coordinator 拥有完整 state/machine/emitter 三方身份；Router 只能
+        通过 run-scoped controller 交互。若 EventEmitter 缺失（纯测试装配），
+        返回 None，Router 对 APPROVAL_REQUIRED fail closed。
+        """
+        if self._tool_approval_controller is not None:
+            return self._tool_approval_controller
+        emitter = self.event_emitter
+        if emitter is None:
+            return None
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        controller = ToolApprovalController(
+            run_id=self.run_context.run_id,
+            run_context=self.run_context,
+            state_bridge=AgentStateApprovalBridge(
+                self.state_machine, self.agent_state
+            ),
+            deadline_check=self.run_context.remaining_seconds,
+            loop=running_loop,
+        )
+        controller.bind_step_emitter_resolver(
+            lambda step_id: emitter.for_step(step_id)
+        )
+        self._tool_approval_controller = controller
+        try:
+            self.run_handle.bind_approval_controller_resolver(
+                lambda: self.tool_approval_controller
+            )
+        except RuntimeError:
+            # 已绑定同源 resolver 时忽略。
+            pass
+        return controller
+
+    async def _invalidate_pending_approvals_for_terminal(
+        self,
+        decision: RunFinalizationDecision,
+        cleanup_error_codes: list[str],
+    ) -> None:
+        """Run 终结时失效尚未 execution-claimed 的审批。
+
+        cancel -> INVALIDATED_CANCELLED；deadline/失败终结 -> INVALIDATED_TIMEOUT
+        只用于已 claim 前失效；成功终结时通常没有 pending。已 EXECUTION_CLAIMED
+        的请求沿用既有 CancellationToken / deadline / before_side_effect 语义。
+        """
+        controller = self._tool_approval_controller
+        if controller is None:
+            return
+        if decision.status is RunStatus.CANCELLED:
+            status = ApprovalStatus.INVALIDATED_CANCELLED
+        elif decision.stop_reason is StopReason.DEADLINE_EXCEEDED:
+            status = ApprovalStatus.INVALIDATED_TIMEOUT
+        else:
+            status = ApprovalStatus.INVALIDATED_CANCELLED
+        try:
+            await controller.invalidate_async(status=status)
+        except Exception:
+            cleanup_error_codes.append("APPROVAL_INVALIDATION_FAILED")
+        finally:
+            try:
+                controller.close()
+            except Exception:
+                cleanup_error_codes.append("APPROVAL_CONTROLLER_CLOSE_FAILED")
+            self._tool_approval_controller = None
 
     @property
     def user_request(self) -> str | None:
@@ -1258,6 +1342,7 @@ class RunCoordinator:
                     self._attach_planning_span_attributes(planner_span)
                 if decision is None:
                     assert self.plan is not None and self.scheduler is not None
+                    self._ensure_tool_approval_controller()
                     self.scheduler.prepare(
                         self.plan, self.agent_state, self._event_time(),
                         self.policy.max_concurrency,
@@ -1316,6 +1401,9 @@ class RunCoordinator:
                 }:
                     self._dynamic_plan_state = DynamicPlanState.FAILED
                 await self._settle_active_steps(decision, cleanup_error_codes)
+                await self._invalidate_pending_approvals_for_terminal(
+                    decision, cleanup_error_codes
+                )
                 with self.activity_tracker.track(
                     "state_event_transitions_in_flight"
                 ):

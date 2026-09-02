@@ -46,6 +46,8 @@ IGNORED_EVENT_TYPES = frozenset(
         RuntimeEventType.MODEL_COMPLETED,
         RuntimeEventType.TOOL_STARTED,
         RuntimeEventType.TOOL_COMPLETED,
+        RuntimeEventType.TOOL_APPROVAL_REQUESTED,
+        RuntimeEventType.TOOL_APPROVAL_DECIDED,
         RuntimeEventType.RETRIEVAL_STARTED,
         RuntimeEventType.RETRIEVAL_STAGE_COMPLETED,
         RuntimeEventType.RETRIEVAL_COMPLETED,
@@ -370,6 +372,12 @@ class LimitedJournalTailReducer:
                 if not _consume(tool_started, _tool_key(item)):
                     _append_reason(reasons, RecoveryReason.TOOL_OUTCOME_UNKNOWN)
                 _collect_tool_risk(item, reasons)
+            elif event_type is RuntimeEventType.TOOL_APPROVAL_REQUESTED:
+                # 审批证据是观测/审计事实，不进入 recovery projection。
+                pass
+            elif event_type is RuntimeEventType.TOOL_APPROVAL_DECIDED:
+                # 审批证据是观测/审计事实，不进入 recovery projection。
+                pass
             elif event_type is RuntimeEventType.ERROR:
                 # Safe layered facts; RUN_COMPLETED remains authoritative.
                 projected_delivery = payload.get("delivery_status")

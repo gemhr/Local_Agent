@@ -37,10 +37,16 @@ class StepStatus(str, Enum):
 
     BLOCKED 表示前置条件失败、被取消或无法满足，因而该步骤不会在当前运行中执行。
     仅等待仍可能完成的前置条件的步骤应保持 PENDING。
+
+    WAITING_FOR_APPROVAL 表示该 Step 已被 Scheduler claim 并开始执行，但当前
+    worker 正在等待同一 Run 内 Tool Approval 的人类决定。它是 active、
+    nonterminal、already-started Step：必须保留 ``started_at``、不得设置
+    ``ended_at``，并继续留在 ``active_step_ids`` 中。
     """
 
     PENDING = "PENDING"
     RUNNING = "RUNNING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -144,6 +150,11 @@ class StepState:
         if self.status == StepStatus.RUNNING:
             if self.started_at is None or self.ended_at is not None:
                 raise AgentStateValidationError("running step must have started_at and no ended_at")
+        if self.status == StepStatus.WAITING_FOR_APPROVAL:
+            if self.started_at is None or self.ended_at is not None:
+                raise AgentStateValidationError(
+                    "waiting-for-approval step must have started_at and no ended_at"
+                )
         if self.status == StepStatus.BLOCKED and self.started_at is not None:
             raise AgentStateValidationError("blocked step must not have started_at")
         if self.status in _TERMINAL_STEP_STATUSES and self.ended_at is None:
@@ -353,11 +364,20 @@ class AgentState:
             step = self.steps.get(step_id)
             if step is None:
                 raise AgentStateValidationError("active step id must exist in steps")
-            if step.status != StepStatus.RUNNING:
-                raise AgentStateValidationError("active step must be RUNNING")
-        running_step_ids = {step.step_id for step in self.steps.values() if step.status == StepStatus.RUNNING}
+            if step.status not in {
+                StepStatus.RUNNING,
+                StepStatus.WAITING_FOR_APPROVAL,
+            }:
+                raise AgentStateValidationError("active step must be RUNNING or WAITING_FOR_APPROVAL")
+        running_step_ids = {
+            step.step_id
+            for step in self.steps.values()
+            if step.status in {StepStatus.RUNNING, StepStatus.WAITING_FOR_APPROVAL}
+        }
         if running_step_ids != self.active_step_ids:
-            raise AgentStateValidationError("all RUNNING steps must be present in active_step_ids")
+            raise AgentStateValidationError(
+                "all RUNNING / WAITING_FOR_APPROVAL steps must be present in active_step_ids"
+            )
 
     def to_dict(self) -> dict[str, object]:
         """将状态序列化为确定性的适用于 JSON 的基础类型。"""

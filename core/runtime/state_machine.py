@@ -48,6 +48,9 @@ class StepEventType(str, Enum):
     """Step 生命周期支持的状态事件。"""
 
     STARTED = "STARTED"
+    APPROVAL_REQUESTED = "APPROVAL_REQUESTED"
+    APPROVAL_APPROVED = "APPROVAL_APPROVED"
+    APPROVAL_REJECTED = "APPROVAL_REJECTED"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -165,9 +168,22 @@ class StepStateEvent:
         _validate_utc_datetime(self.occurred_at)
         _validate_error_message(self.error_message)
 
-        if self.event_type in {StepEventType.STARTED, StepEventType.SUCCEEDED, StepEventType.SKIPPED}:
+        if self.event_type in {
+            StepEventType.STARTED,
+            StepEventType.SUCCEEDED,
+            StepEventType.SKIPPED,
+            StepEventType.APPROVAL_REQUESTED,
+            StepEventType.APPROVAL_APPROVED,
+        }:
             if self.error_code is not None or self.error_message is not None:
                 raise ValueError(f"{self.event_type.value} Step 事件不得携带错误信息")
+            return
+        if self.event_type == StepEventType.APPROVAL_REJECTED:
+            if self.error_code is None and self.error_message is None:
+                raise ValueError(
+                    "APPROVAL_REJECTED Step 事件必须包含安全错误信息"
+                )
+            _validate_error_code(self.error_code, required=False)
             return
         if self.event_type == StepEventType.FAILED:
             if self.error_code is None and self.error_message is None:
@@ -224,6 +240,10 @@ class AgentStateMachine:
         (StepStatus.RUNNING, StepEventType.SUCCEEDED): StepStatus.SUCCEEDED,
         (StepStatus.RUNNING, StepEventType.FAILED): StepStatus.FAILED,
         (StepStatus.RUNNING, StepEventType.CANCELLED): StepStatus.CANCELLED,
+        (StepStatus.RUNNING, StepEventType.APPROVAL_REQUESTED): StepStatus.WAITING_FOR_APPROVAL,
+        (StepStatus.WAITING_FOR_APPROVAL, StepEventType.APPROVAL_APPROVED): StepStatus.RUNNING,
+        (StepStatus.WAITING_FOR_APPROVAL, StepEventType.APPROVAL_REJECTED): StepStatus.FAILED,
+        (StepStatus.WAITING_FOR_APPROVAL, StepEventType.CANCELLED): StepStatus.CANCELLED,
     })
 
     def add_step(self, state: AgentState, *, step_id: str, name: str) -> None:
@@ -301,11 +321,20 @@ class AgentStateMachine:
         step = state.steps.get(event.step_id)
         if (
             step is not None
-            and step.status == StepStatus.RUNNING
-            and event.event_type in {StepEventType.SUCCEEDED, StepEventType.FAILED, StepEventType.CANCELLED}
+            and step.status in {
+                StepStatus.RUNNING,
+                StepStatus.WAITING_FOR_APPROVAL,
+            }
+            and event.event_type
+            in {
+                StepEventType.SUCCEEDED,
+                StepEventType.FAILED,
+                StepEventType.CANCELLED,
+                StepEventType.APPROVAL_REJECTED,
+            }
             and event.step_id not in state.active_step_ids
         ):
-            self._raise_step(state, event, "RUNNING Step 必须位于 active 集合")
+            self._raise_step(state, event, "active Step 必须位于 active 集合")
         state.validate()
         if state.status in _TERMINAL_RUN_STATUSES:
             self._raise_step(state, event, "终态 Run 拒绝所有后续 Step 事件")
@@ -330,6 +359,13 @@ class AgentStateMachine:
                 self._raise_step(state, event, "RUNNING Step 必须位于 active 集合")
             if step.started_at is not None and event.occurred_at < step.started_at:
                 self._raise_step(state, event, "结束事件时间不得早于 Step 启动时间")
+        elif step.status == StepStatus.WAITING_FOR_APPROVAL:
+            if event.step_id not in state.active_step_ids:
+                self._raise_step(
+                    state, event, "WAITING_FOR_APPROVAL Step 必须位于 active 集合"
+                )
+            if step.started_at is not None and event.occurred_at < step.started_at:
+                self._raise_step(state, event, "结束事件时间不得早于 Step 启动时间")
         elif event.step_id in state.active_step_ids:
             self._raise_step(state, event, "未启动 Step 不得位于 active 集合")
 
@@ -343,6 +379,15 @@ class AgentStateMachine:
             candidate_step.error_code = None
             candidate_step.error_message = None
             candidate.active_step_ids.add(event.step_id)
+        elif event.event_type in {
+            StepEventType.APPROVAL_REQUESTED,
+            StepEventType.APPROVAL_APPROVED,
+        }:
+            # 仍是 active、already-started Step：保留 started_at、不设置
+            # ended_at、不离开 active_step_ids。
+            candidate_step.ended_at = None
+            candidate_step.error_code = None
+            candidate_step.error_message = None
         else:
             candidate_step.ended_at = event.occurred_at
             candidate_step.error_code = event.error_code
@@ -389,7 +434,11 @@ class AgentStateMachine:
             )
 
     def _guard_run_has_no_active_steps(self, state: AgentState, event_type: str) -> None:
-        has_running_step = any(step.status == StepStatus.RUNNING for step in state.steps.values())
+        has_running_step = any(
+            step.status
+            in {StepStatus.RUNNING, StepStatus.WAITING_FOR_APPROVAL}
+            for step in state.steps.values()
+        )
         if state.active_step_ids or has_running_step:
             self._raise_run(state, event_type, "Run 进入终态前必须先结束所有 active Step")
 

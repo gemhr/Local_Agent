@@ -31,6 +31,7 @@ from core.runtime.step_result import (
     StepResult,
 )
 from core.runtime.step_result_store import DependencyResultView
+from core.runtime.approval import ToolApprovalRejectedError
 from core.runtime.tool_governance import ToolGovernanceError, ToolGovernanceErrorCode
 
 
@@ -79,6 +80,7 @@ class AgentExecutionRequest:
         "_event_emitter",
         "_fault_controller",
         "_memory_context_bundle",
+        "_approval_controller",
         "_locked",
     )
 
@@ -98,6 +100,7 @@ class AgentExecutionRequest:
         event_emitter: StepEventEmitter | None = None,
         fault_controller=None,
         memory_context_bundle=None,
+        approval_controller=None,
     ) -> None:
         if not isinstance(step_id, str) or not step_id.strip():
             raise AgentAdapterError(
@@ -173,6 +176,7 @@ class AgentExecutionRequest:
         object.__setattr__(self, "_event_emitter", event_emitter)
         object.__setattr__(self, "_fault_controller", fault_controller)
         object.__setattr__(self, "_memory_context_bundle", memory_context_bundle)
+        object.__setattr__(self, "_approval_controller", approval_controller)
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name, value) -> None:
@@ -236,6 +240,14 @@ class AgentExecutionRequest:
         repr 不暴露 bundle 内容。
         """
         return self._memory_context_bundle
+
+    @property
+    def approval_controller(self):
+        """WP1：run-scoped ToolApprovalController（仅 Coordinated 装配注入）。
+
+        恒为 None 时 Router 对 APPROVAL_REQUIRED fail closed，绝不降级为 ALLOW。
+        """
+        return self._approval_controller
 
     def __repr__(self) -> str:
         return (
@@ -441,6 +453,7 @@ class AgentRouterSingleAgentAdapter:
                 event_emitter=request.event_emitter,
                 fault_controller=request.fault_controller,
                 memory_context_bundle=request.memory_context_bundle,
+                approval_controller=request.approval_controller,
             )
         except (
             asyncio.CancelledError,
@@ -448,6 +461,10 @@ class AgentRouterSingleAgentAdapter:
             RunDeadlineExceededError,
             BudgetExceededError,
         ):
+            raise
+        except ToolApprovalRejectedError:
+            # REJECT 语义：Step 以 TOOL_APPROVAL_REJECTED 失败；零 ToolExecution。
+            # 不是 SECURITY_DENIED 结果，因此原样上抛给 Driver/Executor 收口。
             raise
         except ToolGovernanceError as denied:
             denial_code = _GOVERNANCE_DENIAL_CODES.get(denied.error_code)
