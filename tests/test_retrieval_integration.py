@@ -84,6 +84,18 @@ class RewriteLLM:
         yield "CDT"
 
 
+class CountingAnswerLLM:
+    def __init__(self, *, fail_final: bool = False):
+        self.calls = 0
+        self.fail_final = fail_final
+
+    def generate(self, *args, **kwargs):
+        self.calls += 1
+        if self.fail_final and kwargs.get("max_tokens") == 640:
+            raise RuntimeError("provider failure after empty retrieval")
+        yield "没有找到可用的本地检索证据。"
+
+
 class TrapLegacyLLM:
     def __init__(self):
         self.calls = 0
@@ -412,12 +424,20 @@ async def test_knowledge_rewrite_is_non_recursive_and_owns_dedicated_messages() 
     )
 
 
-def test_knowledge_expert_distinguishes_empty_from_embedding_failure() -> None:
+def test_knowledge_expert_continues_empty_but_embedding_failure_remains_failure() -> None:
+    empty_llm = CountingAnswerLLM()
     empty_router = AgentRouter(
-        RewriteLLM(), FakeMemory(), ExplicitVectorDB(empty=True)
+        empty_llm, FakeMemory(), ExplicitVectorDB(empty=True)
     )
-    with pytest.raises(KnowledgeSourceNotFoundError):
-        empty_router._build_messages("解释 CDT", "knowledge_expert")
+    messages = empty_router._build_messages("解释 CDT", "knowledge_expert")
+    combined = "\n".join(message["content"] for message in messages)
+    assert "knowledge_retrieval_status=EMPTY" in combined
+    assert len([message for message in messages if message["role"] == "user"]) == 1
+    assert "Retrieved Documents" not in combined
+    assert empty_llm.calls == 1
+
+    assert empty_router._complete_final_response("knowledge_expert", "解释 CDT")
+    assert empty_llm.calls == 3
 
     failed_router = AgentRouter(
         RewriteLLM(),
@@ -429,6 +449,15 @@ def test_knowledge_expert_distinguishes_empty_from_embedding_failure() -> None:
     assert raised.value.result.status == RetrievalExecutionStatus.FAILED
     assert raised.value.result.error.safe_error_code == "EMBEDDING_FAILED"
     assert not isinstance(raised.value, KnowledgeSourceNotFoundError)
+
+
+def test_empty_followed_by_model_provider_failure_remains_failure() -> None:
+    provider = CountingAnswerLLM(fail_final=True)
+    router = AgentRouter(provider, FakeMemory(), ExplicitVectorDB(empty=True))
+
+    with pytest.raises(RuntimeError, match="provider failure after empty retrieval"):
+        router._complete_final_response("knowledge_expert", "解释 CDT")
+    assert provider.calls == 2
 
 
 @pytest.mark.asyncio

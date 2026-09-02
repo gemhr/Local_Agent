@@ -166,3 +166,12 @@ Run drain 使用 `RUNTIME_SHUTDOWN_GRACE_SECONDS`，单组件关闭/worker drain
 ## Fault Injection
 
 生产配置入口：无。默认 `controller=None`。测试只能显式构造 test Scope/Controller；不存在 Settings、环境变量、HTTP、Prompt 或 Tool 参数激活方式。
+## WP3 production-target evaluation-only controls
+
+正常运行不设置以下变量。只有正式 WP3 evaluation process 才可同时设置
+`LOCAL_AGENT_EVALUATION_MODE=1`、`LOCAL_AGENT_EVALUATION_GENERATION_PIN_PATH`、
+`LOCAL_AGENT_EVALUATION_REWRITE_FIXTURE_PATH` 和
+`LOCAL_AGENT_EVALUATION_IDENTITY_SHA256`。进程启动时会只读校验同一 active
+generation pin，并回放 immutable rewrite fixture；generation、provenance、fixture
+或 identity 不一致时 fail closed。该能力不增加 request-level strategy/rewrite override，
+不构建或复制 Dense index，也不改变 `BASELINE` production default。

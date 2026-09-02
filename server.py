@@ -97,6 +97,12 @@ from core.runtime.retrieval_evaluation import (
     install_retrieval_evaluation_collector,
     reset_retrieval_evaluation_collector,
 )
+from core.runtime.evaluation_controls import (
+    EvaluationGenerationPin,
+    EvaluationRewriteFixture,
+    load_generation_pin,
+    load_rewrite_fixture,
+)
 from core.runtime.episodic_evaluation import (
     EpisodicCaptureCollector,
     EpisodicEvaluationCapability,
@@ -198,6 +204,9 @@ except Exception as exc:  # pragma: no cover
 settings = Settings.load()
 chat_service: Optional[ChatService] = None
 application_runtime_services: Optional[ApplicationRuntimeServices] = None
+evaluation_generation_pin: EvaluationGenerationPin | None = None
+evaluation_rewrite_fixture: EvaluationRewriteFixture | None = None
+evaluation_validated_generation = None
 logger = logging.getLogger(__name__)
 def _next_or_none(stream):
     """避免 StopIteration 穿透 Future 边界。"""
@@ -333,7 +342,7 @@ def _retrieval_evaluation_collector(run_id: str):
     provenance 只在 validated Hybrid generation 存在时填充；BASELINE 不伪造
     Hybrid provenance（truthful emission，WP2 冻结 §22）。
     """
-    generation = (
+    generation = evaluation_validated_generation or (
         application_runtime_services.hybrid_validated_generation
         if application_runtime_services is not None
         else None
@@ -345,6 +354,9 @@ def _retrieval_evaluation_collector(run_id: str):
         run_id,
         retrieval_strategy=settings.retrieval_strategy.value,
         provenance_sha256=provenance_sha256,
+        generation_id=(generation.generation_id if generation is not None else None),
+        identity_sha256=(settings.evaluation_identity_sha256 or None),
+        rewrite_fixture=(evaluation_rewrite_fixture if settings.evaluation_mode else None),
     )
 
 
@@ -376,6 +388,17 @@ async def lifespan(app: FastAPI):
         None: 启动阶段创建服务，关闭阶段释放引用。
     """
     global application_runtime_services, chat_service
+    global evaluation_generation_pin, evaluation_rewrite_fixture, evaluation_validated_generation
+
+    evaluation_generation_pin = None
+    evaluation_rewrite_fixture = None
+    evaluation_validated_generation = None
+    if settings.evaluation_mode:
+        evaluation_generation_pin = load_generation_pin(settings.evaluation_generation_pin_path)
+        evaluation_rewrite_fixture = load_rewrite_fixture(settings.evaluation_rewrite_fixture_path)
+        app.state.evaluation_generation_pin = evaluation_generation_pin.to_dict()
+        app.state.evaluation_rewrite_fixture_id = evaluation_rewrite_fixture.fixture_id
+        app.state.evaluation_identity_sha256 = settings.evaluation_identity_sha256
 
     # 配置 Parse / Semantic / Role failure 必须发生在首个 Application Resource
     # 构造之前；role validation 不做任何 I/O。
@@ -508,7 +531,7 @@ async def lifespan(app: FastAPI):
         try:
             collection_name = settings.knowledge_collection_name
             hybrid_descriptor = None
-            if settings.retrieval_strategy is RetrievalStrategy.HYBRID_RRF:
+            if settings.retrieval_strategy is RetrievalStrategy.HYBRID_RRF or settings.evaluation_mode:
                 from core.runtime.hybrid_provenance_validator import (
                     HybridProvenanceValidationError,
                     load_active_hybrid_descriptor,
@@ -585,7 +608,57 @@ async def lifespan(app: FastAPI):
                         },
                     )
                 else:
+                    if settings.evaluation_mode:
+                        expected_pin = EvaluationGenerationPin.from_validated_generation(
+                            hybrid_validated_generation
+                        )
+                        if expected_pin.to_dict(include_digest=False) != evaluation_generation_pin.to_dict(include_digest=False):
+                            raise HybridProvenanceValidationError(
+                                "EVALUATION_GENERATION_PIN_MISMATCH",
+                                "evaluation generation pin does not match active generation",
+                            )
+                        evaluation_validated_generation = hybrid_validated_generation
                     logger.info("Hybrid retrieval dependencies validated", extra={"component": "knowledge_base", "phase": "initialization", "status": "COMPLETED", "retrieval_strategy": "HYBRID_RRF"})
+                if knowledge_base_error is not None:
+                    raise _ChromaRebuildRequiredError()
+            elif settings.evaluation_mode:
+                # Evaluation BASELINE uses the same validated physical generation;
+                # it does not publish, clear, rebuild, or mutate the collection.
+                from core.runtime.hybrid_provenance_validator import (
+                    HybridProvenanceValidationError,
+                    validate_active_hybrid_generation,
+                )
+
+                try:
+                    evaluation_validated_generation = validate_active_hybrid_generation(
+                        db_manager=db_manager,
+                        chroma_dir=settings.chroma_dir,
+                        logical_collection_name=settings.knowledge_collection_name,
+                        embedding_model_path=settings.embedding_model_path,
+                        descriptor=hybrid_descriptor,
+                    )
+                    expected_pin = EvaluationGenerationPin.from_validated_generation(
+                        evaluation_validated_generation
+                    )
+                    if expected_pin.to_dict(include_digest=False) != evaluation_generation_pin.to_dict(include_digest=False):
+                        raise HybridProvenanceValidationError(
+                            "EVALUATION_GENERATION_PIN_MISMATCH",
+                            "evaluation generation pin does not match active generation",
+                        )
+                except HybridProvenanceValidationError as exc:
+                    knowledge_base_error = "EVALUATION_GENERATION_PIN_INVALID"
+                    if settings.knowledge_base_required:
+                        await initialization_stack.fail(RuntimeInitializationError("knowledge_base"))
+                    logger.warning(
+                        "Evaluation generation pin validation failed safely",
+                        extra={
+                            "safe_error_code": exc.safe_error_code,
+                            "component": "knowledge_base",
+                            "phase": "initialization",
+                            "status": "FAILED",
+                            "retrieval_strategy": settings.retrieval_strategy.value,
+                        },
+                    )
                 if knowledge_base_error is not None:
                     raise _ChromaRebuildRequiredError()
             else:
@@ -605,7 +678,7 @@ async def lifespan(app: FastAPI):
                     "document_count": db_manager.count(),
                     "collection_status": (
                         "current"
-                        if settings.retrieval_strategy is RetrievalStrategy.HYBRID_RRF
+                        if settings.evaluation_mode or settings.retrieval_strategy is RetrievalStrategy.HYBRID_RRF
                         else chroma_preflight.status.value
                     ),
                 },
