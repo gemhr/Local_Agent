@@ -86,6 +86,23 @@ def test_strict_parser_accepts_direct_and_delegated_typed_schema() -> None:
     assert delegated.tasks[0].required_capabilities == frozenset({"code_reasoning"})
 
 
+def test_strict_parser_keeps_delegated_input_type_in_runtime_text_contract() -> None:
+    delegated = StrictPlanningDecisionParser.parse(
+        delegate_json(
+            [{
+                "task_id": "code",
+                "agent_id": "code_expert",
+                "instruction": "处理用户提供的 JSON 请求",
+                "input_type": "json",
+            }],
+            True,
+        )
+    )
+
+    assert isinstance(delegated, DelegatedPlanDecision)
+    assert delegated.tasks[0].input_type == "text"
+
+
 @pytest.mark.parametrize(
     "raw,error_code",
     [
@@ -224,7 +241,7 @@ async def test_non_data_queries_still_use_model_path() -> None:
     [
         (direct_json(), ("core_router",)),
         (delegate_json([{"task_id": "knowledge", "agent_id": "knowledge_expert", "instruction": "find source"}], False), ("knowledge_expert",)),
-        (delegate_json([{"task_id": "code", "agent_id": "code_expert", "instruction": "inspect"}], True), ("code_expert", "synthesis_agent")),
+        (delegate_json([{"task_id": "code", "agent_id": "code_expert", "instruction": "inspect", "input_type": "json"}], True), ("code_expert", "synthesis_agent")),
         (delegate_json([{"task_id": "knowledge", "agent_id": "knowledge_expert", "instruction": "find"}, {"task_id": "code", "agent_id": "code_expert", "instruction": "inspect"}], True), ("code_expert", "knowledge_expert", "synthesis_agent")),
     ],
 )

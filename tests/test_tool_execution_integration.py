@@ -689,3 +689,21 @@ def test_tool_intent_exact_name_derives_from_registry():
     # 通用兼容关键词仍保留
     assert router._tool_intent_likely("list the files in a folder") is True
     assert router._tool_intent_likely("hello") is False
+
+
+def test_explicit_registered_tool_call_with_json_bypasses_model_planner():
+    registry = ToolRegistry()
+    register_all_tools(registry)
+    registry.freeze()
+    router = AgentRouter.__new__(AgentRouter)
+    router.tool_registry = registry
+    request = (
+        "请明确调用 complex_workflow_simulator，执行以下非幂等模拟操作："
+        + complex_payload(execution_mode="NON_IDEMPOTENT_SIMULATION")
+    )
+
+    assert router._plan_tool_call(
+        [{"role": "user", "content": request}], "core_router"
+    ) == ("complex_workflow_simulator", complex_payload(
+        execution_mode="NON_IDEMPOTENT_SIMULATION"
+    ))

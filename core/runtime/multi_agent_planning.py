@@ -321,7 +321,12 @@ class StrictPlanningDecisionParser:
                             task_id=item["task_id"],
                             agent_id=item["agent_id"],
                             instruction=item["instruction"],
-                            input_type=item.get("input_type", "text"),
+                            # Planner 输出不拥有 specialist 的 invocation
+                            # contract。当前 Registry 的所有 delegated agent
+                            # 均以文本接收 instruction；用户请求中包含 JSON
+                            # 也不会改变该边界。保留该字段的 parser 兼容性，
+                            # 但不允许模型把任意标签带入已编译 Plan。
+                            input_type="text",
                             required_capabilities=frozenset(capabilities),
                         )
                     )
