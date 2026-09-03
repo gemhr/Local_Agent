@@ -180,7 +180,7 @@ async def test_scope_has_exactly_one_run_scoped_controller():
         approval_request = controller.get(approval_id)
         result = await registry.get(run_id).approve_tool_approval(
             approval_id=approval_id,
-            invocation_id=approval_request.invocation_id,
+            invocation_binding_digest=approval_request.invocation_binding_digest,
         )
         assert result.ok
         result = await execute_task
@@ -210,7 +210,7 @@ async def test_registry_command_surface_approve_executes_once():
         handle = registry.get(run_id)
         result = await handle.approve_tool_approval(
             approval_id=approval_id,
-            invocation_id=approval_request.invocation_id,
+            invocation_binding_digest=approval_request.invocation_binding_digest,
             actor_id="reviewer",
         )
         assert isinstance(result, ApprovalCommandResult)
@@ -260,7 +260,7 @@ async def test_registry_command_surface_reject_fails_step():
         handle = registry.get(run_id)
         result = await handle.reject_tool_approval(
             approval_id=approval_id,
-            invocation_id=approval_request.invocation_id,
+            invocation_binding_digest=approval_request.invocation_binding_digest,
         )
         assert result.ok
         assert result.effective_status is ApprovalStatus.REJECTED
@@ -309,7 +309,7 @@ async def test_pending_cancel_invalidates_and_late_approve_zero_execution():
         handle = registry.get(run_id)
         late = await handle.approve_tool_approval(
             approval_id=approval_id,
-            invocation_id=approval_request.invocation_id,
+            invocation_binding_digest=approval_request.invocation_binding_digest,
         )
         assert isinstance(late, ApprovalCommandResult)
         assert late.effective_status in {

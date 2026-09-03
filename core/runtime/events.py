@@ -266,6 +266,7 @@ class ToolApprovalRequestedPayload:
     tool_name: str
     invocation_identity_digest: str
     arguments_digest: str
+    invocation_binding_digest: str
     idempotency_key_digest: str | None = None
     risk_level: str | None = None
     risk_facts: str = ""
@@ -275,6 +276,9 @@ class ToolApprovalRequestedPayload:
         _require_text(self.tool_name, "tool_name")
         _validate_sha256_digest(self.invocation_identity_digest, "invocation_identity_digest")
         _validate_sha256_digest(self.arguments_digest, "arguments_digest")
+        _validate_sha256_digest(
+            self.invocation_binding_digest, "invocation_binding_digest"
+        )
         if self.idempotency_key_digest is not None:
             _validate_sha256_digest(
                 self.idempotency_key_digest, "idempotency_key_digest"
@@ -296,12 +300,16 @@ class ToolApprovalDecidedPayload:
 
     approval_id: str
     invocation_identity_digest: str
+    invocation_binding_digest: str
     decision_status: str
     actor_id_digest: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.approval_id, "approval_id")
         _validate_sha256_digest(self.invocation_identity_digest, "invocation_identity_digest")
+        _validate_sha256_digest(
+            self.invocation_binding_digest, "invocation_binding_digest"
+        )
         if self.decision_status not in {
             "APPROVED",
             "REJECTED",
@@ -977,6 +985,7 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
         "tool_name",
         "invocation_identity_digest",
         "arguments_digest",
+        "invocation_binding_digest",
         "idempotency_key_digest",
         "risk_level",
         "risk_facts",
@@ -984,6 +993,7 @@ _JOURNAL_PAYLOAD_FIELDS: dict[type[RuntimeEventPayload], tuple[str, ...]] = {
     ToolApprovalDecidedPayload: (
         "approval_id",
         "invocation_identity_digest",
+        "invocation_binding_digest",
         "decision_status",
         "actor_id_digest",
     ),
@@ -1224,6 +1234,14 @@ _LEGACY_OPTIONAL_JOURNAL_FIELDS: dict[
             "bm25_latency_ms",
             "rrf_latency_ms",
         }
+    ),
+    # Stage5-Phase7-WP2：approval 事件新增的 public correlation digest；旧
+    # WP1 记录没有该字段，读取端必须继续接受（compatibility Unknown）。
+    RuntimeEventType.TOOL_APPROVAL_REQUESTED: frozenset(
+        {"invocation_binding_digest"}
+    ),
+    RuntimeEventType.TOOL_APPROVAL_DECIDED: frozenset(
+        {"invocation_binding_digest"}
     ),
 }
 

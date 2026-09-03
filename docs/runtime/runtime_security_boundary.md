@@ -111,7 +111,7 @@ Wiki write不复用Tool read Authority；`WikiCrawler`校验remote `sn` 为单�
 
 HTTP request 已有 application-wide 1 MiB actual-byte Gate 和 endpoint 字段级 chars/count/range Gate。它们是 pre-Run 输入约束，不是 Runtime Budget、Tool Permission、Resource Authorization、human IAM、Rate Limit 或 DLP；400/413/422 拒绝不产生 Run、RuntimeEvent、Journal 或业务 mutation。
 
-Known Limitations：无authenticated human IAM、inbound TLS、Rate Limit、full Sandbox/OS isolation、handle-based TOCTOU elimination、generic DLP、egress sandbox、human approval transport（Runtime core approval evidence/HITL 已实现于 `core/runtime/approval.py`，但 authenticated approve/reject endpoint/UI、RBAC 与 durable pause-resume 未实现）；FastAPI 默认422 detail可能回显被拒绝输入，留给WP3-C；authorized business content/path仍可进入正常Wire/Memory；UI/script raw logs与hardcoded Wiki endpoint仍是配置/日志债务；UNC不支持；real reparse测试可能受环境权限阻止；Resource contracts与payload contracts仍为INTERNAL_RC；Recovery仍validation-only、部署仍single-process Windows Native。
+Known Limitations：无authenticated human IAM、inbound TLS、Rate Limit、full Sandbox/OS isolation、handle-based TOCTOU elimination、generic DLP、egress sandbox、human approval authentication/authorization（WP2 已实现无认证的 human decision transport：`POST /api/runtime/runs/{run_id}/tool-approvals/{approval_id}/approve|reject` 命令面与 `[[ORCH]]` `TOOL_APPROVAL_REQUESTED/DECIDED` 安全投影，即 `HUMAN_DECISION_TRANSPORT = IMPLEMENTED`、`AUTHENTICATION/AUTHORIZATION/RBAC = NOT_IMPLEMENTED`；`approval_id` 与 `invocation_binding_digest` 只是 correlation 数据，不是授权凭据，`actor_id` 仅 audit label；无 approval UI、reconnect 与 durable pause-resume）；FastAPI 默认422 detail可能回显被拒绝输入，留给WP3-C；authorized business content/path仍可进入正常Wire/Memory；UI/script raw logs与hardcoded Wiki endpoint仍是配置/日志债务；UNC不支持；real reparse测试可能受环境权限阻止；Resource contracts与payload contracts仍为INTERNAL_RC；Recovery仍validation-only、部署仍single-process Windows Native。
 
 ## Security Non-capabilities / Deferred Scope
 
@@ -255,5 +255,5 @@ Prompt、Model output、Tool arguments/output、RAG chunks、Memory 正文、本
 
 - governance non-ALLOW 不产生 `TOOL_STARTED`/`TOOL_COMPLETED` 或任何 Tool evidence；denial 是直接安全 Wire 文本，不伪造 execution facts。
 - `ToolPermission != filesystem/path authorization`；WP3-A 已实现 frozen workspace read-root/path containment，仍不等于 OS Sandbox 或 TOCTOU elimination。两个 Settings credential 的 `repr=False` 与 Provider safe projection 已覆盖，但 generic secret isolation / DLP 仍未实现。
-- `ToolSideEffectKind.NONE` 不表示 permission-free；approval 不是 sandbox。approval evidence、durable pause/resume、human approval workflow 均未实现。
+- `ToolSideEffectKind.NONE` 不表示 permission-free；approval 不是 sandbox。approval evidence 是 governance 判定的输入，不是授权事实；human approve/reject 命令面已实现但无认证（见上方 truth boundary），durable pause/resume 未实现。
 - **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent / governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后，不为此新增 RuntimeEvent / Journal schema。

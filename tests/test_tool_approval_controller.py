@@ -113,12 +113,16 @@ class _Harness:
         )
 
     async def decide(
-        self, approval_id: str, invocation_id: str, decision, actor_id=None
+        self,
+        approval_id: str,
+        invocation_binding_digest: str,
+        decision,
+        actor_id=None,
     ):
         return await self.controller.decide_async(
             run_id=self.context.run_id,
             approval_id=approval_id,
-            invocation_id=invocation_id,
+            invocation_binding_digest=invocation_binding_digest,
             decision=decision,
             actor_id=actor_id,
         )
@@ -191,7 +195,9 @@ async def test_approve_then_claim_runs_claim_returns_execution_claimed():
         invocation = _make_invocation()
         request = await harness.request(invocation)
         decided = await harness.decide(
-            request.approval_id, invocation.invocation_id, ApprovalDecisionValue.APPROVE
+            request.approval_id,
+            request.invocation_binding_digest,
+            ApprovalDecisionValue.APPROVE,
         )
         assert decided.ok
         assert decided.effective_status is ApprovalStatus.APPROVED
@@ -222,7 +228,7 @@ async def test_decided_publish_failure_fail_closed_no_authorization():
         await harness.channel.close()
         decided = await harness.decide(
             request.approval_id,
-            invocation.invocation_id,
+            request.invocation_binding_digest,
             ApprovalDecisionValue.APPROVE,
         )
         assert not decided.ok
@@ -248,10 +254,14 @@ async def test_duplicate_approve_is_idempotent_no_second_wake():
         invocation = _make_invocation()
         request = await harness.request(invocation)
         first = await harness.decide(
-            request.approval_id, invocation.invocation_id, ApprovalDecisionValue.APPROVE
+            request.approval_id,
+            request.invocation_binding_digest,
+            ApprovalDecisionValue.APPROVE,
         )
         second = await harness.decide(
-            request.approval_id, invocation.invocation_id, ApprovalDecisionValue.APPROVE
+            request.approval_id,
+            request.invocation_binding_digest,
+            ApprovalDecisionValue.APPROVE,
         )
         assert first.effective_status is ApprovalStatus.APPROVED
         assert second.effective_status is ApprovalStatus.APPROVED
@@ -268,10 +278,14 @@ async def test_approve_vs_reject_first_wins():
         invocation = _make_invocation()
         request = await harness.request(invocation)
         first = await harness.decide(
-            request.approval_id, invocation.invocation_id, ApprovalDecisionValue.REJECT
+            request.approval_id,
+            request.invocation_binding_digest,
+            ApprovalDecisionValue.REJECT,
         )
         second = await harness.decide(
-            request.approval_id, invocation.invocation_id, ApprovalDecisionValue.APPROVE
+            request.approval_id,
+            request.invocation_binding_digest,
+            ApprovalDecisionValue.APPROVE,
         )
         assert first.effective_status is ApprovalStatus.REJECTED
         assert not first.safe_error_code
@@ -290,16 +304,37 @@ async def test_cross_binding_rejected():
     try:
         invocation_a = _make_invocation(invocation_id="inv-A")
         request = await harness.request(invocation_a)
-        # 同一 tool_name、类似 args 的 B invocation 不能授权。
+        # 同一 tool_name、类似 args 的 B invocation 有自己的 binding digest；
+        # B 的 digest 不能授权 A 的 approval。（同一 Step 已 WAITING，不能为
+        # B 再建第二个 active approval，故直接计算 B 的真实 binding digest。）
+        from core.runtime.approval import compute_invocation_binding_digest
+        from core.runtime.tool_contract import safe_key_digest
+
         invocation_b = _make_invocation(
             invocation_id="inv-B", args={"operation_id": "op-2"}
         )
+        digest_b = compute_invocation_binding_digest(
+            invocation_identity_digest=safe_key_digest(
+                invocation_b.invocation_id
+            ),
+            tool_name=invocation_b.tool_name,
+            arguments_digest=invocation_b.arguments_digest,
+            idempotency_key_digest=safe_key_digest(invocation_b.idempotency_key),
+            resource_key_digest=safe_key_digest(invocation_b.resource_key),
+            risk_level="HIGH",
+            risk_facts=(),
+        )
+        assert digest_b != request.invocation_binding_digest
         decision_b = await harness.decide(
             request.approval_id,
-            invocation_b.invocation_id,
+            digest_b,
             ApprovalDecisionValue.APPROVE,
         )
-        assert decision_b.safe_error_code == ApprovalCommandErrorCode.UNKNOWN_APPROVAL.value
+        assert (
+            decision_b.safe_error_code
+            == ApprovalCommandErrorCode.BINDING_MISMATCH.value
+        )
+        assert decision_b.effective_status is ApprovalStatus.PENDING
         claim_b = await harness.claim(request.approval_id, invocation_b)
         assert (
             claim_b.safe_error_code
@@ -308,7 +343,7 @@ async def test_cross_binding_rejected():
         # A 不受影响。
         decision_a = await harness.decide(
             request.approval_id,
-            invocation_a.invocation_id,
+            request.invocation_binding_digest,
             ApprovalDecisionValue.APPROVE,
         )
         assert decision_a.ok
@@ -325,7 +360,7 @@ async def test_claim_rejects_same_id_and_tool_with_changed_immutable_fields():
         request = await harness.request(invocation)
         decided = await harness.decide(
             request.approval_id,
-            invocation.invocation_id,
+            request.invocation_binding_digest,
             ApprovalDecisionValue.APPROVE,
         )
         assert decided.ok
@@ -381,16 +416,22 @@ async def test_approve_then_cancel_before_claim_zero_execution():
         invocation = _make_invocation()
         request = await harness.request(invocation)
         decided = await harness.decide(
-            request.approval_id, invocation.invocation_id, ApprovalDecisionValue.APPROVE
+            request.approval_id,
+            request.invocation_binding_digest,
+            ApprovalDecisionValue.APPROVE,
         )
         assert decided.ok
         harness.cancel()
         claim = await harness.claim(request.approval_id, invocation)
         assert claim.effective_status is ApprovalStatus.INVALIDATED_CANCELLED
         late = await harness.decide(
-            request.approval_id, invocation.invocation_id, ApprovalDecisionValue.APPROVE
+            request.approval_id,
+            request.invocation_binding_digest,
+            ApprovalDecisionValue.APPROVE,
         )
         assert late.effective_status is ApprovalStatus.INVALIDATED_CANCELLED
+        # WP2：已失效 approval 的 late decision 是 typed 410 事实，非 conflict。
+        assert late.safe_error_code == ApprovalCommandErrorCode.INVALIDATED.value
     finally:
         await harness.close()
 
@@ -411,9 +452,12 @@ async def test_timeout_before_claim_late_approve_invalid():
         claim = await harness.claim(request.approval_id, invocation)
         assert claim.effective_status is ApprovalStatus.INVALIDATED_TIMEOUT
         late = await harness.decide(
-            request.approval_id, invocation.invocation_id, ApprovalDecisionValue.APPROVE
+            request.approval_id,
+            request.invocation_binding_digest,
+            ApprovalDecisionValue.APPROVE,
         )
         assert late.effective_status is ApprovalStatus.INVALIDATED_TIMEOUT
+        assert late.safe_error_code == ApprovalCommandErrorCode.INVALIDATED.value
     finally:
         await harness.close()
 
@@ -499,7 +543,7 @@ async def test_worker_wait_returns_approved_after_decide():
     harness = _Harness()
     try:
         invocation = _make_invocation()
-        approval_id_holder: list[str] = []
+        request_holder: list = []
         wait_result_holder: list = []
 
         def worker():
@@ -511,7 +555,7 @@ async def test_worker_wait_returns_approved_after_decide():
                 risk_facts=(),
                 event_emitter=harness.step_emitter,
             )
-            approval_id_holder.append(request.approval_id)
+            request_holder.append(request)
             result = harness.controller.wait_for_decision(
                 approval_id=request.approval_id
             )
@@ -521,13 +565,13 @@ async def test_worker_wait_returns_approved_after_decide():
         thread.start()
         # 等请求创建完成。
         for _ in range(200):
-            if approval_id_holder:
+            if request_holder:
                 break
             await asyncio.sleep(0.01)
-        assert approval_id_holder
+        assert request_holder
         decided = await harness.decide(
-            approval_id_holder[0],
-            invocation.invocation_id,
+            request_holder[0].approval_id,
+            request_holder[0].invocation_binding_digest,
             ApprovalDecisionValue.APPROVE,
         )
         assert decided.ok
@@ -546,7 +590,7 @@ async def test_worker_wait_returns_rejected_after_decide():
     harness = _Harness()
     try:
         invocation = _make_invocation()
-        approval_id_holder: list[str] = []
+        request_holder: list = []
         wait_result_holder: list = []
 
         def worker():
@@ -558,7 +602,7 @@ async def test_worker_wait_returns_rejected_after_decide():
                 risk_facts=(),
                 event_emitter=harness.step_emitter,
             )
-            approval_id_holder.append(request.approval_id)
+            request_holder.append(request)
             result = harness.controller.wait_for_decision(
                 approval_id=request.approval_id
             )
@@ -567,13 +611,13 @@ async def test_worker_wait_returns_rejected_after_decide():
         thread = threading.Thread(target=worker)
         thread.start()
         for _ in range(200):
-            if approval_id_holder:
+            if request_holder:
                 break
             await asyncio.sleep(0.01)
-        assert approval_id_holder
+        assert request_holder
         await harness.decide(
-            approval_id_holder[0],
-            invocation.invocation_id,
+            request_holder[0].approval_id,
+            request_holder[0].invocation_binding_digest,
             ApprovalDecisionValue.REJECT,
         )
         thread.join(timeout=5)
@@ -638,7 +682,7 @@ async def test_two_concurrent_approves_single_claim():
             *[
                 harness.decide(
                     request.approval_id,
-                    invocation.invocation_id,
+                    request.invocation_binding_digest,
                     ApprovalDecisionValue.APPROVE,
                 )
                 for _ in range(2)
@@ -679,12 +723,12 @@ async def test_approve_vs_reject_race_first_wins():
         results = await asyncio.gather(
             harness.decide(
                 request.approval_id,
-                invocation.invocation_id,
+                request.invocation_binding_digest,
                 ApprovalDecisionValue.APPROVE,
             ),
             harness.decide(
                 request.approval_id,
-                invocation.invocation_id,
+                request.invocation_binding_digest,
                 ApprovalDecisionValue.REJECT,
             ),
         )
@@ -731,7 +775,7 @@ async def test_approve_vs_cancel_race_consistent():
         results = await asyncio.gather(
             harness.decide(
                 request.approval_id,
-                invocation.invocation_id,
+                request.invocation_binding_digest,
                 ApprovalDecisionValue.APPROVE,
             ),
             do_cancel(),

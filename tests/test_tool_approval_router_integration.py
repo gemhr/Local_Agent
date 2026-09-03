@@ -232,7 +232,7 @@ async def test_high_risk_request_zero_execution_before_decision():
         result = await harness.controller.decide_async(
             run_id=harness.context.run_id,
             approval_id=approval_id,
-            invocation_id=approval_request.invocation_id,
+            invocation_binding_digest=approval_request.invocation_binding_digest,
             decision=ApprovalDecisionValue.REJECT,
         )
         # invocation id 来自 request 内部；用 status 断言。
@@ -325,7 +325,7 @@ async def test_approve_executes_same_invocation_once_with_ordering():
         decided = await harness.controller.decide_async(
             run_id=harness.context.run_id,
             approval_id=approval_id,
-            invocation_id=request.invocation_id,
+            invocation_binding_digest=request.invocation_binding_digest,
             decision=ApprovalDecisionValue.APPROVE,
         )
         assert decided.ok

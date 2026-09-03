@@ -35,6 +35,11 @@ from core.persistence_migration import (
 )
 from core.runtime import (
     ApplicationRuntimeServices,
+    ApprovalCommandErrorCode,
+    ApprovalCommandResult,
+    ApprovalDecisionValue,
+    ApprovalError,
+    ApprovalStatus,
     ChatRuntimeMode,
     ChatRuntimeSelector,
     CancellationReason,
@@ -1157,6 +1162,42 @@ class RuntimeExecuteResponse(BaseModel):
     stop_reason: StrictStr
     error_code: StrictStr | None
     safe_message: StrictStr | None
+
+
+class ToolApprovalDecisionRequest(BaseModel):
+    """高风险 Tool 审批决定请求体（approve/reject 两个 route 共用）。
+
+    Public correlation 固定为 ``run_id + approval_id +
+    invocation_binding_digest``；decision 由 path 决定，body 不接受 decision
+    字段，也不接受 raw invocation_id / tool args / execution spec。
+    ``actor_id`` 只是受限审计标签，不是 authentication/authorization。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    invocation_binding_digest: Annotated[
+        StrictStr, Field(pattern=r"^[0-9a-f]{64}$")
+    ]
+    actor_id: Annotated[
+        StrictStr, Field(min_length=1, max_length=128)
+    ] | None = None
+
+
+class ToolApprovalDecisionResponse(BaseModel):
+    """审批决定响应体：content-free 严格公共 DTO。
+
+    只由 typed ``ApprovalCommandResult`` 投影，不序列化 Runtime internal
+    dataclass，也不返回 tool result / raw args / actor identity。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: StrictStr
+    approval_id: StrictStr
+    effective_status: StrictStr
+    idempotent: bool
+    error_code: StrictStr | None
+    decided_at: StrictStr | None
 
 
 class RuntimeEvaluationExecuteResponse(BaseModel):
@@ -2356,6 +2397,133 @@ async def cancel_run_endpoint(
     if result is None:
         return {"status": "inactive", "run_id": run_id}
     return {"status": "cancelled" if result else "already_cancelled", "run_id": run_id}
+
+
+# WP2 Frozen Contract：approval 命令面的 domain error → HTTP 投影。
+# 未列出的其余 fail-closed typed failure（INVALID_STATE / JOURNAL_UNAVAILABLE /
+# PUBLICATION_FAILED / STATE_TRANSITION_FAILED 等）按合同投影 409。
+_TOOL_APPROVAL_HTTP_ERROR_STATUS: dict[str, int] = {
+    "APPROVAL_UNKNOWN": 404,
+    "APPROVAL_UNKNOWN_RUN": 404,
+    "APPROVAL_RUN_INACTIVE": 410,
+    "APPROVAL_INVALIDATED": 410,
+    "APPROVAL_DECISION_CONFLICT": 409,
+    "APPROVAL_BINDING_MISMATCH": 409,
+}
+_TOOL_APPROVAL_DEFAULT_ERROR_STATUS = 409
+
+
+def _validate_uuid_path_value(value: str, field_name: str) -> None:
+    try:
+        uuid.UUID(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail=f"invalid {field_name}"
+        ) from exc
+
+
+async def _handle_tool_approval_decision(
+    run_id: str,
+    approval_id: str,
+    decision: ApprovalDecisionValue,
+    payload: ToolApprovalDecisionRequest,
+) -> JSONResponse:
+    """approve/reject 共用的 transport-only 转发实现。
+
+    route → DTO/path validation → RunRegistry typed forwarding →
+    ToolApprovalController decision CAS。HTTP 不直接 mutate AgentState、不读取
+    Journal、不执行 Tool；domain result（含 404/409/410）一律投影公共 DTO，
+    不以 HTTPException detail 回显 controller internals。
+    """
+    _validate_uuid_path_value(run_id, "run_id")
+    _validate_uuid_path_value(approval_id, "approval_id")
+    service = require_service()
+    try:
+        result = await _run_registry_for(service).decide_tool_approval(
+            run_id,
+            approval_id,
+            payload.invocation_binding_digest,
+            decision,
+            actor_id=payload.actor_id,
+        )
+        error_code = result.safe_error_code
+        status_code = (
+            200
+            if error_code is None
+            else _TOOL_APPROVAL_HTTP_ERROR_STATUS.get(
+                error_code, _TOOL_APPROVAL_DEFAULT_ERROR_STATUS
+            )
+        )
+        effective_status = result.effective_status.value
+        idempotent = bool(result.idempotent)
+        decided_at = (
+            result.decided_at.isoformat()
+            if result.decided_at is not None
+            else None
+        )
+    except ApprovalError as exc:
+        # Fail-closed typed failure：零状态改变；不回显 exception internals。
+        error_code = exc.error_code.value
+        status_code = _TOOL_APPROVAL_HTTP_ERROR_STATUS.get(
+            error_code, _TOOL_APPROVAL_DEFAULT_ERROR_STATUS
+        )
+        if exc.error_code is ApprovalCommandErrorCode.CONTROLLER_CLOSED:
+            # controller 只在 Run terminal 化后 close；transport 投影为
+            # APPROVAL_INVALIDATED（410），不重做 lifecycle。
+            error_code = ApprovalCommandErrorCode.INVALIDATED.value
+            status_code = 410
+        effective_status = ApprovalStatus.PENDING.value
+        idempotent = False
+        decided_at = None
+    response = ToolApprovalDecisionResponse(
+        run_id=run_id,
+        approval_id=approval_id,
+        effective_status=effective_status,
+        idempotent=idempotent,
+        error_code=error_code,
+        decided_at=decided_at,
+    )
+    return JSONResponse(
+        status_code=status_code, content=response.model_dump(mode="json")
+    )
+
+
+@app.post(
+    "/api/runtime/runs/{run_id}/tool-approvals/{approval_id}/approve",
+    response_model=ToolApprovalDecisionResponse,
+)
+async def approve_tool_approval_endpoint(
+    run_id: Annotated[
+        str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
+    ],
+    approval_id: Annotated[
+        str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
+    ],
+    payload: ToolApprovalDecisionRequest,
+) -> JSONResponse:
+    """批准一次高风险 Tool 审批（first-wins；同向重复决定幂等 200）。"""
+    return await _handle_tool_approval_decision(
+        run_id, approval_id, ApprovalDecisionValue.APPROVE, payload
+    )
+
+
+@app.post(
+    "/api/runtime/runs/{run_id}/tool-approvals/{approval_id}/reject",
+    response_model=ToolApprovalDecisionResponse,
+)
+async def reject_tool_approval_endpoint(
+    run_id: Annotated[
+        str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
+    ],
+    approval_id: Annotated[
+        str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
+    ],
+    payload: ToolApprovalDecisionRequest,
+) -> JSONResponse:
+    """拒绝一次高风险 Tool 审批（零 ToolExecution；不等价 cancel Run）。"""
+    return await _handle_tool_approval_decision(
+        run_id, approval_id, ApprovalDecisionValue.REJECT, payload
+    )
 
 
 @app.get("/api/history/{agent_id}")

@@ -112,6 +112,7 @@ class ApprovalCommandErrorCode(str, Enum):
     UNKNOWN_APPROVAL = "APPROVAL_UNKNOWN"
     UNKNOWN_RUN = "APPROVAL_UNKNOWN_RUN"
     RUN_INACTIVE = "APPROVAL_RUN_INACTIVE"
+    INVALIDATED = "APPROVAL_INVALIDATED"
     INVALID_STATE = "APPROVAL_INVALID_STATE"
     BINDING_MISMATCH = "APPROVAL_BINDING_MISMATCH"
     DUPLICATE_INVOCATION = "APPROVAL_DUPLICATE_INVOCATION"
@@ -490,7 +491,7 @@ class ToolApprovalController:
         *,
         run_id: str,
         approval_id: str,
-        invocation_id: str,
+        invocation_binding_digest: str,
         decision: ApprovalDecisionValue,
         actor_id: str | None = None,
     ) -> ApprovalCommandResult:
@@ -498,7 +499,7 @@ class ToolApprovalController:
         coro = self._decide_coro(
             run_id=run_id,
             approval_id=approval_id,
-            invocation_id=invocation_id,
+            invocation_binding_digest=invocation_binding_digest,
             decision=decision,
             actor_id=actor_id,
         )
@@ -556,14 +557,14 @@ class ToolApprovalController:
         *,
         run_id: str,
         approval_id: str,
-        invocation_id: str,
+        invocation_binding_digest: str,
         decision: ApprovalDecisionValue,
         actor_id: str | None = None,
     ) -> ApprovalCommandResult:
         return await self._decide_coro(
             run_id=run_id,
             approval_id=approval_id,
-            invocation_id=invocation_id,
+            invocation_binding_digest=invocation_binding_digest,
             decision=decision,
             actor_id=actor_id,
         )
@@ -656,6 +657,7 @@ class ToolApprovalController:
                     tool_name=request.tool_name,
                     invocation_identity_digest=request.invocation_identity_digest,
                     arguments_digest=request.arguments_digest,
+                    invocation_binding_digest=request.invocation_binding_digest,
                     idempotency_key_digest=request.idempotency_key_digest,
                     risk_level=request.risk_level,
                     risk_facts=(
@@ -697,12 +699,14 @@ class ToolApprovalController:
         *,
         run_id: str,
         approval_id: str,
-        invocation_id: str,
+        invocation_binding_digest: str,
         decision: ApprovalDecisionValue,
         actor_id: str | None,
     ) -> ApprovalCommandResult:
         if not isinstance(decision, ApprovalDecisionValue):
             raise TypeError("decision 必须是 ApprovalDecisionValue")
+        if not isinstance(invocation_binding_digest, str):
+            raise TypeError("invocation_binding_digest 必须是字符串")
         if run_id != self.run_id:
             return ApprovalCommandResult(
                 run_id=run_id,
@@ -713,12 +717,24 @@ class ToolApprovalController:
         async with self._lock:
             self._raise_if_closed()
             record = self._approvals.get(approval_id)
-            if record is None or record.request.invocation_id != invocation_id:
+            if record is None:
                 return ApprovalCommandResult(
                     run_id=run_id,
                     approval_id=approval_id,
                     effective_status=ApprovalStatus.PENDING,
                     safe_error_code=ApprovalCommandErrorCode.UNKNOWN_APPROVAL.value,
+                )
+            # WP2 public correlation：command 只携带 invocation_binding_digest，
+            # 与 frozen ApprovalRequest.invocation_binding_digest exact-match；
+            # raw invocation_id 永不出现在 command surface。
+            if record.request.invocation_binding_digest != invocation_binding_digest:
+                return ApprovalCommandResult(
+                    run_id=run_id,
+                    approval_id=approval_id,
+                    effective_status=record.status,
+                    safe_error_code=(
+                        ApprovalCommandErrorCode.BINDING_MISMATCH.value
+                    ),
                 )
             if record.status is not ApprovalStatus.PENDING:
                 return self._late_decision_result(record, decision)
@@ -744,6 +760,7 @@ class ToolApprovalController:
         payload = ToolApprovalDecidedPayload(
             approval_id=request.approval_id,
             invocation_identity_digest=request.invocation_identity_digest,
+            invocation_binding_digest=request.invocation_binding_digest,
             decision_status=(
                 "APPROVED"
                 if decision is ApprovalDecisionValue.APPROVE
@@ -922,6 +939,9 @@ class ToolApprovalController:
                     invocation_identity_digest=(
                         record.request.invocation_identity_digest
                     ),
+                    invocation_binding_digest=(
+                        record.request.invocation_binding_digest
+                    ),
                     decision_status=status.value,
                     actor_id_digest=actor_digest,
                 )
@@ -1059,18 +1079,33 @@ class ToolApprovalController:
         record: _ApprovalRecord,
         decision: ApprovalDecisionValue,
     ) -> ApprovalCommandResult:
+        # 已失效（cancel/timeout）的 request 一律先投影 410 事实：decision 即使
+        # 曾被记录也不再 effective（WP2 §25：deadline 后 late approve 零执行）。
         if record.status in {
-            ApprovalStatus.APPROVED,
-            ApprovalStatus.EXECUTION_CLAIMED,
-        } and decision is ApprovalDecisionValue.APPROVE:
+            ApprovalStatus.INVALIDATED_CANCELLED,
+            ApprovalStatus.INVALIDATED_TIMEOUT,
+        }:
+            return ApprovalCommandResult(
+                run_id=self.run_id,
+                approval_id=record.approval_id,
+                effective_status=record.status,
+                safe_error_code=ApprovalCommandErrorCode.INVALIDATED.value,
+                decided_at=(
+                    record.decision.decided_at if record.decision else None
+                ),
+            )
+        # Same-decision duplicate（含 REJECT 重复与 approve 已 claim）只投影
+        # 既有 immutable decision，不重新 publish / wake / claim。
+        if (
+            record.decision is not None
+            and record.decision.decision is decision
+        ):
             return ApprovalCommandResult(
                 run_id=self.run_id,
                 approval_id=record.approval_id,
                 effective_status=record.status,
                 idempotent=True,
-                decided_at=(
-                    record.decision.decided_at if record.decision else None
-                ),
+                decided_at=record.decision.decided_at,
             )
         return ApprovalCommandResult(
             run_id=self.run_id,
