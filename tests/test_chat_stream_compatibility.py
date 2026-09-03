@@ -18,6 +18,7 @@ from core.runtime import (
     RuntimeEventChannel,
     RuntimeEventDraft,
     RuntimeEventType,
+    StepCompletedPayload,
     TimeoutPayload,
     ToolCompletedPayload,
 )
@@ -122,6 +123,54 @@ async def test_runtime_error_maps_to_one_fixed_safe_error_without_raw_message():
     assert chunk.kind is ChatStreamChunkKind.SAFE_ERROR
     assert chunk.text == "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
     assert "secret" not in chunk.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_rejected_tool_approval_has_a_clear_safe_user_message():
+    chunk = ChatStreamCompatibilityAdapter().adapt(
+        await _event(
+            RuntimeEventType.ERROR,
+            ErrorPayload(
+                "TOOL_APPROVAL_REJECTED",
+                "Tool 调用已被拒绝审批（TOOL_APPROVAL_REJECTED）",
+                "run_coordinator",
+                True,
+            ),
+        )
+    )
+
+    assert chunk is not None
+    assert chunk.kind is ChatStreamChunkKind.TEXT
+    assert chunk.text == "已拒绝本次工具调用，未执行任何操作。\n"
+
+
+@pytest.mark.asyncio
+async def test_rejected_step_maps_its_generic_run_failure_to_safe_user_message():
+    adapter = ChatStreamCompatibilityAdapter()
+    step = adapter.adapt(
+        await _event(
+            RuntimeEventType.STEP_COMPLETED,
+            StepCompletedPayload(
+                "FAILED", safe_error_code="TOOL_APPROVAL_REJECTED"
+            ),
+            step=True,
+        )
+    )
+    error = adapter.adapt(
+        await _event(
+            RuntimeEventType.ERROR,
+            ErrorPayload(
+                "AGENT_STEP_FAILED",
+                "一个或多个步骤执行失败",
+                "run_coordinator",
+                True,
+            ),
+        )
+    )
+
+    assert step is not None and step.kind is ChatStreamChunkKind.CONTROL
+    assert error is not None and error.kind is ChatStreamChunkKind.TEXT
+    assert error.text == "已拒绝本次工具调用，未执行任何操作。\n"
 
 
 @pytest.mark.asyncio

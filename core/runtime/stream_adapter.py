@@ -68,6 +68,10 @@ _CONTROL_EVENT_TYPES = frozenset(
     }
 )
 
+_SAFE_ERROR_TEXT = {
+    "TOOL_APPROVAL_REJECTED": "已拒绝本次工具调用，未执行任何操作。\n",
+}
+
 _PAYLOAD_FIELD_ALLOWLIST: dict[RuntimeEventType, tuple[str, ...]] = {
     RuntimeEventType.RUN_STARTED: ("status",),
     RuntimeEventType.PLANNING_STARTED: (
@@ -210,6 +214,7 @@ class ChatStreamCompatibilityAdapter:
     def __init__(self) -> None:
         self._terminal_seen = False
         self._finished = False
+        self._approval_rejected_seen = False
 
     @property
     def terminal_seen(self) -> bool:
@@ -229,6 +234,18 @@ class ChatStreamCompatibilityAdapter:
             return ChatStreamChunk(ChatStreamChunkKind.TEXT, event.payload.text)
 
         if event.event_type is RuntimeEventType.ERROR:
+            safe_text = _SAFE_ERROR_TEXT.get(
+                getattr(event.payload, "safe_error_code", None)
+            )
+            if (
+                safe_text is None
+                and self._approval_rejected_seen
+                and getattr(event.payload, "safe_error_code", None)
+                == "AGENT_STEP_FAILED"
+            ):
+                safe_text = _SAFE_ERROR_TEXT["TOOL_APPROVAL_REJECTED"]
+            if safe_text is not None:
+                return ChatStreamChunk(ChatStreamChunkKind.TEXT, safe_text)
             return safe_transport_error_chunk("RUNTIME_EXECUTION_FAILED")
 
         if event.event_type not in _CONTROL_EVENT_TYPES:
@@ -236,6 +253,12 @@ class ChatStreamCompatibilityAdapter:
 
         if event.event_type is RuntimeEventType.RUN_COMPLETED:
             self._terminal_seen = True
+        elif (
+            event.event_type is RuntimeEventType.STEP_COMPLETED
+            and getattr(event.payload, "safe_error_code", None)
+            == "TOOL_APPROVAL_REJECTED"
+        ):
+            self._approval_rejected_seen = True
 
         try:
             payload = {

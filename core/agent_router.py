@@ -1282,6 +1282,48 @@ class AgentRouter:
             for descriptor in self.tool_registry.descriptors()
         )
 
+    def _extract_explicit_tool_call(
+        self, user_query: str
+    ) -> Optional[tuple[str, str]]:
+        """解析“明确调用已注册 Tool + JSON 参数”的确定性请求。
+
+        这是 Tool planner 之前的窄路径：仅接受用户在 Tool 名称附近明确
+        使用调用动词，且紧随其后的内容可以解析为单个 JSON 对象的请求。
+        解析成功仍会进入既有 Tool Governance 和审批流程，不授予执行权限。
+        """
+        for descriptor in self.tool_registry.descriptors():
+            match = re.search(
+                rf"(?<![a-zA-Z0-9_]){re.escape(descriptor.name)}(?![a-zA-Z0-9_])",
+                user_query,
+                flags=re.IGNORECASE,
+            )
+            if match is None:
+                continue
+            action_window = user_query[
+                max(0, match.start() - 32):match.end() + 32
+            ]
+            if re.search(
+                r"调用|执行|运行|call|run|invoke",
+                action_window,
+                flags=re.IGNORECASE,
+            ) is None:
+                continue
+            json_start = user_query.find("{", match.end())
+            if json_start < 0:
+                continue
+            try:
+                payload, json_end = json.JSONDecoder().raw_decode(
+                    user_query[json_start:]
+                )
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            return descriptor.name, user_query[
+                json_start:json_start + json_end
+            ]
+        return None
+
     def _plan_tool_call(
         self,
         messages: list[dict[str, str]],
@@ -1290,6 +1332,11 @@ class AgentRouter:
         """决定当前回答前是否需要调用工具。"""
         if not self.tool_registry.descriptors():
             return None
+        explicit_tool_call = self._extract_explicit_tool_call(
+            messages[-1]["content"]
+        )
+        if explicit_tool_call is not None:
+            return explicit_tool_call
         if not self._tool_intent_likely(messages[-1]["content"]):
             return None
 
@@ -2038,6 +2085,8 @@ class AgentRouter:
             "数据分析问题交给 data_analyst。task.capabilities 只能为空数组，或与 "
             "agent 对应：knowledge_expert→rag，code_expert→code_reasoning，"
             "data_analyst→data_analysis；不确定时不要声明 capabilities。"
+            "task.input_type 可省略；如填写只能是 text。它表示 specialist 接收"
+            "instruction 的固定文本合同，用户请求中包含 JSON 时也绝不填写 json、object 或其他值。"
             "只有单个 knowledge_expert task 可以设置 "
             "synthesis_required=false；其他专业任务必须设置 synthesis_required=true。"
         )
