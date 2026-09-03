@@ -4,9 +4,11 @@
 
 import os
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+
+from core.approval_presentation import ApprovalCardModel
 
 
 class AgentListItemWidget(QWidget):
@@ -144,3 +146,57 @@ class OrchestrationStatusWidget(QWidget):
         label.setWordWrap(True)
         label.setStyleSheet("color: #516273; font-size: 12px;")
         self.status_layout.addWidget(label)
+
+
+class ApprovalCardWidget(QWidget):
+    """单次高风险工具调用的人工作业审批卡片。"""
+
+    decision_requested = pyqtSignal(str)
+
+    def __init__(self, model: ApprovalCardModel) -> None:
+        super().__init__()
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(20, 6, 20, 6)
+
+        card = QWidget()
+        card.setStyleSheet(
+            "background: #fff8e8; border: 1px solid #e0c77c; border-radius: 10px;"
+        )
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        self.title_label = QLabel()
+        self.title_label.setStyleSheet("font-weight: 600; color: #6c4d00;")
+        self.tool_label = QLabel()
+        self.risk_label = QLabel()
+        self.facts_label = QLabel()
+        self.facts_label.setWordWrap(True)
+        self.message_label = QLabel()
+        self.message_label.setWordWrap(True)
+        self.message_label.setStyleSheet("color: #725b28; font-size: 12px;")
+        self.approve_button = QPushButton("批准")
+        self.reject_button = QPushButton("拒绝")
+        self.approve_button.clicked.connect(lambda: self.decision_requested.emit("approve"))
+        self.reject_button.clicked.connect(lambda: self.decision_requested.emit("reject"))
+        actions = QHBoxLayout()
+        actions.addWidget(self.approve_button)
+        actions.addWidget(self.reject_button)
+        actions.addStretch(1)
+        for widget in (self.title_label, self.tool_label, self.risk_label, self.facts_label, self.message_label):
+            layout.addWidget(widget)
+        layout.addLayout(actions)
+        root_layout.addWidget(card)
+        self.set_model(model)
+
+    def set_model(self, model: ApprovalCardModel) -> None:
+        """以展示模型更新卡片；该方法只应在 UI 线程调用。"""
+        self.title_label.setText(model.title)
+        self.tool_label.setText(f"工具：{model.tool_name}")
+        self.risk_label.setText(f"风险等级：{model.risk_level or '未标注'}")
+        facts = "\n".join(f"- {fact}" for fact in model.risk_facts)
+        self.facts_label.setText(f"风险原因：\n{facts}" if facts else "风险原因：未提供")
+        self.message_label.setText(model.message)
+        self.message_label.setVisible(bool(model.message))
+        self.approve_button.setEnabled(model.buttons_enabled)
+        self.reject_button.setEnabled(model.buttons_enabled)

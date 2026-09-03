@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox
 from core.settings import CLIENT_ROLE, Settings, validate_role_configuration
 from core.application_metadata import create_application_metadata
 from core.cancellation_client import request_run_cancellation
+from core.approval_client import request_tool_approval_decision, tool_approval_decision_url
+from core.approval_presentation import ApprovalCardModel, ApprovalCommandHttpResult
 from core.client_readiness import ReadinessWorker
 from core.runtime.multi_agent_status import format_frontend_status
 from ui.chat_panel import ChatPanel
@@ -200,6 +202,7 @@ class MainController(QObject):
     """协调桌面端 UI 状态与后端请求。"""
 
     history_ready_signal = pyqtSignal(list, str)
+    approval_result_signal = pyqtSignal(object, object)
     history_prepend_signal = pyqtSignal(list, str)
 
     def __init__(self) -> None:
@@ -218,6 +221,7 @@ class MainController(QObject):
         self.worker.finished_signal.connect(self._on_worker_finished)
         self.worker.error_signal.connect(self._on_worker_error)
         self.worker.settled_signal.connect(self._on_worker_settled)
+        self.approval_result_signal.connect(self._on_approval_result)
 
         # 每个智能体单独维护分页偏移量，避免切换会话时互相污染。
         self.agent_history_offsets: dict[str, int] = {}
@@ -248,6 +252,7 @@ class MainController(QObject):
         self.pet.quit_requested.connect(self._quit_application)
         self.chat_panel.message_sent.connect(self._handle_user_message)
         self.chat_panel.stop_requested.connect(self._handle_stop_request)
+        self.chat_panel.approval_command_requested.connect(self._submit_approval_command)
         self.chat_panel.memory_changed_signal.connect(self._handle_memory_changed)
         self.chat_panel.request_more_history_signal.connect(self._fetch_older_history)
         self.chat_panel.agent_switched_signal.connect(self._load_agent_history_if_needed)
@@ -430,6 +435,7 @@ class MainController(QObject):
         run_id = self.worker.run_id
         if not run_id or not self.worker.isRunning():
             return
+        self.chat_panel.expire_pending_approvals(run_id)
         cancel_url = f"{self.api_base_url}/api/runtime/runs/{run_id}/cancel"
 
         def cancel_then_close() -> None:
@@ -446,6 +452,8 @@ class MainController(QObject):
 
     def _on_worker_status(self, event: dict) -> None:
         """将多智能体编排事件转换为 UI 可读状态。"""
+        if self.chat_panel.handle_approval_event(event, target_agent_id=self.worker.agent_id):
+            return
         status_text = format_frontend_status(event)
         if not status_text:
             return
@@ -466,8 +474,29 @@ class MainController(QObject):
 
     def _on_worker_settled(self) -> None:
         """统一收口成功、失败和用户取消后的前端运行状态。"""
+        self.chat_panel.expire_pending_approvals(self.worker.run_id or None)
         self.chat_panel.set_streaming(False)
         self.worker.run_id = ""
+
+    def _submit_approval_command(self, model: ApprovalCardModel, action: str) -> None:
+        """在独立短请求线程提交审批，结果通过 Qt signal 回到 UI 线程。"""
+        url = tool_approval_decision_url(
+            self.api_base_url, model.run_id, model.approval_id, action
+        )
+
+        def submit() -> None:
+            result = request_tool_approval_decision(
+                self.http.post, url, model.invocation_binding_digest
+            )
+            self.approval_result_signal.emit(model.key, result)
+
+        threading.Thread(target=submit, daemon=True, name="tool-approval-command").start()
+
+    def _on_approval_result(
+        self, key: tuple[str, str], result: ApprovalCommandHttpResult
+    ) -> None:
+        """Qt queued slot：只在 UI 线程更新仍存在的卡片。"""
+        self.chat_panel.apply_approval_http_result(key, result)
 
     def _handle_memory_changed(self, agent_ids: list, delete_all: bool) -> None:
         """在记忆发生删除后同步刷新主界面历史状态。"""
