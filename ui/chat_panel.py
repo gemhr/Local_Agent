@@ -23,7 +23,17 @@ from PyQt6.QtWidgets import (
 )
 
 from ui.chat_utils import format_chat_time, render_markdown_html
-from ui.chat_widgets import AgentListItemWidget, MessageBubble, OrchestrationStatusWidget
+from core.approval_presentation import (
+    ApprovalCardModel,
+    ApprovalCommandHttpResult,
+    apply_decided_to_store,
+    apply_http_result,
+    begin_submit,
+    event_expires_pending_approvals,
+    expire_store,
+    remember_requested,
+)
+from ui.chat_widgets import ApprovalCardWidget, AgentListItemWidget, MessageBubble, OrchestrationStatusWidget
 from ui.memory_dialog import MemoryManagerDialog
 
 
@@ -38,6 +48,7 @@ class ChatPanel(QWidget):
     request_more_history_signal = pyqtSignal(str)
     agent_switched_signal = pyqtSignal(str)
     memory_changed_signal = pyqtSignal(list, bool)
+    approval_command_requested = pyqtSignal(object, str)
 
     def __init__(self, api_base_url: str, client_trust_env: bool = True) -> None:
         """初始化聊天主面板。
@@ -61,6 +72,9 @@ class ChatPanel(QWidget):
         self.active_ai_labels: dict[str, QLabel] = {}
         self.active_ai_texts: dict[str, str] = {}
         self.active_status_widgets: dict[str, OrchestrationStatusWidget] = {}
+        self.approval_models: dict[tuple[str, str], ApprovalCardModel] = {}
+        self.approval_widgets: dict[tuple[str, str], ApprovalCardWidget] = {}
+        self._approval_agent_ids: dict[tuple[str, str], str] = {}
         # 每个智能体各自维护一个节流定时器，避免多个会话互相抢刷新节奏。
         self._render_timers: dict[str, QTimer] = {}
 
@@ -251,6 +265,11 @@ class ChatPanel(QWidget):
         self.active_ai_labels.pop(agent_id, None)
         self.active_ai_texts.pop(agent_id, None)
         self.active_status_widgets.pop(agent_id, None)
+        for key, card_agent_id in list(self._approval_agent_ids.items()):
+            if card_agent_id == agent_id:
+                self.approval_models.pop(key, None)
+                self.approval_widgets.pop(key, None)
+                self._approval_agent_ids.pop(key, None)
         timer = self._render_timers.get(agent_id)
         if timer is not None:
             timer.stop()
@@ -639,6 +658,61 @@ class ChatPanel(QWidget):
             self.active_status_widgets[target_id] = widget
         widget.append_status(text)
         self._scroll_to_bottom(target_id)
+
+    def handle_approval_event(self, event: dict, target_agent_id: str | None = None) -> bool:
+        """消费 WP2 的安全 approval control event，返回是否由审批 UI 处理。"""
+        target_id = target_agent_id or self.current_agent_id
+        event_type = str(event.get("event_type") or "")
+        model = remember_requested(self.approval_models, event)
+        if model is not None:
+            widget = ApprovalCardWidget(model)
+            widget.decision_requested.connect(
+                lambda action, key=model.key: self._begin_approval_submission(key, action)
+            )
+            self.chat_layouts[target_id].addWidget(widget)
+            self.approval_widgets[model.key] = widget
+            self._approval_agent_ids[model.key] = target_id
+            self._scroll_to_bottom(target_id)
+            return True
+        decided = apply_decided_to_store(self.approval_models, event)
+        if decided is not None:
+            self._render_approval_model(decided)
+            return True
+        if event_expires_pending_approvals(event):
+            run_id = str(event.get("run_id") or "").strip() or None
+            self.expire_pending_approvals(run_id)
+            return True
+        return event_type in {"TOOL_APPROVAL_REQUESTED", "TOOL_APPROVAL_DECIDED"}
+
+    def _begin_approval_submission(self, key: tuple[str, str], action: str) -> None:
+        model = self.approval_models.get(key)
+        if model is None:
+            return
+        updated, should_send = begin_submit(model)
+        self.approval_models[key] = updated
+        self._render_approval_model(updated)
+        if should_send:
+            self.approval_command_requested.emit(updated, action)
+
+    def apply_approval_http_result(
+        self, key: tuple[str, str], result: ApprovalCommandHttpResult
+    ) -> None:
+        model = self.approval_models.get(key)
+        if model is None:
+            return
+        updated = apply_http_result(model, result)
+        self.approval_models[key] = updated
+        self._render_approval_model(updated)
+
+    def expire_pending_approvals(self, run_id: str | None = None) -> None:
+        for model in expire_store(self.approval_models, run_id):
+            self._render_approval_model(model)
+
+    def _render_approval_model(self, model: ApprovalCardModel) -> None:
+        widget = self.approval_widgets.get(model.key)
+        if widget is not None:
+            widget.set_model(model)
+            self._scroll_to_bottom(self._approval_agent_ids.get(model.key))
 
     def _on_input_changed(self) -> None:
         """根据输入框和附件状态切换发送按钮可用性。"""

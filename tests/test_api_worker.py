@@ -107,12 +107,17 @@ def test_failed_worker_emits_error_before_settled(monkeypatch) -> None:
 
 def test_worker_settled_resets_shared_streaming_state_and_run_id() -> None:
     streaming_states: list[bool] = []
+    expired_run_ids: list[str | None] = []
     controller = SimpleNamespace(
-        chat_panel=SimpleNamespace(set_streaming=streaming_states.append),
+        chat_panel=SimpleNamespace(
+            set_streaming=streaming_states.append,
+            expire_pending_approvals=expired_run_ids.append,
+        ),
         worker=SimpleNamespace(run_id="49796282cdb643c7b8850942f7b66bd1"),
     )
 
     main.MainController._on_worker_settled(controller)
 
     assert streaming_states == [False]
+    assert expired_run_ids == ["49796282cdb643c7b8850942f7b66bd1"]
     assert controller.worker.run_id == ""
