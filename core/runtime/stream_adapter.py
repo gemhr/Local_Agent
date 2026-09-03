@@ -56,6 +56,8 @@ _CONTROL_EVENT_TYPES = frozenset(
         RuntimeEventType.MODEL_COMPLETED,
         RuntimeEventType.TOOL_STARTED,
         RuntimeEventType.TOOL_COMPLETED,
+        RuntimeEventType.TOOL_APPROVAL_REQUESTED,
+        RuntimeEventType.TOOL_APPROVAL_DECIDED,
         RuntimeEventType.RETRIEVAL_STARTED,
         RuntimeEventType.RETRIEVAL_STAGE_COMPLETED,
         RuntimeEventType.RETRIEVAL_COMPLETED,
@@ -119,6 +121,21 @@ _PAYLOAD_FIELD_ALLOWLIST: dict[RuntimeEventType, tuple[str, ...]] = {
         "retry_index",
         "duration_ms",
         "status",
+    ),
+    # Stage5-Phase7-WP2：approval 事件的 public projection 使用 explicit
+    # allowlist，绝不整包 model_dump/payload asdict。禁止暴露 raw
+    # invocation_id、arguments_digest、idempotency key、actor identity 等。
+    RuntimeEventType.TOOL_APPROVAL_REQUESTED: (
+        "approval_id",
+        "tool_name",
+        "invocation_binding_digest",
+        "risk_level",
+        "risk_facts",
+    ),
+    RuntimeEventType.TOOL_APPROVAL_DECIDED: (
+        "approval_id",
+        "invocation_binding_digest",
+        "decision_status",
     ),
     RuntimeEventType.RETRIEVAL_STARTED: ("collection_count", "top_k"),
     RuntimeEventType.RETRIEVAL_STAGE_COMPLETED: (

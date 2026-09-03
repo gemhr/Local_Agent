@@ -27,12 +27,14 @@ def _requested(
     invocation_digest: str = "a" * 64,
     arguments_digest: str = "b" * 64,
     idem_digest: str = "c" * 64,
+    binding_digest: str = "e" * 64,
 ) -> ToolApprovalRequestedPayload:
     return ToolApprovalRequestedPayload(
         approval_id=approval_id,
         tool_name="complex_workflow_simulator",
         invocation_identity_digest=invocation_digest,
         arguments_digest=arguments_digest,
+        invocation_binding_digest=binding_digest,
         idempotency_key_digest=idem_digest,
         risk_level="HIGH",
         risk_facts="LOCAL_STATE_MUTATION|NON_IDEMPOTENT",
@@ -44,10 +46,12 @@ def _decided(
     invocation_digest: str = "a" * 64,
     decision_status: str = "APPROVED",
     actor_digest: str | None = None,
+    binding_digest: str = "e" * 64,
 ) -> ToolApprovalDecidedPayload:
     return ToolApprovalDecidedPayload(
         approval_id=approval_id,
         invocation_identity_digest=invocation_digest,
+        invocation_binding_digest=binding_digest,
         decision_status=decision_status,
         actor_id_digest=actor_digest,
     )
@@ -61,6 +65,8 @@ def test_requested_payload_rejects_raw_and_bad_digests():
         _requested(arguments_digest="not-a-digest")
     with pytest.raises(ValueError):
         _requested(idem_digest="short")
+    with pytest.raises(ValueError):
+        _requested(binding_digest="not-a-digest")
     # risk_facts 必须稳定字符串表示。
     with pytest.raises(TypeError):
         ToolApprovalRequestedPayload(
@@ -68,6 +74,7 @@ def test_requested_payload_rejects_raw_and_bad_digests():
             tool_name="t",
             invocation_identity_digest="a" * 64,
             arguments_digest="b" * 64,
+            invocation_binding_digest="e" * 64,
             risk_facts=("A", "B"),  # type: ignore[arg-type]
         )
     # 不支持 status。
@@ -88,6 +95,7 @@ def test_requested_journal_payload_safety_and_allowlist():
     assert safe["tool_name"] == "complex_workflow_simulator"
     assert safe["invocation_identity_digest"] == "a" * 64
     assert safe["arguments_digest"] == "b" * 64
+    assert safe["invocation_binding_digest"] == "e" * 64
     assert safe["idempotency_key_digest"] == "c" * 64
     assert safe["risk_level"] == "HIGH"
     assert safe["risk_facts"] == "LOCAL_STATE_MUTATION|NON_IDEMPOTENT"
@@ -108,6 +116,7 @@ def test_decided_journal_payload_safety_and_allowlist():
     safe = record.safe_payload
     assert safe["approval_id"] == "approval-1"
     assert safe["invocation_identity_digest"] == "a" * 64
+    assert safe["invocation_binding_digest"] == "e" * 64
     assert safe["decision_status"] == "APPROVED"
     assert safe["actor_id_digest"] == actor_digest
     # 不包含 raw approver identity 与 raw invocation。

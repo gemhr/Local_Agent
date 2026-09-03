@@ -119,14 +119,15 @@ class ActiveRunControlHandle:
         self,
         *,
         approval_id: str,
-        invocation_id: str,
+        invocation_binding_digest: str,
         decision: object,
         actor_id: str | None = None,
     ) -> object:
-        """WP1 typed domain command forwarding（供 WP2 transport 调用）。
+        """WP1 typed domain command forwarding（WP2 transport 调用）。
 
         只转发给当前 run 的 controller，绝不保存 approval business payload。
-        不存在 controller 时返回 not-found/inactive typed result。
+        command correlation 使用 invocation_binding_digest exact-match；
+        不存在 controller 时返回 unknown-approval typed result（active Run）。
         """
         from core.runtime.approval import (
             ApprovalCommandErrorCode,
@@ -158,7 +159,7 @@ class ActiveRunControlHandle:
         return await controller.decide_async(
             run_id=self.run_id,
             approval_id=approval_id,
-            invocation_id=invocation_id,
+            invocation_binding_digest=invocation_binding_digest,
             decision=decision,
             actor_id=actor_id,
         )
@@ -167,14 +168,14 @@ class ActiveRunControlHandle:
         self,
         *,
         approval_id: str,
-        invocation_id: str,
+        invocation_binding_digest: str,
         actor_id: str | None = None,
     ) -> object:
         from core.runtime.approval import ApprovalDecisionValue
 
         return await self.decide_tool_approval(
             approval_id=approval_id,
-            invocation_id=invocation_id,
+            invocation_binding_digest=invocation_binding_digest,
             decision=ApprovalDecisionValue.APPROVE,
             actor_id=actor_id,
         )
@@ -183,14 +184,14 @@ class ActiveRunControlHandle:
         self,
         *,
         approval_id: str,
-        invocation_id: str,
+        invocation_binding_digest: str,
         actor_id: str | None = None,
     ) -> object:
         from core.runtime.approval import ApprovalDecisionValue
 
         return await self.decide_tool_approval(
             approval_id=approval_id,
-            invocation_id=invocation_id,
+            invocation_binding_digest=invocation_binding_digest,
             decision=ApprovalDecisionValue.REJECT,
             actor_id=actor_id,
         )
@@ -300,11 +301,15 @@ class RunRegistry:
         self,
         run_id: str,
         approval_id: str,
-        invocation_id: str,
+        invocation_binding_digest: str,
         decision: object,
         actor_id: str | None = None,
     ) -> object:
-        """Registry 级 typed command forwarding；不存在 handle 时返回 inactive。"""
+        """Registry 级 typed command forwarding。
+
+        不存在 active handle 时统一返回 inactive typed result（WP2 §10 taxonomy
+        修正：missing handle 是 APPROVAL_RUN_INACTIVE，不是 APPROVAL_UNKNOWN）。
+        """
         handle = self.get(run_id)
         if handle is None:
             from core.runtime.approval import (
@@ -317,11 +322,11 @@ class RunRegistry:
                 run_id=run_id,
                 approval_id=approval_id,
                 effective_status=ApprovalStatus.PENDING,
-                safe_error_code=ApprovalCommandErrorCode.UNKNOWN_APPROVAL.value,
+                safe_error_code=ApprovalCommandErrorCode.RUN_INACTIVE.value,
             )
         return await handle.decide_tool_approval(
             approval_id=approval_id,
-            invocation_id=invocation_id,
+            invocation_binding_digest=invocation_binding_digest,
             decision=decision,
             actor_id=actor_id,
         )
@@ -330,7 +335,7 @@ class RunRegistry:
         self,
         run_id: str,
         approval_id: str,
-        invocation_id: str,
+        invocation_binding_digest: str,
         actor_id: str | None = None,
     ) -> object:
         from core.runtime.approval import ApprovalDecisionValue
@@ -338,7 +343,7 @@ class RunRegistry:
         return await self.decide_tool_approval(
             run_id,
             approval_id,
-            invocation_id,
+            invocation_binding_digest,
             ApprovalDecisionValue.APPROVE,
             actor_id=actor_id,
         )
@@ -347,7 +352,7 @@ class RunRegistry:
         self,
         run_id: str,
         approval_id: str,
-        invocation_id: str,
+        invocation_binding_digest: str,
         actor_id: str | None = None,
     ) -> object:
         from core.runtime.approval import ApprovalDecisionValue
@@ -355,7 +360,7 @@ class RunRegistry:
         return await self.decide_tool_approval(
             run_id,
             approval_id,
-            invocation_id,
+            invocation_binding_digest,
             ApprovalDecisionValue.REJECT,
             actor_id=actor_id,
         )
