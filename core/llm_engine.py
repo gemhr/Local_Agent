@@ -10,6 +10,8 @@ from typing import Dict, Generator, List
 
 import requests
 
+from core.runtime.model_invocation import ModelAdapterResponse, NativeToolCall
+
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +249,10 @@ class RemoteLLMEngine:
         """只为显式声明的 DeepSeek Provider 发送专属参数。"""
         return self.provider_kind == "deepseek"
 
+    def supports_native_tool_calling(self) -> bool:
+        """声明当前实例可用的 provider native function calling 能力。"""
+        return self.provider_kind == "deepseek"
+
     @staticmethod
     def _extract_content(payload: dict[str, Any]) -> str:
         choices = payload.get("choices")
@@ -347,6 +353,80 @@ class RemoteLLMEngine:
                 provider_responded=True,
             )
         yield content
+
+    def generate_native(
+        self,
+        messages: List[Dict[str, object]],
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        *,
+        tools: list[dict[str, object]],
+        tool_choice: str = "auto",
+        enable_thinking: bool = False,
+    ) -> ModelAdapterResponse:
+        """执行一次 DeepSeek 非流式 native function calling 请求。
+
+        此处只负责 provider wire 到窄内部 DTO 的正常化；参数和权限仍由
+        AgentRouter 后面的 ToolAdapter/Governance 链处理。
+        """
+        if self.provider_kind != "deepseek":
+            raise RemoteLLMError(
+                "Native tool calling is only supported by DeepSeek",
+                model_failure_category="PROVIDER_CONFIGURATION_ERROR",
+                safe_error_code="NATIVE_TOOL_PROVIDER_UNSUPPORTED",
+                provider_started=False,
+                provider_responded=False,
+            )
+        if enable_thinking:
+            raise RemoteLLMError(
+                "Thinking native tool calling is not supported",
+                model_failure_category="PROVIDER_CONFIGURATION_ERROR",
+                safe_error_code="NATIVE_TOOL_THINKING_UNSUPPORTED",
+                provider_started=False,
+                provider_responded=False,
+            )
+        body: dict[str, object] = {
+            "model": self.model_name, "messages": messages,
+            "temperature": temperature, "max_tokens": max_tokens,
+            "stream": False, "tools": tools, "tool_choice": tool_choice,
+            "thinking": {"type": "disabled"},
+        }
+        with self._session_lock:
+            if self._closed:
+                raise RemoteLLMError("Remote model client has been closed", safe_error_code="REMOTE_CLIENT_CLOSED", provider_started=False, provider_responded=False)
+            response = self._session.post(self._chat_completions_url(), headers=self._build_headers(), json=body, timeout=self.timeout_seconds, verify=self.verify_tls)
+        if response.status_code >= 400:
+            raise RemoteLLMError("Remote API request failed", status_code=response.status_code, safe_error_code="REMOTE_HTTP_ERROR", provider_responded=True)
+        try:
+            payload = response.json()
+            choice = payload["choices"][0]
+            message = choice["message"]
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise RemoteLLMError("Remote API returned malformed native response", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_RESPONSE_INVALID", provider_responded=True) from None
+        if not isinstance(message, dict):
+            raise RemoteLLMError("Remote API returned malformed native response", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_RESPONSE_INVALID", provider_responded=True)
+        content = message.get("content")
+        if content is None:
+            content = ""
+        if not isinstance(content, str):
+            raise RemoteLLMError("Remote API returned malformed native content", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_RESPONSE_INVALID", provider_responded=True)
+        calls = message.get("tool_calls")
+        if calls is None:
+            if not content.strip():
+                raise RemoteLLMError("Remote model returned empty content", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_EMPTY_CONTENT", provider_responded=True)
+            return ModelAdapterResponse(content)
+        if not isinstance(calls, list) or len(calls) != 1:
+            raise RemoteLLMError("Remote API returned unsupported tool call count", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_COUNT_INVALID", provider_responded=True)
+        call = calls[0]
+        function = call.get("function") if isinstance(call, dict) else None
+        call_id = call.get("id") if isinstance(call, dict) else None
+        name = function.get("name") if isinstance(function, dict) else None
+        arguments = function.get("arguments") if isinstance(function, dict) else None
+        if not all(isinstance(value, str) and value for value in (call_id, name, arguments)):
+            raise RemoteLLMError("Remote API returned malformed native tool call", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True)
+        native = NativeToolCall(call_id, name, arguments)
+        assistant_message = {"role": "assistant", "content": content or None, "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}]}
+        return ModelAdapterResponse(content, native_tool_call=native, assistant_message=assistant_message)
 
     def close(self) -> None:
         """等待活跃请求结束后幂等关闭共享 Session。"""

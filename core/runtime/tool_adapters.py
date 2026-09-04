@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 import json
 from typing import Any, Callable, Mapping, Protocol
+from uuid import uuid4
 
 from core.runtime.retry import OperationIdempotency
 from core.runtime.tool_contract import (
@@ -83,6 +84,10 @@ class ToolAdapter(ABC):
     is_async = False
     spec: ToolExecutionSpec
 
+    def llm_input_schema(self) -> dict[str, object]:
+        """从既有 Adapter/DTO 输入合同投影出的 provider schema。"""
+        raise NotImplementedError("ToolAdapter 必须提供 LLM 输入 schema")
+
     def spec_for(self, invocation: ToolInvocation) -> ToolExecutionSpec:
         if invocation.tool_name != self.spec.tool_name:
             raise ToolAdapterInvocationError(
@@ -151,9 +156,32 @@ class ComplexWorkflowToolAdapter(ToolAdapter):
         self._state_store = state_store or InMemoryWorkflowStateStore()
         self._sleeper = sleeper
 
+    def llm_input_schema(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "resource_key": {"type": "string", "description": "目标资源标识"},
+                "execution_mode": {"type": "string", "enum": [item.value for item in WorkflowExecutionMode], "description": "业务执行模式"},
+                "items": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"item_id": {"type": "string"}, "action": {"type": "string", "enum": ["ADD", "REMOVE", "UPDATE"]}, "quantity": {"type": "integer"}, "priority": {"type": "integer"}, "attributes": {"type": "object"}}, "required": ["item_id", "action", "quantity"]}},
+            },
+            "required": ["resource_key", "execution_mode", "items"],
+            "additionalProperties": False,
+        }
+
     def build_invocation(self, argument_text: str) -> ToolInvocation:
         try:
             payload = json.loads(argument_text)
+            if not isinstance(payload, dict):
+                raise ValueError("request must be an object")
+            payload = dict(payload)
+            # 这些 identity 是 invocation 技术字段，不是用户或 planner 的业务输入。
+            if not payload.get("operation_id"):
+                payload["operation_id"] = f"workflow-{uuid4().hex}"
+            if (
+                payload.get("execution_mode") == "IDEMPOTENT_COMMIT"
+                and not payload.get("idempotency_key")
+            ):
+                payload["idempotency_key"] = f"idempotency-{uuid4().hex}"
             request = ComplexWorkflowRequest.from_dict(payload)
         except (json.JSONDecodeError, TypeError, ValueError):
             raise ToolAdapterInvocationError(
@@ -321,6 +349,11 @@ class LegacyStringToolAdapter(ToolAdapter):
             max_output_bytes=max_output_bytes,
             max_concurrency=max_concurrency,
         )
+
+    def llm_input_schema(self) -> dict[str, object]:
+        if self._argument_parser is None and self._function.__name__ == "get_system_status":
+            return {"type": "object", "properties": {}, "additionalProperties": False}
+        return {"type": "object", "properties": {"argument_text": {"type": "string"}}, "required": ["argument_text"], "additionalProperties": False}
 
     def build_invocation(self, argument_text: str) -> ToolInvocation:
         if not isinstance(argument_text, str):
