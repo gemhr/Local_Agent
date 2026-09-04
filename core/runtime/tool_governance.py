@@ -54,6 +54,7 @@ class ToolRiskFact(str, Enum):
 
     ARBITRARY_LOCAL_FILESYSTEM_READ = "ARBITRARY_LOCAL_FILESYSTEM_READ"
     SYSTEM_INFORMATION_READ = "SYSTEM_INFORMATION_READ"
+    RESTRICTED_WORKSPACE_READ = "RESTRICTED_WORKSPACE_READ"
 
 
 class ToolRiskLevel(str, Enum):
@@ -336,10 +337,20 @@ _FULL_RISK_COMBINATIONS: dict[
         OperationIdempotency.READ_ONLY,
     ): ToolRiskLevel.LOW,
     (
+        frozenset({ToolRiskFact.RESTRICTED_WORKSPACE_READ}),
+        ToolSideEffectKind.NONE,
+        OperationIdempotency.READ_ONLY,
+    ): ToolRiskLevel.LOW,
+    (
         frozenset(),
         ToolSideEffectKind.NONE,
         OperationIdempotency.READ_ONLY,
     ): ToolRiskLevel.LOW,
+    (
+        frozenset(),
+        ToolSideEffectKind.LOCAL_STATE_MUTATION,
+        OperationIdempotency.IDEMPOTENT,
+    ): ToolRiskLevel.MEDIUM,
     (
         frozenset(),
         ToolSideEffectKind.LOCAL_STATE_MUTATION,
@@ -510,11 +521,20 @@ class ToolGovernanceService:
 
 
 def register_default_tool_policies(catalog: ToolPolicyCatalog) -> None:
-    """注册四条生产 Tool policy（5×4 explicit ALLOW，无 implicit default allow）。
+    """注册生产 Tool policy（每条 explicit ALLOW，无 implicit default allow）。
 
-    risk facts / approval rule 严格按 Architecture Decision §31 / §33 / §43 冻结。
+    risk facts / approval rule 严格按 Architecture Decision §31 / §33 / §43 冻结；
+    workspace 工具新增 RESTRICTED_WORKSPACE_READ 静态事实（WP2）。
     """
     policies = (
+        (
+            "workspace_read_file",
+            (ToolRiskFact.RESTRICTED_WORKSPACE_READ,),
+        ),
+        (
+            "workspace_write_file",
+            (),
+        ),
         (
             "list_files",
             (ToolRiskFact.ARBITRARY_LOCAL_FILESYSTEM_READ,),

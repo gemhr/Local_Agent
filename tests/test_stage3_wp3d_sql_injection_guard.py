@@ -1950,6 +1950,8 @@ def test_current_tool_and_route_sql_authority_inventory() -> None:
     register_all_tools(registry)
     registry.freeze()
     assert {item.name for item in registry.descriptors()} == {
+        "workspace_read_file",
+        "workspace_write_file",
         "list_files",
         "analyze_excel",
         "get_system_status",

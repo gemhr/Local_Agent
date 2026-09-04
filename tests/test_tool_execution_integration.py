@@ -286,7 +286,7 @@ async def test_read_only_legacy_adapter_validates_error_string_and_output_limit(
     assert result.safe_error_code == "LEGACY_TOOL_REPORTED_ERROR"
 
 
-def test_registry_registers_exactly_four_production_tools_all_adapter_backed():
+def test_registry_registers_exactly_six_production_tools_all_adapter_backed():
     registry = ToolRegistry()
     register_all_tools(registry)
     registry.freeze()
@@ -294,12 +294,14 @@ def test_registry_registers_exactly_four_production_tools_all_adapter_backed():
     assert tuple(
         registration.descriptor.name for registration in registrations
     ) == (
+        "workspace_read_file",
+        "workspace_write_file",
         "list_files",
         "analyze_excel",
         "get_system_status",
         "complex_workflow_simulator",
     )
-    # 全部四个 Tool 都是 adapter-backed，且 Descriptor/Adapter Tool identity 一致
+    # 全部六个 Tool 都是 adapter-backed，且 Descriptor/Adapter Tool identity 一致
     for registration in registrations:
         assert registration.adapter.spec.tool_name == registration.descriptor.name
 
@@ -742,6 +744,8 @@ def test_router_tools_is_read_only_compatibility_view():
     router.tool_registry = registry
     view = router.tools
     assert set(view) == {
+        "workspace_read_file",
+        "workspace_write_file",
         "list_files",
         "analyze_excel",
         "get_system_status",

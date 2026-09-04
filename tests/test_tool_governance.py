@@ -1,7 +1,7 @@
 """WP2-B Tool Governance v1 测试（INTERNAL_RC）。
 
 覆盖：ToolPolicy / ToolPolicyCatalog lifecycle 与 validation、静态 Permission、
-dynamic Risk / Approval、production coverage（4 policies × 5 agents）、
+dynamic Risk / Approval、production coverage（6 policies × 5 agents）、
 AgentRouter 两级 Gate 的 deny / approval-required / allow parity、错误安全、
 deny 不发 Tool event、model 文本不可 self-approve、complex 无副作用不变更。
 """
@@ -466,7 +466,7 @@ def test_catalog_disabled_agent_reference_fails_freeze():
 # ---------------------------------------------------------------------------
 
 
-def test_production_catalog_covers_exactly_four_tools():
+def test_production_catalog_covers_exactly_six_tools():
     registry = production_registry()
     catalog = ToolPolicyCatalog(
         tool_registry=registry,
@@ -479,12 +479,14 @@ def test_production_catalog_covers_exactly_four_tools():
     }
     catalog_names = {policy.tool_name for policy in catalog.policies()}
     assert registry_names == catalog_names == {
+        "workspace_read_file",
+        "workspace_write_file",
         "list_files",
         "analyze_excel",
         "get_system_status",
         "complex_workflow_simulator",
     }
-    assert len(catalog_names) == 4
+    assert len(catalog_names) == 6
 
 
 def test_production_policies_allow_exactly_five_explicit_agents():
@@ -500,7 +502,7 @@ def test_production_policies_allow_exactly_five_explicit_agents():
         assert policy.allowed_agent_ids == frozenset(DEFAULT_AGENT_REGISTRY.agent_ids)
 
 
-def test_all_five_agents_allowed_for_all_four_tools():
+def test_all_five_agents_allowed_for_all_six_tools():
     service = production_service()
     registry = production_registry()
     for registration in registry.registrations():
@@ -703,7 +705,7 @@ def test_unknown_dynamic_risk_combination_fails_closed():
 @pytest.mark.parametrize(
     ("risk_facts", "side_effect", "idempotency", "expected"),
     [
-        # Architecture-approved 5 个 unique full combinations。
+        # Architecture-approved 7 个 unique full combinations。
         (
             (ToolRiskFact.ARBITRARY_LOCAL_FILESYSTEM_READ,),
             ToolSideEffectKind.NONE,
@@ -717,10 +719,22 @@ def test_unknown_dynamic_risk_combination_fails_closed():
             ToolRiskLevel.LOW,
         ),
         (
+            (ToolRiskFact.RESTRICTED_WORKSPACE_READ,),
+            ToolSideEffectKind.NONE,
+            OperationIdempotency.READ_ONLY,
+            ToolRiskLevel.LOW,
+        ),
+        (
             (),
             ToolSideEffectKind.NONE,
             OperationIdempotency.READ_ONLY,
             ToolRiskLevel.LOW,
+        ),
+        (
+            (),
+            ToolSideEffectKind.LOCAL_STATE_MUTATION,
+            OperationIdempotency.IDEMPOTENT,
+            ToolRiskLevel.MEDIUM,
         ),
         (
             (),
