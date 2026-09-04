@@ -129,6 +129,9 @@ class ToolResourceExtractorCatalog:
             raise RuntimeError("已冻结 catalog 不允许重新校验")
         if not isinstance(tool_registry, ToolRegistry) or not tool_registry.frozen:
             raise RuntimeError("ToolRegistry 必须先冻结")
+        # 只覆盖 legacy 任意路径 READ 型文件工具；workspace 工具接受相对
+        # path 且由 adapter 内置 resolve containment 强制 Demo Root 边界，
+        # 不进入本 application-wide read-roots 授权面。
         required = {"list_files", "analyze_excel"}
         if set(self._descriptors) != required:
             raise RuntimeError("File Tool resource extractor coverage 不完整")

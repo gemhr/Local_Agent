@@ -276,7 +276,12 @@ def _build_tool_governance(tool_registry: ToolRegistry) -> ToolGovernanceService
 def _build_resource_authorization(
     tool_registry: ToolRegistry,
 ) -> ResourceAuthorizationService:
-    """构造、校验并冻结 application-scoped File Tool read policy。"""
+    """构造、校验并冻结 application-scoped File Tool read policy。
+
+    workspace 工具不注册 extractor：它们只接受相对 path 且由 adapter 内置
+    resolve containment 强制 Demo Root 边界（fail closed），不属于本
+    application-wide read-roots 授权面。
+    """
     catalog = ToolResourceExtractorCatalog()
     catalog.register(
         ToolResourceExtractorDescriptor(

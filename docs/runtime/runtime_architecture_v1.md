@@ -105,20 +105,20 @@ Observability、Trace、Report、RecoveryValidator 不反向修改 AgentState、
 `ToolRegistry` 是进程级（APPLICATION_SCOPE）Tool 身份、描述、枚举与执行绑定的唯一事实源。生命周期固定为静态 startup 注册：
 
 ```text
-construct -> register（4 个 ToolRegistration）-> freeze -> 注入 AgentRouter -> 运行期只读
+construct -> register（6 个 ToolRegistration，含受限 Demo Workspace read/write）-> freeze -> 注入 AgentRouter -> 运行期只读
 ```
 
 - `ToolDescriptor`（frozen）只含 `name` + `description`；name 必须匹配 `^[a-z][a-z0-9_]{0,63}$`（case-sensitive）；description 为 trim 后非空、无控制字符的安全字符串。Descriptor 不复制 `ToolExecutionSpec` 任何字段。
 - `ToolRegistration`（frozen）只含 `descriptor` + `adapter`；注册时校验 `descriptor.name == adapter.spec.tool_name`（invocation-independent identity，以 `ToolExecutionSpec` 为准）。
 - `freeze()` 幂等；freeze 前 read API fail closed（`TOOL_REGISTRY_NOT_FROZEN`）；freeze 后 `register()` fail closed（`TOOL_REGISTRY_FROZEN`）；重复 canonical name fail closed（`TOOL_REGISTRY_DUPLICATE`，保留 original binding，无 last-write-wins）。
-- **Tool resolution owner**：`AgentRouter`（untrusted planner 输出经 `resolve()` 拒绝为 no-tool；trusted internal 经 `require()` fail closed）。**Tool execution owner**：`ToolExecutionService`（生产四个 Tool 全部经 `ToolAdapter -> ToolExecutionService`，为 sole production execution owner；不做 name 解析，handler 由调用方传入）。
+- **Tool resolution owner**：`AgentRouter`（untrusted planner 输出经 `resolve()` 拒绝为 no-tool；trusted internal 经 `require()` fail closed）。**Tool execution owner**：`ToolExecutionService`（生产六个 Tool 全部经 `ToolAdapter -> ToolExecutionService`，为 sole production execution owner；不做 name 解析，handler 由调用方传入）。
 - `ComplexWorkflowToolAdapter.spec_for(invocation)` 保留按 invocation 动态派生 side-effect/idempotency 执行 truth；Descriptor 不固化动态执行语义。
 - `AgentRouter.tools` 降级为只读兼容视图（由 frozen Registry 派生），不再是 mutable 注册事实源；不提供动态注册 / hot reload / `/api/tools` / 跨进程 Registry。
 - risk / permission / approval 属 WP2-B，不进 Descriptor。
 
 ### 2.2 Tool Governance v1（WP2-B，INTERNAL_RC）
 
-`ToolPolicyCatalog` 是静态 Tool governance policy facts 的唯一事实源（APPLICATION_SCOPE / process-local）。生命周期固定：`construct -> register_default_tool_policies（4 条）-> validate（对 frozen ToolRegistry 与 DEFAULT_AGENT_REGISTRY 只读校验）-> freeze -> 运行期只读`。freeze 幂等；freeze 前 read fail closed（`TOOL_GOVERNANCE_NOT_FROZEN`）；freeze 后 register fail closed（`TOOL_GOVERNANCE_FROZEN`）；重复 Tool policy fail closed（`TOOL_GOVERNANCE_DUPLICATE`）。任一 registered Tool 缺 policy、policy 引用未知 Tool / 未知或未启用 Agent、allowed set 为空、risk fact / approval rule 非法 -> `TOOL_GOVERNANCE_INVALID` 使 startup fail（never READY）。
+`ToolPolicyCatalog` 是静态 Tool governance policy facts 的唯一事实源（APPLICATION_SCOPE / process-local）。生命周期固定：`construct -> register_default_tool_policies（6 条，含受限 Demo Workspace read/write）-> validate（对 frozen ToolRegistry 与 DEFAULT_AGENT_REGISTRY 只读校验）-> freeze -> 运行期只读`。freeze 幂等；freeze 前 read fail closed（`TOOL_GOVERNANCE_NOT_FROZEN`）；freeze 后 register fail closed（`TOOL_GOVERNANCE_FROZEN`）；重复 Tool policy fail closed（`TOOL_GOVERNANCE_DUPLICATE`）。任一 registered Tool 缺 policy、policy 引用未知 Tool / 未知或未启用 Agent、allowed set 为空、risk fact / approval rule 非法 -> `TOOL_GOVERNANCE_INVALID` 使 startup fail（never READY）。
 
 `ToolGovernanceService` 是唯一 invocation-time Authority，只解释 frozen Catalog 与已解析 `ToolExecutionSpec`，不保存 execution spec 字段（不复制 side-effect / idempotency / timeout / concurrency）。
 
@@ -136,15 +136,15 @@ construct -> register（4 个 ToolRegistration）-> freeze -> 注入 AgentRouter
   - 静态 Permission non-ALLOW（`authorize_tool` 返回 DENY）：`build_invocation = NOT CALLED`、`spec_for = NOT CALLED`；
   - 动态 governance non-ALLOW（`evaluate_invocation` 返回 `APPROVAL_REQUIRED` / `TOOL_RISK_UNCLASSIFIED`）：发生于 build/spec 之后，`build_invocation = ALREADY CALLED`、`spec_for = ALREADY CALLED`。
   两类均保证：`execute_sync = NOT CALLED`、`invoke_once = NOT CALLED`、`TOOL_STARTED = 0`、`TOOL_COMPLETED = 0`、不重试 planner、不换 Tool、不调用 final-answer model、不跨 Runtime fallback。
-- **Permission**：per-Tool explicit allowed Agent IDs（当前 4 Tool × 5 Agent = 20 条显式授权关系，无 implicit default allow）；未知 principal / missing policy / explicit deny 均 fail closed。
-- **Risk**：只按 Architecture Decision 冻结的 exact full-combination allowlist 分类。完整 key = `(frozenset(static_risk_facts), side_effect_kind, idempotency)`，只有 5 个唯一组合被批准：`{ARBITRARY_LOCAL_FILESYSTEM_READ}+NONE+READ_ONLY -> MEDIUM`、`{SYSTEM_INFORMATION_READ}+NONE+READ_ONLY -> LOW`、`{}+NONE+READ_ONLY -> LOW`、`{}+LOCAL_STATE_MUTATION+IDEMPOTENT_WITH_KEY -> MEDIUM`、`{}+LOCAL_STATE_MUTATION+NON_IDEMPOTENT -> HIGH`。任何其它完整组合（含 static/dynamic 各自已知但组合未冻结、multiple static facts、未知 dynamic enum）一律 `TOOL_RISK_UNCLASSIFIED` fail closed；不实现通用 risk algebra（不取 max、不按 baseline 推断）。`ToolExecutionSpec` 仍是 side_effect_kind / idempotency 唯一 source of truth。
-- **Approval**：effective risk >= policy threshold（HIGH）-> `APPROVAL_REQUIRED`；v1 无 approval evidence capability，因此是 terminal pre-execution safe denial（不是可恢复 PENDING）。无 human approval workflow、无 durable pause/resume、无 approval endpoint。
+- **Permission**：per-Tool explicit allowed Agent IDs（当前 6 Tool × 5 Agent = 30 条显式授权关系，无 implicit default allow）；未知 principal / missing policy / explicit deny 均 fail closed。
+- **Risk**：只按 Architecture Decision 冻结的 exact full-combination allowlist 分类。完整 key = `(frozenset(static_risk_facts), side_effect_kind, idempotency)`，只有 7 个唯一组合被批准：`{ARBITRARY_LOCAL_FILESYSTEM_READ}+NONE+READ_ONLY -> MEDIUM`、`{SYSTEM_INFORMATION_READ}+NONE+READ_ONLY -> LOW`、`{RESTRICTED_WORKSPACE_READ}+NONE+READ_ONLY -> LOW`、`{}+NONE+READ_ONLY -> LOW`、`{}+LOCAL_STATE_MUTATION+IDEMPOTENT -> MEDIUM`（受限 workspace set/overwrite）、`{}+LOCAL_STATE_MUTATION+IDEMPOTENT_WITH_KEY -> MEDIUM`、`{}+LOCAL_STATE_MUTATION+NON_IDEMPOTENT -> HIGH`。任何其它完整组合（含 static/dynamic 各自已知但组合未冻结、multiple static facts、未知 dynamic enum）一律 `TOOL_RISK_UNCLASSIFIED` fail closed；不实现通用 risk algebra（不取 max、不按 baseline 推断）。`ToolExecutionSpec` 仍是 side_effect_kind / idempotency 唯一 source of truth。
+- **Approval**：effective risk >= policy threshold（HIGH）-> `APPROVAL_REQUIRED`。在有 run-scoped `ToolApprovalController` 的 COORDINATED active Run 中，既有 `TOOL_APPROVAL_REQUESTED -> WAITING_FOR_APPROVAL -> APPROVE/REJECT -> execution claim` 路径拥有审批事实；controller 缺失或审批证据无法可靠发布时仍 fail closed、零执行。HTTP approve/reject 只是该 controller 的命令 transport，不成为 approval truth；无 durable pause/resume、reconnect/replay、认证或 RBAC。
 - **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent 或 governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后（WP4 候选），不为此新增 RuntimeEvent / Journal schema。
 - **Boundary**：`ToolExecutionService` 仍是 sole actual execution owner（non-ALLOW 时绝不调用）；`ToolRegistry` 仍只回答“What Tools exist?”；`AgentRegistry` capability 不变成 authorization；governance 不是 filesystem sandbox / path authorization（WP3）。
 
 ### 2.3 File Tool Resource Authorization（Stage 3 WP3，INTERNAL_RC）
 
-`ResourceAuthorizationService` 是 application-wide filesystem read 的唯一 Authority。启动装配固定为 `frozen ToolRegistry -> construct/register/validate/freeze ToolResourceExtractorCatalog -> FilesystemResourcePolicy -> ResourceAuthorizationService -> AgentRouter`。当前 descriptor 恰好为 `list_files: argument_text/DIRECTORY/READ` 与 `analyze_excel: argument_text/FILE/READ`；非文件 Tool 显式无资源请求。
+`ResourceAuthorizationService` 是 application-wide arbitrary filesystem read 的唯一 Authority。启动装配固定为 `frozen ToolRegistry -> construct/register/validate/freeze ToolResourceExtractorCatalog -> FilesystemResourcePolicy -> ResourceAuthorizationService -> AgentRouter`。当前 descriptor 恰好为 `list_files: argument_text/DIRECTORY/READ` 与 `analyze_excel: argument_text/FILE/READ`；`workspace_read_file` / `workspace_write_file` 只接受相对路径，Adapter 在业务 I/O 前以 resolved containment 固定到生产 `data/demo_workspace`，不进入 application-wide read-roots extractor 面；其它非文件 Tool 显式无资源请求。
 
 执行顺序冻结为：`ToolRegistry.require -> ToolGovernanceService.authorize_tool -> adapter.build_invocation -> adapter.spec_for -> ToolGovernanceService.evaluate_invocation -> extractor.extract -> ResourceAuthorizationService.require_authorized -> ToolExecutionService.execute_sync`。`ToolGovernanceService`、`ToolExecutionService`、`ToolInvocation`、`ToolExecutionSpec`、RuntimeEvent 与 Journal schema 均未改变。拒绝固定为 `TOOL_RESOURCE_DENIED`，不产生 Tool events、不调用 final-answer model，并按既有 OutputGate / delivered-only Memory 语义交付安全文本。
 
@@ -226,10 +226,10 @@ server.app（POST /api/chat）
 ```
 
 - success 场景由 `core_router` 动态规划到单步回答，真实执行 `list_files`；临时目录中的已知文件名先出现在 production Tool observation，再进入 final-answer model 和唯一用户 TEXT。`TOOL_STARTED` / `TOOL_COMPLETED`、Journal、delivered-only Memory 与唯一 `OUTPUT_DELTA` 同时提供证据。
-- governance 场景由同一路径规划 `complex_workflow_simulator` 的 `NON_IDEMPOTENT_SIMULATION`；production exact-combination risk 判定为 `HIGH / APPROVAL_REQUIRED`，以固定 safe denial 正常交付，且 Tool events、Journal Tool facts、Tool state mutation 和 final-answer model invocation 均为零。
+- governance 场景由同一路径规划 `complex_workflow_simulator` 的 `NON_IDEMPOTENT_SIMULATION`；production exact-combination risk 判定为 `HIGH / APPROVAL_REQUIRED`。无 controller 的既有 deterministic 回归以固定 safe denial 正常交付，且 Tool events、Journal Tool facts、Tool state mutation 和 final-answer model invocation 均为零；有 controller 的 active Run 则按既有 HITL command/claim 路径等待 approve/reject。
 - 测试只在既有 `server.LocalLLMEngine` constructor seam 注入按 prompt 语义响应的 FakeModel；Router、Planner、Registry、Governance、execution service、adapter、Tool、OutputGate、Memory 与 Journal 均为 production 对象。每个场景使用独立临时持久化路径，不访问 Internet、remote LLM、外部服务或真实开发数据库。
 - `OUTPUT_DELTA` 在 Journal 中保留安全事实，经 `ChatStreamCompatibilityAdapter` 转换为 TEXT；它不是 `[[ORCH]]` CONTROL chunk。测试保留原始 ASGI body message 边界并消费至 `more_body=false`，据此验证 CONTROL 与用户 TEXT 分离。
-- 该测试证据不改变现有 Owner、contract classification 或安全能力，也不代表 human approval、approval evidence、durable approval resume、filesystem/path authorization、sandbox 或 dedicated governance event 已实现。
+- 该测试证据不改变现有 Owner、contract classification 或安全能力；它不代表 durable approval resume、filesystem/path authorization、sandbox 或 dedicated governance event 已实现。run-scoped human approval transport 已由后续阶段实现，但仍无认证、RBAC、reconnect 或 durable pause-resume。
 
 ### 2.5 Phase5 Semantic Memory Formation
 

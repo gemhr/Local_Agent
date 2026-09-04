@@ -7,6 +7,10 @@ from core.runtime.tool_adapters import (
     LegacyStringToolAdapter,
 )
 from core.runtime.tool_registry import ToolDescriptor, ToolRegistration
+from core.runtime.workspace_tool_adapters import (
+    WorkspaceReadToolAdapter,
+    WorkspaceWriteToolAdapter,
+)
 from tools.local_tools import (
     analyze_excel_data,
     get_system_status,
@@ -24,9 +28,46 @@ def register_all_tools(tool_registry) -> None:
     tool_registry.register(
         ToolRegistration(
             descriptor=ToolDescriptor(
+                name="workspace_read_file",
+                description=(
+                    "Read a UTF-8 text file inside the restricted demo workspace."
+                ),
+                llm_instructions=(
+                    "适用于用户要读取 Demo Workspace 里的某个文件并了解其内容；"
+                    "参数只填 Demo Workspace 内的相对路径（如 project_note.txt 或 "
+                    "notes/result.txt）。不要用于查看任意磁盘目录（那是 list_files / "
+                    "analyze_excel 的场景，且受独立授权限制），也不要用 .. 或绝对路径。"
+                ),
+            ),
+            adapter=WorkspaceReadToolAdapter(),
+        )
+    )
+    tool_registry.register(
+        ToolRegistration(
+            descriptor=ToolDescriptor(
+                name="workspace_write_file",
+                description=(
+                    "Set or overwrite a UTF-8 text file inside the restricted "
+                    "demo workspace with the given content."
+                ),
+                llm_instructions=(
+                    "适用于用户要求把一段文字保存 / 写入 Demo Workspace 内的某个文件；"
+                    "参数只填相对路径 path 和完整文本 content，写入为整体覆盖。"
+                    "不适用于删除、追加或修改 Demo Workspace 之外的任何文件；"
+                    "不要用 .. 或绝对路径。"
+                ),
+            ),
+            adapter=WorkspaceWriteToolAdapter(),
+        )
+    )
+    tool_registry.register(
+        ToolRegistration(
+            descriptor=ToolDescriptor(
                 name="list_files",
                 description="List files in a local directory. Argument: directory path.",
-                llm_instructions="适用于用户要查看某个本地目录中的文件；参数只填目录路径。",
+                llm_instructions="适用于用户要查看某个本地目录中的文件；参数只填目录路径。"
+                "与 workspace_read_file 不同：list_files 面向本地任意已授权目录的列举，"
+                "不读取文件内容，也不是 Demo Workspace 相对路径语义。",
             ),
             adapter=LegacyStringToolAdapter(
                 tool_name="list_files",

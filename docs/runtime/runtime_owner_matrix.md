@@ -41,9 +41,9 @@ consumer-neutral trace export。
 
 | Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
 | --- | --- | --- | --- | --- | --- | --- |
-| File Tool filesystem READ authorization | `ResourceAuthorizationService` + frozen `FilesystemResourcePolicy` / `ToolResourceExtractorCatalog`（APPLICATION_SCOPE） | AgentRouter pre-execution Gate、startup validation、测试 | 仅 `server.py::lifespan()` 从 Settings snapshot 与 frozen ToolRegistry 构造；运行期只读 | 无 | Tool function/Adapter/Governance 自行 allow；请求扩大 roots；raw path 进入安全投影 | INTERNAL_RC |
+| Arbitrary File Tool filesystem READ authorization | `ResourceAuthorizationService` + frozen `FilesystemResourcePolicy` / `ToolResourceExtractorCatalog`（APPLICATION_SCOPE） | AgentRouter pre-execution Gate、startup validation、测试 | 仅 `server.py::lifespan()` 从 Settings snapshot 与 frozen ToolRegistry 构造；运行期只读 | 无 | Tool function/Adapter/Governance 自行 allow；请求扩大 roots；raw path 进入安全投影 | INTERNAL_RC |
 
-Tool Governance 仍拥有 Agent→Tool Permission/Risk/Approval，`ToolExecutionService` 仍拥有实际执行；Resource Authorization 不成为第二 ToolRegistry，也不修改 `ToolInvocation` / `ToolExecutionSpec` / RuntimeEvent / Journal。
+Tool Governance 仍拥有 Agent→Tool Permission/Risk/Approval，`ToolExecutionService` 仍拥有实际执行；Resource Authorization 不成为第二 ToolRegistry，也不修改 `ToolInvocation` / `ToolExecutionSpec` / RuntimeEvent / Journal。`workspace_read_file` / `workspace_write_file` 不属于 arbitrary filesystem read：其 Adapter 只接受相对 path，并在业务 I/O 前以 resolved containment 固定生产 Demo Root；该固定边界不授予任意 read root，也不是通用 Sandbox。
 
 ## Stage 3 WP3-B HTTP Payload Owners
 

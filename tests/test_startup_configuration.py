@@ -374,12 +374,14 @@ async def test_lifespan_injects_populated_frozen_tool_registry(
             registration.descriptor.name
             for registration in registry.registrations()
         ) == (
+            "workspace_read_file",
+            "workspace_write_file",
             "list_files",
             "analyze_excel",
             "get_system_status",
             "complex_workflow_simulator",
         )
-        # 全部四个注册都是 adapter-backed，且 Descriptor/Adapter identity 一致
+        # 全部六个注册都是 adapter-backed，且 Descriptor/Adapter identity 一致
         for registration in registry.registrations():
             assert (
                 registration.adapter.spec.tool_name
@@ -422,7 +424,7 @@ async def test_tool_registry_duplicate_blocks_startup(
 async def test_lifespan_injects_governance_into_production_router(
     monkeypatch, tmp_path
 ) -> None:
-    """真实 lifespan：冻结 Catalog（4 policies）、5×4 explicit permission、
+    """真实 lifespan：冻结 Catalog（6 policies）、5×6 explicit permission、
     ToolGovernanceService 注入同一生产 AgentRouter，startup 成功 READY。"""
     settings = _tmp_settings(monkeypatch, tmp_path, profile="LOCAL")
     monkeypatch.setattr(server, "settings", settings)
@@ -434,8 +436,8 @@ async def test_lifespan_injects_governance_into_production_router(
         assert isinstance(service, ToolGovernanceService)
         catalog = service._catalog  # 测试 seam；Service 不暴露 catalog 是契约行为
         assert catalog.frozen is True
-        assert len(catalog.policies()) == 4
-        # 5×4 explicit ALLOW
+        assert len(catalog.policies()) == 6
+        # 5×6 explicit ALLOW
         for registration in router.tool_registry.registrations():
             for agent_id in PRODUCTION_AGENT_IDS:
                 decision = service.authorize_tool(

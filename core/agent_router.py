@@ -319,7 +319,10 @@ class AgentRouter:
         tool_registry: ToolRegistry,
     ) -> ResourceAuthorizationService:
         catalog = ToolResourceExtractorCatalog()
-        if tool_registry.contains("list_files") or tool_registry.contains("analyze_excel"):
+        if (
+            tool_registry.contains("list_files")
+            or tool_registry.contains("analyze_excel")
+        ):
             catalog.register(
                 ToolResourceExtractorDescriptor(
                     "list_files", "argument_text", ResourceKind.DIRECTORY, ResourceOperation.READ
@@ -1289,6 +1292,7 @@ class AgentRouter:
 
         # 覆盖业务动作而非完整 Tool wire 或单一 Tool 名称。它有意保持保守，避免
         # 普通聊天额外触发未经过模型选择、预算与重试路径的 planner 调用。
+        # WP2：补充受限 workspace 读写与“记录/保存/写入”类业务动作。
         action_markers = (
             "预演",
             "模拟",
@@ -1302,6 +1306,16 @@ class AgentRouter:
             "调用",
             "列出",
             "查看文件",
+            "读取",
+            "读一下",
+            "写入",
+            "写到",
+            "写进",
+            "保存",
+            "记录",
+            "查看",
+            "读取文件",
+            "文件内容",
             "系统状态",
             "状态",
             "analyze",
@@ -1313,6 +1327,10 @@ class AgentRouter:
             "invoke",
             "add ",
             "remove ",
+            "read ",
+            "write ",
+            "save ",
+            "workspace",
         )
         return any(marker in lowered for marker in action_markers)
 

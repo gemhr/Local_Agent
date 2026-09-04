@@ -105,6 +105,8 @@ episodic candidate/selected/context-record counts，不携带 episode identity �
 
 `Tool Permission != Resource Authorization != Sandbox`。File Tool 的真实链为 `ToolRegistry -> ToolGovernanceService -> ResourceAuthorizationService -> ToolExecutionService -> Adapter -> Tool -> Windows filesystem/ACL`。`list_files` 与 `analyze_excel` 使用同一 frozen application-wide read roots；relative、drive-relative、UNC、device/extended path、outside/traversal/prefix collision、nonexistent、wrong type及resolved link escape均在业务I/O前拒绝。固定拒绝不包含path/root/OSError，不产生 `TOOL_STARTED` / `TOOL_COMPLETED`，不调用final-answer model；RuntimeEvent和Journal schema未扩展。
 
+Phase8 的 `workspace_read_file` / `workspace_write_file` 是独立的受限 Demo Workspace 业务工具：Model 仅能给出相对 `path`，Adapter 在业务 I/O 前以 canonical resolved candidate 相对固定 `data/demo_workspace` 的 containment 判定，拒绝 traversal、盘符/drive-relative、UNC、device/extended path 与 resolved symlink/junction escape。它们不进入 arbitrary filesystem read-roots 授权面；此 fixed-root containment 不是 generic filesystem Sandbox，也不扩大 `ResourceAuthorizationService` 的 Owner。
+
 Wiki write不复用Tool read Authority；`WikiCrawler`校验remote `sn` 为单一Windows leaf，并对最终`.md/.pdf` candidate执行configured-output-root containment。拒绝只记录 `WIKI_REMOTE_FILENAME_INVALID` / `WIKI_OUTPUT_PATH_DENIED`，不记录raw metadata/path。
 
 `Settings.remote_api_key` 与 `Settings.wiki_cookie` 使用 `repr=False`，只解决这两个credential的dataclass `repr/str` 暴露。Provider 401/403/timeout/5xx/malformed response 继续只投影固定 safe facts，不允许 Authorization marker 进入异常、Event、Journal、结构化日志、Metric、Span、Wire 或 Health。PRODUCTION local API仅允许numeric loopback HTTP；这不是human authentication或inbound TLS。
