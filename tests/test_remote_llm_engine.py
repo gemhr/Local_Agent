@@ -5,7 +5,8 @@ import pytest
 
 from core.agent_router import AgentRouter
 from core.llm_engine import RemoteLLMEngine
-from core.runtime import BudgetLedger, RunBudget, create_run_context
+from core.runtime import BudgetLedger, GeneratorModelAdapter, RunBudget, create_run_context
+from core.runtime.model_invocation import ModelAdapterInvocationError
 
 
 @dataclass
@@ -58,6 +59,67 @@ def test_deepseek_thinking_disabled_is_explicit(monkeypatch) -> None:
     assert captured["url"].endswith("/v1/chat/completions")
     assert captured["json"]["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in captured["json"]
+
+
+def test_deepseek_native_tool_call_sends_wire_and_normalizes(monkeypatch) -> None:
+    captured = _capture_request(monkeypatch, {"choices": [{"message": {"content": None, "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "get_system_status", "arguments": "{}"}}]}}]})
+    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek")
+
+    assert engine.supports_native_tool_calling() is True
+
+    result = engine.generate_native(
+        [{"role": "user", "content": "状态"}],
+        tools=[{"type": "function", "function": {"name": "get_system_status", "parameters": {"type": "object"}}}],
+    )
+
+    assert captured["json"]["tool_choice"] == "auto"
+    assert captured["json"]["tools"][0]["function"]["name"] == "get_system_status"
+    assert result.native_tool_call.provider_tool_call_id == "call-1"
+    assert result.native_tool_call.arguments_json == "{}"
+    assert result.assistant_message["tool_calls"][0]["id"] == "call-1"
+
+
+def test_non_native_local_adapter_preserves_plain_generation_without_tools() -> None:
+    class LocalEngine:
+        def generate(self, _messages, *, max_tokens):
+            assert max_tokens == 16
+            return iter(("legacy response",))
+
+    adapter = GeneratorModelAdapter(LocalEngine())
+
+    assert adapter.supports_native_tool_calling() is False
+    assert adapter.invoke([{"role": "user", "content": "hi"}], max_tokens=16).output == "legacy response"
+
+
+def test_permissive_fake_without_native_capability_cannot_silently_ignore_tools() -> None:
+    class PermissiveFakeEngine:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, _messages, **_kwargs):
+            self.calls += 1
+            return iter(("must not be returned",))
+
+    engine = PermissiveFakeEngine()
+    adapter = GeneratorModelAdapter(engine)
+
+    with pytest.raises(ModelAdapterInvocationError) as captured:
+        adapter.invoke(
+            [{"role": "user", "content": "hi"}],
+            max_tokens=16,
+            generation_options={"tools": [], "tool_choice": "auto"},
+        )
+    assert captured.value.safe_error_code == "NATIVE_TOOL_CALLING_UNSUPPORTED"
+    assert engine.calls == 0
+
+
+def test_deepseek_native_multiple_tool_calls_fail_closed(monkeypatch) -> None:
+    _capture_request(monkeypatch, {"choices": [{"message": {"tool_calls": [{"id": "one", "function": {"name": "a", "arguments": "{}"}}, {"id": "two", "function": {"name": "b", "arguments": "{}"}}]}}]})
+    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek")
+
+    with pytest.raises(RuntimeError) as captured:
+        engine.generate_native([{"role": "user", "content": "x"}], tools=[])
+    assert captured.value.safe_error_code == "REMOTE_NATIVE_TOOL_CALL_COUNT_INVALID"
 
 
 def test_deepseek_parameters_are_not_sent_to_other_providers(monkeypatch) -> None:

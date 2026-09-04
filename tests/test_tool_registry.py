@@ -307,6 +307,15 @@ def test_same_registration_and_adapter_identity() -> None:
         assert registry.require("alpha_tool").adapter is registration.adapter
 
 
+def test_native_definition_projects_adapter_schema() -> None:
+    registration = _registration("alpha_tool")
+    definition = registration.native_function_definition()
+
+    assert definition["type"] == "function"
+    assert definition["function"]["name"] == "alpha_tool"
+    assert definition["function"]["parameters"]["required"] == ["argument_text"]
+
+
 def test_concurrent_frozen_reads_are_stable() -> None:
     registry = _frozen_registry(
         "alpha_tool", "beta_tool", "gamma_tool", "delta_tool"

@@ -43,10 +43,11 @@ class ToolRegistryError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ToolDescriptor:
-    """不可变 Tool 静态描述；只表达 identity + description，不承载执行状态。"""
+    """不可变 Tool 静态描述；不承载执行状态或治理事实。"""
 
     name: str
     description: str
+    llm_instructions: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or _SAFE_TOOL_NAME.fullmatch(self.name) is None:
@@ -71,6 +72,24 @@ class ToolDescriptor:
                 "Tool description 不能包含控制字符",
             )
         object.__setattr__(self, "description", stripped)
+        if not isinstance(self.llm_instructions, str):
+            raise ToolRegistryError(
+                ToolRegistryErrorCode.INVALID,
+                "Tool LLM 指引必须是字符串",
+            )
+        instructions = self.llm_instructions.strip()
+        if any(unicodedata.category(char) == "Cc" for char in instructions):
+            raise ToolRegistryError(
+                ToolRegistryErrorCode.INVALID,
+                "Tool LLM 指引不能包含控制字符",
+            )
+        object.__setattr__(self, "llm_instructions", instructions)
+
+    def render_for_planner(self) -> str:
+        """渲染给 planner 的业务语义，不暴露 runtime/governance contract。"""
+        if not self.llm_instructions:
+            return f"{self.name}: {self.description}"
+        return f"{self.name}: {self.description}\n  {self.llm_instructions}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +126,13 @@ class ToolRegistration:
                 ToolRegistryErrorCode.INVALID,
                 "Descriptor 与 Adapter 的 Tool name 必须一致",
             )
+
+    def native_function_definition(self) -> dict[str, object]:
+        """渲染 DeepSeek 所需的最小 function 定义，不复制治理事实。"""
+        description = self.descriptor.description
+        if self.descriptor.llm_instructions:
+            description = f"{description}\n{self.descriptor.llm_instructions}"
+        return {"type": "function", "function": {"name": self.descriptor.name, "description": description, "parameters": self.adapter.llm_input_schema()}}
 
 
 class ToolRegistry:

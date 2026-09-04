@@ -26,6 +26,7 @@ def register_all_tools(tool_registry) -> None:
             descriptor=ToolDescriptor(
                 name="list_files",
                 description="List files in a local directory. Argument: directory path.",
+                llm_instructions="适用于用户要查看某个本地目录中的文件；参数只填目录路径。",
             ),
             adapter=LegacyStringToolAdapter(
                 tool_name="list_files",
@@ -40,6 +41,7 @@ def register_all_tools(tool_registry) -> None:
             descriptor=ToolDescriptor(
                 name="analyze_excel",
                 description="Analyze a local Excel or CSV file and summarize the data.",
+                llm_instructions="适用于用户要分析本地 Excel 或 CSV；参数只填文件路径。",
             ),
             adapter=LegacyStringToolAdapter(
                 tool_name="analyze_excel",
@@ -54,6 +56,7 @@ def register_all_tools(tool_registry) -> None:
             descriptor=ToolDescriptor(
                 name="get_system_status",
                 description="Return basic local system status. No arguments required.",
+                llm_instructions="适用于用户询问本机基本系统状态；使用空参数。",
             ),
             adapter=LegacyStringToolAdapter(
                 tool_name="get_system_status",
@@ -69,11 +72,18 @@ def register_all_tools(tool_registry) -> None:
             descriptor=ToolDescriptor(
                 name="complex_workflow_simulator",
                 description=(
-                    "Run a deterministic local batch-workflow simulation. "
-                    "Argument: one JSON object containing operation_id, resource_key, "
-                    "idempotency_key, execution_mode, items, failure_injection, "
-                    "processing_options, and metadata. "
-                    "NON_IDEMPOTENT_SIMULATION must only be selected explicitly."
+                    "Run a deterministic local batch-workflow simulation."
+                ),
+                llm_instructions=(
+                    "适用于用户要求对某资源中的一个或多个项目进行预演或模拟变更；"
+                    "不适用于解释概念或普通聊天。参数使用 JSON，只提取业务字段："
+                    "resource_key，以及 items 数组（每项含 item_id、action、quantity）。"
+                    "用户表示“只预演”时 execution_mode 用 DRY_RUN；表示真实模拟副作用时用 "
+                    "NON_IDEMPOTENT_SIMULATION；要求可安全重复提交时用 IDEMPOTENT_COMMIT。"
+                    "operation_id 和幂等键由系统补齐；不要填写内部测试、故障注入或运行时字段。"
+                    "示例：{\"resource_key\":\"demo-resource\",\"execution_mode\":"
+                    "\"NON_IDEMPOTENT_SIMULATION\",\"items\":[{\"item_id\":\"item-1\","
+                    "\"action\":\"ADD\",\"quantity\":1}]}。"
                 ),
             ),
             adapter=ComplexWorkflowToolAdapter(),

@@ -73,9 +73,20 @@ class CircuitHealthOutcome(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class NativeToolCall:
+    """Provider native tool call 的窄化内部表示。"""
+
+    provider_tool_call_id: str
+    tool_name: str
+    arguments_json: str
+
+
+@dataclass(frozen=True, slots=True)
 class ModelAdapterResponse:
     output: str
     actual_usage: BudgetUsage | None = None
+    native_tool_call: NativeToolCall | None = None
+    assistant_message: Mapping[str, object] | None = None
 
 
 class ModelAdapter(Protocol):
@@ -84,6 +95,8 @@ class ModelAdapter(Protocol):
     def invoke(
         self, messages: Sequence[Mapping[str, str]], *, max_tokens: int
     ) -> ModelAdapterResponse: ...
+
+    def supports_native_tool_calling(self) -> bool: ...
 
 
 class ModelAdapterInvocationError(RuntimeError):
@@ -112,6 +125,11 @@ class GeneratorModelAdapter:
     def __init__(self, engine: object) -> None:
         self._engine = engine
 
+    def supports_native_tool_calling(self) -> bool:
+        """只接受 Engine 显式声明的 native function calling 能力。"""
+        capability = getattr(self._engine, "supports_native_tool_calling", None)
+        return bool(capability()) if callable(capability) else False
+
     def invoke(
         self,
         messages: Sequence[Mapping[str, str]],
@@ -126,6 +144,18 @@ class GeneratorModelAdapter:
             provider_started = True
             if on_started is not None:
                 on_started()
+            if generation_options and "tools" in generation_options:
+                if not self.supports_native_tool_calling():
+                    raise ModelAdapterInvocationError(
+                        ModelFailureCategory.PROVIDER_CONFIGURATION_ERROR,
+                        safe_error_code="NATIVE_TOOL_CALLING_UNSUPPORTED",
+                        provider_started=False,
+                        provider_responded=False,
+                    )
+                return self._engine.generate_native(
+                    list(messages), max_tokens=max_tokens,
+                    **dict(generation_options),
+                )
             stream = self._engine.generate(
                 list(messages),
                 max_tokens=max_tokens,
@@ -198,6 +228,7 @@ class ModelInvocationResult:
     executed_profile_id: ModelProfileId
     attempts: tuple[ModelInvocationAttempt, ...]
     quality_tradeoff_disclosed: bool
+    response: ModelAdapterResponse | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -881,6 +912,7 @@ class ModelInvocationRouter:
                         != routing_decision.initial_selected_profile_id
                     )
                 ),
+                response,
             )
         raise ModelInvocationChainError(
             ModelInvocationFailure(
