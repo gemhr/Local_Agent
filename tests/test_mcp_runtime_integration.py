@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -167,6 +168,36 @@ while True:
                     "content": [
                         {"type": "image", "data": "x", "mimeType": "image/png"}
                     ]
+                },
+            })
+        elif MODE == "call_embedded_mixed":
+            _send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": [
+                    {"type": "text", "text": "status"},
+                    {"type": "resource", "resource": {
+                        "uri": "repo://private/metadata-sentinel",
+                        "mimeType": "application/octet-stream",
+                        "text": "body 中"}},
+                    {"type": "text", "text": "tail"},
+                ]},
+            })
+        elif MODE == "call_embedded_blob":
+            _send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"content": [{"type": "resource", "resource": {
+                    "uri": "repo://blob", "blob": "AA=="}}]},
+            })
+        elif MODE == "call_is_error_embedded":
+            _send({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "content": [{"type": "resource", "resource": {
+                        "uri": "repo://error", "text": "SECRET-RESOURCE-BODY"}}],
+                    "isError": True,
                 },
             })
         elif MODE == "call_structured_only":
@@ -650,6 +681,47 @@ async def test_tools_call_success_through_tool_execution_service(tmp_path):
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_embedded_mixed_result_uses_existing_output_quota(tmp_path):
+    mapping = McpToolPolicyMapping(
+        remote_name="echo",
+        local_name="mcp_echo",
+        side_effect_kind="NONE",
+        idempotency="READ_ONLY",
+        max_output_bytes=14,
+    )
+    client = await _make_initialized_client(
+        tmp_path, "call_embedded_mixed", tools=(mapping,)
+    )
+    try:
+        registration = build_mcp_registrations(
+            snapshot=McpDiscoverySnapshot(
+                results=(_available_result("demo", tuple(await client.list_tools())),)
+            ),
+            configs=(_server_config(tmp_path, "call_embedded_mixed", tools=(mapping,)),),
+            session_resolver_factory=lambda server_id: (lambda: client),
+            existing_tool_names=BUILTIN_TOOL_NAMES,
+            request_timeout_seconds=10.0,
+        )[0].registrations[0]
+        result = await ToolExecutionService().execute(
+            invocation=registration.adapter.build_invocation('{"path": "a.txt"}'),
+            adapter=registration.adapter,
+            run_context=_make_run_context(),
+            step_id="step",
+        )
+        normalized = "status\nbody 中\ntail"
+        assert result.status is ToolExecutionStatus.SUCCEEDED
+        assert result.output.content == "status\nbody "
+        assert result.output.original_size_bytes == len(normalized.encode("utf-8"))
+        assert result.output.returned_size_bytes == 12
+        assert result.output.truncated is True
+        assert result.output.digest == hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        assert "repo://" not in result.output.content
+        assert "application/octet-stream" not in result.output.content
+    finally:
+        await client.close()
+
+
 # ---- F/G. isError / unsupported content（adapter 级 + service 级）----
 
 
@@ -727,6 +799,76 @@ async def test_unsupported_content_fails_safely(tmp_path, mode):
             await adapter.invoke_once(invocation, _FakeAdapterContext())
         assert excinfo.value.category is ToolErrorCategory.OUTPUT_INVALID
         assert excinfo.value.safe_error_code == "MCP_TOOL_RESULT_UNSUPPORTED"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "mode",
+        "mutation",
+        "expected_category",
+        "expected_state",
+        "expected_authoritative",
+    ),
+    [
+        (
+            "call_embedded_blob",
+            True,
+            ToolErrorCategory.OUTPUT_INVALID,
+            ToolSideEffectState.COMMITTED,
+            True,
+        ),
+        (
+            "call_is_error_embedded",
+            False,
+            ToolErrorCategory.OUTPUT_INVALID,
+            ToolSideEffectState.NOT_STARTED,
+            True,
+        ),
+        (
+            "call_is_error_embedded",
+            True,
+            ToolErrorCategory.SIDE_EFFECT_UNKNOWN,
+            ToolSideEffectState.NOT_STARTED,
+            False,
+        ),
+    ],
+)
+async def test_embedded_failure_preserves_is_error_and_side_effect_semantics(
+    tmp_path,
+    mode,
+    mutation,
+    expected_category,
+    expected_state,
+    expected_authoritative,
+):
+    mapping = _mutation_mapping() if mutation else _read_only_mapping()
+    client = await _make_initialized_client(tmp_path, mode, tools=(mapping,))
+    try:
+        registration = build_mcp_registrations(
+            snapshot=McpDiscoverySnapshot(
+                results=(_available_result("demo", tuple(await client.list_tools())),)
+            ),
+            configs=(_server_config(tmp_path, mode, tools=(mapping,)),),
+            session_resolver_factory=lambda server_id: (lambda: client),
+            existing_tool_names=BUILTIN_TOOL_NAMES,
+            request_timeout_seconds=10.0,
+        )[0].registrations[0]
+        with pytest.raises(ToolAdapterInvocationError) as excinfo:
+            await registration.adapter.invoke_once(
+                registration.adapter.build_invocation('{"path": "a.txt"}'),
+                _FakeAdapterContext(),
+            )
+        assert excinfo.value.category is expected_category
+        assert excinfo.value.side_effect_state is expected_state
+        assert excinfo.value.side_effect_state_authoritative is expected_authoritative
+        assert "SECRET-RESOURCE-BODY" not in str(excinfo.value)
+        if mode == "call_embedded_blob":
+            assert excinfo.value.safe_error_code == "MCP_TOOL_RESULT_UNSUPPORTED"
+        else:
+            assert excinfo.value.safe_error_code == "MCP_TOOL_REPORTED_ERROR"
     finally:
         await client.close()
 
@@ -883,6 +1025,34 @@ async def test_mutation_tool_calls_side_effect_checkpoint_and_reports_committed(
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_mutation_embedded_success_reports_committed(tmp_path):
+    mapping = _mutation_mapping()
+    client = await _make_initialized_client(
+        tmp_path, "call_embedded_mixed", tools=(mapping,)
+    )
+    try:
+        registration = build_mcp_registrations(
+            snapshot=McpDiscoverySnapshot(
+                results=(_available_result("demo", tuple(await client.list_tools())),)
+            ),
+            configs=(_server_config(tmp_path, "call_embedded_mixed", tools=(mapping,)),),
+            session_resolver_factory=lambda server_id: (lambda: client),
+            existing_tool_names=BUILTIN_TOOL_NAMES,
+            request_timeout_seconds=10.0,
+        )[0].registrations[0]
+        context = _FakeAdapterContext()
+        response = await registration.adapter.invoke_once(
+            registration.adapter.build_invocation('{"path": "a.txt"}'), context
+        )
+        assert context.side_effect_calls == 1
+        assert response.content == "status\nbody 中\ntail"
+        assert response.side_effect_state is ToolSideEffectState.COMMITTED
+        assert response.side_effect_state_authoritative is True
+    finally:
+        await client.close()
+
+
 # ---- J. No bypass ----
 
 
@@ -910,6 +1080,12 @@ def test_mcp_execution_only_reachable_through_existing_runtime_path():
     # call_tool 只出现在 adapter.invoke_once 的执行路径内。
     assert adapter_source.count(".call_tool(") == 1
     assert "self._session_resolver()" in adapter_source
+    mcp_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((repo_root / "mcp").glob("*.py"))
+    )
+    assert '"resources/read"' not in mcp_sources
+    assert '"resources/list"' not in mcp_sources
 
 
 # ---- build_invocation validation boundary ----

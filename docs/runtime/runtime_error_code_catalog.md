@@ -250,7 +250,7 @@ failure 的 category 归属与 retry disposition 仍由既有 `ToolExecutionServ
 | `MCP_SERVER_UNAVAILABLE` | transport / startup | `mcp/client.py` spawn、`mcp/discovery.py` | 子进程 spawn 失败或 discovery 期间 transport 不可用 | discovery 降级 `DISCOVERY_FAILED`；运行期 adapter → typed INTERNAL failure | not started / evidence 决定 | discovery result safe code / tool failure |
 | `MCP_TRANSPORT_TIMEOUT` | transport / startup | `mcp/client.py` | initialize/tools/list/connect 等有界 IO 超时；运行期 `tools/call` 请求超时（connection 标记 broken，不重连） | discovery 降级；运行期 → `ToolErrorCategory.TIMEOUT`，retry 由既有 policy 决定 | mutation 且 attempt 已 start → UNKNOWN | tool failure safe code |
 | `MCP_TRANSPORT_CLOSED` | transport / runtime | `mcp/client.py` | stdout EOF、连接已 broken、client 已 close | 无重连；后续调用持续 fail closed | evidence 决定 | tool failure safe code |
-| `MCP_PROTOCOL_ERROR` | protocol | `mcp/client.py`、`mcp/models.py` | JSON-RPC/response/结果 形状非法（`malformed_json_line`、`error_response`、`tool_result_not_object` 等） | fail closed | evidence 决定 | typed exception / tool failure |
+| `MCP_PROTOCOL_ERROR` | protocol | `mcp/client.py`、`mcp/models.py` | JSON-RPC/response/结果 形状非法（`malformed_json_line`、`error_response`、`tool_result_not_object`、embedded text resource 的 resource/text/URI/mimeType 非法或文本无法 UTF-8 encode 等） | fail closed | evidence 决定 | typed exception / tool failure |
 | `MCP_PROTOCOL_VERSION_UNSUPPORTED` | startup handshake | `mcp/client.py` | server 返回非 `2025-06-18` protocolVersion | discovery 降级，不部分采纳 | not started | discovery result safe code |
 | `MCP_CAPABILITY_MISSING` | startup handshake | `mcp/client.py` | server capabilities 缺少 `tools` | discovery 降级 | not started | discovery result safe code |
 | `MCP_DISCOVERY_INVALID` | startup discovery | `mcp/client.py` `list_tools` | tools/list 页数/工具数/重复 remote name/非法 entry | 整个 server snapshot fail closed（零采纳） | not started | discovery result safe code |
@@ -267,7 +267,7 @@ failure 的 category 归属与 retry disposition 仍由既有 `ToolExecutionServ
 | `MCP_TOOL_DESCRIPTOR_INVALID` | startup registration | `mcp/registration.py` | `ToolDescriptor` 构造失败（safe-name/长度） | 同上 |
 | `MCP_SESSION_UNAVAILABLE` | invocation | `mcp/adapter.py` | session resolver 返回 None / client closed / broken | typed INTERNAL tool failure，不执行 outbound call |
 | `MCP_TOOL_REPORTED_ERROR` | invocation | `mcp/adapter.py` | server 返回 `isError=true` result | read-only → `OUTPUT_INVALID`（authoritative NOT_STARTED）；mutation → `SIDE_EFFECT_UNKNOWN`（retry OUTCOME_UNKNOWN）；raw remote body 不进入错误文本 |
-| `MCP_TOOL_RESULT_UNSUPPORTED` | invocation | `mcp/adapter.py` | 非 text content / structured-only / image / audio / resource link | typed `OUTPUT_INVALID` safe failure；mutation 且协议成功时副作用事实仍为 COMMITTED |
+| `MCP_TOOL_RESULT_UNSUPPORTED` | invocation | `mcp/adapter.py` | BlobResourceContents（含 text+blob 歧义形状）/ResourceLink/image/audio/unknown/structured-only 等不在 `TextContent` + `EmbeddedResource(TextResourceContents)` 子集内的合法结果 | typed `OUTPUT_INVALID` safe failure；mutation 且协议成功时副作用事实仍为 COMMITTED |
 
 `MCP_SESSION_UNAVAILABLE`、`MCP_TOOL_REPORTED_ERROR`、`MCP_TOOL_RESULT_UNSUPPORTED`
 经既有 `ToolExecutionError.safe_error_code` 通道进入 Tool failure

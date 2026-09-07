@@ -11,13 +11,14 @@ import json
 
 import pytest
 
-from mcp.errors import McpDiscoveryError
+from mcp.errors import McpDiscoveryError, McpProtocolError
 from mcp.models import (
     MAX_TOOLS_PER_SERVER,
     McpDiscoverySnapshot,
     McpServerDiscoveryResult,
     McpServerDiscoveryStatus,
     McpToolDescriptor,
+    McpToolCallResult,
 )
 
 
@@ -134,3 +135,101 @@ def test_deep_or_non_json_schema_fails_closed() -> None:
         McpToolDescriptor.from_protocol_payload(
             "demo", _payload(inputSchema={"value": float("nan")})
         )
+
+
+def test_tool_result_text_only_regression() -> None:
+    result = McpToolCallResult.from_protocol_payload(
+        {"content": [{"type": "text", "text": ""}]}
+    )
+    assert result.is_error is False
+    assert result.text_parts == ("",)
+    assert result.has_unsupported_content is False
+
+
+@pytest.mark.parametrize("mime", [None, "application/json"])
+def test_embedded_text_resource_is_accepted_without_propagating_metadata(mime) -> None:
+    resource = {"uri": "repo://owner/path%20with%20space", "text": "body"}
+    if mime is not None:
+        resource["mimeType"] = mime
+    result = McpToolCallResult.from_protocol_payload(
+        {
+            "content": [
+                {
+                    "type": "resource",
+                    "resource": resource,
+                    "annotations": {"sentinel": "ANNOTATION"},
+                    "_meta": {"sentinel": "META"},
+                }
+            ]
+        }
+    )
+    assert result.text_parts == ("body",)
+    assert result.has_unsupported_content is False
+    assert "repo://" not in "\n".join(result.text_parts)
+
+
+def test_mixed_and_multiple_embedded_text_preserve_order_and_empty_parts() -> None:
+    result = McpToolCallResult.from_protocol_payload(
+        {
+            "content": [
+                {"type": "text", "text": "status"},
+                {"type": "resource", "resource": {"uri": "x:a", "text": "body A"}},
+                {"type": "text", "text": ""},
+                {"type": "resource", "resource": {"uri": "x:b", "text": "body B"}},
+            ]
+        }
+    )
+    assert "\n".join(result.text_parts) == "status\nbody A\n\nbody B"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "resource", "resource": "not-an-object"},
+        {"type": "resource", "resource": {"uri": "x:a", "text": 1}},
+        {"type": "resource", "resource": {"text": "secret"}},
+        {"type": "resource", "resource": {"uri": "1bad:value", "text": "secret"}},
+        {"type": "resource", "resource": {"uri": "x:bad value", "text": "secret"}},
+        {"type": "resource", "resource": {"uri": "x:bad%2", "text": "secret"}},
+        {"type": "resource", "resource": {"uri": "x:a", "text": "secret", "mimeType": 1}},
+        {"type": "resource", "resource": {"uri": "x:a", "text": "\ud800"}},
+        {"type": "text", "text": "\ud800"},
+    ],
+)
+def test_malformed_tool_result_text_or_resource_fails_closed(payload) -> None:
+    with pytest.raises(McpProtocolError) as excinfo:
+        McpToolCallResult.from_protocol_payload({"content": [payload]})
+    assert excinfo.value.safe_error_code == "MCP_PROTOCOL_ERROR"
+    assert "secret" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "resource", "resource": {"uri": "x:a", "blob": "AA=="}},
+        {
+            "type": "resource",
+            "resource": {"uri": "x:a", "text": "ignored", "blob": "AA=="},
+        },
+        {"type": "resource_link", "uri": "x:a", "name": "a"},
+        {"type": "image", "data": "AA==", "mimeType": "image/png"},
+        {"type": "audio", "data": "AA==", "mimeType": "audio/wav"},
+        {"type": "future", "value": "unknown"},
+    ],
+)
+def test_non_text_content_subsets_remain_unsupported(block) -> None:
+    result = McpToolCallResult.from_protocol_payload({"content": [block]})
+    assert result.has_unsupported_content is True
+
+
+def test_embedded_text_does_not_enable_structured_content_compatibility() -> None:
+    result = McpToolCallResult.from_protocol_payload(
+        {
+            "content": [
+                {"type": "resource", "resource": {"uri": "x:a", "text": "body"}}
+            ],
+            "structuredContent": {"answer": 42},
+        }
+    )
+    assert result.text_parts == ("body",)
+    assert result.has_unsupported_content is True

@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import json
+import re
 
 from mcp.errors import McpDiscoveryError, McpProtocolError
 
@@ -143,19 +144,48 @@ class McpInitializeInfo:
     server_version: str
 
 
-# WP2 冻结结果策略（MCP_RESULT_STRATEGY）：只支持 text content block +
-# ``isError``；structuredContent 仅在同时存在 TextContent 时被接受（此时
-# 忽略，只用文本表示）；image/audio/resource_link/embedded 等一律记为
-# unsupported，由 adapter safe failure，不隐式 fetch/decode。
+# MCP_RESULT_STRATEGY：支持 TextContent 与 EmbeddedResource 中的
+# TextResourceContents；structuredContent 仅在同时存在原生 TextContent 时
+# 被接受（此时忽略，只用文本表示）。其它内容块由 adapter safe
+# failure，不隐式 fetch/decode。
 TEXT_CONTENT_BLOCK_TYPE = "text"
+EMBEDDED_RESOURCE_BLOCK_TYPE = "resource"
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_MALFORMED_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
+def _validate_result_text(value: object, *, detail: str) -> str:
+    if not isinstance(value, str):
+        raise McpProtocolError(detail)
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise McpProtocolError(detail) from None
+    return value
+
+
+def _validate_resource_uri(value: object) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or _URI_SCHEME_RE.match(value) is None
+        or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+        or _MALFORMED_PERCENT_ESCAPE_RE.search(value) is not None
+    ):
+        raise McpProtocolError("tool_result_resource_uri_invalid")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise McpProtocolError("tool_result_resource_uri_invalid") from None
 
 
 @dataclass(frozen=True)
 class McpToolCallResult:
     """tools/call result 的 bounded 归一化中间形态（untrusted provider 数据）。
 
-    text_parts 是各 TextContent block 的原文（不可信，untrusted external
-    observation）；总量受 client 单行 JSON-RPC line limit 约束。
+    text_parts 是各 TextContent 或 embedded TextResourceContents 的原文
+    （不可信，untrusted external observation）；总量受 client 单行
+    JSON-RPC line limit 约束。
     """
 
     is_error: bool
@@ -174,19 +204,39 @@ class McpToolCallResult:
         if not isinstance(content, list):
             raise McpProtocolError("tool_result_content_invalid")
         text_parts: list[str] = []
+        has_native_text_content = False
         has_unsupported_content = False
         for block in content:
             if not isinstance(block, dict):
                 raise McpProtocolError("tool_result_content_invalid")
             if block.get("type") == TEXT_CONTENT_BLOCK_TYPE:
-                text = block.get("text")
-                if not isinstance(text, str):
-                    raise McpProtocolError("tool_result_text_invalid")
+                text = _validate_result_text(
+                    block.get("text"), detail="tool_result_text_invalid"
+                )
                 text_parts.append(text)
+                has_native_text_content = True
+            elif block.get("type") == EMBEDDED_RESOURCE_BLOCK_TYPE:
+                resource = block.get("resource")
+                if not isinstance(resource, dict):
+                    raise McpProtocolError("tool_result_resource_invalid")
+                if "blob" in resource:
+                    has_unsupported_content = True
+                    continue
+                _validate_resource_uri(resource.get("uri"))
+                if "mimeType" in resource and not isinstance(
+                    resource["mimeType"], str
+                ):
+                    raise McpProtocolError("tool_result_resource_mime_type_invalid")
+                text_parts.append(
+                    _validate_result_text(
+                        resource.get("text"),
+                        detail="tool_result_resource_text_invalid",
+                    )
+                )
             else:
                 has_unsupported_content = True
         if (
-            not text_parts
+            not has_native_text_content
             and "structuredContent" in payload
             and payload["structuredContent"] is not None
         ):

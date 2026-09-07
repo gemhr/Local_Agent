@@ -204,7 +204,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS` | `5.0` | MCP stdio 子进程 spawn + initialize 的 bounded IO timeout；严格正有限数 |
 | `LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS` | `10.0` | MCP `tools/list` / `tools/call` 单请求的 bounded IO 上界；严格正有限数（Runtime effective deadline 才是 timeout authority） |
 
-Phase9-WP3 已用真实独立 stdio MCP demo server（`demo/mcp_demo_server.py`，零第三方依赖的标准 2025-06-18 JSON-RPC 实现，提供 read-only `get_demo_status` 与 side-effect `append_demo_record` 两个 demo tool）完成 REAL_MCP_E2E：自然语言 → DeepSeek native selection → 既有 Governance/HITL → `tools/call` → final answer。配置模板见 `demo/mcp_config.template.json`（生成后属于 operator 本地配置，不得提交进仓库）。
+Phase9-WP3 已用真实独立 stdio MCP demo server（`demo/mcp_demo_server.py`，零第三方依赖的标准 2025-06-18 JSON-RPC 实现，提供 read-only `get_demo_status` 与 side-effect `append_demo_record` 两个 demo tool）完成 REAL_MCP_E2E：自然语言 → DeepSeek native selection → 既有 Governance/HITL → `tools/call` → final answer。`tools/call` 结果支持 `TextContent` 及 `EmbeddedResource(TextResourceContents)` 文本，不会自动访问 resource URI；MCP Resources primitive（如 `resources/list` / `resources/read`）仍不支持。配置模板见 `demo/mcp_config.template.json`（生成后属于 operator 本地配置，不得提交进仓库）。
 
 远程 HTTP 的 `requests.Session` 由 `LOCAL_AGENT_REMOTE_TRUST_ENV` 显式控制是否继承进程系统 proxy：为 True 时使用 operator 批准的受控代理，Test/Production 默认 False 不继承宿主 proxy；项目不记录 proxy URL 或凭据。Desktop Client 的 `requests.Session` 由 `LOCAL_AGENT_CLIENT_TRUST_ENV` 独立控制（默认 `True` 继承系统 proxy，保持既有行为）；两个 transport scope 完全分离。`LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS` 已标记 DEPRECATED（无行为），replacement 为 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。
 
