@@ -19,13 +19,9 @@ from tools.local_tools import (
 )
 
 
-def register_all_tools(tool_registry) -> None:
-    """将全部内置 Tool 注册到 ToolRegistry。
-
-    Args:
-        tool_registry: startup builder 状态的 ToolRegistry；注册完成后由调用方 freeze。
-    """
-    tool_registry.register(
+def build_builtin_tool_registrations() -> tuple[ToolRegistration, ...]:
+    """构造全部内置 Tool Registration（builtin name 的唯一事实源）。"""
+    return (
         ToolRegistration(
             descriptor=ToolDescriptor(
                 name="workspace_read_file",
@@ -40,9 +36,7 @@ def register_all_tools(tool_registry) -> None:
                 ),
             ),
             adapter=WorkspaceReadToolAdapter(),
-        )
-    )
-    tool_registry.register(
+        ),
         ToolRegistration(
             descriptor=ToolDescriptor(
                 name="workspace_write_file",
@@ -58,9 +52,7 @@ def register_all_tools(tool_registry) -> None:
                 ),
             ),
             adapter=WorkspaceWriteToolAdapter(),
-        )
-    )
-    tool_registry.register(
+        ),
         ToolRegistration(
             descriptor=ToolDescriptor(
                 name="list_files",
@@ -75,9 +67,7 @@ def register_all_tools(tool_registry) -> None:
                 error_prefixes=("Path does not exist:", "List files failed:"),
                 argument_parser=parse_filesystem_argument,
             ),
-        )
-    )
-    tool_registry.register(
+        ),
         ToolRegistration(
             descriptor=ToolDescriptor(
                 name="analyze_excel",
@@ -90,9 +80,7 @@ def register_all_tools(tool_registry) -> None:
                 error_prefixes=("File not found:", "Excel analysis failed:"),
                 argument_parser=parse_filesystem_argument,
             ),
-        )
-    )
-    tool_registry.register(
+        ),
         ToolRegistration(
             descriptor=ToolDescriptor(
                 name="get_system_status",
@@ -106,9 +94,7 @@ def register_all_tools(tool_registry) -> None:
                 max_output_bytes=4096,
                 max_concurrency=2,
             ),
-        )
-    )
-    tool_registry.register(
+        ),
         ToolRegistration(
             descriptor=ToolDescriptor(
                 name="complex_workflow_simulator",
@@ -128,5 +114,15 @@ def register_all_tools(tool_registry) -> None:
                 ),
             ),
             adapter=ComplexWorkflowToolAdapter(),
-        )
+        ),
     )
+
+
+def register_all_tools(tool_registry) -> None:
+    """将全部内置 Tool 注册到 ToolRegistry。
+
+    Args:
+        tool_registry: startup builder 状态的 ToolRegistry；注册完成后由调用方 freeze。
+    """
+    for registration in build_builtin_tool_registrations():
+        tool_registry.register(registration)

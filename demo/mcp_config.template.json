@@ -1,0 +1,37 @@
+{
+  "schema_version": "localagent-mcp-config.v1",
+  "servers": [
+    {
+      "server_id": "demo-server",
+      "command": "LOCALAGENT_VENV_PYTHON_PATH",
+      "arguments": [
+        "LOCALAGENT_DEMO_SERVER_SCRIPT",
+        "--workspace",
+        "LOCALAGENT_DEMO_WORKSPACE"
+      ],
+      "enabled": true,
+      "tools": {
+        "get_demo_status": {
+          "local_name": "demo_read_status",
+          "side_effect_kind": "NONE",
+          "idempotency": "READ_ONLY",
+          "risk_facts": [],
+          "approval_required_threshold": "HIGH",
+          "default_timeout_seconds": 30.0,
+          "max_output_bytes": 16384,
+          "max_concurrency": 1
+        },
+        "append_demo_record": {
+          "local_name": "demo_append_record",
+          "side_effect_kind": "LOCAL_STATE_MUTATION",
+          "idempotency": "NON_IDEMPOTENT",
+          "risk_facts": [],
+          "approval_required_threshold": "HIGH",
+          "default_timeout_seconds": 30.0,
+          "max_output_bytes": 16384,
+          "max_concurrency": 1
+        }
+      }
+    }
+  ]
+}

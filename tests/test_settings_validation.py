@@ -363,3 +363,61 @@ def test_api_port_is_bounded_range(monkeypatch) -> None:
         _load(monkeypatch, LOCAL_AGENT_API_PORT="70000")
     assert high.value.reason_code == "above_maximum"
     assert _load(monkeypatch, LOCAL_AGENT_API_PORT="65535").api_port == 65535
+
+
+# ---- Phase9-WP1：MCP 基础配置 ----
+
+def test_mcp_defaults_keep_integration_disabled(monkeypatch) -> None:
+    settings = _load(monkeypatch)
+    assert settings.mcp_config_path == ""
+    assert settings.mcp_connect_timeout_seconds == 5.0
+    assert settings.mcp_request_timeout_seconds == 10.0
+
+
+def test_mcp_config_path_blank_stays_disabled(monkeypatch) -> None:
+    settings = _load(monkeypatch, LOCAL_AGENT_MCP_CONFIG_PATH="   ")
+    assert settings.mcp_config_path == ""
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "NaN", "Inf"])
+def test_mcp_connect_timeout_non_positive_or_nonfinite_fails_closed(
+    monkeypatch, raw
+) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(monkeypatch, LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS=raw)
+    assert captured.value.safe_error_code == SETTINGS_VALIDATION_ERROR
+    assert captured.value.field == "LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS"
+
+
+def test_mcp_connect_timeout_invalid_text_fails_parse(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(monkeypatch, LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS="abc")
+    assert captured.value.safe_error_code == SETTINGS_PARSE_ERROR
+    assert captured.value.field == "LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS"
+
+
+@pytest.mark.parametrize("raw", ["0", "-0.5", "nan"])
+def test_mcp_request_timeout_non_positive_or_nonfinite_fails_closed(
+    monkeypatch, raw
+) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(monkeypatch, LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS=raw)
+    assert captured.value.safe_error_code == SETTINGS_VALIDATION_ERROR
+    assert captured.value.field == "LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS"
+
+
+def test_mcp_request_timeout_invalid_text_fails_parse(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(monkeypatch, LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS="abc")
+    assert captured.value.safe_error_code == SETTINGS_PARSE_ERROR
+    assert captured.value.field == "LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS"
+
+
+def test_mcp_timeouts_positive_boundary_is_accepted(monkeypatch) -> None:
+    settings = _load(
+        monkeypatch,
+        LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS="0.1",
+        LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS="1",
+    )
+    assert settings.mcp_connect_timeout_seconds == 0.1
+    assert settings.mcp_request_timeout_seconds == 1.0

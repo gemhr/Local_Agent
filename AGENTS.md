@@ -33,6 +33,7 @@
 | `core/knowledge_base/` | 文档加载、向量库和知识检索 |
 | `core/runtime/` | 状态、计划、调度、执行、事件、Journal、Snapshot、恢复校验、可观测性和生命周期 |
 | `tools/` | 本地工具及 `tools/registry.py` 注册入口 |
+| `mcp/` | MCP 外部 Tool Provider 边界：stdio client、startup discovery、application-scope 集成组件、MCP-backed ToolAdapter 与 freeze 前 Registration；不拥有 Runtime timeout/cancellation authority |
 | `ui/` | 桌面界面组件 |
 | `tests/` | pytest 主测试树；`tests/_*.py` 为共享 fixture、清单或派生评估辅助 |
 | `scripts/` | 本地知识库引导与查询脚本 |

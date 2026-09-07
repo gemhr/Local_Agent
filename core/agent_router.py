@@ -872,9 +872,15 @@ class AgentRouter:
         return f"{source} ({', '.join(suffix_parts)})"
 
     def _estimate_messages_tokens(self, messages: list[dict[str, str]]) -> int:
-        """估算 Builder 之外既有消息正文的近似 Token 数。"""
+        """估算 Builder 之外既有消息正文的近似 Token 数。
+
+        DeepSeek native tool_calls 消息的 ``content`` 可为 None（provider
+        wire 合同允许）；估算只计文本正文，None 按 0 处理。
+        """
         return sum(
-            self.context_builder.estimator.estimate(message["content"])
+            self.context_builder.estimator.estimate(
+                message.get("content") or ""
+            )
             for message in messages
         )
 

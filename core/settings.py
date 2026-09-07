@@ -708,6 +708,9 @@ class Settings:
     evaluation_rewrite_fixture_path: str = ""
     evaluation_identity_sha256: str = ""
     evaluation_hybrid_profile_path: str = ""
+    mcp_config_path: str = ""
+    mcp_connect_timeout_seconds: float = 5.0
+    mcp_request_timeout_seconds: float = 10.0
 
     @classmethod
     def load(cls) -> "Settings":
@@ -988,6 +991,18 @@ class Settings:
                     "deadline_not_below_close_timeout",
                 )
 
+        # Phase9-WP1：MCP client/discovery 基础配置。默认关闭（config path
+        # 为空即不构造 MCP 集成组件、不启动任何子进程）；per-server enabled
+        # 由配置文件控制。timeout 只表达底层 bounded IO 机制，Runtime
+        # timeout/cancellation authority 不因此改变。
+        mcp_config_path = os.getenv("LOCAL_AGENT_MCP_CONFIG_PATH", "").strip()
+        mcp_connect_timeout_seconds = _env_strict_float(
+            "LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS", 5.0, positive=True
+        )
+        mcp_request_timeout_seconds = _env_strict_float(
+            "LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS", 10.0, positive=True
+        )
+
         return cls(
             project_root=project_root,
             environment_profile=environment_profile,
@@ -1213,4 +1228,7 @@ class Settings:
             evaluation_rewrite_fixture_path=evaluation_rewrite_fixture_path,
             evaluation_identity_sha256=evaluation_identity_sha256,
             evaluation_hybrid_profile_path=evaluation_hybrid_profile_path,
+            mcp_config_path=mcp_config_path,
+            mcp_connect_timeout_seconds=mcp_connect_timeout_seconds,
+            mcp_request_timeout_seconds=mcp_request_timeout_seconds,
         )

@@ -231,6 +231,49 @@ Settings/startup 错误使用独立 taxonomy：`SettingsValidationError`（`Valu
 | `SERVER_SHUTDOWN` | Cancellation | planning/execution | RunCoordinator | server shutdown cancel | bounded cleanup follows | cooperative cancel | terminal safe code | inspect ShutdownReport | cancellation reason | `tests/test_stage2_5_wp6_planning_faults.py::test_shutdown_during_planning_is_cancelled` |
 | `REQUEST_CANCELLED` | Cancellation | planning/execution | RunCoordinator | user request cancel | no auto resume | cooperative cancel | terminal safe code | allow new request | cancellation reason | `tests/test_dynamic_planning_lifecycle.py::test_user_cancellation_during_planning_is_not_planning_failed` |
 
+## Phase9 MCP Integration Codes（WP1/WP2/WP3）
+
+MCP boundary 的 safe codes 只表达 MCP boundary 失败事实（config / transport /
+protocol / discovery / registration / runtime adapter），全部 content-free：
+不携带 raw server payload、command、arguments、stderr、session token 或路径。
+它们不改变 Tool Runtime 的 timeout/cancellation/retry authority；typed tool
+failure 的 category 归属与 retry disposition 仍由既有 `ToolExecutionService`
+和 `ToolExecutionSpec` 拥有。
+
+### Boundary exception codes（`mcp/errors.py` 类级 `safe_error_code`）
+
+| Code | Phase | Owner | Trigger | Retry / fallback | Side effect | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| `MCP_BOUNDARY_ERROR` | any | `mcp/` boundary | 未细分的 MCP boundary 失败基类 | 无自动 retry | not started（discovery/registration 阶段） | typed exception safe code |
+| `MCP_CONFIG_INVALID` | startup config | `mcp/config.py` load | 配置文件缺失/非 JSON/schema/字段/数量边界非法（startup fatal） | restart after fix | not started | safe reason detail（`config_file_unavailable`/`unknown_field`/`tool_local_name_duplicate` 等） |
+| `MCP_TRANSPORT_ERROR` | transport | `mcp/client.py` | 未细分的 stdio transport 失败基类 | 无 retry/reconnect | attempt evidence 决定 | typed exception safe code |
+| `MCP_SERVER_UNAVAILABLE` | transport / startup | `mcp/client.py` spawn、`mcp/discovery.py` | 子进程 spawn 失败或 discovery 期间 transport 不可用 | discovery 降级 `DISCOVERY_FAILED`；运行期 adapter → typed INTERNAL failure | not started / evidence 决定 | discovery result safe code / tool failure |
+| `MCP_TRANSPORT_TIMEOUT` | transport / startup | `mcp/client.py` | initialize/tools/list/connect 等有界 IO 超时；运行期 `tools/call` 请求超时（connection 标记 broken，不重连） | discovery 降级；运行期 → `ToolErrorCategory.TIMEOUT`，retry 由既有 policy 决定 | mutation 且 attempt 已 start → UNKNOWN | tool failure safe code |
+| `MCP_TRANSPORT_CLOSED` | transport / runtime | `mcp/client.py` | stdout EOF、连接已 broken、client 已 close | 无重连；后续调用持续 fail closed | evidence 决定 | tool failure safe code |
+| `MCP_PROTOCOL_ERROR` | protocol | `mcp/client.py`、`mcp/models.py` | JSON-RPC/response/结果 形状非法（`malformed_json_line`、`error_response`、`tool_result_not_object` 等） | fail closed | evidence 决定 | typed exception / tool failure |
+| `MCP_PROTOCOL_VERSION_UNSUPPORTED` | startup handshake | `mcp/client.py` | server 返回非 `2025-06-18` protocolVersion | discovery 降级，不部分采纳 | not started | discovery result safe code |
+| `MCP_CAPABILITY_MISSING` | startup handshake | `mcp/client.py` | server capabilities 缺少 `tools` | discovery 降级 | not started | discovery result safe code |
+| `MCP_DISCOVERY_INVALID` | startup discovery | `mcp/client.py` `list_tools` | tools/list 页数/工具数/重复 remote name/非法 entry | 整个 server snapshot fail closed（零采纳） | not started | discovery result safe code |
+
+### Registration / adapter safe codes（freeze 前与 invocation 期）
+
+| Code | Phase | Owner | Trigger | 行为 |
+| --- | --- | --- | --- | --- |
+| `MCP_TOOL_POLICY_MISSING` | startup registration | `mcp/registration.py` | discovery 到的 remote tool 缺 operator mapping（或 config 无对应 server） | 该 server registration 整体 fail closed（零注册），startup 继续 |
+| `MCP_TOOL_POLICY_INVALID` | startup registration | `mcp/registration.py` | mapping 字段无法映射到既有 `ToolPolicy`/`ToolExecutionSpec` enum | 同上 |
+| `MCP_TOOL_RISK_UNCLASSIFIED` | startup registration | `mcp/registration.py` | `(risk_facts, side_effect_kind, idempotency)` 组合不在 Governance full-combination allowlist（`classify_full_risk_combination` 返回 None） | 同上（不产生“已注册但 invocation 时 DENY”的中间态） |
+| `MCP_TOOL_NAME_COLLISION` | startup registration | `mcp/registration.py` | canonical local name 与 builtin 或其它 server 冲突 | 同上 |
+| `MCP_TOOL_INPUT_SCHEMA_INVALID` / `MCP_TOOL_INPUT_SCHEMA_UNSUPPORTED` | startup registration | `mcp/registration.py` | inputSchema 非法 JSON object / type≠object | 同上 |
+| `MCP_TOOL_DESCRIPTOR_INVALID` | startup registration | `mcp/registration.py` | `ToolDescriptor` 构造失败（safe-name/长度） | 同上 |
+| `MCP_SESSION_UNAVAILABLE` | invocation | `mcp/adapter.py` | session resolver 返回 None / client closed / broken | typed INTERNAL tool failure，不执行 outbound call |
+| `MCP_TOOL_REPORTED_ERROR` | invocation | `mcp/adapter.py` | server 返回 `isError=true` result | read-only → `OUTPUT_INVALID`（authoritative NOT_STARTED）；mutation → `SIDE_EFFECT_UNKNOWN`（retry OUTCOME_UNKNOWN）；raw remote body 不进入错误文本 |
+| `MCP_TOOL_RESULT_UNSUPPORTED` | invocation | `mcp/adapter.py` | 非 text content / structured-only / image / audio / resource link | typed `OUTPUT_INVALID` safe failure；mutation 且协议成功时副作用事实仍为 COMMITTED |
+
+`MCP_SESSION_UNAVAILABLE`、`MCP_TOOL_REPORTED_ERROR`、`MCP_TOOL_RESULT_UNSUPPORTED`
+经既有 `ToolExecutionError.safe_error_code` 通道进入 Tool failure
+evidence；其 category/phase/side_effect_state 语义见 Phase9-WP2 Gate C/E
+（`40_codex_mcp_runtime_final_confirmation.md`）。
+
 ## Semantic Categories
 
 - Retryable provider failure：仅 Model/Tool policy 明确允许且预算、deadline、幂等证据均允许时重试。

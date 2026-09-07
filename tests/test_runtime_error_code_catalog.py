@@ -18,12 +18,21 @@ def test_catalog_codes_all_exist_in_real_code() -> None:
         path.read_text(encoding="utf-8")
         for path in (*Path("core").rglob("*.py"), Path("server.py"))
     )
+    mcp_source = "\n".join(
+        path.read_text(encoding="utf-8") for path in Path("mcp").glob("*.py")
+    )
     codes = _catalog_codes()
 
     assert len(codes) >= 35
     assert len(codes) == len(set(codes))
     assert all(re.fullmatch(r"[A-Z][A-Z0-9_]+", code) for code in codes)
-    assert all(f'"{code}"' in source or f".{code}" in source for code in codes)
+    assert all(
+        f'"{code}"' in source
+        or f".{code}" in source
+        # Phase9 MCP boundary codes 由 mcp/ 包拥有（WP3 收口）。
+        or f'"{code}"' in mcp_source
+        for code in codes
+    )
 
 
 def test_catalog_covers_critical_domains_without_universal_retry_advice() -> None:

@@ -107,6 +107,9 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID` | AgentEvalOpsTraceExporter | string | empty | non-empty identifier | when enabled | APPLICATION_SCOPE | yes | internal identifier | enabled 时缺失 startup-fatal | `project-1` |
 | `LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS` | AgentEvalOpsTraceExporter | finite float | `0.5` | finite >0 且可转换为整数 ms | when enabled | APPLICATION_SCOPE | yes | internal config | 非正/非有限/小数毫秒/超过 total deadline 显式值 fail closed | `0.5` |
 | `LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS` | AgentEvalOpsTraceExporter | finite float | `3.0` | finite >0 且可转换为整数 ms | when enabled | APPLICATION_SCOPE | yes | internal config | 非正/非有限/小数毫秒 fail closed；total + 0.5s cleanup margin 必须 `< RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS` | `3.0` |
+| `LOCAL_AGENT_MCP_CONFIG_PATH` | mcp.config / lifespan MCP assembly | path（JSON 文件） | empty | operator 本地 JSON 文件，schema `localagent-mcp-config.v1`（server identity/command/arguments/environment/enabled + 可选 per-tool `tools` local mapping，fail-closed 校验） | no | APPLICATION_SCOPE | yes | sensitive local operator config（environment 值通常含 secret，文件不得提交） | 留空=默认关闭，不构造 MCP 集成组件、不启动子进程；文件缺失/非法/schema 不匹配/字段校验失败为 `MCP_CONFIG_INVALID` startup fatal | `<local-operator-path>` |
+| `LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS` | mcp.client（stdio spawn + initialize） | finite float | `5.0` | finite >0 | no | APPLICATION_SCOPE | yes | internal config | 非正/非有限/非法显式值 fail closed；超时按 MCP transport 失败处理（单 server 降级，不重试/重连） | `5.0` |
+| `LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS` | mcp.client（`tools/list` / `tools/call` 单请求上界） | finite float | `10.0` | finite >0 | no | APPLICATION_SCOPE | yes | internal config | 非正/非有限/非法显式值 fail closed；底层 bounded IO 机制，Runtime effective deadline（`ToolExecutionService`）为真正 authority，adapter 取两者较小值 | `10.0` |
 
 ## Environment Profile
 
@@ -175,3 +178,54 @@ Run drain 使用 `RUNTIME_SHUTDOWN_GRACE_SECONDS`，单组件关闭/worker drain
 generation pin，并回放 immutable rewrite fixture；generation、provenance、fixture
 或 identity 不一致时 fail closed。该能力不增加 request-level strategy/rewrite override，
 不构建或复制 Dense index，也不改变 `BASELINE` production default。
+
+## MCP Integration（Phase9-WP1 / WP2）
+
+`LOCAL_AGENT_MCP_CONFIG_PATH` 指向的 JSON 文件是唯一 MCP server 配置来源；
+server identity、command、arguments、environment 全部为 operator 显式配置，
+模型输出、Tool 参数与请求输入不得提供 MCP command 或触发 MCP server 启动。
+未配置时 Phase9 完全不参与 startup（无子进程、无组件、无 MCP Tool 注册）。
+配置存在时，`mcp.discovery` 在 ToolRegistry / PolicyCatalog freeze 之前执行
+`STARTUP_SNAPSHOT_ONLY` discovery；单个 enabled server 的 spawn/协议/discovery
+失败按显式降级策略记为 `DISCOVERY_FAILED`（safe code：`MCP_SERVER_UNAVAILABLE`、
+`MCP_TRANSPORT_TIMEOUT`、`MCP_TRANSPORT_CLOSED`、`MCP_PROTOCOL_ERROR`、
+`MCP_PROTOCOL_VERSION_UNSUPPORTED`、`MCP_CAPABILITY_MISSING`、
+`MCP_DISCOVERY_INVALID`），不阻止 startup、不产生第二 runtime、不放宽本地
+policy；配置文件本身非法为 startup fatal。AVAILABLE server 的 client/session
+属 APPLICATION_SCOPE，由 `server.py::lifespan()` 的 initialization stack /
+`ApplicationRuntimeServices.extra_closeables` 拥有并在 shutdown 关闭；
+Run 终止不关闭它。
+
+### WP2：per-tool local mapping（canonical name + policy 输入）
+
+配置 schema `localagent-mcp-config.v1` 在 server 级新增可选 `tools` 字段：
+`remote tool name -> { local_name, side_effect_kind, idempotency, risk_facts?,
+approval_required_threshold?, default_timeout_seconds?, max_output_bytes?,
+max_concurrency? }`。语义（全部 fail closed，`MCP_CONFIG_INVALID` startup
+fatal）：
+
+- `local_name` 是该 tool 在 LocalAgent 的 canonical tool name（
+  `^[a-z][a-z0-9_]{0,63}$`），是 ToolRegistry / PolicyCatalog /
+  ToolInvocation / model-facing identity；`server_id` + remote name 只保留
+  在 adapter provenance。同一 server 内 `local_name` 重复即配置非法。
+- `side_effect_kind` 只允许 `NONE` / `LOCAL_STATE_MUTATION`；
+  `idempotency` 只允许 `READ_ONLY` / `IDEMPOTENT` / `IDEMPOTENT_WITH_KEY` /
+  `NON_IDEMPOTENT`；`risk_facts` 只允许现有 `ToolRiskFact` 取值。
+- MCP annotations / inputSchema / description 全部是 untrusted provider
+  metadata，绝不参与 policy/risk/approval 推导；本地 policy 与
+  `ToolAdapter.spec_for` 是唯一 Runtime safety fact 来源。
+- discovery 到的每个 remote tool 都必须有 operator 映射：任一 tool 缺失
+  映射（`MCP_TOOL_POLICY_MISSING`）、映射非法（`MCP_TOOL_POLICY_INVALID`）、
+  组合无法被 Governance full-combination allowlist 分类
+  （`MCP_TOOL_RISK_UNCLASSIFIED`）、与内置或其它 server 的 local name 冲突
+  （`MCP_TOOL_NAME_COLLISION`）或 inputSchema 不可用
+  （`MCP_TOOL_INPUT_SCHEMA_INVALID` / `MCP_TOOL_INPUT_SCHEMA_UNSUPPORTED`）
+  时，该 configured server 的 registration 整体 fail closed（零注册），
+  不部分采纳；不产生 `ToolRegistry 已注册 / PolicyCatalog 无覆盖` 中间态，
+  也不阻止 application startup。
+- 没有 `tools` 字段的 server 只参与 discovery，不注册任何 MCP Tool。
+- 注册成功的 MCP Tool 经既有 `ToolRegistration.native_function_definition()`
+  暴露给模型；execution 走既有 `ToolExecutionService -> adapter.invoke_once
+  -> session_for(server_id) -> tools/call` 路径，Runtime
+  timeout/cancellation authority 不变；结果归一化仅支持 text content +
+  `isError`，其它内容形态 safe failure（`MCP_TOOL_RESULT_UNSUPPORTED`）。

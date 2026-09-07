@@ -156,7 +156,13 @@ from core.settings import (
     Settings,
     validate_role_configuration,
 )
-from tools.registry import register_all_tools
+from mcp.config import load_mcp_server_configs
+from mcp.lifecycle import McpIntegrationComponent
+from mcp.registration import (
+    McpServerRegistrationStatus,
+    build_mcp_registrations,
+)
+from tools.registry import build_builtin_tool_registrations, register_all_tools
 
 # WP4-C：AgentEvalOps trace export dispatcher 的 code-owned bounded queue 容量
 # （最小配置约束：不新增 Settings；默认与 observability queue 一致）。
@@ -250,25 +256,41 @@ def _close_model_engines(engines: dict) -> tuple[str, ...]:
     return tuple(error_codes)
 
 
-def _populate_tool_registry() -> ToolRegistry:
-    """构造并冻结生产 ToolRegistry；非法/重复注册在此 fail closed。"""
+def _populate_tool_registry(
+    mcp_registrations: tuple = (),
+) -> ToolRegistry:
+    """构造并冻结生产 ToolRegistry；非法/重复注册在此 fail closed。
+
+    MCP-backed ToolRegistration（WP2）必须在 freeze 前传入：registration
+    失败的 server 已在 ``mcp.registration`` 阶段整体 fail closed（零注册），
+    本函数只接收成功映射的 registration。
+    """
     registry = ToolRegistry()
     register_all_tools(registry)
+    for registration in mcp_registrations:
+        registry.register(registration)
     registry.freeze()
     return registry
 
 
-def _build_tool_governance(tool_registry: ToolRegistry) -> ToolGovernanceService:
+def _build_tool_governance(
+    tool_registry: ToolRegistry,
+    mcp_policies: tuple = (),
+) -> ToolGovernanceService:
     """构造/校验/冻结 ToolPolicyCatalog 并创建唯一 ToolGovernanceService。
 
     任一 missing/duplicate/unknown policy 引用、unknown/disabled Agent 引用、
     非法 risk fact / approval rule 都使 startup fail closed（never READY）。
+    每个 MCP-backed registration 必须携带同源 local policy，保证
+    ``ToolRegistry 已注册 / PolicyCatalog 无覆盖`` 的中间状态不存在。
     """
     catalog = ToolPolicyCatalog(
         tool_registry=tool_registry,
         agent_registry=DEFAULT_AGENT_REGISTRY,
     )
     register_default_tool_policies(catalog)
+    for policy in mcp_policies:
+        catalog.register(policy)
     catalog.freeze()
     return ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
 
@@ -864,14 +886,82 @@ async def lifespan(app: FastAPI):
             count_rate_limited=settings.model_breaker_count_rate_limited,
         )
     )
+    # Phase9-WP1：MCP client/discovery 基础组件（APPLICATION_SCOPE）。
+    # 未配置 LOCAL_AGENT_MCP_CONFIG_PATH 时保持现状：不构造组件、不启动任何
+    # 子进程。配置存在时 startup discovery 必须发生在 ToolRegistry /
+    # PolicyCatalog freeze 之前（STARTUP_SNAPSHOT_ONLY）；单 server 失败由
+    # mcp.discovery 按显式降级策略记为 DISCOVERY_FAILED，不阻止 startup；
+    # 组件构造/启动的意外失败走 initialization stack rollback（startup fatal）。
+    # session 生命周期：AVAILABLE server 的 client 由组件持有并在 application
+    # shutdown 经 extra_closeables 关闭；Run 终止不关闭它。
+    mcp_integration = None
+    mcp_server_configs: tuple = ()
+    if settings.mcp_config_path:
+        mcp_server_configs = await initialization_stack.run(
+            lambda: load_mcp_server_configs(settings.mcp_config_path),
+            component="mcp_configuration",
+        )
+        mcp_integration = await initialization_stack.create(
+            "mcp_integration",
+            lambda: McpIntegrationComponent(
+                mcp_server_configs,
+                connect_timeout_seconds=settings.mcp_connect_timeout_seconds,
+                request_timeout_seconds=settings.mcp_request_timeout_seconds,
+            ),
+        )
+        await initialization_stack.run(
+            mcp_integration.start,
+            component="mcp_integration_discovery",
+        )
+    # Phase9-WP2：discovery 快照 -> canonical local name + local policy 映射
+    # -> MCP-backed ToolRegistration / ToolPolicy。必须在 Registry / Catalog
+    # freeze 之前完成（STARTUP_SNAPSHOT_ONLY，无运行期 mutation）。任一 tool
+    # 映射失败使该 server 的 registration 整体 fail closed（零注册，safe
+    # code 可观测），不阻止 startup、不产生第二 runtime、不放宽本地 policy。
+    mcp_registrations: tuple = ()
+    mcp_policies: tuple = ()
+    if mcp_integration is not None:
+        mcp_registration_results = await initialization_stack.run(
+            lambda: build_mcp_registrations(
+                snapshot=mcp_integration.discovery_snapshot,
+                configs=mcp_server_configs,
+                session_resolver_factory=(
+                    lambda server_id: (
+                        lambda: mcp_integration.session_for(server_id)
+                    )
+                ),
+                existing_tool_names=frozenset(
+                    registration.descriptor.name
+                    for registration in build_builtin_tool_registrations()
+                ),
+                request_timeout_seconds=settings.mcp_request_timeout_seconds,
+            ),
+            component="mcp_tool_registration",
+        )
+        for mcp_result in mcp_registration_results:
+            if mcp_result.status == McpServerRegistrationStatus.REGISTERED:
+                mcp_registrations = mcp_registrations + mcp_result.registrations
+                mcp_policies = mcp_policies + mcp_result.policies
+            elif (
+                mcp_result.status == McpServerRegistrationStatus.REGISTRATION_FAILED
+            ):
+                logger.warning(
+                    "MCP tool registration failed closed",
+                    extra={
+                        "safe_error_code": mcp_result.safe_error_code,
+                        "component": "mcp_integration",
+                        "phase": "startup",
+                        "status": "FAILED",
+                    },
+                )
     tool_registry = await initialization_stack.run(
-        _populate_tool_registry,
+        lambda: _populate_tool_registry(mcp_registrations),
         component="tool_registry",
     )
     # WP2-B Tool Governance：Registry freeze 后构造/校验/冻结 ToolPolicyCatalog
     # 并创建唯一 Service；任一 policy 校验失败 -> startup fail（never READY）。
     tool_governance_service = await initialization_stack.run(
-        lambda: _build_tool_governance(tool_registry),
+        lambda: _build_tool_governance(tool_registry, mcp_policies),
         component="tool_governance",
     )
     resource_authorization_service = await initialization_stack.run(
@@ -1012,6 +1102,11 @@ async def lifespan(app: FastAPI):
                 *tuple(
                     (f"model_engine_{index}", engine)
                     for index, engine in enumerate(engines.values())
+                ),
+                *(
+                    (("mcp_integration", mcp_integration),)
+                    if mcp_integration is not None
+                    else ()
                 ),
             ),
         ),

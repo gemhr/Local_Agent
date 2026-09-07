@@ -373,6 +373,22 @@ _USER_VISIBLE_DENIAL = {
 }
 
 
+def classify_full_risk_combination(
+    risk_facts: frozenset[ToolRiskFact],
+    side_effect_kind: ToolSideEffectKind,
+    idempotency: OperationIdempotency,
+) -> ToolRiskLevel | None:
+    """只读查询 exact full-combination allowlist；未冻结组合返回 ``None``。
+
+    供 startup registration 边界（如 MCP tool policy mapping）在 freeze 前
+    校验一个 (risk_facts, side_effect_kind, idempotency) 组合能否被
+    ``evaluate_invocation`` 分类；不改变任何运行期决策语义。
+    """
+    return _FULL_RISK_COMBINATIONS.get(
+        (frozenset(risk_facts), side_effect_kind, idempotency)
+    )
+
+
 def governance_denial_message(error_code: str) -> str:
     """把 runtime denial code 映射为固定中文 safe message；未知 code 即编程错误。"""
     return _USER_VISIBLE_DENIAL[error_code]
@@ -575,6 +591,7 @@ __all__ = [
     "ToolPolicyCatalog",
     "ToolRiskFact",
     "ToolRiskLevel",
+    "classify_full_risk_combination",
     "governance_denial_message",
     "register_default_tool_policies",
 ]
