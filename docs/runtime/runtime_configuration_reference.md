@@ -234,3 +234,9 @@ fatal）：
   -> session_for(server_id) -> tools/call` 路径，Runtime
   timeout/cancellation authority 不变；结果归一化仅支持 text content +
   `isError`，其它内容形态 safe failure（`MCP_TOOL_RESULT_UNSUPPORTED`）。
+## Stage6-WP2 Authentication
+
+服务端配置 `LOCAL_AGENT_JWT_PUBLIC_KEY`、`LOCAL_AGENT_JWT_ISSUER`、`LOCAL_AGENT_JWT_AUDIENCE`
+和可选的 `LOCAL_AGENT_JWT_CLOCK_SKEW_SECONDS`。算法固定为 `EdDSA`，API 验证路径只加载公钥。
+`LOCAL_AGENT_JWT_PRIVATE_KEY` 仅供 `scripts/manage_identity.py` 在 LOCAL/TEST 中签发受控测试令牌，
+不得配置到生产 API 进程。

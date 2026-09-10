@@ -344,3 +344,8 @@ Release Gate 必须由当前测试和 `tests/_runtime_release_gate.py` 重新派
 - 部署：`docs/runtime/runtime_deployment_runbook.md`（Windows Native 单进程部署合同）
 - Release Gate：`docs/runtime/runtime_release_gate.md`、`docs/runtime/runtime_release_checklist.md`
 - 已知限制：`docs/runtime/stage2_known_limitations_and_next_stage.md`
+### API authentication
+
+除 `/health` 和 `/readyz` 外，HTTP API 需要服务端验证的 EdDSA JWT Bearer token。身份记录和角色
+来自 PostgreSQL；客户端提交的 `actor_id`、`user_id` 或 `owner_id` 不会提升权限。LOCAL/TEST 可用
+`scripts/manage_identity.py create-user` 与 `issue-test-token` 生成受控测试身份，生产环境不提供签发接口。

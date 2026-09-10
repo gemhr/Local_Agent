@@ -177,3 +177,5 @@ test-only AST Gate 只是全production Python surface的owner/sink oracle，不�
 | 第二 shutdown Owner 或新 ShutdownReport 字段 | 已禁止；GracefulShutdownCoordinator 仍是 orchestration Owner，exporter 结果走既有 `RuntimeComponentResult` |
 | Exporter 修改 Run/AgentState/OutputGate/Journal/Snapshot/Recovery | 已禁止；exporter 是 side-channel observability，不写回任何 Runtime Authority |
 | Trace export metrics 第二计数状态机 | 已禁止；dispatcher health counters 是权威内部事实，metrics 只是 best-effort projection，reason/stage 词表单 owner（dispatcher） |
+| HTTP Principal / JWT verification | `core/auth.py::AuthService` | PostgreSQL users + server-verified EdDSA JWT | route 不解析 JWT、不信任 caller identity |
+| Identity schema | Alembic `0002_wp2_identity` + `core/persistence/models.py` | PostgreSQL `users` / `roles` / `user_roles` | startup 只读 readiness |

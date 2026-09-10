@@ -17,6 +17,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from core.agent_router import AgentRouter
+from core.auth import (
+    AUTH_INVALID_TOKEN,
+    AuthError,
+    AuthService,
+    AuthorizationService,
+    require_role,
+)
 from core.application_metadata import create_application_metadata
 from core.chat_service import ChatRuntimeTransportError, ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine, ScriptedEvaluationLLMEngine
@@ -495,6 +502,8 @@ async def lifespan(app: FastAPI):
             RuntimeInitializationError("database_readiness")
         )
     app.state.db_schema_revision = schema_readiness.alembic_revision
+    app.state.auth_service = AuthService(persistence_database, settings)
+    app.state.authorization_service = AuthorizationService(persistence_database)
 
     persistence_memory = await initialization_stack.create(
         "persistence_memory",
@@ -1205,6 +1214,54 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
+
+_ADMIN_ONLY_API_PATHS = frozenset({
+    "/api/runtime/evaluation-execute/v3",
+    "/api/runtime/evaluation-execute/v4",
+})
+
+
+def _api_error(request: Request, code: str, status_code: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "code": code,
+                "message": "Authentication failed." if status_code == 401 else "Forbidden.",
+                "request_id": getattr(request.state, "request_id", ""),
+            }
+        },
+        headers={"X-Request-ID": getattr(request.state, "request_id", "")},
+    )
+
+
+@app.exception_handler(AuthError)
+async def auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
+    return _api_error(request, exc.code, exc.status_code)
+
+
+@app.middleware("http")
+async def request_id_and_auth_middleware(request: Request, call_next):
+    """Request ID 与唯一 HTTP Auth 边界；Authorization 不进入日志或错误正文。"""
+    incoming = request.headers.get("X-Request-ID", "")
+    request_id = incoming.strip() if len(incoming.strip()) <= 128 and incoming.strip() else uuid.uuid4().hex
+    request.state.request_id = request_id
+    protected = request.url.path.startswith("/api/")
+    try:
+        if protected:
+            service = getattr(request.app.state, "auth_service", None)
+            if not isinstance(service, AuthService):
+                return _api_error(request, AUTH_INVALID_TOKEN, 401)
+            request.state.principal = await service.authenticate(request.headers.get("Authorization"))
+            if request.url.path in _ADMIN_ONLY_API_PATHS:
+                require_role(request.state.principal, "ADMIN")
+        response = await call_next(request)
+    except AuthError as exc:
+        return _api_error(request, exc.code, exc.status_code)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
 app.add_middleware(
     RequestBodyLimitMiddleware,
     policy=REQUEST_PAYLOAD_POLICY,
@@ -1600,6 +1657,29 @@ def require_service() -> ChatService:
     return chat_service
 
 
+def _authorization_service(request: Request) -> AuthorizationService:
+    service = getattr(request.app.state, "authorization_service", None)
+    if not isinstance(service, AuthorizationService):
+        raise HTTPException(status_code=503, detail="AUTHORIZATION_UNAVAILABLE")
+    return service
+
+
+async def _bind_new_run_and_conversation(
+    request: Request, *, run_id: str, agent_id: str
+) -> None:
+    """以认证 Principal 持久化对象归属，不接管 Runtime 运行态。"""
+    principal = request.state.principal
+    authz = _authorization_service(request)
+    await authz.bind_new(principal, "CONVERSATION", agent_id)
+    await authz.bind_new(principal, "RUN", run_id)
+
+
+async def _require_run_owner(request: Request, run_id: str) -> None:
+    await _authorization_service(request).require_owner(
+        request.state.principal, "RUN", run_id
+    )
+
+
 def _run_registry_for(service) -> object:
     """Use the lifespan-owned registry, preserving test/legacy compatibility."""
     return getattr(service, "run_registry", process_run_registry)
@@ -1694,6 +1774,9 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         uuid.UUID(run_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
+    await _bind_new_run_and_conversation(
+        request, run_id=run_id, agent_id=payload.agent_id
+    )
 
     if mode is ChatRuntimeMode.LEGACY:
         stream = service.stream_chat(
@@ -1845,7 +1928,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
 
 
 @app.post("/api/runtime/execute")
-async def runtime_execute_endpoint(payload: RuntimeExecuteRequest):
+async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Request):
     """同步执行一条严格校验的 Coordinated Runtime 请求。"""
 
     service = require_service()
@@ -1867,6 +1950,9 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest):
         uuid.UUID(payload.run_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
+    await _bind_new_run_and_conversation(
+        request, run_id=payload.run_id, agent_id=payload.agent_id
+    )
 
     try:
         _output, result = await service.run_coordinated_agent(
@@ -1895,7 +1981,9 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest):
 
 
 @app.post("/api/runtime/evaluation-execute/v1")
-async def runtime_evaluation_execute_endpoint(payload: RuntimeExecuteRequest):
+async def runtime_evaluation_execute_endpoint(
+    payload: RuntimeExecuteRequest, request: Request
+):
     """通过同一 Coordinated Runtime 返回终态与请求级 RAG evaluation evidence。"""
 
     service = require_service()
@@ -1908,6 +1996,9 @@ async def runtime_evaluation_execute_endpoint(payload: RuntimeExecuteRequest):
         uuid.UUID(payload.run_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
+    await _bind_new_run_and_conversation(
+        request, run_id=payload.run_id, agent_id=payload.agent_id
+    )
 
     collector = _retrieval_evaluation_collector(payload.run_id)
     token = install_retrieval_evaluation_collector(collector)
@@ -1989,7 +2080,9 @@ def _encoded_response_content(response: BaseModel) -> tuple[dict[str, object], i
 
 
 @app.post("/api/runtime/evaluation-execute/v2")
-async def runtime_evaluation_execute_v2_endpoint(payload: RuntimeExecuteRequest):
+async def runtime_evaluation_execute_v2_endpoint(
+    payload: RuntimeExecuteRequest, request: Request
+):
     """返回 v2 RAG 与独立 delivered final answer evaluation evidence。"""
     service = require_service()
     if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
@@ -2001,6 +2094,9 @@ async def runtime_evaluation_execute_v2_endpoint(payload: RuntimeExecuteRequest)
         uuid.UUID(payload.run_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
+    await _bind_new_run_and_conversation(
+        request, run_id=payload.run_id, agent_id=payload.agent_id
+    )
 
     collector = _retrieval_evaluation_collector(payload.run_id)
     token = install_retrieval_evaluation_collector(collector)
@@ -2163,7 +2259,9 @@ def _v4_install_private_fixtures(store, fixtures, run_id: str) -> list[dict[str,
 
 
 @app.post("/api/runtime/evaluation-execute/v4")
-async def runtime_evaluation_execute_v4_endpoint(payload: RuntimeEvaluationExecuteV4Request):
+async def runtime_evaluation_execute_v4_endpoint(
+    payload: RuntimeEvaluationExecuteV4Request, request: Request
+):
     """WP7-E TEST_ONLY bridge: typed controls → real runtime/services → safe facts.
 
     This endpoint never accepts expected outcomes, authorization overrides, a
@@ -2177,6 +2275,9 @@ async def runtime_evaluation_execute_v4_endpoint(payload: RuntimeEvaluationExecu
         project, grants = payload.evaluation_control.project_access()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+    await _bind_new_run_and_conversation(
+        request, run_id=payload.run_id, agent_id=payload.agent_id
+    )
     private_store = _evaluation_memory_store(service)
     manager = service.router.memory_manager
     project_service = ProjectSemanticMemoryService(
@@ -2308,6 +2409,7 @@ async def runtime_evaluation_execute_v4_endpoint(payload: RuntimeEvaluationExecu
 @app.post("/api/runtime/evaluation-execute/v3")
 async def runtime_evaluation_execute_v3_endpoint(
     payload: RuntimeEvaluationExecuteV3Request,
+    request: Request,
 ):
     """Isolated WP6-E evaluation path with strict typed episodic control.
 
@@ -2326,6 +2428,9 @@ async def runtime_evaluation_execute_v3_endpoint(
         uuid.UUID(payload.run_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
+    await _bind_new_run_and_conversation(
+        request, run_id=payload.run_id, agent_id=payload.agent_id
+    )
 
     try:
         control = (
@@ -2486,12 +2591,14 @@ async def cancel_run_endpoint(
     run_id: Annotated[
         str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
     ],
+    request: Request,
 ):
     """客户端只能请求用户主动取消，重复请求保持幂等。"""
     try:
         uuid.UUID(run_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
+    await _require_run_owner(request, run_id)
     service = require_service()
     result = _run_registry_for(service).cancel(
         run_id, CancellationReason.REQUEST_CANCELLED
@@ -2529,6 +2636,7 @@ async def _handle_tool_approval_decision(
     approval_id: str,
     decision: ApprovalDecisionValue,
     payload: ToolApprovalDecisionRequest,
+    request: Request,
 ) -> JSONResponse:
     """approve/reject 共用的 transport-only 转发实现。
 
@@ -2539,6 +2647,8 @@ async def _handle_tool_approval_decision(
     """
     _validate_uuid_path_value(run_id, "run_id")
     _validate_uuid_path_value(approval_id, "approval_id")
+    await _require_run_owner(request, run_id)
+    principal = request.state.principal
     service = require_service()
     try:
         result = await _run_registry_for(service).decide_tool_approval(
@@ -2546,7 +2656,7 @@ async def _handle_tool_approval_decision(
             approval_id,
             payload.invocation_binding_digest,
             decision,
-            actor_id=payload.actor_id,
+            actor_id=str(principal.user_id),
         )
         error_code = result.safe_error_code
         status_code = (
@@ -2602,10 +2712,12 @@ async def approve_tool_approval_endpoint(
         str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
     ],
     payload: ToolApprovalDecisionRequest,
+    request: Request,
 ) -> JSONResponse:
     """批准一次高风险 Tool 审批（first-wins；同向重复决定幂等 200）。"""
     return await _handle_tool_approval_decision(
-        run_id, approval_id, ApprovalDecisionValue.APPROVE, payload
+        run_id, approval_id, ApprovalDecisionValue.APPROVE, payload,
+        request,
     )
 
 
@@ -2621,10 +2733,12 @@ async def reject_tool_approval_endpoint(
         str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
     ],
     payload: ToolApprovalDecisionRequest,
+    request: Request,
 ) -> JSONResponse:
     """拒绝一次高风险 Tool 审批（零 ToolExecution；不等价 cancel Run）。"""
     return await _handle_tool_approval_decision(
-        run_id, approval_id, ApprovalDecisionValue.REJECT, payload
+        run_id, approval_id, ApprovalDecisionValue.REJECT, payload,
+        request,
     )
 
 
@@ -2633,6 +2747,7 @@ async def get_history_endpoint(
     agent_id: Annotated[
         str, Path(max_length=REQUEST_PAYLOAD_POLICY.AGENT_ID_MAX_CHARS)
     ],
+    request: Request,
     limit: Annotated[
         int,
         Query(
@@ -2649,6 +2764,9 @@ async def get_history_endpoint(
     ] = REQUEST_PAYLOAD_POLICY.HISTORY_OFFSET_DEFAULT,
 ):
     """按页返回某个智能体的历史消息。"""
+    await _authorization_service(request).require_owner(
+        request.state.principal, "CONVERSATION", agent_id
+    )
     service = require_service()
     result = service.get_history(agent_id=agent_id, limit=limit, offset=offset)
     if inspect.isawaitable(result):
@@ -2662,8 +2780,10 @@ async def search_endpoint(
         str,
         Query(max_length=REQUEST_PAYLOAD_POLICY.SEARCH_KEYWORD_MAX_CHARS),
     ],
+    request: Request,
 ):
     """根据关键词搜索持久化消息。"""
+    require_role(request.state.principal, "ADMIN")
     service = require_service()
     result = service.search_memory(keyword)
     if inspect.isawaitable(result):
@@ -2672,8 +2792,9 @@ async def search_endpoint(
 
 
 @app.get("/api/memory")
-async def get_all_memory_endpoint():
+async def get_all_memory_endpoint(request: Request):
     """返回记忆管理弹窗使用的消息集合。"""
+    require_role(request.state.principal, "ADMIN")
     service = require_service()
     result = service.get_all_memory()
     if inspect.isawaitable(result):
@@ -2682,10 +2803,11 @@ async def get_all_memory_endpoint():
 
 
 @app.delete("/api/memory")
-async def delete_memory_endpoint(request: DeleteMemoryRequest):
+async def delete_memory_endpoint(request: Request, payload: DeleteMemoryRequest):
     """删除指定消息或清空全部记忆。"""
+    require_role(request.state.principal, "ADMIN")
     service = require_service()
-    result = service.delete_memory(message_ids=request.message_ids, delete_all=request.delete_all)
+    result = service.delete_memory(message_ids=payload.message_ids, delete_all=payload.delete_all)
     if inspect.isawaitable(result):
         result = await result
     return result

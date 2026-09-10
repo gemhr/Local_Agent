@@ -604,6 +604,16 @@ def validate_role_configuration(settings: "Settings", *, role: str) -> None:
         _validate_server_role(settings)
 
 
+def load_identity_issuer_settings() -> tuple[str, str, str, str]:
+    """仅供 development/test 管理脚本读取私钥；API 不调用此函数。"""
+    return (
+        os.getenv("LOCAL_AGENT_JWT_PRIVATE_KEY", ""),
+        os.getenv("LOCAL_AGENT_JWT_ISSUER", "localagent").strip(),
+        os.getenv("LOCAL_AGENT_JWT_AUDIENCE", "localagent-api").strip(),
+        os.getenv("LOCAL_AGENT_JWT_ALLOWED_ALGORITHM", "EdDSA").strip(),
+    )
+
+
 def _validate_server_role(settings: "Settings") -> None:
     # Stage6-WP1：SERVER 进程必须装配 PostgreSQL Canonical Persistence，
     # 不存在 SQLite fallback，因此 DSN 是必填项而非可选优化。
@@ -751,6 +761,11 @@ class Settings:
     db_statement_timeout_ms: int = 15000
     db_lock_timeout_ms: int = 5000
     db_idle_in_transaction_timeout_ms: int = 10000
+    jwt_public_key: str = field(default="", repr=False)
+    jwt_issuer: str = "localagent"
+    jwt_audience: str = "localagent-api"
+    jwt_allowed_algorithm: str = "EdDSA"
+    jwt_clock_skew_seconds: int = 30
 
     @classmethod
     def load(cls) -> "Settings":
@@ -1271,4 +1286,9 @@ class Settings:
             db_idle_in_transaction_timeout_ms=_env_strict_int(
                 "LOCAL_AGENT_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", 10000, minimum=1
             ),
+            jwt_public_key=os.getenv("LOCAL_AGENT_JWT_PUBLIC_KEY", ""),
+            jwt_issuer=os.getenv("LOCAL_AGENT_JWT_ISSUER", "localagent").strip(),
+            jwt_audience=os.getenv("LOCAL_AGENT_JWT_AUDIENCE", "localagent-api").strip(),
+            jwt_allowed_algorithm="EdDSA",
+            jwt_clock_skew_seconds=_env_strict_int("LOCAL_AGENT_JWT_CLOCK_SKEW_SECONDS", 30, minimum=0, maximum=300),
         )

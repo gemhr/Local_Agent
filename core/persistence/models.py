@@ -31,6 +31,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
@@ -39,6 +40,58 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class PersistenceBase(DeclarativeBase):
     """所有持久化模型的公共 Base；不提供通用 CRUD。"""
+
+
+class UserRow(PersistenceBase):
+    __tablename__ = "users"
+    id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    disabled_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+
+
+class RoleRow(PersistenceBase):
+    __tablename__ = "roles"
+    id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "code IN ('USER', 'OPERATOR', 'ADMIN')",
+            name="ck_roles_code",
+        ),
+    )
+
+
+class UserRoleRow(PersistenceBase):
+    __tablename__ = "user_roles"
+    user_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    role_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True)
+
+
+class ObjectOwnershipRow(PersistenceBase):
+    """对象归属的窄持久化绑定；不承接 Runtime 状态或执行 Owner。"""
+
+    __tablename__ = "object_ownership"
+    object_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    object_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    owner_user_id: Mapped[object] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "object_type IN ('RUN', 'CONVERSATION')",
+            name="ck_object_ownership_type",
+        ),
+        Index("ix_object_ownership_owner_type", "owner_user_id", "object_type"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +463,10 @@ class ProjectSemanticMemoryRow(PersistenceBase):
 
 # Alembic 与 readiness 共用的 Canonical 表清单（不含 alembic_version）。
 CANONICAL_TABLES = (
+    "users",
+    "roles",
+    "user_roles",
+    "object_ownership",
     "runtime_event_journal",
     "runtime_snapshots",
     "event_consumption_checkpoint",
@@ -420,12 +477,8 @@ CANONICAL_TABLES = (
     "project_semantic_memory",
 )
 
-# WP1 不创建 users / roles / evaluation_jobs / evaluation_results /
-# outbox_events / consumer_processed_events —— 它们属于 WP2 / WP4。
+# 后续 WP 的表仍不属于当前 Canonical schema。
 TABLES_DEFERRED_TO_LATER_WORK_PACKAGES = (
-    "users",
-    "roles",
-    "user_roles",
     "evaluation_jobs",
     "evaluation_results",
     "outbox_events",
@@ -441,6 +494,10 @@ __all__ = [
     "MessageExchangeRow",
     "MessageRow",
     "PersistenceBase",
+    "RoleRow",
+    "UserRoleRow",
+    "ObjectOwnershipRow",
+    "UserRow",
     "ProjectSemanticMemoryRow",
     "RuntimeEventJournalRow",
     "RuntimeSnapshotRow",

@@ -241,6 +241,15 @@ Prompt、Model output、Tool arguments/output、RAG chunks、Memory 正文、本
 
 密钥只通过受控 secret mechanism 注入，不提交到仓库。文档示例使用相对占位路径、回环 API 地址或 `<redacted>`；远程 Provider endpoint 不在正式结果/报告中回显。错误处理输出字段名和固定码，不输出配置值。
 
+## Stage6-WP2 HTTP Identity Boundary
+
+`/health` 与 `/readyz` 为 PUBLIC；所有 `/api/*` 路由必须通过 `Authorization: Bearer` 的
+EdDSA JWT 验证。Principal 由服务端 JWT claims 与 PostgreSQL `users`/`user_roles` 联合确认，
+客户端 `actor_id`、`user_id`、`owner_id` 不构成身份。认证失败返回 401，已认证但无权限返回 403，
+对象归属失败默认返回 404；Authorization header、JWT 和私钥不得进入日志或错误正文。
+带 fixture/replay 或私有 Memory 治理控制的 `evaluation-execute/v3`、`v4` 仅允许 ADMIN，
+其请求体中的 `agent_id` / `requester_agent_id` 只是业务控制字段，不构成 HTTP Principal。
+
 ## Tool Governance Security（WP2-B）
 
 `ToolGovernanceService` / `ToolPolicyCatalog` 只处理 Agent ID、canonical Tool name、固定枚举/code、risk classification 与内部 run/step scope。

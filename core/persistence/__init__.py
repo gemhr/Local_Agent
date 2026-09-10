@@ -30,6 +30,10 @@ from core.persistence.models import (
     CANONICAL_TABLES,
     TABLES_DEFERRED_TO_LATER_WORK_PACKAGES,
     PersistenceBase,
+    UserRow,
+    RoleRow,
+    UserRoleRow,
+    ObjectOwnershipRow,
 )
 from core.persistence.readiness import (
     SchemaReadiness,
@@ -56,6 +60,10 @@ __all__ = [
     "DatabaseConfig",
     "DatabaseErrorCode",
     "PersistenceBase",
+    "UserRow",
+    "RoleRow",
+    "UserRoleRow",
+    "ObjectOwnershipRow",
     "PersistenceError",
     "SchemaReadiness",
     "SyncPersistenceBridge",
