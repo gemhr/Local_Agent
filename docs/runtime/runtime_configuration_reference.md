@@ -61,15 +61,20 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_MODEL_BREAKER_RECOVERY_TIMEOUT_SECONDS` | circuit registry | int | `30` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `30` |
 | `LOCAL_AGENT_MODEL_BREAKER_HALF_OPEN_MAX_CALLS` | circuit registry | int | `1` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `1` |
 | `LOCAL_AGENT_MODEL_BREAKER_COUNT_RATE_LIMITED` | circuit registry | strict bool | `1` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | internal config | 非法显式值 fail closed | `1` |
-| `LOCAL_AGENT_MEMORY_DB_PATH` | MemoryManager | path | project database path | writable SQLite path | no | APPLICATION_SCOPE | yes | sensitive path/data | initialization/I/O failure | `data/database/memory.db` |
 | `LOCAL_AGENT_CHROMA_DIR` | VectorDBManager | path | project chroma dir | readable/writable directory | no | APPLICATION_SCOPE | yes | sensitive path/data | KB degrades with safe code；PRODUCTION 默认 required | `data/vector_store` |
 | `LOCAL_AGENT_EMBEDDING_MODEL_PATH` | VectorDBManager | path | `data/models/Qwen3-Embedding-0.6B` | readable local model directory；相对路径按 project root 解析 | no | APPLICATION_SCOPE | yes | sensitive path | 缺失时离线 fail fast；KB 按 required policy 失败或降级 | `data/models/embedding` |
 | `LOCAL_AGENT_EMBEDDING_QUERY_PROMPT_NAME` | embedding adapter | string | empty | backend-supported name | no | APPLICATION_SCOPE | yes | internal config | adapter behavior/failure | `query` |
 | `LOCAL_AGENT_EMBEDDING_BATCH_SIZE` | embedding adapter | int | `8` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `8` |
-| `LOCAL_AGENT_EVENT_JOURNAL_DB_PATH` | SQLiteRunEventJournal | path | project database path | writable SQLite path | no | APPLICATION_SCOPE | yes | sensitive path/data | startup or append fails closed | `data/database/runtime_journal.db` |
-| `LOCAL_AGENT_SNAPSHOT_ENABLED` | snapshot assembly | strict bool | `false` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | public-safe flag | typo fails Settings load | `false` |
-| `LOCAL_AGENT_SNAPSHOT_DB_PATH` | SQLiteSnapshotStore | path | project database path | writable SQLite path | when enabled | APPLICATION_SCOPE | yes | sensitive path/data | startup/read/write fails closed | `data/database/runtime_snapshot.db` |
-| `LOCAL_AGENT_OBSERVABILITY_CHECKPOINT_DB_PATH` | checkpoint stores | path | project database path | writable SQLite path | no | APPLICATION_SCOPE | yes | sensitive path/data | observability degraded/start failure | `data/database/runtime_observability.db` |
+| `LOCAL_AGENT_SNAPSHOT_ENABLED` | PostgresSnapshotStore assembly | strict bool | `false` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | public-safe flag | typo fails Settings load | `false` |
+| `LOCAL_AGENT_DATABASE_URL` | PostgreSQL persistence（canonical） | DSN (`postgresql+asyncpg`) | 无（SERVER 必填） | 仅接受 `postgresql+asyncpg://` | SERVER/SCRIPT | APPLICATION_SCOPE | yes | **secret**：绝不进入 repr/log/trace/错误正文 | 空值或非 asyncpg driver 在 Settings 阶段 fail closed；不可达 / schema 未就绪阻止 startup READY | `<secret-store-reference>` |
+| `LOCAL_AGENT_DB_POOL_SIZE` | Database（pool） | int | `5` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `5` |
+| `LOCAL_AGENT_DB_MAX_OVERFLOW` | Database（pool） | int | `5` | integer ≥0 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `5` |
+| `LOCAL_AGENT_DB_POOL_TIMEOUT_SECONDS` | Database（pool acquire） | finite float | `5.0` | >0 | no | APPLICATION_SCOPE | yes | internal config | pool 耗尽映射为 typed `DATABASE_POOL_EXHAUSTED`（HTTP 503），不无限等待 | `5.0` |
+| `LOCAL_AGENT_DB_POOL_RECYCLE_SECONDS` | Database（pool） | int | `1800` | integer ≥0 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `1800` |
+| `LOCAL_AGENT_DB_CONNECT_TIMEOUT_SECONDS` | Database（connect） | finite float | `5.0` | >0 | no | APPLICATION_SCOPE | yes | internal config | 不可达映射为 typed `DATABASE_UNAVAILABLE` | `5.0` |
+| `LOCAL_AGENT_DB_STATEMENT_TIMEOUT_MS` | Database（per-connection） | int | `15000` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 超时映射为 typed `DATABASE_STATEMENT_TIMEOUT` 并回滚事务 | `15000` |
+| `LOCAL_AGENT_DB_LOCK_TIMEOUT_MS` | Database（per-connection） | int | `5000` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 超时映射为 typed `DATABASE_LOCK_TIMEOUT` | `5000` |
+| `LOCAL_AGENT_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | Database（per-connection） | int | `10000` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 空闲事务被终止并映射为 typed timeout | `10000` |
 | `LOCAL_AGENT_OBSERVABILITY_QUEUE_CAPACITY` | dispatcher | int | `256` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed；overflow drops/rejects diagnostically | `256` |
 | `LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS` | Settings | int | `5` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | **DEPRECATED**；严格解析但无行为接线，显式配置产生安全 warning；replacement 为 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS` | `5` |
 | `RUNTIME_DISCONNECT_GRACE_SECONDS` | HTTP disconnect cleanup | finite float | `0.75` | ≥0 | no | APPLICATION_SCOPE | yes | internal config | invalid value fails load | `0.75` |
@@ -151,11 +156,11 @@ Model routing/retry/fallback 属于 Runtime policy；HTTP transport、本地模�
 
 ## Journal / Snapshot
 
-Journal 在生产 lifespan 中固定装配 `SQLiteRunEventJournal`，schema v2、reader v1/v2，append-only 且损坏 fail closed；不得手工编辑 SQLite 记录。Snapshot 默认关闭，显式 opt-in 后装配 `SQLiteSnapshotStore`，schema v1 且 digest 严格校验；损坏、未知版本或部分持久化均 fail closed，不自动重存、不自动恢复。
+Journal 在生产 lifespan 中固定装配 `PostgresRunEventJournal`，由 Alembic canonical schema 和 typed digest 校验拥有 append-only 事实；读取损坏、未知版本或约束冲突均 fail closed。Snapshot 默认关闭，显式 opt-in 后装配 `PostgresSnapshotStore`，schema/digest 严格校验；不自动重存、不自动恢复。Memory、Journal、Snapshot、Checkpoint 均使用同一 application-scope PostgreSQL `Database` engine/pool/session factory；生产路径不再读取或构造 SQLite Memory。
 
 ## Observability / Trace
 
-Observability 使用有界进程内队列、两个 SQLite consumer checkpoint store 和 best-effort projector；Health 为 `HEALTHY/DEGRADED`，记录 dropped/logger/metrics/worker/duplicate/record/flush failures 与 last safe code。Trace 当前是进程内 `InMemorySpanRecorder`，记录 active/completed/dropped 与 start/end/flush failures。两者故障不改变业务权威结果。禁止 Prompt、run id、路径、原始 Tool 名等高基数或敏感 label；Tool label 仅由 allowlist 开放。当前不等于已接 Prometheus/Grafana。
+Observability 使用有界进程内队列、两个 PostgreSQL consumer checkpoint store 和 best-effort projector；Health 为 `HEALTHY/DEGRADED`，记录 dropped/logger/metrics/worker/duplicate/record/flush failures 与 last safe code。Trace 当前是进程内 `InMemorySpanRecorder`，记录 active/completed/dropped 与 start/end/flush failures。两者故障不改变业务权威结果。禁止 Prompt、run id、路径、原始 Tool 名等高基数或敏感 label；Tool label 仅由 allowlist 开放。当前不等于已接 Prometheus/Grafana。
 
 ## Shutdown
 

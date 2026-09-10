@@ -17,13 +17,13 @@ Checklist 是有证据引用的 code-level gate，不替代生产容量、外部
 - [ ] Application services/lifespan：`tests/test_runtime_lifespan.py`、`tests/test_server_compatibility_handles.py`。
 - [ ] Admission=`ACCEPTING`：`tests/test_application_runtime_services.py`。
 - [ ] Default Runtime=`COORDINATED`：RC-01、`tests/test_default_runtime_entry.py`。
-- [ ] Journal/Observability/Trace health：`tests/test_event_journal.py`、`test_observability_integration.py`、`test_trace_integration.py`。
+- [ ] Journal/Observability/Trace health：`tests/test_stage6_wp1_postgres_runtime_stores.py`、`test_observability_integration.py`、`test_trace_integration.py`。
 - [ ] Offline safe smoke：RC-01；不访问生产外部服务。
 
 ## Runtime
 
 - [ ] Registry/Budget/Worker owner：`tests/test_runtime_invariants.py`、RC-06/11/12/18。
-- [ ] Event sequence/terminal：RC-01/09/10/20、`tests/test_event_journal.py`。
+- [ ] Event sequence/terminal：RC-01/09/10/20、`tests/test_stage6_wp1_postgres_runtime_stores.py`。
 - [ ] Disconnect watcher/producer/channel：RC-13、`tests/test_stream_cancellation.py`。
 - [ ] Sensitive output allowlists：`tests/test_runtime_security_boundary.py`、`tests/test_snapshot_security.py`、`tests/test_shutdown_report_truthfulness.py`。
 
@@ -32,7 +32,7 @@ Checklist 是有证据引用的 code-level gate，不替代生产容量、外部
 - [ ] Run/worker drain、flush、close order：RC-17、`tests/test_graceful_shutdown.py`。
 - [ ] Model safety/deferred truth：RC-18、`tests/test_shutdown_report_truthfulness.py`。
 - [ ] `fully_closed`、failure/deferred/unknown：`test_shutdown_top_level_semantics_distinguish_orchestration_and_closure`。
-- [ ] Reentry：`tests/test_shutdown_cancellation_reentry.py`；不要对 UNKNOWN 自动 double close。
+- [ ] Reentry：`tests/test_graceful_shutdown.py`；不要对 UNKNOWN 自动 double close。
 
 ## Rollback
 

@@ -642,6 +642,13 @@ class RunCoordinator:
         )
         memory_writer: RunFinalMemoryWriter | None = None
         if self._planning_request is not None:
+            router_memory = getattr(self._multi_agent_driver._router, "memory_manager", None)
+            database = getattr(router_memory, "database", None)
+            statement_timeout_ms = (
+                database.deadline_statement_timeout_ms(self.run_context.remaining_seconds())
+                if database is not None
+                else None
+            )
             memory_writer = RunFinalMemoryWriter(
                 self._multi_agent_driver._router,
                 entry_agent_id=self._planning_request.selected_agent_id,
@@ -653,27 +660,23 @@ class RunCoordinator:
                 run_id=self.run_context.run_id,
                 span_recorder=self.span_recorder,
                 metrics_recorder=self._metrics_recorder,
+                statement_timeout_ms=statement_timeout_ms,
             )
         # WP2: run-scoped post-delivery Semantic Formation component，与 final
-        # writer 并列注入；只在 persist 且真实 Memory（含 v2 db_path）可用时
-        # 构造。db_path 缺失时保持 Formation 未接入，不伪造持久化。
+        # writer 并列注入；持久化 Owner 来自 application-scoped PG stores。
         semantic_formation: SemanticMemoryFormation | None = None
         if memory_writer is not None and self._persist:
             router = self._multi_agent_driver._router
             memory_manager = getattr(router, "memory_manager", None)
-            db_path = (
-                getattr(memory_manager, "db_path", None)
-                if memory_manager is not None
-                else None
-            )
-            if isinstance(db_path, str) and db_path.strip():
+            memory_store = getattr(memory_manager, "advanced_store", None)
+            if memory_store is not None:
                 semantic_formation = SemanticMemoryFormation(
                     entry_agent_id=self._planning_request.selected_agent_id,
                     requester=MemoryAccessPrincipal(
                         self._planning_request.selected_agent_id
                     ),
                     user_request=self._planning_request.user_request,
-                    memory_store=AdvancedMemoryStore(db_path),
+                    memory_store=memory_store,
                     extraction_model=UnifiedFormationExtractionAdapter(
                         router,
                         run_context=self.run_context,
@@ -779,8 +782,7 @@ class RunCoordinator:
     def _build_memory_retrieval_service(self) -> MemoryRetrievalService:
         """构造 run-scoped MemoryRetrievalService（RETRIEVAL/RANKING Owner）。
 
-        PERSISTENCE_OWNER 仍是 AdvancedMemoryStore；db_path 缺失时抛 typed
-        UNAVAILABLE，由 best-effort 策略转为空 bundle，不伪造持久化。
+        PERSISTENCE_OWNER 是 application-scoped PostgreSQL Advanced Memory store。
         """
         router = (
             getattr(self._multi_agent_driver, "_router", None)
@@ -788,29 +790,33 @@ class RunCoordinator:
             else None
         )
         memory_manager = getattr(router, "memory_manager", None)
-        db_path = getattr(memory_manager, "db_path", None)
-        if not isinstance(db_path, str) or not db_path.strip():
+        store = getattr(memory_manager, "advanced_store", None)
+        if store is None:
             raise MemoryRetrievalError(
                 MemoryRetrievalErrorCode.UNAVAILABLE,
                 "Long-term Memory authority 不可用",
             )
-        return MemoryRetrievalService(AdvancedMemoryStore(db_path))
+        return MemoryRetrievalService(store)
 
     def _build_project_memory_service(self) -> ProjectSemanticMemoryService:
         router = getattr(self._multi_agent_driver, "_router", None) if self._multi_agent_driver is not None else None
-        db_path = getattr(getattr(router, "memory_manager", None), "db_path", None)
-        if not isinstance(db_path, str) or not db_path.strip():
+        memory_manager = getattr(router, "memory_manager", None)
+        project_store = getattr(memory_manager, "project_store", None)
+        private_store = getattr(memory_manager, "advanced_store", None)
+        if project_store is None or private_store is None:
             raise MemoryRetrievalError(MemoryRetrievalErrorCode.UNAVAILABLE, "Project Memory authority 不可用")
-        return ProjectSemanticMemoryService(ProjectSemanticMemoryStore(db_path), AdvancedMemoryStore(db_path))
+        return ProjectSemanticMemoryService(project_store, private_store)
 
-    def _retrieve_project_memory_context(self, bundle: MemoryContextBundle, entry_agent_id: str) -> MemoryContextBundle:
+    async def _retrieve_project_memory_context(self, bundle: MemoryContextBundle, entry_agent_id: str) -> MemoryContextBundle:
         """PROJECT read 独立于 PRIVATE read；授权失败前绝不访问 Project Store。"""
         project = self.run_context.project_identity
         grants = self.run_context.project_grants
         if project is None:
             return bundle
         grant = next((item for item in grants if item.agent_id == entry_agent_id), None)
-        records, authorization = self._build_project_memory_service().read(
+        service = self._build_project_memory_service()
+        records, authorization = await asyncio.to_thread(
+            service.read,
             requester=MemoryAccessPrincipal(entry_agent_id), project=project, grant=grant,
         )
         if not authorization.allowed:
@@ -828,10 +834,63 @@ class RunCoordinator:
         return replace(bundle, project_records=projected, project_candidate_count=len(records), project_selected_count=len(projected))
 
     def _retrieve_memory_context(self) -> None:
+        """同步测试/兼容入口；生产异步路径使用 ``_retrieve_memory_context_async``。"""
+        if self._memory_context_bundle is not None or self._planning_request is None:
+            return
+        entry_agent_id = self._planning_request.selected_agent_id
+        started = time.monotonic()
+        try:
+            self.run_context.raise_if_inactive()
+            service = self._memory_retrieval_service or self._build_memory_retrieval_service()
+            bundle = service.retrieve(
+                requester=MemoryAccessPrincipal(entry_agent_id),
+                target_owner_agent_id=entry_agent_id,
+                memory_scope=MEMORY_DIRECT_SCOPE,
+                query=self._planning_request.user_request,
+            )
+            if self.run_context.project_identity is not None:
+                project_service = self._build_project_memory_service()
+                grant = next(
+                    (item for item in self.run_context.project_grants if item.agent_id == entry_agent_id),
+                    None,
+                )
+                records, authorization = project_service.read(
+                    requester=MemoryAccessPrincipal(entry_agent_id),
+                    project=self.run_context.project_identity,
+                    grant=grant,
+                )
+                if authorization.allowed:
+                    projected = tuple(
+                        MemoryContextRecord(
+                            provenance=MemoryProvenance(record.memory_id, "PROJECT_SEMANTIC", record.memory_id),
+                            source_type=ContextSourceType.PROJECT_MEMORY_RETRIEVAL,
+                            content=record.canonical_text,
+                            created_at=datetime.fromisoformat(record.created_at),
+                            priority=695,
+                        )
+                        for record in records
+                    )
+                    bundle = replace(bundle, project_records=projected, project_candidate_count=len(records), project_selected_count=len(projected))
+            self.run_context.raise_if_inactive()
+            self._memory_context_bundle = bundle
+            observe_episodic_retrieval(run_id=self.run_context.run_id, bundle=bundle)
+            self._memory_retrieval_observation = _MemoryRetrievalObservation(
+                bundle=bundle, status="SUCCEEDED", safe_error_code=None,
+                duration_ms=max(0, int((time.monotonic() - started) * 1000)),
+                context_record_count=0,
+            )
+        except (RunCancelledError, RunDeadlineExceededError, BudgetExceededError):
+            raise
+        except MemoryRetrievalError as exc:
+            self._record_memory_retrieval_failure(entry_agent_id, exc.error_code, started)
+        except Exception:
+            self._record_memory_retrieval_failure(entry_agent_id, MemoryRetrievalErrorCode.FAILED, started)
+
+    async def _retrieve_memory_context_async(self) -> None:
         """单次 canonical retrieval：entry agent + DIRECT scope + original query。
 
         RETRIEVAL_FAILURE_POLICY =
-        BEST_EFFORT_EMPTY_BUNDLE_NO_STALE_FALLBACK：SQLite unavailable /
+        BEST_EFFORT_EMPTY_BUNDLE_NO_STALE_FALLBACK：PostgreSQL unavailable /
         malformed rows / ranking exception / bundle construction failure 均转
         为 safe observation + 空 bundle，Run 继续；Cancellation / run deadline
         / budget terminal signal 按既有 contract 传播，不被吞掉。
@@ -848,13 +907,14 @@ class RunCoordinator:
             service = self._memory_retrieval_service
             if service is None:
                 service = self._build_memory_retrieval_service()
-            bundle = service.retrieve(
+            bundle = await asyncio.to_thread(
+                service.retrieve,
                 requester=MemoryAccessPrincipal(entry_agent_id),
                 target_owner_agent_id=entry_agent_id,
                 memory_scope=MEMORY_DIRECT_SCOPE,
                 query=self._planning_request.user_request,
             )
-            bundle = self._retrieve_project_memory_context(bundle, entry_agent_id)
+            bundle = await self._retrieve_project_memory_context(bundle, entry_agent_id)
             self.run_context.raise_if_inactive()
             self._memory_context_bundle = bundle
             # WP6-E isolated evaluation seam: observation-only projection of the
@@ -1000,7 +1060,7 @@ class RunCoordinator:
             raise RunDeadlineExceededError("run deadline exceeded")
         # WP4-B canonical retrieval hook：run scope 已创建、original query 与
         # entry agent 已冻结，且在 PlanResolver.resolve() 之前执行。
-        self._retrieve_memory_context()
+        await self._retrieve_memory_context_async()
         planning_started = time.monotonic()
         injection_reports: list = []
         try:
@@ -1943,8 +2003,8 @@ class RunCoordinator:
         try:
             router = self._multi_agent_driver._router
             memory_manager = getattr(router, "memory_manager", None)
-            db_path = getattr(memory_manager, "db_path", None)
-            if not isinstance(db_path, str) or not db_path.strip():
+            memory_store = getattr(memory_manager, "advanced_store", None)
+            if memory_store is None:
                 return
             attempt = self._output_gate.last_attempt if self._output_gate else None
             delivery_status = (
@@ -1967,7 +2027,7 @@ class RunCoordinator:
             if observer is not None:
                 observer.on_evidence(source)
             result = await EpisodicMemoryFormation(
-                AdvancedMemoryStore(db_path),
+                memory_store,
                 self.event_emitter,
                 requester=MemoryAccessPrincipal(
                     self._planning_request.selected_agent_id
@@ -1988,8 +2048,8 @@ class RunCoordinator:
         if not (self._dynamic and self._persist and self.plan and self._planning_request and self._multi_agent_driver and self._invocation_bindings):
             return
         router = self._multi_agent_driver._router
-        db_path = getattr(getattr(router, "memory_manager", None), "db_path", None)
-        if not isinstance(db_path, str) or not db_path.strip():
+        memory_store = getattr(getattr(router, "memory_manager", None), "advanced_store", None)
+        if memory_store is None:
             return
         entry_agent_id = self._planning_request.selected_agent_id
         for step in self.plan.steps:
@@ -2009,7 +2069,7 @@ class RunCoordinator:
                 producer_agent_id = self._step_result_store.committed_producer_agent_id(step.step_id) if self._step_result_store else None
                 if producer_agent_id != step.preferred_agent:
                     continue
-                await SpecialistEpisodicMemoryFormation(AdvancedMemoryStore(db_path), self.event_emitter).run_formation(
+                await SpecialistEpisodicMemoryFormation(memory_store, self.event_emitter).run_formation(
                     SpecialistEpisodeEvidenceInput(
                         run_id=self.run_context.run_id, step_id=step.step_id,
                         specialist_agent_id=step.preferred_agent, memory_scope=MEMORY_DIRECT_SCOPE,

@@ -672,9 +672,10 @@ class ChatService:
         finally:
             await events.aclose()
 
-    def get_history(self, agent_id: str, limit: int, offset: int) -> list[dict]:
+    async def get_history(self, agent_id: str, limit: int, offset: int) -> list[dict]:
         """返回按显示顺序排列的一页历史消息。"""
-        records = self.router.memory_manager.get_chat_history(
+        records = await self._memory_call(
+            "get_chat_history",
             agent_id=agent_id,
             limit=limit,
             offset=offset,
@@ -682,35 +683,47 @@ class ChatService:
         )
         return list(reversed(records))
 
-    def search_memory(self, keyword: str) -> list[dict]:
+    async def search_memory(self, keyword: str) -> list[dict]:
         """搜索持久化消息。"""
-        return self.router.memory_manager.search_messages(
+        return await self._memory_call(
+            "search_messages",
             keyword,
             memory_scope=self.router.DIRECT_MEMORY_SCOPE,
         )
 
-    def get_all_memory(self) -> dict[str, list[dict[str, Any]]]:
+    async def get_all_memory(self) -> dict[str, list[dict[str, Any]]]:
         """返回记忆管理界面使用的完整记忆快照。"""
         return {
-            "messages": self.router.memory_manager.get_all_messages(),
-            "summaries": self.router.memory_manager.get_all_summaries(),
+            "messages": await self._memory_call("get_all_messages"),
+            "summaries": await self._memory_call("get_all_summaries"),
         }
 
-    def delete_memory(
+    async def delete_memory(
         self,
         message_ids: Optional[list[int]] = None,
         delete_all: bool = False,
     ) -> dict[str, Any]:
         """删除指定消息或清空全部记忆。"""
         if delete_all:
-            self.router.memory_manager.clear_all_memory()
+            await self._memory_call("clear_all_memory")
             return {
                 "status": "success",
                 "affected_agent_ids": list(self.router.agents_config.keys()),
                 "refresh_agent_ids": list(self.router.agents_config.keys()),
                 "delete_all": True,
             }
-        result = self.router.memory_manager.delete_messages(message_ids or [])
+        result = await self._memory_call("delete_messages", message_ids or [])
         result["status"] = "success"
         result["delete_all"] = False
         return result
+
+    async def _memory_call(self, method_name: str, *args, **kwargs):
+        """调用应用级异步 PG store；仅为显式测试装配兼容同步 fake。"""
+        manager = self.router.memory_manager
+        async_store = getattr(manager, "async_store", None)
+        owner = async_store if async_store is not None else manager
+        method = getattr(owner, method_name)
+        result = method(*args, **kwargs)
+        if hasattr(result, "__await__"):
+            return await result
+        return await asyncio.to_thread(lambda: result)

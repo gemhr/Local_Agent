@@ -12,7 +12,7 @@ def test_release_checklist_has_all_phases_and_real_test_references() -> None:
         for heading in ("## Pre-release", "## Startup", "## Runtime", "## Shutdown", "## Rollback")
     )
     referenced_files = set(re.findall(r"`(tests/[^`:]+\.py)", text))
-    assert len(referenced_files) >= 12
+    assert len(referenced_files) >= 10
     assert all(Path(file_name).is_file() for file_name in referenced_files)
     assert all(f"RC-{index:02d}" in Path("docs/runtime/runtime_rc_scenario_matrix.md").read_text(encoding="utf-8") for index in range(1, 21))
 

@@ -25,6 +25,9 @@ dependencies = [
     "uvicorn>=0.35.0",
     "xlrd>=2.0.1",
     "pycurl>=7.47.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
 ]
 
 [dependency-groups]

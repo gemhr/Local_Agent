@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import server
+from core.advanced_memory import AdvancedMemoryStore
 from core.agent_router import AgentRouter
 from core.chat_service import ChatService
 from core.memory_manager import MemoryManager
@@ -77,6 +78,9 @@ async def test_api_to_factory_to_output_delta_to_terminal_happy_path(monkeypatch
             model,
             MemoryManager(str(Path(directory) / "memory.db")),
             orchestration_enabled=False,
+        )
+        router.memory_manager.advanced_store = AdvancedMemoryStore(
+            str(Path(directory) / "memory.db")
         )
         registry = RunRegistry()
         service = make_coordinated_chat_service(

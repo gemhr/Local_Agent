@@ -73,11 +73,10 @@ def test_snapshot_production_assembly_is_fail_fast_and_independently_configured(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("LOCAL_AGENT_SNAPSHOT_ENABLED", raising=False)
-    monkeypatch.delenv("LOCAL_AGENT_SNAPSHOT_DB_PATH", raising=False)
     loaded = server.Settings.load()
     source = inspect.getsource(server.lifespan)
 
     assert loaded.snapshot_store_enabled is False
-    assert Path(loaded.snapshot_store_db_path).name == "runtime_snapshots.db"
-    assert "SQLiteSnapshotStore(settings.snapshot_store_db_path)" in source
+    assert "PostgresSnapshotStore(persistence_database)" in source
+    assert "SQLiteSnapshotStore" not in source
     assert "InMemorySnapshotStore" not in source

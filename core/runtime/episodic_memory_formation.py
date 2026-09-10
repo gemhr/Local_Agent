@@ -7,6 +7,7 @@ terminal, invokes a model, reads raw journal content, or changes delivery.
 from __future__ import annotations
 
 import re
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -54,6 +55,13 @@ class LessonStatus(str, Enum):
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
     ERROR = "ERROR"
+
+async def _persist_episode(store: AdvancedMemoryStore, record: EpisodicMemoryRecord):
+    """在异步 formation 中安全调用同步 bridge 或原生异步 store。"""
+    persisted = await asyncio.to_thread(store.create_or_get_episode, record)
+    if hasattr(persisted, "__await__"):
+        persisted = await persisted
+    return persisted
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,7 +202,7 @@ class EpisodicMemoryFormation:
             if record is None:
                 result = EpisodicFormationResult(source.run_id, EpisodicFormationOutcome.SKIPPED, safe_reason="SKIPPED_INELIGIBLE")
             else:
-                persisted = self._store.create_or_get_episode(record)
+                persisted = await _persist_episode(self._store, record)
                 outcome = (
                     EpisodicFormationOutcome.REUSED
                     if persisted.memory_id != record.memory_id
@@ -278,7 +286,7 @@ class SpecialistEpisodicMemoryFormation:
                 ),
                 created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
             )
-            persisted = self._store.create_or_get_episode(record)
+            persisted = await _persist_episode(self._store, record)
             outcome = EpisodicFormationOutcome.REUSED if persisted.memory_id != record.memory_id else EpisodicFormationOutcome.CREATED
             result = EpisodicFormationResult(source.run_id, outcome, persisted.memory_id)
         except Exception:

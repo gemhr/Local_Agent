@@ -33,7 +33,8 @@ def test_every_documented_configuration_name_comes_from_real_settings() -> None:
     assert documented <= real
     assert {
         "CHAT_RUNTIME_MODE",
-        "LOCAL_AGENT_EVENT_JOURNAL_DB_PATH",
+        "LOCAL_AGENT_DATABASE_URL",
+        "LOCAL_AGENT_DB_POOL_SIZE",
         "LOCAL_AGENT_SNAPSHOT_ENABLED",
         "RUNTIME_SHUTDOWN_GRACE_SECONDS",
     } <= documented
@@ -50,7 +51,7 @@ def test_configuration_reference_freezes_runtime_and_fault_boundaries() -> None:
     assert "LOCAL_AGENT_REMOTE_TRUST_ENV" in text
     assert "LOCAL_AGENT_ENVIRONMENT_PROFILE" in text
     assert "SETTINGS_SECURITY_POLICY_ERROR" in text
-    assert "不得手工编辑 SQLite" in text
+    assert "生产路径不再读取或构造 SQLite Memory" in text
 
 
 def test_configuration_examples_contain_no_real_absolute_path_or_provider_url() -> None:

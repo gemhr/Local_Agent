@@ -9,7 +9,7 @@ raw results are never written. The completion pipeline calls this writer only
 after OutputGate reports DELIVERED.
 
 WP5 hardening:
-- ``write_delivered`` commits the user + assistant rows inside one SQLite
+- ``write_delivered`` commits the user + assistant rows inside one PostgreSQL
   transaction (``append_exchange_atomic``), so both succeed or neither does;
 - the writer is write-once per Run: a failed commit is never silently retried
   and a second call in the same Run is rejected (no duplicated user text);
@@ -94,6 +94,7 @@ class RunFinalMemoryWriter:
         run_id: str | None = None,
         span_recorder=None,
         metrics_recorder=None,
+        statement_timeout_ms: int | None = None,
     ) -> None:
         if not isinstance(entry_agent_id, str) or not entry_agent_id.strip():
             raise ValueError("entry_agent_id 不能为空")
@@ -116,6 +117,7 @@ class RunFinalMemoryWriter:
         self._run_id = run_id
         self._span_recorder = span_recorder
         self._metrics_recorder = metrics_recorder
+        self._statement_timeout_ms = statement_timeout_ms
         self._write_lock = threading.Lock()
         self._written = False
 
@@ -212,13 +214,15 @@ class RunFinalMemoryWriter:
             else "exchange-" + str(uuid4().hex)
         )
         try:
+            exchange_kwargs = {
+                "run_id": self._run_id,
+                "exchange_id": exchange_id,
+            }
+            if self._statement_timeout_ms is not None:
+                exchange_kwargs["statement_timeout_ms"] = self._statement_timeout_ms
             memory.append_exchange_atomic(
-                self._entry_agent_id,
-                scope,
-                self._user_request,
-                content,
-                run_id=self._run_id,
-                exchange_id=exchange_id,
+                self._entry_agent_id, scope, self._user_request, content,
+                **exchange_kwargs,
             )
             user_write_status = "WRITTEN"
             assistant_write_status = "WRITTEN"

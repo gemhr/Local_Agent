@@ -16,6 +16,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from sqlalchemy.exc import IntegrityError
+
+from core.persistence.database import Database
+from core.persistence.errors import PersistenceError
+from core.persistence.repositories import runtime as checkpoint_repository
 from core.persistence_migration import (
     PERSISTENCE_MIGRATION_FAILED,
     PERSISTENCE_PREFLIGHT_FAILED,
@@ -27,6 +32,7 @@ from core.persistence_migration import (
     open_read_only,
     sqlite_quick_check,
 )
+from core.runtime.awaitable_compat import resolve
 from core.runtime.event_journal import JournalRecord
 
 
@@ -83,17 +89,17 @@ class EventConsumptionCheckpoint:
 
 
 class EventConsumptionCheckpointStore(Protocol):
-    def get(
+    async def get(
         self, consumer_id: str, event_id: str
     ) -> EventConsumptionCheckpoint | None: ...
 
-    def last_sequence(self, consumer_id: str, run_id: str) -> int | None: ...
+    async def last_sequence(self, consumer_id: str, run_id: str) -> int | None: ...
 
-    def save(self, checkpoint: EventConsumptionCheckpoint) -> None: ...
+    async def save(self, checkpoint: EventConsumptionCheckpoint) -> None: ...
 
     def processing_lock(self, consumer_id: str, run_id: str) -> asyncio.Lock: ...
 
-    def close(self) -> None: ...
+    async def close(self) -> None: ...
 
 
 class _ProcessingLocks:
@@ -176,6 +182,150 @@ class InMemoryEventConsumptionCheckpointStore(_ProcessingLocks):
     def close(self) -> None:
         with self._lock:
             self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise EventConsumerError(
+                ConsumerErrorCode.CHECKPOINT_STORE_FAILED,
+                "Checkpoint Store 已关闭",
+            )
+
+
+class PostgresEventConsumptionCheckpointStore(_ProcessingLocks):
+    """PostgreSQL Canonical checkpoint store；不存储 Event Payload。
+
+    用途不变：仍然是 Runtime projection / local consumer 的**消费进度**，
+    不是 Kafka Consumer Offset Authority（Kafka offset 属于 WP5）。
+
+    保留语义：consumer identity、sequence progress、monotonic progression、
+    duplicate / stale update 处理。
+
+    并发实现：不再依赖 SQLite 的 autocommit INSERT + 捕获 IntegrityError，
+    而是用 ``(consumer_id, event_id)`` 主键 + ``(consumer_id, run_id,
+    sequence)`` 唯一约束，并在同一事务内先 SELECT 再 INSERT；唯一约束冲突
+    通过**独立事务**重读判定，因此 duplicate 与 conflict 都得到确定性结果。
+    """
+
+    def __init__(self, database: "Database") -> None:
+        super().__init__()
+        if not isinstance(database, Database):
+            raise TypeError("database must be a Database")
+        self._database = database
+        self._closed = False
+
+    async def get(
+        self, consumer_id: str, event_id: str
+    ) -> EventConsumptionCheckpoint | None:
+        _require_text(consumer_id, "consumer_id")
+        _require_text(event_id, "event_id")
+        self._ensure_open()
+        try:
+            async with self._database.session() as session:
+                row = await checkpoint_repository.select_checkpoint(
+                    session, consumer_id, event_id
+                )
+                return self._from_row(row) if row is not None else None
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            raise EventConsumerError(
+                ConsumerErrorCode.CHECKPOINT_STORE_FAILED,
+                "PostgreSQL Checkpoint Store 读取失败",
+            ) from exc
+
+    async def last_sequence(
+        self, consumer_id: str, run_id: str
+    ) -> int | None:
+        _require_text(consumer_id, "consumer_id")
+        _require_text(run_id, "run_id")
+        self._ensure_open()
+        try:
+            async with self._database.session() as session:
+                return await checkpoint_repository.select_last_checkpoint_sequence(
+                    session, consumer_id, run_id
+                )
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            raise EventConsumerError(
+                ConsumerErrorCode.CHECKPOINT_STORE_FAILED,
+                "PostgreSQL Checkpoint Store 读取失败",
+            ) from exc
+
+    async def save(self, checkpoint: EventConsumptionCheckpoint) -> None:
+        if not isinstance(checkpoint, EventConsumptionCheckpoint):
+            raise TypeError("checkpoint 必须是 EventConsumptionCheckpoint")
+        self._ensure_open()
+        try:
+            async with self._database.transaction() as session:
+                existing_row = await checkpoint_repository.select_checkpoint(
+                    session, checkpoint.consumer_id, checkpoint.event_id
+                )
+                if existing_row is not None:
+                    existing = self._from_row(existing_row)
+                    if (
+                        existing.run_id == checkpoint.run_id
+                        and existing.sequence == checkpoint.sequence
+                    ):
+                        # Duplicate：业务效果已持久化，不重写。
+                        return
+                    raise EventConsumerError(
+                        ConsumerErrorCode.CHECKPOINT_CONFLICT,
+                        "Consumer checkpoint 冲突",
+                    )
+                await checkpoint_repository.insert_checkpoint(
+                    session,
+                    consumer_id=checkpoint.consumer_id,
+                    event_id=checkpoint.event_id,
+                    run_id=checkpoint.run_id,
+                    sequence=checkpoint.sequence,
+                    processed_at=checkpoint.processed_at,
+                )
+        except EventConsumerError:
+            raise
+        except PersistenceError:
+            raise
+        except IntegrityError:
+            # 并发 duplicate：约束先于本次 SELECT 提交。用独立事务重读判定，
+            # stale（同 event 不同 sequence/run）仍然是 typed conflict。
+            existing = await self.get(
+                checkpoint.consumer_id, checkpoint.event_id
+            )
+            if (
+                existing is not None
+                and existing.run_id == checkpoint.run_id
+                and existing.sequence == checkpoint.sequence
+            ):
+                return
+            raise EventConsumerError(
+                ConsumerErrorCode.CHECKPOINT_CONFLICT,
+                "Consumer checkpoint 冲突",
+            ) from None
+        except Exception as exc:
+            raise EventConsumerError(
+                ConsumerErrorCode.CHECKPOINT_STORE_FAILED,
+                "PostgreSQL Checkpoint Store 写入失败",
+            ) from exc
+
+    async def close(self) -> None:
+        # Engine/Pool 的 Owner 是 application lifecycle，不是本 Store。
+        self._closed = True
+
+    @staticmethod
+    def _from_row(row: object) -> EventConsumptionCheckpoint:
+        processed_at = row.processed_at
+        if not isinstance(processed_at, datetime):
+            raise EventConsumerError(
+                ConsumerErrorCode.CHECKPOINT_STORE_FAILED,
+                "Checkpoint 记录结构损坏",
+            )
+        return EventConsumptionCheckpoint(
+            consumer_id=str(row.consumer_id),
+            event_id=str(row.event_id),
+            run_id=str(row.run_id),
+            sequence=int(row.sequence),
+            processed_at=processed_at,
+        )
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -369,8 +519,8 @@ class IdempotentEventConsumer:
             self.consumer_id, record.run_id
         )
         async with lock:
-            existing = self.checkpoint_store.get(
-                self.consumer_id, record.event_id
+            existing = await resolve(
+                self.checkpoint_store.get(self.consumer_id, record.event_id)
             )
             if existing is not None:
                 if (
@@ -382,8 +532,10 @@ class IdempotentEventConsumer:
                         "Duplicate Event 与既有 checkpoint 不一致",
                     )
                 return EventConsumptionStatus.DUPLICATE
-            last_sequence = self.checkpoint_store.last_sequence(
-                self.consumer_id, record.run_id
+            last_sequence = await resolve(
+                self.checkpoint_store.last_sequence(
+                    self.consumer_id, record.run_id
+                )
             )
             if last_sequence is not None and record.sequence <= last_sequence:
                 raise EventConsumerError(
@@ -393,13 +545,15 @@ class IdempotentEventConsumer:
             result = self.handler(record)
             if inspect.isawaitable(result):
                 await result
-            self.checkpoint_store.save(
-                EventConsumptionCheckpoint(
-                    consumer_id=self.consumer_id,
-                    event_id=record.event_id,
-                    run_id=record.run_id,
-                    sequence=record.sequence,
-                    processed_at=datetime.now(UTC),
+            await resolve(
+                self.checkpoint_store.save(
+                    EventConsumptionCheckpoint(
+                        consumer_id=self.consumer_id,
+                        event_id=record.event_id,
+                        run_id=record.run_id,
+                        sequence=record.sequence,
+                        processed_at=datetime.now(UTC),
+                    )
                 )
             )
             return EventConsumptionStatus.PROCESSED

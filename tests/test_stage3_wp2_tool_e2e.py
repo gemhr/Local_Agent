@@ -173,10 +173,6 @@ def _isolated_settings(tmp_path: Path):
         chat_runtime_mode=ChatRuntimeMode.COORDINATED,
         llm_backend="local",
         model_path=str(tmp_path / "missing-local-model"),
-        memory_db_path=str(tmp_path / "memory.db"),
-        event_journal_db_path=str(tmp_path / "journal.db"),
-        observability_checkpoint_db_path=str(tmp_path / "observability.db"),
-        snapshot_store_db_path=str(tmp_path / "snapshot.db"),
         snapshot_store_enabled=False,
         chroma_dir=str(tmp_path / "chroma"),
         embedding_model_path=str(tmp_path / "missing-embedding-model"),
@@ -260,8 +256,8 @@ async def test_default_coordinated_list_files_full_e2e(monkeypatch, tmp_path):
         harness = _AsgiHarness(query=query, run_id=run_id)
         await harness.run()
         start, _raw_chunks, controls, texts = harness.parsed_response()
-        journal = services.event_journal.read_after(run_id, 0, 1000)
-        history = service.router.memory_manager.get_chat_history(
+        journal = await services.event_journal.read_after(run_id, 0, 1000)
+        history = await service.router.memory_manager.async_store.get_chat_history(
             "core_router", limit=10, ascending=True, memory_scope="direct"
         )
 
@@ -403,7 +399,7 @@ async def test_default_coordinated_approval_required_full_e2e(monkeypatch, tmp_p
         harness = _AsgiHarness(query=query, run_id=run_id)
         await harness.run()
         start, _raw_chunks, controls, texts = harness.parsed_response()
-        journal = services.event_journal.read_after(run_id, 0, 1000)
+        journal = await services.event_journal.read_after(run_id, 0, 1000)
 
         _assert_http_response(start, run_id)
         assert texts == [_APPROVAL_TEXT]

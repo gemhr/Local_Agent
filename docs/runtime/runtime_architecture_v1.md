@@ -195,13 +195,13 @@ actual ToolGovernanceError / ResourceAuthorizationError
 
 能力状态为`PARTIALLY_SUPPORTED`：模型仍可能受恶意自然语言影响，System Prompt可能被复述/改写，RAG/Memory/Tool/Step data仍可能影响自然语言回答。无generic injection classifier、WAF、generic DLP、Human IAM、full Sandbox或HITL；无dedicated security-denial RuntimeEvent/Journal/Snapshot fact，Recovery不能重建runtime-internal typed denial。Command Injection与SSRF在当前Tool inventory中为`NOT_APPLICABLE_CURRENT_INVENTORY`。
 
-### 2.6 SQLite Statement Authority（Stage 3 WP3-D）
+### 2.6 PostgreSQL / SQLAlchemy Statement Authority（Stage 3 WP3-D / Stage 6 WP1）
 
-current LocalAgent production SQLite inventory 采用单向 authority：SQL structure owner 是 code，User、Model output、RAG、Tool result、Memory text 与 HTTP payload 只能经 DB-API parameter binding 成为 values，不得提供 statement、identifier、keyword 或 ordering authority。直接 SQLite owner 冻结为 `core/memory_manager.py`、`core/persistence_migration.py`、`core/runtime/event_journal_store.py`、`core/runtime/event_consumer.py` 与 `core/runtime/snapshot_store.py`；排序由 code-owned boolean 映射，动态 `IN` 仅生成 `?` placeholders，固定 module constants保持immutable code structure。
+current LocalAgent production PostgreSQL inventory 采用单向 authority：SQL structure owner 是 code，User、Model output、RAG、Tool result、Memory text 与 HTTP payload 只能经 SQLAlchemy bound parameters 成为 values，不得提供 statement、identifier、keyword 或 ordering authority。生产 SQL owner 位于 `core/persistence/`；排序由 code-owned mapping，动态集合使用绑定参数，固定 module constants 保持 immutable code structure。历史 SQLite 实现仅属于 LEGACY/OFFLINE/test seam，不在 application Composition。
 
 test-only AST Gate 对完整 production Python surface 做 owner discovery、receiver resolution 与 SQL sink classification；新增 owner、未知 receiver、动态 statement、`executescript`、未解析 helper 或 exception shape drift 均 fail closed。schema-metadata PRAGMA 只允许精确 startup/internal/read-only helper shape、固定 metadata identifier与`sqlite3.Error` fail-closed行为，不构成通用 identifier interpolation。Chroma internal persistence不是LocalAgent direct SQL owner。
 
-能力状态为`SUPPORTED`，但只覆盖 current LocalAgent production SQLite inventory。No generic SQL firewall/parser，No NL2SQL validator/feature，No SQL Tool；未来新增 Tool/NL2SQL/direct SQLite owner/数据库技术必须重新过 Gate。FTS query-language semantics 与 LIKE wildcard semantics 保持搜索语义；用户可见固定错误不代表 internal logs 已实现 generic DLP。本节不宣称 WP3-D Final Gate、WP3 aggregate 或 Stage 3 PASS。
+能力状态为`SUPPORTED`，但只覆盖 current LocalAgent production PostgreSQL/SQLAlchemy inventory。No generic SQL firewall/parser，No NL2SQL validator/feature，No SQL Tool；未来新增 Tool/NL2SQL/direct SQLite owner/数据库技术必须重新过 Gate。PostgreSQL FTS query-language semantics 与 LIKE wildcard semantics 保持搜索语义；用户可见固定错误不代表 internal logs 已实现 generic DLP。本节不宣称 WP3-D Final Gate、WP3 aggregate 或 Stage 3 PASS。
 
 ### 2.7 WP2 Tool Platform Integration Gate（offline deterministic E2E）
 
@@ -220,7 +220,7 @@ server.app（POST /api/chat）
 -> StepResultStore / StepResultCommitter
 -> OutputGate / RunFinalMemoryWriter
 -> committed exchange receipt / SemanticMemoryFormation
--> RuntimeEventChannel + SQLite Journal
+-> RuntimeEventChannel + PostgreSQL Journal
 -> ChatStreamCompatibilityAdapter
 -> user-visible text/plain TEXT
 ```
@@ -326,14 +326,14 @@ semantic user-chat forget（NOT_IMPLEMENTED / KNOWN_LIMITATION）。
 ### 2.8 Phase5 WP4-B Memory Retrieval, Ranking & Context Injection
 
 WP4-B 实现 Long-term Memory 的 deterministic lexical retrieval（v1 策略
-`SQLITE_BOUNDED_LEXICAL_NO_DERIVED_INDEX`：只读 SQLite authority，无 vector/FTS
-derived index、无 dual-write、无新依赖）。Owner 决策：
+`POSTGRES_BOUNDED_LEXICAL_V1`：只读 PostgreSQL authority，使用 PostgreSQL-native FTS，
+无 vector/独立 FTS derived index、无 dual-write、无新依赖）。Owner 决策：
 
 ```text
 RETRIEVAL_OWNER = RANKING_OWNER = MemoryRetrievalService（RUN_SCOPE policy component）
 
 WP6-D 在该唯一 Owner 内增加 typed Episodic pipeline：`EPISODIC` / `ACTIVE` 的
-exact agent + scope 窄读使用 `SQLITE_BOUNDED_LEXICAL_V1`，以 episode
+exact agent + scope 窄读使用 `POSTGRES_BOUNDED_LEXICAL_V1`，以 episode
 `canonical_text` 为唯一匹配源，独立执行 score → created_at DESC → memory_id ASC，
 top-K=3、1200 chars。Semantic pipeline 的 ranking、top-K、2000 chars 与
 `MEMORY_RETRIEVAL` source 不变；两类不做全局 score 比较。bundle 保持 semantic
@@ -577,10 +577,10 @@ KB degraded 语义：`knowledge_base_required=false` 且 KB 初始化/import 失
 
 | Store | Logical role | Physical unit | Classification | LocalAgent schema owner? | Rebuildable? |
 | --- | --- | --- | --- | --- | --- |
-| Memory | 业务对话、摘要、delivered-only exchange | `agent_memory.db` | DURABLE_APPLICATION_STATE | YES，`MemoryManager` | NO |
-| Runtime Event Journal | append-only Runtime 安全事实、sequence、terminal evidence | `runtime_event_journal.db` | DURABLE_APPLICATION_STATE | YES，`SQLiteRunEventJournal` + `JournalRecord` | NO |
-| Snapshot | opt-in 历史 `RunSnapshot` v1 | `runtime_snapshots.db`（仅 enabled） | DURABLE_APPLICATION_STATE_OPT_IN | YES，`SQLiteSnapshotStore` + Snapshot contract | NO（历史 snapshot） |
-| Observability Checkpoint | logger/metrics 幂等消费 offset | `runtime_observability_checkpoint.db` | REBUILDABLE_DERIVED_STATE | YES，`SQLiteEventConsumptionCheckpointStore` | YES（缺口可接受） |
+| Memory | 业务对话、摘要、delivered-only exchange | PostgreSQL `messages` / `conversation_summaries` / `message_exchanges` | DURABLE_APPLICATION_STATE | YES，Postgres Memory stores | NO |
+| Runtime Event Journal | append-only Runtime 安全事实、sequence、terminal evidence | PostgreSQL `runtime_event_journal` | DURABLE_APPLICATION_STATE | YES，`PostgresRunEventJournal` + `JournalRecord` | NO |
+| Snapshot | opt-in 历史 `RunSnapshot` v1 | PostgreSQL `runtime_snapshots`（仅 enabled） | DURABLE_APPLICATION_STATE_OPT_IN | YES，`PostgresSnapshotStore` + Snapshot contract | NO（历史 snapshot） |
+| Observability Checkpoint | logger/metrics 幂等消费 offset | PostgreSQL `event_consumption_checkpoints` | REBUILDABLE_DERIVED_STATE | YES，`PostgresEventConsumptionCheckpointStore` | YES（缺口可接受） |
 | Chroma collection | KB 派生向量索引 | `chroma_db/` | REBUILDABLE_DERIVED_STATE | Chroma internal = NO；LocalAgent collection/chunk contract = YES | YES（需 KB source + 匹配 embedding artifact） |
 | KB source | Chroma rebuild 的业务源 | `data/knowledge_base/` | SOURCE_DATA | 文件/loader contract 由 LocalAgent 管理 | 不应假设可从其他 Store 重建 |
 | GGUF / Embedding model | 生成/向量语义依赖 | `data/models/` | DEPLOYMENT_ARTIFACT | NO | 由已批准 artifact 重新部署 |
@@ -591,21 +591,21 @@ KB degraded 语义：`knowledge_base_required=false` 且 KB 初始化/import 失
 
 | Store | Version mechanism | Migration | Historical rewrite |
 | --- | --- | --- | --- |
-| Memory | `PRAGMA user_version=3`（SQLite physical marker；v3 在 v2 `long_term_memory` 上新增 Episodic partial indexes） | 显式 SCRIPT_ROLE：current-unversioned → 版本 3 adoption；v2 → additive Episodic indexes；v1（无 `long_term_memory`）→ current Long-term Memory structure；唯一 allowlisted pre-additive legacy → additive columns + backfill + tables/indexes/FTS/triggers + Long-term Memory | 不修改业务 row 正文；version 与 schema change 同事务原子提交 |
-| Journal | exact physical signature（无 DB-level version）；row v1/v2 | 显式 SCRIPT_ROLE：仅允许缺 nullable `span_id`/`parent_span_id` 的 legacy → 单事务 ADD 两列 + index | **FORBIDDEN**（不 UPDATE/DELETE/rewrite 历史 row、version、digest、sequence、terminal ordering） |
-| Snapshot | row/payload v1（`snapshot_schema_version=1`）；exact table shape | 无 migration | FORBIDDEN（v0 不存在；未知版本 fail closed；不写回） |
-| Checkpoint | exact table shape（无版本） | 显式 SCRIPT_ROLE：不兼容 → 单事务 drop/recreate derived table | 可丢弃整个 derived Store（历史 offset 丢弃，不改变业务 Authority） |
+| Memory | Alembic revision `19d1ccbe8526` + PostgreSQL table/schema contract | 显式 `uv run alembic upgrade head`；无自动 SQLite→PG 业务数据导入 | 不修改历史业务正文；migration transaction rollback |
+| Journal | Alembic revision `19d1ccbe8526` + row/payload contract | 显式 Alembic migration；startup 只读 readiness | **FORBIDDEN**（不 UPDATE/DELETE/rewrite 历史 row、version、digest、sequence、terminal ordering） |
+| Snapshot | row/payload v1（`snapshot_schema_version=1`）+ PostgreSQL schema | Alembic migration；Recovery validation-only | FORBIDDEN（未知版本 fail closed；不写回） |
+| Checkpoint | Alembic revision `19d1ccbe8526` + PostgreSQL table contract | Alembic migration；derived state 可按运维策略重建 | 可丢弃整个 derived Store（历史 offset 丢弃，不改变业务 Authority） |
 | Chroma | LocalAgent collection metadata marker（`localagent_collection_contract_version=1` + `chunk_schema_version=kb_chunk_schema_v2` + `embedding_compatibility_digest` + `embedding_dimension`） | marker validation + operator rebuild；不碰 Chroma internal SQLite | 不做 internal row migration |
 
-`record/payload schema version != SQLite physical schema version`。`journal_schema_version=2` 只说明 record digest/payload contract，不是 DB physical version；Memory 的 `PRAGMA user_version=3` 才是 physical marker。
+`record/payload schema version != Alembic database revision`。`journal_schema_version=2` 只说明 record digest/payload contract，不是 database migration revision；PostgreSQL schema truth 由 Alembic 管理。
 
 ### 11.3 Migration Boundary（frozen）
 
 ```text
 Migration Runner = Minimal Persistence Migration Coordinator（core/persistence_migration.py）
-Server startup   = automatic READ-ONLY preflight（PRAGMA quick_check + physical shape + 版本事实）
-Existing-data migration = explicit SCRIPT_ROLE command only（manage_persistence.py migrate --backup-confirmed）
-Backup           = manual stopped-server only（.db + 任何 -wal 为同一 unit；-shm 不要求）
+Server startup   = automatic READ-ONLY PostgreSQL schema readiness（reachable + required tables + Alembic head）
+Existing-data migration = explicit SCRIPT_ROLE command only（uv run alembic upgrade head）
+Backup           = manual stopped-server operational contract，PostgreSQL backup strategy 由 operator 管理
 Restore          = manual stopped-server set replacement + explicit full preflight
 Downgrade        = NOT_IMPLEMENTED（forward-only）
 Rollback after schema mutation = restore matching pre-migration backup（binary-only rollback NOT ASSUMED）
@@ -613,7 +613,7 @@ Rollback after schema mutation = restore matching pre-migration backup（binary-
 
 - Coordinator 只做 preflight orchestration、migration ordering、safe result aggregation、safe error/result model；
   不得成为 Memory/Journal/Checkpoint/Chroma schema owner。Store-specific SQL/transaction 保留在对应 Store module。
-- 每个支持 mutation 的 SQLite Store 使用独立单 Store transaction（`BEGIN IMMEDIATE → revalidate from-state → change → version marker（Memory）→ COMMIT`；失败 ROLLBACK）。
+- 每个支持 mutation 的 PostgreSQL Store 使用独立 AsyncSession / transaction（revalidate from-state → change → COMMIT；失败 ROLLBACK）。
 - 无 cross-store atomic transaction / distributed transaction / two-phase commit。多个 Store 部分 commit 后失败：overall FAIL + partial committed facts；rerun 从实际 facts 继续（idempotent / safely re-runnable，不宣称 exactly-once）。
 - Migration 是 forward-only：schema-changing migration 提交后 old binary compatibility NOT ASSUMED。无 reverse SQL / downgrade。
 - Server startup 绝不自动迁移已有数据；preflight 发现 MIGRATION_REQUIRED / UNSUPPORTED / FAILED → `never READY`。

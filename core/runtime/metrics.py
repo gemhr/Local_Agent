@@ -184,7 +184,7 @@ _LIFECYCLE_ERROR_CODES = frozenset(
     }
 )
 _MEMORY_RETRIEVAL_METHOD_VALUES = frozenset(
-    {"SQLITE_BOUNDED_LEXICAL_V1", "unknown"}
+    {"POSTGRES_BOUNDED_LEXICAL_V1", "unknown"}
 )
 _MEMORY_RETRIEVAL_STATUS_VALUES = frozenset(
     {"SUCCEEDED", "FAILED", "unknown"}

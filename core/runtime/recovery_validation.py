@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 from core.runtime.checkpoint_contract import CheckpointKind
 from core.runtime.cancellation import CancellationToken, RunCancelledError
 from core.runtime.event_journal import (
@@ -136,6 +138,80 @@ class RecoveryValidator:
                 snapshot_id=snapshot_id,
             )
         return self.assess_snapshot(
+            snapshot=snapshot,
+            current_plan=current_plan,
+            fault_controller=fault_controller,
+            cancellation_token=cancellation_token,
+        )
+
+    async def validate_async(
+        self,
+        *,
+        snapshot_id: str,
+        current_plan: Plan,
+        fault_controller: FaultInjectionController | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> RecoveryAssessment:
+        """Async entry point for the PostgreSQL Snapshot/Journal stores."""
+        return await self.assess_async(
+            snapshot_id=snapshot_id,
+            current_plan=current_plan,
+            fault_controller=fault_controller,
+            cancellation_token=cancellation_token,
+        )
+
+    async def assess_async(
+        self,
+        *,
+        snapshot_id: str,
+        current_plan: Plan,
+        fault_controller: FaultInjectionController | None = None,
+        cancellation_token: CancellationToken | None = None,
+    ) -> RecoveryAssessment:
+        """Load async evidence, then run the unchanged validation-only algorithm.
+
+        The materialized journal is a read-only validation view.  It contains no
+        store/session and cannot be used to replay or mutate an active Run.
+        """
+        if self.snapshot_store is None:
+            raise ValueError("snapshot_store is required when loading by ID")
+        try:
+            snapshot = self.snapshot_store.get(snapshot_id)
+            if inspect.isawaitable(snapshot):
+                snapshot = await snapshot
+        except SnapshotStoreError as exc:
+            if exc.error_code is SnapshotErrorCode.SNAPSHOT_SCHEMA_UNSUPPORTED:
+                return _failure(status=RecoveryStatus.INCOMPATIBLE_SCHEMA, reason=RecoveryReason.SNAPSHOT_SCHEMA_UNSUPPORTED, snapshot_id=snapshot_id)
+            if exc.error_code is SnapshotErrorCode.SNAPSHOT_CORRUPTED:
+                return _failure(status=RecoveryStatus.CORRUPTED, reason=RecoveryReason.SNAPSHOT_DIGEST_INVALID, snapshot_id=snapshot_id)
+            return _failure(status=RecoveryStatus.UNSUPPORTED, reason=RecoveryReason.SNAPSHOT_NOT_FOUND, snapshot_id=snapshot_id)
+        except (ValueError, TypeError):
+            return _failure(status=RecoveryStatus.CORRUPTED, reason=RecoveryReason.SNAPSHOT_INTERNAL_INCONSISTENCY, snapshot_id=snapshot_id)
+        if snapshot is None:
+            return _failure(status=RecoveryStatus.UNSUPPORTED, reason=RecoveryReason.SNAPSHOT_NOT_FOUND, snapshot_id=snapshot_id)
+        journal = self.journal
+        if inspect.iscoroutinefunction(getattr(journal, "last_sequence", None)):
+            try:
+                journal = await _materialize_async_journal(
+                    journal, snapshot.run_id, snapshot.last_journal_sequence
+                )
+            except JournalError as exc:
+                if exc.error_code is JournalErrorCode.JOURNAL_CORRUPTED:
+                    return _failure(
+                        status=RecoveryStatus.CORRUPTED,
+                        reason=RecoveryReason.JOURNAL_RECORD_CORRUPTED,
+                        snapshot_id=snapshot_id,
+                        run_id=snapshot.run_id,
+                        snapshot_sequence=snapshot.last_journal_sequence,
+                    )
+                return _failure(
+                    status=RecoveryStatus.JOURNAL_GAP_OR_CONFLICT,
+                    reason=RecoveryReason.JOURNAL_SEQUENCE_CONFLICT,
+                    snapshot_id=snapshot_id,
+                    run_id=snapshot.run_id,
+                    snapshot_sequence=snapshot.last_journal_sequence,
+                )
+        return RecoveryValidator(journal=journal).assess_snapshot(
             snapshot=snapshot,
             current_plan=current_plan,
             fault_controller=fault_controller,
@@ -555,6 +631,40 @@ class RecoveryValidator:
         if latest != expected_last:
             raise _JournalChanged()
         return tuple(records)
+
+
+class _MaterializedJournal:
+    """只读的 async journal evidence view used by validation."""
+
+    def __init__(self, records: tuple, last_sequences: dict[str, int]) -> None:
+        self._records = records
+        self._last_sequences = last_sequences
+
+    def last_sequence(self, run_id: str) -> int | None:
+        return self._last_sequences.get(run_id)
+
+    def read_after(self, run_id: str, after_sequence: int, limit: int) -> tuple:
+        return tuple(
+            record for record in self._records
+            if record.run_id == run_id and record.sequence > after_sequence
+        )[:limit]
+
+
+async def _materialize_async_journal(journal, run_id: str, expected_last: int):
+    records: list = []
+    cursor = 0
+    while cursor < expected_last:
+        page = await journal.read_after(run_id, cursor, MAX_READ_LIMIT)
+        page = tuple(record for record in page if record.sequence <= expected_last)
+        if not page:
+            break
+        records.extend(page)
+        next_cursor = page[-1].sequence
+        if next_cursor <= cursor:
+            break
+        cursor = next_cursor
+    latest = await journal.last_sequence(run_id)
+    return _MaterializedJournal(tuple(records), {run_id: int(latest or 0)})
 
 
 def assess_recovery(

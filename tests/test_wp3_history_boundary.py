@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from core.advanced_memory import AdvancedMemoryStore
 from core.agent_router import AgentRouter
 from core.memory_manager import MemoryManager
 from core.runtime import (
@@ -37,6 +38,7 @@ from core.runtime import (
     create_run_context,
 )
 from core.runtime.retrieval_contract import RetrievalBudgetUsage
+from core.runtime.project_memory import ProjectSemanticMemoryStore
 from tests._wp3_fixtures import delegated_json, direct_json
 from tests.test_step_result_security import (
     make_security_services,
@@ -107,6 +109,10 @@ def make_real_router(
     retrieval_service=None,
     db_manager=None,
 ) -> AgentRouter:
+    if not hasattr(memory, "advanced_store"):
+        memory.advanced_store = AdvancedMemoryStore(memory.db_path)
+    if not hasattr(memory, "project_store"):
+        memory.project_store = ProjectSemanticMemoryStore(memory.db_path)
     profile = ModelProfile(
         ModelProfileId.LOCAL_FAST,
         context_window=4096,

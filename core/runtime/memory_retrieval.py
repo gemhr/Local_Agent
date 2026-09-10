@@ -9,8 +9,8 @@ eligibility filtering、bounded deterministic lexical matching、deterministic
 ranking、top-K / char-budget selection，以及把 selected rows 投影为
 ``MemoryContextRecord``。
 
-v1 策略：``SQLITE_BOUNDED_LEXICAL_NO_DERIVED_INDEX``。没有 Memory vector
-index、没有 FTS business authority、没有 Knowledge RAG collection 复用、
+v1 策略：``POSTGRES_BOUNDED_LEXICAL_NO_DERIVED_INDEX``。没有 Memory vector
+index、没有独立 FTS business authority、没有 Knowledge RAG collection 复用、
 没有 dual-write、没有新依赖。失败策略：
 ``BEST_EFFORT_EMPTY_BUNDLE_NO_STALE_FALLBACK``（由调用方 RunCoordinator 执行；
 本组件抛 typed ``MemoryRetrievalError``）。
@@ -53,7 +53,7 @@ from core.runtime.memory_authorization import (
 #: 与 AgentRouter.DIRECT_MEMORY_SCOPE 一致的既有 scope 常量（不新建 identity）。
 MEMORY_DIRECT_SCOPE = "direct"
 
-RETRIEVAL_METHOD = "SQLITE_BOUNDED_LEXICAL_V1"
+RETRIEVAL_METHOD = "POSTGRES_BOUNDED_LEXICAL_V1"
 RANKING_METHOD = "DETERMINISTIC_LEXICAL_V1"
 MEMORY_RETRIEVAL_SCHEMA_VERSION = 1
 

@@ -187,7 +187,7 @@ from core.runtime.event_journal import (
 )
 from core.runtime.event_journal_store import (
     InMemoryRunEventJournal,
-    SQLiteRunEventJournal,
+    PostgresRunEventJournal,
 )
 from core.runtime.event_consumer import (
     ConsumerErrorCode,
@@ -197,6 +197,7 @@ from core.runtime.event_consumer import (
     EventConsumerError,
     IdempotentEventConsumer,
     InMemoryEventConsumptionCheckpointStore,
+    PostgresEventConsumptionCheckpointStore,
     SQLiteEventConsumptionCheckpointStore,
 )
 from core.runtime.stream_adapter import (
@@ -342,8 +343,9 @@ __all__ = [
     "safe_transport_error_chunk",
     "RuntimeEventType",
     "RunEventJournal",
+    "PostgresEventConsumptionCheckpointStore",
     "SQLiteEventConsumptionCheckpointStore",
-    "SQLiteRunEventJournal",
+    "PostgresRunEventJournal",
     "StepCompletedPayload",
     "StepEventEmitter",
     "StepStartedPayload",
@@ -866,6 +868,7 @@ from core.runtime.snapshot_serialization import (
 )
 from core.runtime.snapshot_store import (
     InMemorySnapshotStore,
+    PostgresSnapshotStore,
     SQLiteSnapshotStore,
     SnapshotErrorCode,
     SnapshotSaveStatus,
@@ -886,6 +889,7 @@ __all__ += [
     "SNAPSHOT_DIGEST_ALGORITHM",
     "SNAPSHOT_SCHEMA_VERSION",
     "STATE_SNAPSHOT_SCHEMA_VERSION",
+    "PostgresSnapshotStore",
     "SQLiteSnapshotStore",
     "SafeBudgetSnapshot",
     "SnapshotErrorCode",

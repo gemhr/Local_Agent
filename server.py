@@ -4,6 +4,7 @@
 
 from contextlib import asynccontextmanager
 import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -19,19 +20,23 @@ from core.agent_router import AgentRouter
 from core.application_metadata import create_application_metadata
 from core.chat_service import ChatRuntimeTransportError, ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine, ScriptedEvaluationLLMEngine
-from core.memory_manager import MemoryManager
 from core.request_payload import (
     REQUEST_PAYLOAD_POLICY,
     RequestBodyLimitMiddleware,
 )
-from core.persistence_migration import (
-    PERSISTENCE_PREFLIGHT_FAILED,
+from core.persistence import (
+    Database,
+    DatabaseConfig,
+    DatabaseErrorCode,
+    PostgresAdvancedMemoryStore,
+    PostgresAdvancedMemoryStoreBridge,
+    PostgresMemoryManager,
+    PostgresMemoryManagerBridge,
+    PostgresProjectSemanticMemoryStore,
+    PostgresProjectSemanticMemoryStoreBridge,
     PersistenceError,
-    PersistencePaths,
-    PreflightMode,
-    PreflightStatus,
-    preflight_blocks_startup,
-    run_persistence_preflight,
+    SyncPersistenceBridge,
+    check_schema_readiness,
 )
 from core.runtime import (
     ApplicationRuntimeServices,
@@ -57,9 +62,9 @@ from core.runtime import (
     RuntimeInitializationStack,
     RunRegistry,
     RunCancelledError,
-    SQLiteEventConsumptionCheckpointStore,
-    SQLiteRunEventJournal,
-    SQLiteSnapshotStore,
+    PostgresEventConsumptionCheckpointStore,
+    PostgresRunEventJournal,
+    PostgresSnapshotStore,
     RuntimeLifecycleState,
     RuntimeAdmissionRejectedError,
     BlockingExecutorAdmissionTimeout,
@@ -448,59 +453,62 @@ async def lifespan(app: FastAPI):
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.STARTING
     initialization_stack = RuntimeInitializationStack()
 
-    # WP1-D：自动 SQLite persistence preflight（READ ONLY + quick_check）。
-    # 必须在任何持久 Store constructor 之前执行；migration-required /
-    # unsupported / failed 都阻止 READY。Preflight 不创建、不修改任何 DB 文件。
-    persistence_paths = PersistencePaths(
-        memory_db_path=settings.memory_db_path,
-        event_journal_db_path=settings.event_journal_db_path,
-        observability_checkpoint_db_path=settings.observability_checkpoint_db_path,
-        snapshot_store_db_path=(
-            settings.snapshot_store_db_path
-            if settings.snapshot_store_enabled
-            else None
-        ),
+    # Stage6-WP1：PostgreSQL Canonical Persistence 装配。
+    # API startup 不是 Migration Owner：lifespan 只做只读 schema readiness
+    # preflight（reachable + schema exists + alembic revision compatible），
+    # **绝不**执行 alembic upgrade。schema 未迁移时 startup 明确 fail。
+    database_config = DatabaseConfig.from_settings(settings)
+    persistence_database = await initialization_stack.create(
+        "persistence_database",
+        lambda: Database(database_config),
     )
     try:
-        persistence_preflight_results = run_persistence_preflight(
-            persistence_paths, mode=PreflightMode.STARTUP
-        )
+        schema_readiness = await check_schema_readiness(persistence_database)
     except PersistenceError as exc:
         logger.warning(
-            "Persistence preflight failed",
+            "Database readiness preflight failed",
             extra={
-                "safe_error_code": exc.error_code,
-                "component": "persistence_preflight",
+                "safe_error_code": exc.error_code.value,
+                "component": "database_readiness",
                 "phase": "initialization",
                 "status": "FAILED",
             },
         )
         await initialization_stack.fail(
-            RuntimeInitializationError("persistence_preflight")
+            RuntimeInitializationError("database_readiness")
         )
-    blocking_preflight = preflight_blocks_startup(persistence_preflight_results)
-    if blocking_preflight:
-        for result in blocking_preflight:
-            logger.warning(
-                "Persistence preflight blocked startup",
-                extra={
-                    "safe_error_code": (
-                        result.safe_error_code or PERSISTENCE_PREFLIGHT_FAILED
-                    ),
-                    "component": "persistence_preflight",
-                    "phase": "initialization",
-                    "status": result.status.value,
-                    "store_id": result.store_id.value,
-                },
-            )
+    if not schema_readiness.ready:
+        logger.warning(
+            "Database schema is not ready",
+            extra={
+                "safe_error_code": (
+                    schema_readiness.error_code.value
+                    if schema_readiness.error_code
+                    else DatabaseErrorCode.DATABASE_SCHEMA_NOT_READY.value
+                ),
+                "component": "database_readiness",
+                "phase": "initialization",
+                "status": "NOT_READY",
+            },
+        )
         await initialization_stack.fail(
-            RuntimeInitializationError("persistence_preflight")
+            RuntimeInitializationError("database_readiness")
         )
+    app.state.db_schema_revision = schema_readiness.alembic_revision
 
-    memory_manager = await initialization_stack.create(
-        "memory_manager",
-        lambda: MemoryManager(db_path=settings.memory_db_path),
+    persistence_memory = await initialization_stack.create(
+        "persistence_memory",
+        lambda: PostgresMemoryManager(persistence_database),
     )
+    persistence_bridge = await initialization_stack.create(
+        "persistence_bridge",
+        lambda: SyncPersistenceBridge(asyncio.get_running_loop()),
+    )
+    advanced_memory = PostgresAdvancedMemoryStore(persistence_database)
+    project_memory = PostgresProjectSemanticMemoryStore(persistence_database)
+    memory_manager = PostgresMemoryManagerBridge(persistence_memory, persistence_bridge)
+    memory_manager.advanced_store = PostgresAdvancedMemoryStoreBridge(advanced_memory, persistence_bridge)
+    memory_manager.project_store = PostgresProjectSemanticMemoryStoreBridge(project_memory, persistence_bridge)
     blocking_executor = await initialization_stack.create(
         "blocking_executor",
         lambda: BoundedBlockingExecutor(
@@ -1021,15 +1029,11 @@ async def lifespan(app: FastAPI):
     structured_logger = JsonStructuredRuntimeLogger()
     logger_checkpoints = await initialization_stack.create(
         "logger_checkpoint_store",
-        lambda: SQLiteEventConsumptionCheckpointStore(
-            settings.observability_checkpoint_db_path
-        ),
+        lambda: PostgresEventConsumptionCheckpointStore(persistence_database),
     )
     metrics_checkpoints = await initialization_stack.create(
         "metrics_checkpoint_store",
-        lambda: SQLiteEventConsumptionCheckpointStore(
-            settings.observability_checkpoint_db_path
-        ),
+        lambda: PostgresEventConsumptionCheckpointStore(persistence_database),
     )
     observability_dispatcher = await initialization_stack.create(
         "observability_dispatcher",
@@ -1045,15 +1049,15 @@ async def lifespan(app: FastAPI):
     )
     event_journal = await initialization_stack.create(
         "event_journal",
-        lambda: SQLiteRunEventJournal(
-            settings.event_journal_db_path,
+        lambda: PostgresRunEventJournal(
+            persistence_database,
             metrics_hook=infrastructure_metrics,
         ),
     )
     snapshot_store = (
         await initialization_stack.create(
             "snapshot_store",
-            lambda: SQLiteSnapshotStore(settings.snapshot_store_db_path),
+            lambda: PostgresSnapshotStore(persistence_database),
         )
         if settings.snapshot_store_enabled
         else None
@@ -2064,15 +2068,15 @@ async def runtime_evaluation_execute_v2_endpoint(payload: RuntimeExecuteRequest)
     return JSONResponse(content=content)
 
 
-def _evaluation_memory_db_path(service) -> str:
-    """Isolated evaluation needs the real Memory DB for fixture/replay only."""
+def _evaluation_memory_store(service):
+    """Return the application-scoped PostgreSQL Memory bridge for evaluation seams."""
     manager = getattr(getattr(service, "router", None), "memory_manager", None)
-    db_path = getattr(manager, "db_path", None)
-    if not isinstance(db_path, str) or not db_path.strip():
+    store = getattr(manager, "advanced_store", None)
+    if store is None:
         raise HTTPException(
-            status_code=422, detail="EPISODIC_EVALUATION_MEMORY_DB_UNAVAILABLE"
+            status_code=503, detail="EPISODIC_EVALUATION_MEMORY_UNAVAILABLE"
         )
-    return db_path
+    return store
 
 
 def _v4_safe_retrieval(bundle, *, injected_count: int) -> dict[str, object]:
@@ -2173,10 +2177,10 @@ async def runtime_evaluation_execute_v4_endpoint(payload: RuntimeEvaluationExecu
         project, grants = payload.evaluation_control.project_access()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    db_path = _evaluation_memory_db_path(service)
-    private_store = AdvancedMemoryStore(db_path)
+    private_store = _evaluation_memory_store(service)
+    manager = service.router.memory_manager
     project_service = ProjectSemanticMemoryService(
-        ProjectSemanticMemoryStore(db_path), private_store
+        manager.project_store, private_store
     )
     control = payload.evaluation_control
     requester = MemoryAccessPrincipal(control.requester_agent_id)
@@ -2362,6 +2366,7 @@ async def runtime_evaluation_execute_v3_endpoint(
         EpisodicEvaluationCapability.DETERMINISTIC_EPISODIC_SUCCESS_RUN
         in capabilities
     )
+    private_store = _evaluation_memory_store(service)
 
     # v3 always observes the canonical run finalization.  This is a private,
     # content-minimized observation only: NONE still enables no behavior control,
@@ -2376,12 +2381,10 @@ async def runtime_evaluation_execute_v3_endpoint(
 
     fixture_receipts: list[dict[str, object]] = []
     if has_fixture:
-        db_path = _evaluation_memory_db_path(service)
-        installer = EpisodicFixtureInstaller(AdvancedMemoryStore(db_path))
+        installer = EpisodicFixtureInstaller(private_store)
         assert control.fixture is not None
-        fixture_receipts.append(
-            installer.install(control.fixture).to_wire_dict()
-        )
+        receipt = await asyncio.to_thread(installer.install, control.fixture)
+        fixture_receipts.append(receipt.to_wire_dict())
 
     fault_controller = (
         deterministic_failed_run_controller() if has_failed_run else None
@@ -2415,8 +2418,7 @@ async def runtime_evaluation_execute_v3_endpoint(
     replay_receipts: list[dict[str, object]] = []
     if has_replay:
         assert retainer is not None
-        db_path = _evaluation_memory_db_path(service)
-        runner = EpisodicReplayRunner(AdvancedMemoryStore(db_path))
+        runner = EpisodicReplayRunner(private_store)
         try:
             receipt = await runner.replay(run_id=run_id, retainer=retainer)
             replay_receipts.append(receipt.to_wire_dict())
@@ -2648,7 +2650,10 @@ async def get_history_endpoint(
 ):
     """按页返回某个智能体的历史消息。"""
     service = require_service()
-    return {"messages": service.get_history(agent_id=agent_id, limit=limit, offset=offset)}
+    result = service.get_history(agent_id=agent_id, limit=limit, offset=offset)
+    if inspect.isawaitable(result):
+        result = await result
+    return {"messages": result}
 
 
 @app.get("/api/search")
@@ -2660,21 +2665,30 @@ async def search_endpoint(
 ):
     """根据关键词搜索持久化消息。"""
     service = require_service()
-    return {"results": service.search_memory(keyword)}
+    result = service.search_memory(keyword)
+    if inspect.isawaitable(result):
+        result = await result
+    return {"results": result}
 
 
 @app.get("/api/memory")
 async def get_all_memory_endpoint():
     """返回记忆管理弹窗使用的消息集合。"""
     service = require_service()
-    return service.get_all_memory()
+    result = service.get_all_memory()
+    if inspect.isawaitable(result):
+        result = await result
+    return result
 
 
 @app.delete("/api/memory")
 async def delete_memory_endpoint(request: DeleteMemoryRequest):
     """删除指定消息或清空全部记忆。"""
     service = require_service()
-    return service.delete_memory(message_ids=request.message_ids, delete_all=request.delete_all)
+    result = service.delete_memory(message_ids=request.message_ids, delete_all=request.delete_all)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
 
 
 if __name__ == "__main__":

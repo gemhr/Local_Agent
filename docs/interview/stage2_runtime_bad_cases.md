@@ -81,7 +81,7 @@
 - 风险：一次逻辑窗口被注入两次，计数和故障语义失真。
 - 根因：通用路径未排除 terminal 特殊路径。
 - 修复：按 event type 选择唯一 pre-append seam。
-- 回归：`tests/test_journal_fault_injection.py`。
+- 回归：`tests/test_stage6_wp1_postgres_runtime_stores.py`。
 - 设计原则：一个物理窗口只能有一个权威 fault seam。
 - 面试表达：我消除了 terminal 双重注入的歧义。
 - 真实性边界：真实发现；Fault audit 中修复。
@@ -93,7 +93,7 @@
 - 风险：repr/report 泄露正文并延长对象生命周期。
 - 根因：错误诊断直接携带 authority object。
 - 修复：只保存冻结的 payload-free publication evidence。
-- 回归：`tests/test_event_partial_publication.py`、`tests/test_journal_fault_injection.py`。
+- 回归：`tests/test_event_partial_publication.py`、`tests/test_stage6_wp1_postgres_runtime_stores.py`。
 - 设计原则：错误对象保存安全证据，不保存业务对象。
 - 面试表达：我用 allowlist evidence 替换异常里的完整 Event。
 - 真实性边界：真实发现；安全审计问题。
@@ -153,7 +153,7 @@
 - 风险：另一个 alias 仍关闭同一 identity。
 - 根因：安全 gate 按名称而非对象 identity。
 - 修复：共享资源按 identity 去重并统一应用 Model gate。
-- 回归：`tests/test_application_runtime_services.py`、`tests/test_shutdown_component_fault.py`。
+- 回归：`tests/test_application_runtime_services.py`、`tests/test_graceful_shutdown.py`。
 - 设计原则：资源所有权与关闭应按 identity，不按别名。
 - 面试表达：我防止了同一 client 通过别名绕过 worker safety gate。
 - 真实性边界：真实发现；资源审计问题。

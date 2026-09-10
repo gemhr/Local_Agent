@@ -317,6 +317,8 @@ def test_specialist_without_bundle_is_fail_closed_even_with_relevant_rows(
     db_path = str(tmp_path / "memory.db")
     memory_manager = MemoryManager(db_path=db_path)
     store = AdvancedMemoryStore(db_path)
+    memory_manager.advanced_store = store
+    memory_manager.project_store = ProjectSemanticMemoryStore(db_path)
     store.create(
         _make_store_record(
             memory_id="mem-code",
@@ -514,6 +516,8 @@ async def test_full_run_single_retrieval_with_planner_and_direct_entry_injection
     )
 
     model = _CapturingFakeModel()
+    memory_manager.advanced_store = store
+    memory_manager.project_store = ProjectSemanticMemoryStore(db_path)
     router = AgentRouter(
         llm_engine=model,
         memory_manager=memory_manager,
@@ -552,7 +556,7 @@ async def test_full_run_single_retrieval_with_planner_and_direct_entry_injection
     assert payload.context_record_count >= 1
     assert payload.planning_injected is True
     assert payload.direct_entry_supplied is True
-    assert payload.retrieval_method == "SQLITE_BOUNDED_LEXICAL_V1"
+    assert payload.retrieval_method == "POSTGRES_BOUNDED_LEXICAL_V1"
 
     # Planner model invocation 与 entry direct invocation 都包含 typed Memory section。
     planner_calls = [
@@ -588,6 +592,8 @@ async def test_canonical_project_memory_cross_run_read_and_grant_isolation(tmp_p
     """真实 coordinated path：trusted RunContext access 才能读 PROJECT memory。"""
     db_path = str(tmp_path / "memory.db")
     manager = MemoryManager(db_path=db_path)
+    manager.advanced_store = AdvancedMemoryStore(db_path)
+    manager.project_store = ProjectSemanticMemoryStore(db_path)
     project = ProjectSemanticMemoryService(ProjectSemanticMemoryStore(db_path), AdvancedMemoryStore(db_path))
     writer = MemoryAccessPrincipal("agent-a")
     writer_grant = ProjectMemoryGrant("project-p", "agent-a", frozenset({ProjectMemoryPermission.WRITE}))

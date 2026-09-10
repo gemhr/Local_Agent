@@ -142,10 +142,10 @@ $env:LOCAL_AGENT_WIKI_COOKIE="<secret-store-reference>"
 
 | 数据 | 默认路径 | 分类 | Schema/version | 说明 |
 | --- | --- | --- | --- | --- |
-| Memory DB | `data/database/agent_memory.db` | Durable State（required） | Memory SQLite `PRAGMA user_version=3`（v3 含 `long_term_memory` 与 Episodic partial indexes） | 业务 Memory（Conversation History + Advanced Long-term Memory 独立结构）；startup preflight 通过后才构造；初始化失败 fail fast |
-| Runtime Event Journal | `data/database/runtime_event_journal.db` | Durable State（required） | Journal exact physical signature（无 DB-level version）；row v1/v2 | append-only；损坏/追加失败 fail closed；legacy 缺 span 列需显式 migrate |
-| Observability checkpoint | `data/database/runtime_observability_checkpoint.db` | Rebuildable derived state（startup required） | Checkpoint exact table shape（无版本） | 不兼容时显式 recreate；backup optional |
-| Snapshot DB | `data/database/runtime_snapshots.db` | Durable State（opt-in） | Snapshot v1（`snapshot_schema_version=1`） | 仅 `LOCAL_AGENT_SNAPSHOT_ENABLED=true` 时装配；无 migration |
+| Memory DB | `LOCAL_AGENT_DATABASE_URL` 指向 PostgreSQL | Durable State（required） | Alembic canonical revision `19d1ccbe8526`（含 `messages`、`long_term_memory` 与 Episodic partial indexes） | 业务 Memory（Conversation History + Advanced Long-term Memory 独立结构）；startup readiness 通过后才构造；初始化失败 fail fast |
+| Runtime Event Journal | `LOCAL_AGENT_DATABASE_URL` 指向 PostgreSQL | Durable State（required） | Alembic canonical revision `19d1ccbe8526` | append-only；损坏/追加失败 fail closed；startup 只读 readiness，migration 由显式 Alembic 命令执行 |
+| Observability checkpoint | `LOCAL_AGENT_DATABASE_URL` 指向 PostgreSQL | Rebuildable derived state（startup required） | Alembic canonical revision `19d1ccbe8526` | 不兼容时 startup fail；checkpoint 为 derived state，backup optional |
+| Snapshot DB | `LOCAL_AGENT_DATABASE_URL` 指向 PostgreSQL | Durable State（opt-in） | Alembic canonical revision `19d1ccbe8526`（`snapshot_schema_version=1`） | 仅 `LOCAL_AGENT_SNAPSHOT_ENABLED=true` 时装配；startup 不自动 migration |
 | Chroma | `chroma_db/` | Rebuildable derived state（startup required 视 KB_REQUIRED） | LocalAgent collection marker（`localagent_collection_contract_version=1` + `chunk_schema_version=kb_chunk_schema_v2` + embedding digest/dimension） | 缺失时 allowlisted degradation（PRODUCTION 默认 required）；marker mismatch → REBUILD_REQUIRED |
 | Knowledge Base | `data/knowledge_base/` | SOURCE_DATA（MUST_BACKUP） | 文件/loader contract（chunk `schema_version=kb_chunk_schema_v2`） | 业务 KB source；Chroma rebuild 的唯一业务输入 |
 
@@ -181,16 +181,15 @@ Chroma internal schema migration → NOT_LOCAL_SCHEMA_OWNER（LocalAgent 不修�
 
 ### Server startup preflight（automatic，READ ONLY）
 
-每次 Server 启动、在任何持久 Store constructor 之前自动执行 SQLite preflight：
+每次 Server 启动、在任何持久 Store constructor 之前自动执行 PostgreSQL schema readiness：
 
 ```text
 Settings Parse / Semantic Validation → SERVER_ROLE Validation → lifecycle STARTING
-→ automatic SQLite persistence preflight（PRAGMA quick_check + physical shape + 版本事实；不创建/不修改任何 DB 文件）
+→ read-only PostgreSQL schema readiness（reachable + required tables + Alembic head；不执行 migration）
 → required Resource Construction → Chroma open + marker validation → 其余构造 → READY
 ```
 
-- Memory `MIGRATION_REQUIRED` / `UNSUPPORTED` / `FAILED`，或 Journal legacy `MIGRATION_REQUIRED`，
-  或 Checkpoint 不兼容，或 Snapshot（enabled）unsupported，或 `PRAGMA quick_check` 非 `ok`：
+- PostgreSQL 不可达、required table 缺失、Alembic revision 非 head，或 Snapshot（enabled）schema/digest 不兼容：
   startup fail，`never READY`，safe code `PERSISTENCE_*` 由 startup failure boundary 包装。
 - Chroma marker mismatch：`knowledge_base_required=true` → 阻止 READY；显式 `false` → `READY_DEGRADED`。
   Startup 绝不自动 clear / rebuild Chroma，绝不自动迁移已有数据。
@@ -276,13 +275,12 @@ Backup/restore 是 **manual stopped-server operational contract**，不是 autom
 
 ### MUST_BACKUP（correctness，必须来自同一次 Server-stopped backup epoch）
 
-1. Memory DB（`data/database/agent_memory.db` + 任何存在的 `-wal`）；
-2. Event Journal DB（`data/database/runtime_event_journal.db` + 任何存在的 `-wal`）；
-3. Snapshot DB（仅 enabled/存在时：`data/database/runtime_snapshots.db` + `-wal`）；
+1. PostgreSQL database（Memory、Journal、Snapshot、Checkpoint；由 operator 采用一致 backup epoch）；
+2. PostgreSQL backup metadata / known-good Alembic revision；
 4. KB source data（`data/knowledge_base/`）；
 5. 同一次 deployment 的 known-good environment configuration reference（不记录 secret 明文到报告/仓库）。
 
-Memory / Journal / Snapshot 必须来自同一 backup epoch；Journal 与 Snapshot 不得分别从两个不同时间点恢复后宣称 recovery evidence 一致。
+Memory / Journal / Snapshot 必须来自同一 PostgreSQL backup epoch；不得分别从两个不同时间点恢复后宣称 recovery evidence 一致。
 
 ### OPTIONAL_BACKUP
 
@@ -292,13 +290,12 @@ Memory / Journal / Snapshot 必须来自同一 backup epoch；Journal 与 Snapsh
 
 - Observability checkpoint：derived，可 recreate；不是 correctness backup requirement。
 
-### WAL Contract
+### Database backup contract
 
 ```text
-live raw copy                = unsupported（Server 运行中复制 .db 是非一致快照）
-stopped-server backup unit   = 主 .db + 任何存在的 -wal 一起复制
--shm                         = 可重建 coordination sidecar，不作为 correctness 必需文件
-backup 文件创建成功          != 备份可恢复；副本必须通过显式 full preflight 才算门禁通过
+live database copy           = unsupported（必须使用 PostgreSQL 一致性备份机制）
+backup unit                  = PostgreSQL database backup + matching migration/config metadata
+backup 文件创建成功          != 备份可恢复；副本必须通过显式 schema/readiness 与业务 smoke 验证
 ```
 
 ### Restore（manual）
@@ -324,7 +321,7 @@ Deployment Rollback 是**人工操作边界**，且必须区分 **code/artifact 
 ```text
 known-good code/artifact
 + known-good environment configuration
-+ persistent-data compatibility check（SQLite schema 版本兼容）
++ persistent-data compatibility check（PostgreSQL schema / Alembic revision 兼容）
 + smoke validation（新 identity 请求）
 ```
 

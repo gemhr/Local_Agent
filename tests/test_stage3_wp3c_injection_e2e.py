@@ -170,10 +170,6 @@ def _settings(tmp_path, mode: ChatRuntimeMode):
         chat_runtime_mode=mode,
         llm_backend="local",
         model_path=str(tmp_path / "missing-model"),
-        memory_db_path=str(tmp_path / "memory.db"),
-        event_journal_db_path=str(tmp_path / "journal.db"),
-        observability_checkpoint_db_path=str(tmp_path / "observability.db"),
-        snapshot_store_db_path=str(tmp_path / "snapshot.db"),
         snapshot_store_enabled=False,
         chroma_dir=str(tmp_path / "chroma"),
         embedding_model_path=str(tmp_path / "missing-embedding"),
@@ -203,8 +199,8 @@ async def test_coordinated_delegated_actual_approval_denial_dominates_full_http(
         harness = _AsgiHarness("core_router", "请委派专家执行复杂操作", run_id)
         await harness.run()
         start, controls, texts = harness.parsed()
-        journal = server.app.state.runtime_services.event_journal.read_after(run_id, 0, 1000)
-        history = service.router.memory_manager.get_chat_history(
+        journal = await server.app.state.runtime_services.event_journal.read_after(run_id, 0, 1000)
+        history = await service.router.memory_manager.async_store.get_chat_history(
             "core_router", limit=10, ascending=True, memory_scope="direct"
         )
 
@@ -257,7 +253,7 @@ async def test_explicit_legacy_actual_denial_stops_before_synthesis_and_persists
         harness = _AsgiHarness("core_router", "请委派代码专家执行复杂操作", run_id)
         await harness.run()
         start, _controls, texts = harness.parsed()
-        history = service.router.memory_manager.get_chat_history(
+        history = await service.router.memory_manager.async_store.get_chat_history(
             "core_router", limit=10, ascending=True, memory_scope="direct"
         )
 

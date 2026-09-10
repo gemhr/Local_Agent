@@ -12,6 +12,7 @@ import threading
 from typing import AsyncIterator, Protocol
 
 from core.runtime.cancellation import CancellationToken
+from core.runtime.awaitable_compat import resolve
 from core.runtime.event_journal import (
     JournalAppendStatus,
     JournalRecord,
@@ -223,9 +224,11 @@ class RuntimeEventChannel:
         self._journal = journal
         self._observability_dispatcher = observability_dispatcher
         self._fault_controller = fault_controller
-        self._sequence = (
-            journal.last_sequence(run_id) or 0 if journal is not None else 0
-        )
+        self._sequence = 0
+        # Stage6-WP1：Journal 是 async PostgreSQL。channel 构造保持同步，因此
+        # watermark 读取推迟到第一个 async 边界（publish / capture），语义不变：
+        # 任何 sequence 分配之前一定已经读过 Journal 水位。
+        self._watermark_loaded = journal is None
         self._publications_in_flight = 0
         self._cancellation_token = cancellation_token
         self._consumer_owner = EventChannelConsumerOwner.RELEASED
@@ -264,12 +267,25 @@ class RuntimeEventChannel:
     def publications_in_flight(self) -> int:
         return self._publications_in_flight
 
+    async def _ensure_watermark_loaded(self) -> None:
+        """在第一个 async 边界按需读取 Journal 水位（幂等）。"""
+        if self._watermark_loaded:
+            return
+        self._watermark_loaded = True
+        if self._journal is not None:
+            self._sequence = (
+                await resolve(self._journal.last_sequence(self.run_id))
+            ) or 0
+
     async def capture_journal_watermark(self) -> int:
         """Capture the existing sequence owner under the publish lock."""
         async with self._publish_lock:
+            await self._ensure_watermark_loaded()
             channel_sequence = self._sequence
             if self._journal is not None:
-                journal_sequence = self._journal.last_sequence(self.run_id) or 0
+                journal_sequence = (
+                    await resolve(self._journal.last_sequence(self.run_id))
+                ) or 0
                 if journal_sequence != channel_sequence:
                     raise JournalWatermarkError(
                         "journal and channel watermarks do not match"
@@ -298,6 +314,7 @@ class RuntimeEventChannel:
             async with self._publish_lock:
                 # 与 close 竞争时再次校验；只有通过此处的调用才是 accepted Publisher。
                 self._ensure_open()
+                await self._ensure_watermark_loaded()
                 sequence = self._sequence + 1
                 event = RuntimeEvent.from_draft(draft, sequence)
                 if self._journal is not None:
@@ -313,7 +330,7 @@ class RuntimeEventChannel:
                             event,
                             partially_persisted=False,
                         )
-                    append_status = self._journal.append(event)
+                    append_status = await resolve(self._journal.append(event))
                     self._sequence = sequence
                     await self._execute_publication_fault(
                         FaultPoint.EVENT_AFTER_JOURNAL_APPEND,

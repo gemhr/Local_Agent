@@ -580,12 +580,12 @@ def test_owner_matrix_client_proxy_readers_include_ui_plumbing() -> None:
 
 def test_deployment_runbook_locks_manual_stopped_server_backup() -> None:
     """Deployment Runbook 必须把 backup 锁为 manual stopped-server；live raw
-    copy unsupported；WAL unit（.db + -wal）；MUST_BACKUP set 必须出现。"""
+    copy unsupported；PostgreSQL backup unit；MUST_BACKUP set 必须出现。"""
     text = (ROOT / "docs/runtime/runtime_deployment_runbook.md").read_text(encoding="utf-8")
     assert "manual stopped-server" in text
     assert "live raw copy" in text and "unsupported" in text
     assert "MUST_BACKUP" in text
-    assert "-wal" in text
+    assert "PostgreSQL database" in text
     assert "automatic backup" in text and "NOT_IMPLEMENTED" in text
 
 
@@ -619,11 +619,11 @@ def test_capability_matrix_wp1_d_statuses() -> None:
     Chroma internal schema migration 标为 NOT_LOCAL_SCHEMA_OWNER。"""
     text = (ROOT / "docs/runtime/runtime_capability_matrix.md").read_text(encoding="utf-8")
     for capability in (
-        "Persistence preflight",
-        "Explicit SQLite migration",
-        "Memory versioned migration",
-        "Journal known physical migration",
-        "Checkpoint explicit recreate",
+        "Persistence schema readiness",
+        "Explicit PostgreSQL migration",
+        "Memory PostgreSQL schema",
+        "Journal PostgreSQL migration",
+        "Checkpoint PostgreSQL migration",
         "Chroma compatibility marker",
     ):
         assert capability in text and "SUPPORTED" in text

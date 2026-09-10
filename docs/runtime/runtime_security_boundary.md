@@ -121,7 +121,7 @@ Known Limitations：无authenticated human IAM、inbound TLS、Rate Limit、full
 | --- | --- | --- |
 | WAF / generic abuse protection | `NOT_IMPLEMENTED` | WP3-B 的 fixed raw-body/semantic payload bounds 不是 Web Application Firewall（WAF）；当前没有 generic abuse detection、bot detection、distributed request filtering、per-user/per-principal traffic policy 或 WAF-style rule engine。 |
 | Prompt Injection protection | `PARTIALLY_SUPPORTED` | Stage 3 WP3-C 已建立确定性的 instruction/data trust boundary 与 typed security denial integrity：只有 code-owned trusted controls 可绑定 `system` role；User/RAG/Tool/Memory/Step 内容只能作为 data/proposal。它不保证模型不受恶意自然语言影响，也不是 generic injection classifier、WAF 或 DLP。 |
-| SQL Injection protection | `SUPPORTED` | 仅限 current LocalAgent production SQLite inventory：SQL structure owner 是 code，User/Model/RAG/Tool/Memory/HTTP 内容只可作为 DB-API bound values；test-only AST Gate 冻结直接 SQLite owner 与 sink 形状。它不是通用 SQL firewall、NL2SQL 或任意数据库技术认证。 |
+| SQL Injection protection | `SUPPORTED` | 仅限 current LocalAgent production PostgreSQL/SQLAlchemy inventory：SQL structure owner 是 code，User/Model/RAG/Tool/Memory/HTTP 内容只可作为 bound values；test-only AST Gate 冻结 SQLAlchemy owner 与 sink 形状。它不是通用 SQL firewall、NL2SQL 或任意数据库技术认证。 |
 | Human IAM | `NOT_IMPLEMENTED` | numeric loopback、`agent_id` 和 Tool principal 均不是 authenticated human identity、RBAC/ABAC 或 tenant isolation。 |
 | Inbound Local API TLS | `NOT_IMPLEMENTED` | 当前 certified boundary 仍是 numeric-loopback HTTP。 |
 | Inbound API rate limit | `NOT_IMPLEMENTED` | payload bounds、Runtime admission/concurrency 与 Provider rate handling 均不等于 caller rate limit；distributed/per-principal策略 defer to WAF/deployment edge。 |
@@ -146,7 +146,7 @@ Known Limitations：F-03保留为P2；F-04为P2 `KNOWN_LIMITATION`。模型仍�
 
 ## SQL Injection / SQLite Statement Authority（Stage 3 WP3-D）
 
-在 current LocalAgent production SQLite inventory 内，SQL structure owner 固定为 production code；User、Model output、RAG、Tool result、Memory text 与 HTTP payload 均不拥有 statement authority，只能经 DB-API parameter binding 成为值。直接 SQLite owner inventory 冻结为 `core/memory_manager.py`、`core/persistence_migration.py`、`core/runtime/event_journal_store.py`、`core/runtime/event_consumer.py` 与 `core/runtime/snapshot_store.py`。排序方向由 code-owned boolean 映射，动态 `IN` 仅由代码生成 `?` placeholders 并单独绑定 values，immutable module SQL constants仍由代码拥有结构。
+在 current LocalAgent production PostgreSQL inventory 内，SQL structure owner 固定为 production code；User、Model output、RAG、Tool result、Memory text 与 HTTP payload 均不拥有 statement authority，只能经 SQLAlchemy bound parameters 成为值。生产 SQL owner inventory 位于 `core/persistence/`；排序方向由 code-owned mapping，动态集合使用绑定参数，immutable module SQL constants 仍由代码拥有结构。SQLite owner 仅保留为 LEGACY/OFFLINE/test seam，不在 application Composition。
 
 test-only AST Gate 扫描 `main.py`、`server.py`、`core/**`、`tools/**`、`ui/**` 与 `scripts/**`，并冻结 owner discovery、SQLite receiver 与 SQL sink 分类。新增直接 SQLite owner、未知 receiver、动态 statement、`executescript`、exception shape drift 或未解析 sink 都 fail closed。启动/内部只读检查所需的 schema-metadata PRAGMA 仅在精确 helper、固定 metadata 名称、无正文输入并对 `sqlite3.Error` fail closed 的形状下例外；该例外不授予通用 identifier interpolation authority。
 

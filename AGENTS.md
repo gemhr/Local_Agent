@@ -351,3 +351,103 @@ Stage2 / Stage2.5 / Stage3 / Stage4 / Stage5 等带阶段名的旧文档、旧 e
 - 或出现无法继续的 blocker。
 
 不得仅回复“已在后台运行，完成后继续”然后结束本轮。
+
+## Test / Regression Execution Policy
+
+Test execution must follow the smallest-sufficient-validation principle.
+
+###  Default rule
+
+Unless the current task is explicitly identified as the **Final Gate / Final Review / Final Audit of the current WP**, DO NOT run broad or full-repository regression suites.
+
+For normal implementation, debugging, review, documentation synchronization, or intermediate verification:
+
+- Run only tests directly related to the files, modules, contracts, or behavior changed by the current task.
+- Prefer the smallest focused test set that can verify the modification.
+- Do not run the full repository test suite "for safety", "for confidence", "to establish a baseline", or "to make sure nothing else broke".
+- Do not expand regression scope merely because unrelated historical tests exist.
+- Historical failures outside the current change scope must be recorded as pre-existing/out-of-scope unless there is direct evidence that the current change caused them.
+
+### Broad regression is restricted
+
+A broad regression includes, but is not limited to:
+
+- full `pytest` / repository-wide test execution;
+- all-stage or all-phase regression;
+- unrelated subsystem suites;
+- large integration matrices outside the affected execution path;
+- repeating an already-passing large regression suite.
+
+Broad regression is allowed only when:
+
+1. the task explicitly states that the current step is the **WP Final Gate / Final Review / Final Audit**; or
+2. the user explicitly requests a broad/full regression.
+
+Do not infer Final Gate status from context. It must be explicitly stated.
+
+### No repeated safety runs
+
+Passing tests MUST NOT be repeatedly re-run merely for additional confidence.
+
+Default execution policy:
+
+- run the required focused suite once;
+- if it passes, accept the result;
+- if it fails, diagnose and fix the relevant issue;
+- after a fix, re-run the smallest failed or affected subset first;
+- expand only when evidence shows that a wider execution path may have been affected.
+
+Even during Final Gate, normally run each broad regression suite at most once after the implementation is considered stable. Re-run only failed/affected subsets after fixes unless the fix materially changes the scope of the previous broad result.
+
+Statements such as:
+
+- "I'll run the full suite once more to be safe";
+- "I'll do another complete regression for confidence";
+- "I'll run all tests again to get the latest number";
+- "I'll verify the already-passing gate one more time";
+
+are explicitly prohibited unless new code changes invalidate the previous result.
+
+### Validation scope must be justified
+
+Before running a non-trivial test suite, briefly determine which changed behavior it validates.
+
+If a test suite has no clear relationship to the current diff or current WP acceptance criteria, do not run it.
+
+Validation priority:
+
+`direct affected tests > affected subsystem regression > cross-subsystem regression > full repository regression`
+
+Stop as soon as sufficient evidence for the current task has been obtained.
+
+### Documentation-only or evidence-only work
+
+For documentation-only changes, Handoff updates, audit-result synchronization, or evidence collection:
+
+- do not automatically run production tests;
+- validate the changed document/contract with the smallest relevant check;
+- do not trigger a full regression simply because source code exists in the repository.
+
+### Existing failures
+
+When a broader test command exposes failures:
+
+- first determine whether each failure is caused by the current diff;
+- do not start fixing unrelated historical failures;
+- do not repeatedly run the entire suite while investigating a small number of failures;
+- isolate the failing tests and work on the smallest relevant subset.
+
+Unrelated failures must be reported as existing/out-of-scope evidence rather than silently expanding the task.
+
+### Final Gate exception
+
+When the current task is explicitly a WP Final Gate, a reasonably broad regression may be executed if required by the WP acceptance criteria.
+
+Even then:
+
+- prefer one deliberate final regression over multiple precautionary regressions;
+- do not run multiple equivalent full-suite commands;
+- do not repeat a passing full regression without a code change that invalidates it;
+- additional runs after fixes should normally target only the affected failures/subsystems.
+
+The goal of testing is to obtain sufficient evidence for the current change, not to maximize the number of tests executed.

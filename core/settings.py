@@ -229,6 +229,28 @@ def _env_strict_float(
     return value
 
 
+def _env_database_url() -> str:
+    """PostgreSQL async DSN。
+
+    只接受 ``postgresql+asyncpg``；不做任何 dialect 猜测，也不回退到 SQLite。
+    空/未设置返回空串（由 role 校验决定是否为必填）。错误只报告 reason，
+    绝不包含 DSN 正文或凭据。
+    """
+    raw = os.getenv("LOCAL_AGENT_DATABASE_URL")
+    if raw is None:
+        return ""
+    value = raw.strip()
+    if not value:
+        return ""
+    if not value.startswith("postgresql+asyncpg://"):
+        raise SettingsValidationError(
+            SETTINGS_VALIDATION_ERROR,
+            "LOCAL_AGENT_DATABASE_URL",
+            "requires_postgresql_asyncpg_driver",
+        )
+    return value
+
+
 def _env_runtime_mode() -> ChatRuntimeMode:
     raw = os.getenv("CHAT_RUNTIME_MODE")
     if raw is None:
@@ -583,6 +605,14 @@ def validate_role_configuration(settings: "Settings", *, role: str) -> None:
 
 
 def _validate_server_role(settings: "Settings") -> None:
+    # Stage6-WP1：SERVER 进程必须装配 PostgreSQL Canonical Persistence，
+    # 不存在 SQLite fallback，因此 DSN 是必填项而非可选优化。
+    if not settings.database_url:
+        raise SettingsValidationError(
+            STARTUP_CONFIGURATION_ERROR,
+            "LOCAL_AGENT_DATABASE_URL",
+            "required_for_server_role",
+        )
     backend = settings.llm_backend
     if settings.runtime_profile is RuntimeProfile.EPISODIC_EVALUATION_LAYER1:
         if backend != "scripted":
@@ -662,11 +692,7 @@ class Settings:
     embedding_model_path: str
     embedding_query_prompt_name: str
     embedding_batch_size: int
-    memory_db_path: str
-    event_journal_db_path: str
     snapshot_store_enabled: bool
-    snapshot_store_db_path: str
-    observability_checkpoint_db_path: str
     observability_queue_capacity: int
     observability_shutdown_timeout_seconds: int
     runtime_disconnect_grace_seconds: float
@@ -711,6 +737,20 @@ class Settings:
     mcp_config_path: str = ""
     mcp_connect_timeout_seconds: float = 5.0
     mcp_request_timeout_seconds: float = 10.0
+
+    # ---- PostgreSQL Canonical Persistence（Stage6-WP1）----
+    # DSN 含凭据，绝不进入 repr / log / trace，也绝不写入错误正文。
+    database_url: str = field(default="", repr=False)
+    # Pool 容量与 worker concurrency 是两个不同的概念：pool size 只约束
+    # 并发数据库连接数，不代表 Run/worker 并发预算。
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    db_pool_timeout_seconds: float = 5.0
+    db_pool_recycle_seconds: int = 1800
+    db_connect_timeout_seconds: float = 5.0
+    db_statement_timeout_ms: int = 15000
+    db_lock_timeout_ms: int = 5000
+    db_idle_in_transaction_timeout_ms: int = 10000
 
     @classmethod
     def load(cls) -> "Settings":
@@ -1126,33 +1166,8 @@ class Settings:
             embedding_batch_size=_env_strict_int(
                 "LOCAL_AGENT_EMBEDDING_BATCH_SIZE", 8, minimum=1
             ),
-            memory_db_path=os.getenv(
-                "LOCAL_AGENT_MEMORY_DB_PATH",
-                os.path.join(project_root, "data", "database", "agent_memory.db"),
-            ),
-            event_journal_db_path=os.getenv(
-                "LOCAL_AGENT_EVENT_JOURNAL_DB_PATH",
-                os.path.join(
-                    project_root, "data", "database", "runtime_event_journal.db"
-                ),
-            ),
             snapshot_store_enabled=_env_strict_bool(
                 "LOCAL_AGENT_SNAPSHOT_ENABLED", False
-            ),
-            snapshot_store_db_path=os.getenv(
-                "LOCAL_AGENT_SNAPSHOT_DB_PATH",
-                os.path.join(
-                    project_root, "data", "database", "runtime_snapshots.db"
-                ),
-            ),
-            observability_checkpoint_db_path=os.getenv(
-                "LOCAL_AGENT_OBSERVABILITY_CHECKPOINT_DB_PATH",
-                os.path.join(
-                    project_root,
-                    "data",
-                    "database",
-                    "runtime_observability_checkpoint.db",
-                ),
             ),
             observability_queue_capacity=_env_strict_int(
                 "LOCAL_AGENT_OBSERVABILITY_QUEUE_CAPACITY", 256, minimum=1
@@ -1231,4 +1246,29 @@ class Settings:
             mcp_config_path=mcp_config_path,
             mcp_connect_timeout_seconds=mcp_connect_timeout_seconds,
             mcp_request_timeout_seconds=mcp_request_timeout_seconds,
+            database_url=_env_database_url(),
+            db_pool_size=_env_strict_int(
+                "LOCAL_AGENT_DB_POOL_SIZE", 5, minimum=1
+            ),
+            db_max_overflow=_env_strict_int(
+                "LOCAL_AGENT_DB_MAX_OVERFLOW", 5, minimum=0
+            ),
+            db_pool_timeout_seconds=_env_strict_float(
+                "LOCAL_AGENT_DB_POOL_TIMEOUT_SECONDS", 5.0, positive=True
+            ),
+            db_pool_recycle_seconds=_env_strict_int(
+                "LOCAL_AGENT_DB_POOL_RECYCLE_SECONDS", 1800, minimum=0
+            ),
+            db_connect_timeout_seconds=_env_strict_float(
+                "LOCAL_AGENT_DB_CONNECT_TIMEOUT_SECONDS", 5.0, positive=True
+            ),
+            db_statement_timeout_ms=_env_strict_int(
+                "LOCAL_AGENT_DB_STATEMENT_TIMEOUT_MS", 15000, minimum=1
+            ),
+            db_lock_timeout_ms=_env_strict_int(
+                "LOCAL_AGENT_DB_LOCK_TIMEOUT_MS", 5000, minimum=1
+            ),
+            db_idle_in_transaction_timeout_ms=_env_strict_int(
+                "LOCAL_AGENT_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", 10000, minimum=1
+            ),
         )

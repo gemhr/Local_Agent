@@ -5,12 +5,16 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 import sqlite3
 import threading
 from typing import Protocol
 
+from core.persistence.database import Database
+from core.persistence.errors import PersistenceError as DatabasePersistenceError
+from core.persistence.repositories import runtime as snapshot_repository
 from core.persistence_migration import (
     PERSISTENCE_PREFLIGHT_FAILED,
     PERSISTENCE_SCHEMA_UNSUPPORTED,
@@ -63,15 +67,17 @@ class SnapshotStoreError(RuntimeError):
 
 
 class SnapshotStore(Protocol):
-    def save(self, snapshot: RunSnapshot) -> SnapshotSaveStatus: ...
+    async def save(self, snapshot: RunSnapshot) -> SnapshotSaveStatus: ...
 
-    def get(self, snapshot_id: str) -> RunSnapshot | None: ...
+    async def get(self, snapshot_id: str) -> RunSnapshot | None: ...
 
-    def latest(self, run_id: str) -> RunSnapshot | None: ...
+    async def latest(self, run_id: str) -> RunSnapshot | None: ...
 
-    def list_for_run(self, run_id: str, limit: int) -> tuple[RunSnapshot, ...]: ...
+    async def list_for_run(
+        self, run_id: str, limit: int
+    ) -> tuple[RunSnapshot, ...]: ...
 
-    def close(self) -> None: ...
+    async def close(self) -> None: ...
 
 
 def _validate_id(value: object, field_name: str) -> str:
@@ -636,12 +642,170 @@ def snapshot_preflight(
         conn.close()
 
 
+def snapshot_row_to_value(row: object) -> RunSnapshot:
+    """PostgreSQL row → RunSnapshot；envelope 不一致时 fail closed。
+
+    与 SQLite 版本的差异只有一处：``created_at`` 现在是 ``timestamptz``，
+    因此直接比较 datetime 而不是 isoformat 字符串——这是**更强**的约束
+    （不再依赖字符串渲染形式）。
+    """
+    try:
+        version = row.snapshot_schema_version
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError("invalid schema version")
+        snapshot = snapshot_from_json(str(row.payload_json))
+        created_at = row.created_at
+        if not isinstance(created_at, datetime):
+            raise ValueError("invalid created_at")
+        if (
+            snapshot.snapshot_schema_version != version
+            or snapshot.snapshot_id != str(row.snapshot_id)
+            or snapshot.run_id != str(row.run_id)
+            or snapshot.created_at != created_at
+            or snapshot.payload_digest != str(row.payload_digest)
+        ):
+            raise ValueError("row envelope mismatch")
+        return snapshot
+    except UnsupportedSnapshotSchemaError:
+        raise SnapshotStoreError(
+            SnapshotErrorCode.SNAPSHOT_SCHEMA_UNSUPPORTED
+        ) from None
+    except SnapshotStoreError:
+        raise
+    except Exception:
+        raise SnapshotStoreError(
+            SnapshotErrorCode.SNAPSHOT_CORRUPTED
+        ) from None
+
+
+class PostgresSnapshotStore:
+    """PostgreSQL Canonical Snapshot store。
+
+    Snapshot 语义不变：仍是**持久检查点证据**，不是 automatic active-run
+    recovery authority。identity / version / digest / immutable evidence /
+    read semantics / compatibility rejection 全部保留。
+
+    Transaction Owner 是本 Store：``save`` 的 read-then-insert 在同一事务内。
+    """
+
+    def __init__(self, database: "Database") -> None:
+        if not isinstance(database, Database):
+            raise TypeError("database must be a Database")
+        self._database = database
+        self._closed = False
+
+    async def save(self, snapshot: RunSnapshot) -> SnapshotSaveStatus:
+        verified = _verify_for_store(snapshot)
+        payload_json = snapshot_to_json(verified)
+        self._ensure_open()
+        try:
+            async with self._database.transaction() as session:
+                existing_row = await snapshot_repository.select_snapshot_by_id(
+                    session, verified.snapshot_id
+                )
+                if existing_row is not None:
+                    # 先验证已存字节，再判定 duplicate / conflict。
+                    existing = snapshot_row_to_value(existing_row)
+                    if existing.payload_digest == verified.payload_digest:
+                        return SnapshotSaveStatus.DUPLICATE
+                    raise SnapshotStoreError(
+                        SnapshotErrorCode.SNAPSHOT_ID_CONFLICT
+                    )
+                await snapshot_repository.insert_snapshot_row(
+                    session,
+                    {
+                        "snapshot_schema_version": verified.snapshot_schema_version,
+                        "snapshot_id": verified.snapshot_id,
+                        "run_id": verified.run_id,
+                        "created_at": verified.created_at,
+                        "payload_json": payload_json,
+                        "payload_digest": verified.payload_digest,
+                    },
+                )
+                return SnapshotSaveStatus.SAVED
+        except SnapshotStoreError:
+            raise
+        except DatabasePersistenceError:
+            raise
+        except Exception:
+            raise SnapshotStoreError(
+                SnapshotErrorCode.SNAPSHOT_STORE_FAILED
+            ) from None
+
+    async def get(self, snapshot_id: str) -> RunSnapshot | None:
+        _validate_id(snapshot_id, "snapshot_id")
+        self._ensure_open()
+        try:
+            async with self._database.session() as session:
+                row = await snapshot_repository.select_snapshot_by_id(
+                    session, snapshot_id
+                )
+                return snapshot_row_to_value(row) if row is not None else None
+        except SnapshotStoreError:
+            raise
+        except DatabasePersistenceError:
+            raise
+        except Exception:
+            raise SnapshotStoreError(
+                SnapshotErrorCode.SNAPSHOT_STORE_FAILED
+            ) from None
+
+    async def latest(self, run_id: str) -> RunSnapshot | None:
+        _validate_id(run_id, "run_id")
+        self._ensure_open()
+        try:
+            async with self._database.session() as session:
+                row = await snapshot_repository.select_latest_snapshot(
+                    session, run_id
+                )
+                return snapshot_row_to_value(row) if row is not None else None
+        except SnapshotStoreError:
+            raise
+        except DatabasePersistenceError:
+            raise
+        except Exception:
+            raise SnapshotStoreError(
+                SnapshotErrorCode.SNAPSHOT_STORE_FAILED
+            ) from None
+
+    async def list_for_run(
+        self, run_id: str, limit: int
+    ) -> tuple[RunSnapshot, ...]:
+        _validate_id(run_id, "run_id")
+        _validate_limit(limit)
+        self._ensure_open()
+        try:
+            async with self._database.session() as session:
+                rows = await snapshot_repository.select_snapshots_for_run(
+                    session, run_id, limit
+                )
+                return tuple(snapshot_row_to_value(row) for row in rows)
+        except SnapshotStoreError:
+            raise
+        except DatabasePersistenceError:
+            raise
+        except Exception:
+            raise SnapshotStoreError(
+                SnapshotErrorCode.SNAPSHOT_STORE_FAILED
+            ) from None
+
+    async def close(self) -> None:
+        # Engine/Pool 的 Owner 是 application lifecycle，不是本 Store。
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise SnapshotStoreError(SnapshotErrorCode.SNAPSHOT_STORE_FAILED)
+
+
 __all__ = [
     "InMemorySnapshotStore",
     "MAX_SNAPSHOT_LIST_LIMIT",
+    "PostgresSnapshotStore",
     "SQLiteSnapshotStore",
     "SnapshotErrorCode",
     "SnapshotSaveStatus",
     "SnapshotStore",
     "SnapshotStoreError",
+    "snapshot_row_to_value",
 ]

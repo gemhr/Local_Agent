@@ -140,7 +140,7 @@ STAGE25_FAULT_CATALOG = (
     _e("FP-OBS-01", "Span 创建失败", "OBSERVABILITY", FaultPoint.TRACE_BEFORE_SPAN_START, S, True, ("trace_fault_injection",), None),
     _e("FP-OBS-02", "Span 结束失败", "OBSERVABILITY", FaultPoint.TRACE_BEFORE_SPAN_END, S, True, ("trace_lifecycle_fault",), None),
     _e("FP-OBS-03", "recorder 失败不能泄漏正文", "OBSERVABILITY", FaultPoint.OBSERVABILITY_BEFORE_RECORD, S, True, ("observability_fault_injection", "test_wp5_security_matrix"), None),
-    _e("FP-OBS-04", "Journal sequence 重复/倒退", "OBSERVABILITY", None, C, False, ("test_recovery_tail_corruption", "test_recovery_validation"), None),
+    _e("FP-OBS-04", "Journal sequence 重复/倒退", "OBSERVABILITY", None, C, False, ("test_recovery_validation", "test_stage6_wp1_postgres_runtime_stores"), None),
     _e("FP-OBS-05", "unknown event", "OBSERVABILITY", None, C, False, ("test_runtime_projection",), None),
     _e("FP-OBS-06", "safe payload 非法字段", "OBSERVABILITY", None, C, False, ("test_journal_safe_projection",), None),
     _e("FP-OBS-07", "OUTPUT 正文不得进入 Journal", "OBSERVABILITY", None, C, False, ("test_journal_safe_projection", "test_wp5_security_matrix"), None),
@@ -171,7 +171,7 @@ STAGE25_FAULT_CATALOG = (
     _e("FP-REC-07", "delivered 已知 Memory 未知", "RECOVERY", None, C, False, ("test_recovery_delivery_boundary",), None),
     _e("FP-REC-08", "Memory committed 无 terminal", "RECOVERY", None, C, False, ("test_recovery_delivery_boundary",), None),
     _e("FP-REC-09", "terminal 成功", "RECOVERY", None, C, False, ("test_recovery_delivery_boundary",), None),
-    _e("FP-REC-10", "corrupt/duplicate/out-of-order Journal", "RECOVERY", None, C, False, ("test_recovery_tail_corruption",), None),
+    _e("FP-REC-10", "corrupt/duplicate/out-of-order Journal", "RECOVERY", None, C, False, ("test_recovery_validation",), None),
     _e("FP-REC-11", "v1/v2 Snapshot 兼容", "RECOVERY", None, C, False, ("test_recovery_version_compatibility",), None),
     _e("FP-REC-12", "fingerprint mismatch", "RECOVERY", None, C, False, ("test_recovery_version_compatibility",), None),
 )

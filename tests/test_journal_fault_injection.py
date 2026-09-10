@@ -1,84 +1,17 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 
-from core.runtime import (
-    EventPublicationError,
-    FaultPoint,
-    JournalError,
-    RuntimeEventChannel,
-    SQLiteRunEventJournal,
-)
-from tests._event_fault_fixtures import event_controller, run_started_draft
+from core.persistence.errors import DatabaseErrorCode, PersistenceError
+
+pytestmark = pytest.mark.asyncio
 
 
-@pytest.mark.asyncio
-async def test_sqlite_before_append_fault_leaves_transaction_without_record(tmp_path):
-    path = tmp_path / "before.db"
-    journal = SQLiteRunEventJournal(str(path))
-    channel = RuntimeEventChannel(
-        2,
-        run_id="run-a",
-        journal=journal,
-        fault_controller=event_controller(FaultPoint.EVENT_BEFORE_JOURNAL_APPEND),
-    )
-    with pytest.raises(EventPublicationError):
-        await channel.publish(run_started_draft())
-    assert journal.read_after("run-a", 0, 10) == ()
-    journal.close()
-
-    reopened = SQLiteRunEventJournal(str(path))
-    assert reopened.read_after("run-a", 0, 10) == ()
-    reopened.close()
-
-
-@pytest.mark.asyncio
-async def test_sqlite_after_append_fault_occurs_after_commit_and_survives_reopen(tmp_path):
-    path = tmp_path / "after.db"
-    journal = SQLiteRunEventJournal(str(path))
-    channel = RuntimeEventChannel(
-        2,
-        run_id="run-a",
-        journal=journal,
-        fault_controller=event_controller(FaultPoint.EVENT_AFTER_JOURNAL_APPEND),
-    )
-    with pytest.raises(EventPublicationError) as captured:
-        await channel.publish(run_started_draft())
-    evidence = captured.value.evidence
-    assert captured.value.partially_persisted is True
-    assert channel.buffered_count == 0
-    journal.close()
-
-    reopened = SQLiteRunEventJournal(str(path))
-    records = reopened.read_after("run-a", 0, 10)
-    assert [(item.event_id, item.sequence) for item in records] == [
-        (evidence.event_id, 1)
-    ]
-    reopened.close()
-
-
-@pytest.mark.asyncio
-async def test_sqlite_insert_failure_rolls_back_transaction_and_next_append_can_commit(tmp_path):
-    journal = SQLiteRunEventJournal(str(tmp_path / "rollback.db"))
-    journal._connection.execute(
-        """
-        CREATE TRIGGER reject_event BEFORE INSERT ON runtime_event_journal
-        BEGIN SELECT RAISE(ABORT, 'test-only'); END
-        """
-    )
-    event = await _event_from_channel(run_started_draft())
-    with pytest.raises(JournalError):
-        journal.append(event)
-    assert journal.read_after("run-a", 0, 10) == ()
-
-    journal._connection.execute("DROP TRIGGER reject_event")
-    journal.append(event)
-    assert journal.last_sequence("run-a") == 1
-    journal.close()
-    with pytest.raises(JournalError):
-        journal.append(event)
-
-
-async def _event_from_channel(draft):
-    channel = RuntimeEventChannel(1, run_id=draft.run_id)
-    return await channel.publish(draft)
+async def test_postgres_transaction_failure_rolls_back_without_fake_journal_row(clean_database):
+    with pytest.raises(PersistenceError) as exc_info:
+        async with clean_database.transaction() as session:
+            await session.execute(text("INSERT INTO runtime_event_journal (journal_schema_version, event_schema_version, event_id, run_id, trace_id, sequence, emitted_at, journaled_at, event_type, component, safe_payload, payload_digest, event_digest) VALUES (2, 1, 'fault-event', 'fault-run', 'trace', 0, now(), now(), 'STEP_COMPLETED', 'test', '{}', '0', '0')"))
+    assert exc_info.value.error_code is DatabaseErrorCode.DATABASE_INTEGRITY_VIOLATION
+    async with clean_database.session() as session:
+        assert (await session.execute(text("SELECT count(*) FROM runtime_event_journal WHERE run_id = 'fault-run'"))).scalar_one() == 0
