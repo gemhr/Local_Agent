@@ -175,7 +175,15 @@ class ChatService:
             cancellation_check=cancellation_check,
         )
 
-    def stream_chat(self, agent_id: str, query: str, file_path: str = "", run_id: str | None = None) -> Generator[str, None, None]:
+    def stream_chat(
+        self,
+        agent_id: str,
+        query: str,
+        file_path: str = "",
+        run_id: str | None = None,
+        *,
+        retrieval_cache_authz_domain: str | None = None,
+    ) -> Generator[str, None, None]:
         """流式执行一次对话。
 
         Args:
@@ -195,6 +203,7 @@ class ChatService:
             session_id=LEGACY_DEFAULT_SESSION_ID,
             run_id=run_id,
         )
+        run_context.attach_retrieval_cache_access(retrieval_cache_authz_domain)
         # 在此生成器栈帧中保留取消源，避免丢失取消控制权。
         _cancellation_source = cancellation_source
         # ChatService 是当前 Legacy 主链路的 Parent Runtime，单 Run 创建并持有账本。
@@ -255,6 +264,7 @@ class ChatService:
         timeout_seconds: float | None = None,
         budget: RunBudget | None = None,
         persist: bool = True,
+        retrieval_cache_authz_domain: str | None = None,
     ) -> tuple[str | None, RunCoordinatorResult]:
         """通过 RunCoordinator 执行一条真实的非流式单 Agent 路径。
 
@@ -270,6 +280,7 @@ class ChatService:
             timeout_seconds=timeout_seconds,
             budget=budget,
             persist=persist,
+            retrieval_cache_authz_domain=retrieval_cache_authz_domain,
             _result_out=results,
         ):
             events.append(event)
@@ -345,6 +356,7 @@ class ChatService:
         _cancellation_intent: list[CancellationReason] | None = None,
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
+        retrieval_cache_authz_domain: str | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
         if self._coordinated_runtime_factory is None:
@@ -362,6 +374,7 @@ class ChatService:
             cancellation_intent=_cancellation_intent,
             project_identity=project_identity,
             project_grants=project_grants,
+            retrieval_cache_authz_domain=retrieval_cache_authz_domain,
         )
         try:
             async for event in events:
@@ -383,6 +396,7 @@ class ChatService:
         evaluation_plan_resolver=None,
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
+        retrieval_cache_authz_domain: str | None = None,
     ):
         factory = self._coordinated_runtime_factory
         if factory is None:
@@ -390,7 +404,7 @@ class ChatService:
                 "RUNTIME_CONFIGURATION_ERROR"
             ) from None
         try:
-            return await factory.create_run_scope(
+            scope = await factory.create_run_scope(
                 agent_id,
                 query,
                 run_id=run_id,
@@ -403,6 +417,10 @@ class ChatService:
                 project_identity=project_identity,
                 project_grants=project_grants,
             )
+            scope.run_context.attach_retrieval_cache_access(
+                retrieval_cache_authz_domain
+            )
+            return scope
         except asyncio.CancelledError:
             raise
         except RuntimeAdmissionRejectedError:
@@ -427,6 +445,7 @@ class ChatService:
         cancellation_intent: list[CancellationReason] | None,
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
+        retrieval_cache_authz_domain: str | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Run the sole production coordinated event path through the factory.
 
@@ -443,6 +462,7 @@ class ChatService:
             persist=persist,
             project_identity=project_identity,
             project_grants=project_grants,
+            retrieval_cache_authz_domain=retrieval_cache_authz_domain,
         )
         consumer = self._consume_scope_events(
             scope,
@@ -631,6 +651,7 @@ class ChatService:
         run_id: str | None = None,
         budget: RunBudget | None = None,
         persist: bool = True,
+        retrieval_cache_authz_domain: str | None = None,
     ) -> AsyncIterator[str]:
         """通过唯一 Transport Adapter 输出当前自定义纯文本分块协议。"""
         adapter = ChatStreamCompatibilityAdapter()
@@ -641,6 +662,7 @@ class ChatService:
             run_id=run_id,
             budget=budget,
             persist=persist,
+            retrieval_cache_authz_domain=retrieval_cache_authz_domain,
             _cancellation_intent=cancellation_intent,
         )
         try:

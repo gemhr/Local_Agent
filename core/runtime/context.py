@@ -135,6 +135,7 @@ class RunContext:
         self._activity_tracker = None
         self._project_identity: ProjectIdentity | None = None
         self._project_grants: tuple[ProjectMemoryGrant, ...] = ()
+        self._retrieval_cache_authz_domain: str | None = None
 
     @property
     def budget_ledger(self):
@@ -183,6 +184,21 @@ class RunContext:
             raise ValueError("Project grant scope 与 ProjectIdentity 不匹配")
         self._project_identity = project_identity
         self._project_grants = project_grants
+
+    @property
+    def retrieval_cache_authz_domain(self) -> str | None:
+        """返回可信请求边界注入的缓存隔离域；内部调用默认不共享缓存。"""
+        return self._retrieval_cache_authz_domain
+
+    def attach_retrieval_cache_access(self, authz_domain: str | None) -> None:
+        """由认证应用边界注入一次，不进入可序列化 Runtime 元数据。"""
+        if self._retrieval_cache_authz_domain is not None:
+            raise RuntimeError("RunContext 已绑定 Retrieval Cache authz domain")
+        if authz_domain is None:
+            return
+        if not isinstance(authz_domain, str) or not authz_domain.strip():
+            raise ValueError("authz_domain 必须是非空字符串或 None")
+        self._retrieval_cache_authz_domain = authz_domain
 
     @classmethod
     def create(

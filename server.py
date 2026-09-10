@@ -45,6 +45,12 @@ from core.persistence import (
     SyncPersistenceBridge,
     check_schema_readiness,
 )
+from core.redis_service import (
+    RagQueryCache,
+    RedisService,
+    RedisTokenBucketRateLimiter,
+    RedisUnavailableError,
+)
 from core.runtime import (
     ApplicationRuntimeServices,
     ApprovalCommandErrorCode,
@@ -113,6 +119,10 @@ from core.runtime.retrieval_evaluation import (
     RetrievalEvaluationCollector,
     install_retrieval_evaluation_collector,
     reset_retrieval_evaluation_collector,
+)
+from core.runtime.retrieval_cache import (
+    CachedRetrievalExecutionService,
+    SyncRedisBridge,
 )
 from core.runtime.evaluation_controls import (
     EvaluationGenerationPin,
@@ -504,6 +514,14 @@ async def lifespan(app: FastAPI):
     app.state.db_schema_revision = schema_readiness.alembic_revision
     app.state.auth_service = AuthService(persistence_database, settings)
     app.state.authorization_service = AuthorizationService(persistence_database)
+    # Redis owns only cache/admission state.  Connection establishment is lazy so
+    # cache outage never prevents the PostgreSQL/RAG authority from starting.
+    redis_service = await initialization_stack.create(
+        "redis_service", lambda: RedisService(settings)
+    )
+    app.state.redis_service = redis_service
+    app.state.rag_query_cache = RagQueryCache(redis_service.client, settings)
+    app.state.rate_limiter = RedisTokenBucketRateLimiter(redis_service.client, settings)
 
     persistence_memory = await initialization_stack.create(
         "persistence_memory",
@@ -1021,6 +1039,29 @@ async def lifespan(app: FastAPI):
             ),
         ),
     )
+    if router.retrieval_execution_service is not None:
+        redis_bridge = SyncRedisBridge(
+            asyncio.get_running_loop(),
+            timeout_seconds=(
+                settings.redis_connect_timeout_seconds
+                + settings.redis_socket_timeout_seconds
+                + 0.5
+            ),
+        )
+
+        def current_retrieval_generation() -> str | None:
+            if hybrid_validated_generation is not None:
+                return str(hybrid_validated_generation.generation_id)
+            marker = db_manager.read_v2_collection_marker()
+            generation = marker.get("generation_id")
+            return str(generation) if generation else None
+
+        router.retrieval_execution_service = CachedRetrievalExecutionService(
+            router.retrieval_execution_service,
+            app.state.rag_query_cache,
+            redis_bridge,
+            index_generation_provider=current_retrieval_generation,
+        )
     runtime_metrics = InMemoryMetricsRecorder(
         label_policy=MetricLabelPolicy(
             tool_name_allowlist=frozenset(settings.metrics_tool_name_allowlist)
@@ -1121,6 +1162,7 @@ async def lifespan(app: FastAPI):
                     if mcp_integration is not None
                     else ()
                 ),
+                ("redis_service", redis_service),
             ),
         ),
         component="application_runtime_services",
@@ -1255,6 +1297,19 @@ async def request_id_and_auth_middleware(request: Request, call_next):
             request.state.principal = await service.authenticate(request.headers.get("Authorization"))
             if request.url.path in _ADMIN_ONLY_API_PATHS:
                 require_role(request.state.principal, "ADMIN")
+            limiter = getattr(request.app.state, "rate_limiter", None)
+            if not isinstance(limiter, RedisTokenBucketRateLimiter):
+                return _api_error(request, "RATE_LIMIT_UNAVAILABLE", 503)
+            try:
+                decision = await limiter.check(request.state.principal.authz_domain_id)
+            except RedisUnavailableError:
+                # Admission is a security boundary: Redis outage is unavailable,
+                # not a client quota violation and never silently allows traffic.
+                return _api_error(request, "RATE_LIMIT_UNAVAILABLE", 503)
+            if not decision.allowed:
+                response = _api_error(request, "RATE_LIMIT_EXCEEDED", 429)
+                response.headers["Retry-After"] = str(decision.retry_after_seconds)
+                return response
         response = await call_next(request)
     except AuthError as exc:
         return _api_error(request, exc.code, exc.status_code)
@@ -1784,6 +1839,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
             query=payload.query,
             file_path=payload.file_path,
             run_id=run_id,
+            retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
         )
 
         async def generate():
@@ -1881,6 +1937,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
             agent_id=payload.agent_id,
             query=coordinated_query,
             run_id=run_id,
+            retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
         )
 
         async def generate():
@@ -1960,6 +2017,7 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Requ
             query=payload.query,
             run_id=payload.run_id,
             timeout_seconds=payload.timeout_seconds,
+            retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
         )
     except ChatRuntimeTransportError as exc:
         raise HTTPException(status_code=503, detail=exc.error_code) from None

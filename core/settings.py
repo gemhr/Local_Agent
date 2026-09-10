@@ -766,6 +766,18 @@ class Settings:
     jwt_audience: str = "localagent-api"
     jwt_allowed_algorithm: str = "EdDSA"
     jwt_clock_skew_seconds: int = 30
+    # Redis is acceleration/admission infrastructure, never a persistence authority.
+    redis_url: str = field(default="redis://127.0.0.1:6379/0", repr=False)
+    redis_connect_timeout_seconds: float = 0.5
+    redis_socket_timeout_seconds: float = 0.5
+    redis_max_connections: int = 10
+    rag_cache_enabled: bool = True
+    rag_cache_ttl_seconds: int = 60
+    rag_cache_ttl_jitter_seconds: int = 10
+    rag_cache_max_value_bytes: int = 262144
+    rate_limit_enabled: bool = True
+    rate_limit_capacity: int = 30
+    rate_limit_refill_rate: float = 1.0
 
     @classmethod
     def load(cls) -> "Settings":
@@ -1291,4 +1303,15 @@ class Settings:
             jwt_audience=os.getenv("LOCAL_AGENT_JWT_AUDIENCE", "localagent-api").strip(),
             jwt_allowed_algorithm="EdDSA",
             jwt_clock_skew_seconds=_env_strict_int("LOCAL_AGENT_JWT_CLOCK_SKEW_SECONDS", 30, minimum=0, maximum=300),
+            redis_url=os.getenv("LOCAL_AGENT_REDIS_URL", "redis://127.0.0.1:6379/0").strip(),
+            redis_connect_timeout_seconds=_env_strict_float("LOCAL_AGENT_REDIS_CONNECT_TIMEOUT_SECONDS", 0.5, positive=True),
+            redis_socket_timeout_seconds=_env_strict_float("LOCAL_AGENT_REDIS_SOCKET_TIMEOUT_SECONDS", 0.5, positive=True),
+            redis_max_connections=_env_strict_int("LOCAL_AGENT_REDIS_MAX_CONNECTIONS", 10, minimum=1),
+            rag_cache_enabled=_env_strict_bool("LOCAL_AGENT_RAG_CACHE_ENABLED", True),
+            rag_cache_ttl_seconds=_env_strict_int("LOCAL_AGENT_RAG_CACHE_TTL_SECONDS", 60, minimum=1),
+            rag_cache_ttl_jitter_seconds=_env_strict_int("LOCAL_AGENT_RAG_CACHE_TTL_JITTER_SECONDS", 10, minimum=0),
+            rag_cache_max_value_bytes=_env_strict_int("LOCAL_AGENT_RAG_CACHE_MAX_VALUE_BYTES", 262144, minimum=1),
+            rate_limit_enabled=_env_strict_bool("LOCAL_AGENT_RATE_LIMIT_ENABLED", True),
+            rate_limit_capacity=_env_strict_int("LOCAL_AGENT_RATE_LIMIT_CAPACITY", 30, minimum=1),
+            rate_limit_refill_rate=_env_strict_float("LOCAL_AGENT_RATE_LIMIT_REFILL_RATE", 1.0, positive=True),
         )
