@@ -4,6 +4,11 @@
 !.env.example
 .idea/
 
+# Local AI assistant state and exported sessions
+.commandcode/
+command-code-session-*
+$null
+
 # Python caches and virtual environments
 __pycache__/
 *.py[cod]
@@ -20,7 +25,7 @@ data/database/
 data/demo_workspace/
 
 # Runtime logs
-data/logs/*.log
+data/logs/
 
 # Local Python wheel packages
 *.whl
