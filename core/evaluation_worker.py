@@ -5,13 +5,17 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import json
 import logging
 import math
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from core.evaluation_jobs import (
     EVALUATION_JOB_REQUEST_SCHEMA,
@@ -20,6 +24,7 @@ from core.evaluation_jobs import (
     JobError,
     canonical_json_digest,
 )
+from core.observability import fail_open_span
 from core.persistence.database import Database
 from core.kafka_event_sink import await_kafka_io
 
@@ -145,6 +150,7 @@ class KafkaEvaluationWorker:
         consumer: Any | None = None,
         dlq_producer: Any | None = None,
         worker_id: str | None = None,
+        observability=None,
     ) -> None:
         self._database = database
         self._executor = executor
@@ -152,7 +158,8 @@ class KafkaEvaluationWorker:
         self._consumer = consumer
         self._dlq_producer = dlq_producer
         self._worker_id = worker_id or f"worker-{uuid.uuid4()}"
-        self._jobs = EvaluationJobService(database)
+        self._observability = observability
+        self._jobs = EvaluationJobService(database, observability=observability)
         self._partition_lost = False
 
     def _on_revoke(self, _consumer: Any, partitions: Any) -> None:
@@ -239,6 +246,14 @@ class KafkaEvaluationWorker:
         return {"payload": payload, "event_id": event_id, "job_id": job_id}
 
     def _commit(self, message: Any) -> None:
+        try:
+            self._commit_checked(message)
+        except Exception:
+            self._observe("observe_offset_commit", "failure")
+            raise
+        self._observe("observe_offset_commit", "success")
+
+    def _commit_checked(self, message: Any) -> None:
         # Explicit synchronous broker acknowledgement; no auto commit/store.
         if self._partition_lost:
             raise RuntimeError("Kafka partition lost before offset commit")
@@ -306,9 +321,131 @@ class KafkaEvaluationWorker:
             raise RuntimeError("DLQ delivery callback did not confirm ACK")
 
     async def _publish_dlq(self, message: Any, failure: BaseException) -> None:
-        await await_kafka_io(self._publish_dlq_sync, message, failure)
+        reason = self._dlq_reason(failure)
+        try:
+            await await_kafka_io(self._publish_dlq_sync, message, failure)
+        except Exception:
+            self._observe_dlq("failed", reason)
+            raise
+        self._observe_dlq("acked", reason)
+
+    @staticmethod
+    def _dlq_reason(failure: BaseException) -> str:
+        safe = str(failure).lower()
+        if "authority mismatch" in safe:
+            return "intent_mismatch"
+        if "key" in safe or "uuid" in safe or "identity" in safe:
+            return "invalid_identity"
+        if "unsupported" in safe:
+            return "unsupported_event"
+        return "invalid_schema"
+
+    def _observe(self, operation: str, *args) -> None:
+        try:
+            if self._observability is not None:
+                getattr(self._observability, operation)(*args)
+        except Exception:
+            pass
+
+    def _observe_dlq(self, outcome: str, reason: str) -> None:
+        try:
+            if self._observability is not None:
+                self._observability.observe_dlq(outcome=outcome, reason=reason)
+        except Exception:
+            pass
+
+    def _log_context(self) -> dict[str, str | None]:
+        try:
+            if self._observability is not None:
+                return self._observability.correlated_log_fields()
+        except Exception:
+            pass
+        return {"trace_id": None, "span_id": None}
+
+    @staticmethod
+    def _trace_headers(message: Any) -> dict[str, str]:
+        try:
+            raw_headers = message.headers() or ()
+        except Exception:
+            return {}
+        headers: dict[str, str] = {}
+        for key, value in raw_headers:
+            if key not in {"traceparent", "tracestate"} or value is None:
+                continue
+            if isinstance(value, bytes):
+                try:
+                    value = value.decode("ascii")
+                except UnicodeDecodeError:
+                    continue
+            if isinstance(value, str) and len(value) <= 512:
+                headers[key] = value
+        return headers
 
     async def process_message(self, message: Any) -> str:
+        started_at = time.perf_counter()
+        with fail_open_span(
+            lambda: self._observability.start_messaging_span(
+                "kafka consume/process",
+                carrier=self._trace_headers(message),
+                kind=SpanKind.CONSUMER,
+                attributes={"messaging.system": "kafka", "messaging.operation": "process"},
+            )
+            if self._observability is not None
+            else nullcontext(None)
+        ) as span:
+            try:
+                outcome = await self._process_message(message)
+            except asyncio.CancelledError:
+                raise
+            except TimeoutError:
+                if span is not None:
+                    span.set_status(Status(StatusCode.ERROR))
+                self._observe("observe_worker", "timeout", time.perf_counter() - started_at)
+                self._observe("observe_kafka_consumer", "failed")
+                logger.warning(
+                    "Evaluation worker timed out",
+                    extra={"component": "evaluation_worker", "status": "TIMEOUT", **self._log_context()},
+                )
+                raise
+            except Exception:
+                if span is not None:
+                    span.set_status(Status(StatusCode.ERROR))
+                self._observe("observe_worker", "failed", time.perf_counter() - started_at)
+                self._observe("observe_kafka_consumer", "failed")
+                logger.warning(
+                    "Evaluation worker processing failed",
+                    extra={"component": "evaluation_worker", "status": "FAILED", **self._log_context()},
+                )
+                raise
+            consumer_outcome = {
+                "SUCCEEDED": "processed",
+                "NOOP": "duplicate",
+                "CANCELLED_NOOP": "cancelled_noop",
+                "FAILED": "failed",
+                "DLQ": "dlq",
+            }[outcome]
+            worker_outcome = {
+                "SUCCEEDED": "success",
+                "NOOP": "duplicate",
+                "CANCELLED_NOOP": "cancelled_noop",
+                "FAILED": "failed",
+                "DLQ": "failed",
+            }[outcome]
+            self._observe("observe_kafka_consumer", consumer_outcome)
+            self._observe("observe_worker", worker_outcome, time.perf_counter() - started_at)
+            logger.info(
+                "Evaluation worker message processed",
+                extra={
+                    "component": "evaluation_worker",
+                    "status": outcome,
+                    "trace_outcome": consumer_outcome,
+                    **self._log_context(),
+                },
+            )
+            # 对外保留 WP5 的 NOOP Contract；内部细分只用于有界指标与日志。
+            return "NOOP" if outcome == "CANCELLED_NOOP" else outcome
+
+    async def _process_message(self, message: Any) -> str:
         """Process one message; return outcome and leave transient failures uncommitted."""
         if self._dlq_producer is None:
             self._ensure_clients()
@@ -341,6 +478,7 @@ class KafkaEvaluationWorker:
             await await_kafka_io(self._commit, message)
             return "DLQ"
         if claim is None:
+            current = await self._jobs.get(job_id)
             try:
                 await self._jobs.record_processed_event_noop(
                     job_id=job_id,
@@ -355,17 +493,40 @@ class KafkaEvaluationWorker:
                     await self._publish_dlq(message, exc)
                     await await_kafka_io(self._commit, message)
                     return "DLQ"
+                self._observe("observe_worker_claim", "busy")
                 raise
+            self._observe("observe_worker_claim", "terminal")
             await await_kafka_io(self._commit, message)
-            return "NOOP"
+            return (
+                "CANCELLED_NOOP"
+                if getattr(current.status, "value", current.status) == "CANCELLED"
+                else "NOOP"
+            )
+
+        attempt = getattr(claim.job, "attempt", 1)
+        self._observe(
+            "observe_worker_claim", "reclaimed" if attempt > 1 else "claimed"
+        )
+        if attempt == 1:
+            self._observe("observe_job_transition", "QUEUED", "RUNNING")
 
         try:
             # Evaluation owns its own retry policy.  The Kafka worker executes it
             # once; infrastructure failure leaves the offset uncommitted so the
             # broker redelivers the message after process restart/recovery.
-            async with asyncio.timeout(self._config.max_evaluation_seconds):
-                result = await self._executor.execute(claim.job)
-            await self._jobs.finalize_worker_success(
+            with fail_open_span(
+                lambda: self._observability.start_messaging_span(
+                    "evaluation execution",
+                    carrier=None,
+                    kind=SpanKind.INTERNAL,
+                    attributes={"component": "evaluation_worker", "operation": "evaluate"},
+                )
+                if self._observability is not None
+                else nullcontext(None)
+            ):
+                async with asyncio.timeout(self._config.max_evaluation_seconds):
+                    result = await self._executor.execute(claim.job)
+            finalization = await self._jobs.finalize_worker_success(
                 job_id=job_id,
                 claim_owner=claim.claim_owner,
                 claim_token=claim.claim_token,
@@ -376,6 +537,11 @@ class KafkaEvaluationWorker:
                 offset=offset,
                 result_payload=result,
             )
+            if finalization.idempotent or not finalization.applied:
+                self._observe("observe_job_finalization", "duplicate")
+            else:
+                self._observe("observe_job_transition", "RUNNING", "SUCCEEDED")
+                self._observe("observe_job_finalization", "success")
             await await_kafka_io(self._commit, message)
             return "SUCCEEDED"
         except PermanentEvaluationError as exc:
@@ -391,6 +557,8 @@ class KafkaEvaluationWorker:
                 failure_code="EVALUATION_INPUT_INVALID",
                 failure_message=str(exc)[:512],
             )
+            self._observe("observe_job_transition", "RUNNING", "FAILED")
+            self._observe("observe_job_finalization", "failed")
             await await_kafka_io(self._commit, message)
             return "FAILED"
         except asyncio.CancelledError:

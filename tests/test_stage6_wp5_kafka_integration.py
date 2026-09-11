@@ -357,25 +357,26 @@ async def test_real_two_consumers_same_group_assignment_one_result(clean_databas
     job = await service.submit(owner, EvaluationJobRequest("agent", "two-workers", 30))
     sink = KafkaEventSink(KafkaProducerConfig(BOOTSTRAP, "wp5-two-publisher", topic, 5))
     publisher = OutboxPublisherService(clean_database, sink, OutboxPublisherConfig("wp5-two"))
-    assert await publisher.run_once() == 1
     group = f"test.{uuid.uuid4().hex}.two-workers"
     first = _consumer(topic, group)
     second = _consumer(topic, group)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and not (first.assignment() and second.assignment()):
+        first.poll(0.2)
+        second.poll(0.2)
+
+    assert first.assignment() and second.assignment()
+    assert await publisher.run_once() == 1
     messages = []
     deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        first_message = first.poll(0.2)
-        second_message = second.poll(0.2)
-        if first.assignment() and second.assignment():
-            # A two-partition topic gives the same group two independent assignments.
-            if not messages:
-                for consumer, candidate in ((first, first_message), (second, second_message)):
-                    if candidate is not None and candidate.error() is None:
-                        messages.append((consumer, candidate))
-                        break
+    while time.monotonic() < deadline and not messages:
+        for consumer in (first, second):
+            candidate = consumer.poll(0.2)
+            if candidate is not None and candidate.error() is None:
+                messages.append((consumer, candidate))
+                break
         if messages:
             break
-    assert first.assignment() and second.assignment()
     assert len(messages) == 1
     executor = _DeterministicExecutor()
     consumer, message = messages[0]

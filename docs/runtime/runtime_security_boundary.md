@@ -268,3 +268,19 @@ EdDSA JWT 验证。Principal 由服务端 JWT claims 与 PostgreSQL `users`/`use
 - `ToolPermission != filesystem/path authorization`；WP3-A 已实现 frozen workspace read-root/path containment，仍不等于 OS Sandbox 或 TOCTOU elimination。两个 Settings credential 的 `repr=False` 与 Provider safe projection 已覆盖，但 generic secret isolation / DLP 仍未实现。
 - `ToolSideEffectKind.NONE` 不表示 permission-free；approval 不是 sandbox。approval evidence 是 governance 判定的输入，不是授权事实；human approve/reject 命令面已实现但无认证（见上方 truth boundary），durable pause/resume 未实现。
 - **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent / governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后，不为此新增 RuntimeEvent / Journal schema。
+
+## Stage6-WP6 Metrics / Trace / Health Boundary
+
+`/metrics` 是 infrastructure endpoint，不使用第二套 end-user JWT；由部署网络/ingress 控制。
+Metric label 只能来自 code-owned method/route template/status/outcome/reason allowlist，禁止 raw
+path、query/prompt、request/trace/span/user/principal/job/event/run/approval identity、Redis key、
+Kafka offset 与 exception text。
+
+OpenTelemetry 只持久化/传播 W3C `traceparent/tracestate`，不传播 baggage。Span attributes 与
+structured log correlation 禁止 JWT、Authorization、API key、数据库/Redis/Kafka credential、
+prompt/query、retrieved chunk、完整 evaluation input/result。必要 request/job/event identity 只可
+在对应受控日志/trace 中使用，绝不进入 metric label。
+
+Health response 只暴露固定 component、`healthy|degraded|unavailable`、bounded reason code 和
+latency；不返回 exception、host、URL、DSN、credential、pool internals 或 stack trace。检查为
+read-only，Kafka metadata lookup 不以 missing topic 为参数，因此不得触发 auto-create。

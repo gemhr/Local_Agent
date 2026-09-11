@@ -5,13 +5,18 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import logging
 import math
 import random
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
+from opentelemetry.trace import SpanKind, Status, StatusCode
+
 from core.evaluation_jobs import canonical_json_digest
+from core.observability import fail_open_span
 from core.persistence.database import Database
 from core.persistence.errors import PersistenceError
 from core.persistence.repositories import evaluation_jobs as repository
@@ -79,10 +84,19 @@ class OutboxPublisherService:
         database: Database,
         sink: EventSink,
         config: OutboxPublisherConfig,
+        observability=None,
     ) -> None:
         self._database = database
         self._sink = sink
         self._config = config
+        self._observability = observability
+
+    def _observe(self, operation: str, *args) -> None:
+        try:
+            if self._observability is not None:
+                getattr(self._observability, operation)(*args)
+        except Exception:
+            pass
 
     def _backoff_seconds(self, attempt_count: int) -> float:
         delay = min(
@@ -98,12 +112,21 @@ class OutboxPublisherService:
 
     async def claim(self) -> tuple[OutboxClaim, ...]:
         async with self._database.transaction() as session:
-            return await repository.claim_due_outbox_events(
+            claims = await repository.claim_due_outbox_events(
                 session,
                 claim_owner=self._config.claim_owner,
                 lease_seconds=self._config.lease_seconds,
                 batch_size=self._config.batch_size,
             )
+        if not claims:
+            self._observe("observe_outbox_claim", "empty")
+        else:
+            for claim in claims:
+                self._observe(
+                    "observe_outbox_claim",
+                    "reclaimed" if claim.was_reclaimed else "claimed",
+                )
+        return claims
 
     async def mark_published(self, claim: OutboxClaim) -> None:
         async with self._database.transaction() as session:
@@ -126,51 +149,92 @@ class OutboxPublisherService:
         claims = await self.claim()
         published = 0
         for claim in claims:
-            try:
-                if canonical_json_digest(claim.payload) != claim.payload_digest:
-                    raise OutboxError(OUTBOX_PUBLISH_FAILED)
-                await self._sink.publish(claim)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
+            started_at = time.perf_counter()
+            carrier = {
+                key: value
+                for key, value in {
+                    "traceparent": claim.traceparent,
+                    "tracestate": claim.tracestate,
+                }.items()
+                if value
+            }
+            with fail_open_span(
+                lambda: self._observability.start_messaging_span(
+                    "outbox publish",
+                    carrier=carrier,
+                    kind=SpanKind.PRODUCER,
+                    attributes={"messaging.operation": "publish", "component": "outbox_publisher"},
+                )
+                if self._observability is not None
+                else nullcontext(None)
+            ) as span:
                 try:
-                    await self._record_failure(claim)
-                except OutboxError:
+                    if canonical_json_digest(claim.payload) != claim.payload_digest:
+                        raise OutboxError(OUTBOX_PUBLISH_FAILED)
+                    await self._sink.publish(claim)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._observe("observe_outbox_publish", "failure", time.perf_counter() - started_at)
+                    if span is not None:
+                        span.set_status(Status(StatusCode.ERROR))
+                    try:
+                        await self._record_failure(claim)
+                    except OutboxError:
+                        logger.warning(
+                            "Outbox failure receipt rejected",
+                            extra={
+                                "component": "outbox_publisher",
+                                "status": "STALE",
+                                "safe_error_code": OUTBOX_STALE_CLAIM,
+                                **self._log_context(),
+                            },
+                        )
                     logger.warning(
-                        "Outbox failure receipt rejected",
+                        "Outbox publish failed",
+                        extra={
+                            "component": "outbox_publisher",
+                            "status": "FAILED",
+                            "safe_error_code": OUTBOX_PUBLISH_FAILED,
+                            **self._log_context(),
+                        },
+                    )
+                    continue
+                try:
+                    await self.mark_published(claim)
+                except OutboxError:
+                    self._observe("observe_outbox_publish", "stale", time.perf_counter() - started_at)
+                    if span is not None:
+                        span.set_status(Status(StatusCode.ERROR))
+                    logger.warning(
+                        "Outbox publish receipt rejected",
                         extra={
                             "component": "outbox_publisher",
                             "status": "STALE",
                             "safe_error_code": OUTBOX_STALE_CLAIM,
+                            **self._log_context(),
                         },
                     )
-                logger.warning(
-                    "Outbox publish failed",
+                    continue
+                published += 1
+                self._observe("observe_outbox_publish", "success", time.perf_counter() - started_at)
+                logger.info(
+                    "Outbox publish succeeded",
                     extra={
                         "component": "outbox_publisher",
-                        "status": "FAILED",
-                        "safe_error_code": OUTBOX_PUBLISH_FAILED,
+                        "status": "SUCCEEDED",
+                        **self._log_context(),
                     },
                 )
-                continue
-            try:
-                await self.mark_published(claim)
-            except OutboxError:
-                logger.warning(
-                    "Outbox publish receipt rejected",
-                    extra={
-                        "component": "outbox_publisher",
-                        "status": "STALE",
-                        "safe_error_code": OUTBOX_STALE_CLAIM,
-                    },
-                )
-                continue
-            published += 1
-            logger.info(
-                "Outbox publish succeeded",
-                extra={"component": "outbox_publisher", "status": "SUCCEEDED"},
-            )
         return published
+
+    def _log_context(self) -> dict[str, str | None]:
+        try:
+            if self._observability is not None:
+                return self._observability.correlated_log_fields()
+        except Exception:
+            pass
+        return {"trace_id": None, "span_id": None}
 
     async def run(self, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import json
 import logging
 import math
@@ -12,7 +13,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from opentelemetry.trace import SpanKind, Status, StatusCode
+
 from core.outbox_publisher import EventSink
+from core.observability import fail_open_span
 from core.persistence.repositories.evaluation_jobs import OutboxClaim
 
 logger = logging.getLogger(__name__)
@@ -58,10 +62,13 @@ class KafkaProducerConfig:
 class KafkaEventSink(EventSink):
     """EventSink implementation which returns only after broker delivery ACK."""
 
-    def __init__(self, config: KafkaProducerConfig, *, producer: Any | None = None) -> None:
+    def __init__(
+        self, config: KafkaProducerConfig, *, producer: Any | None = None, observability=None
+    ) -> None:
         self.config = config
         self._producer = producer
         self._producer_lock = asyncio.Lock()
+        self._observability = observability
 
     def _get_producer(self) -> Any:
         if self._producer is None:
@@ -88,7 +95,9 @@ class KafkaEventSink(EventSink):
             self._producer = Producer(config)
         return self._producer
 
-    def _publish_sync(self, event: OutboxClaim, deadline: float) -> None:
+    def _publish_sync(
+        self, event: OutboxClaim, deadline: float, headers: list[tuple[str, bytes]]
+    ) -> None:
         producer = self._get_producer()
         delivery_error: list[BaseException] = []
         acknowledged = False
@@ -109,6 +118,7 @@ class KafkaEventSink(EventSink):
             self.config.topic,
             key=str(event.aggregate_id).encode("ascii"),
             value=payload,
+            headers=headers,
             callback=delivery_report,
         )
         remaining = producer.flush(max(0.001, deadline - time.monotonic()))
@@ -123,7 +133,49 @@ class KafkaEventSink(EventSink):
         # confluent-kafka is callback-driven/synchronous; never block the ASGI loop.
         async with self._producer_lock:
             deadline = time.monotonic() + self.config.delivery_timeout_seconds
-            await await_kafka_io(self._publish_sync, event, deadline)
+            started_at = time.perf_counter()
+            with fail_open_span(
+                lambda: self._observability.start_messaging_span(
+                    "kafka produce",
+                    carrier=None,
+                    kind=SpanKind.PRODUCER,
+                    attributes={"messaging.system": "kafka", "messaging.operation": "publish"},
+                )
+                if self._observability is not None
+                else nullcontext(None)
+            ) as span:
+                trace_context = self._capture_trace_context()
+                headers = [
+                    (key, value.encode("ascii")) for key, value in trace_context.items()
+                ]
+                try:
+                    await await_kafka_io(self._publish_sync, event, deadline, headers)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if span is not None:
+                        span.set_status(Status(StatusCode.ERROR))
+                    self._observe(
+                        "timeout" if isinstance(exc, TimeoutError) else "failed",
+                        time.perf_counter() - started_at,
+                    )
+                    raise
+                self._observe("acked", time.perf_counter() - started_at)
+
+    def _capture_trace_context(self) -> dict[str, str]:
+        try:
+            if self._observability is not None:
+                return self._observability.capture_trace_context()
+        except Exception:
+            pass
+        return {}
+
+    def _observe(self, outcome: str, duration_seconds: float) -> None:
+        try:
+            if self._observability is not None:
+                self._observability.observe_kafka_producer(outcome, duration_seconds)
+        except Exception:
+            pass
 
     async def close(self) -> None:
         async with self._producer_lock:

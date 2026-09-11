@@ -13,7 +13,7 @@ from typing import Annotated, Literal, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Path, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from core.agent_router import AgentRouter
@@ -32,6 +32,7 @@ from core.evaluation_jobs import (
     JobError,
     JobErrorCode,
 )
+from core.health_checks import ComponentReadinessService
 from core.chat_service import ChatRuntimeTransportError, ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine, ScriptedEvaluationLLMEngine
 from core.request_payload import (
@@ -52,6 +53,7 @@ from core.persistence import (
     SyncPersistenceBridge,
     check_schema_readiness,
 )
+from core.observability import HttpObservabilityMiddleware, ObservabilityService
 from core.redis_service import (
     RagQueryCache,
     RedisService,
@@ -477,6 +479,14 @@ async def lifespan(app: FastAPI):
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.STARTING
     initialization_stack = RuntimeInitializationStack()
 
+    observability_service = await initialization_stack.create(
+        "observability_service",
+        lambda: ObservabilityService(
+            settings, process_role=getattr(app.state, "process_role", "api")
+        ),
+    )
+    app.state.observability_service = observability_service
+
     # Stage6-WP1：PostgreSQL Canonical Persistence 装配。
     # API startup 不是 Migration Owner：lifespan 只做只读 schema readiness
     # preflight（reachable + schema exists + alembic revision compatible），
@@ -521,15 +531,24 @@ async def lifespan(app: FastAPI):
     app.state.db_schema_revision = schema_readiness.alembic_revision
     app.state.auth_service = AuthService(persistence_database, settings)
     app.state.authorization_service = AuthorizationService(persistence_database)
-    app.state.evaluation_job_service = EvaluationJobService(persistence_database)
+    app.state.evaluation_job_service = EvaluationJobService(
+        persistence_database, observability=observability_service
+    )
     # Redis owns only cache/admission state.  Connection establishment is lazy so
     # cache outage never prevents the PostgreSQL/RAG authority from starting.
     redis_service = await initialization_stack.create(
         "redis_service", lambda: RedisService(settings)
     )
     app.state.redis_service = redis_service
-    app.state.rag_query_cache = RagQueryCache(redis_service.client, settings)
-    app.state.rate_limiter = RedisTokenBucketRateLimiter(redis_service.client, settings)
+    app.state.rag_query_cache = RagQueryCache(
+        redis_service.client, settings, observability=observability_service
+    )
+    app.state.rate_limiter = RedisTokenBucketRateLimiter(
+        redis_service.client, settings, observability=observability_service
+    )
+    app.state.component_readiness = ComponentReadinessService(
+        persistence_database, settings, redis_client=redis_service.client
+    )
 
     persistence_memory = await initialization_stack.create(
         "persistence_memory",
@@ -1069,6 +1088,7 @@ async def lifespan(app: FastAPI):
             app.state.rag_query_cache,
             redis_bridge,
             index_generation_provider=current_retrieval_generation,
+            observability=observability_service,
         )
     runtime_metrics = InMemoryMetricsRecorder(
         label_policy=MetricLabelPolicy(
@@ -1159,6 +1179,7 @@ async def lifespan(app: FastAPI):
                 knowledge_base_degraded=knowledge_base_error is not None
             ),
             extra_closeables=(
+                ("observability_service", observability_service),
                 ("logger_checkpoint_store", logger_checkpoints),
                 ("metrics_checkpoint_store", metrics_checkpoints),
                 *tuple(
@@ -1353,6 +1374,7 @@ app.add_middleware(
     RequestBodyLimitMiddleware,
     policy=REQUEST_PAYLOAD_POLICY,
 )
+app.add_middleware(HttpObservabilityMiddleware)
 
 
 class ChatRequest(BaseModel):
@@ -1904,10 +1926,34 @@ async def readiness_endpoint():
             app.state, "runtime_lifecycle_state", None
         ),
     )
+    component_readiness = getattr(app.state, "component_readiness", None)
+    if isinstance(component_readiness, ComponentReadinessService):
+        readiness = await component_readiness.check_api(
+            runtime_ready=readiness_http_status(snapshot) == 200
+        )
+        return JSONResponse(
+            content=readiness.to_safe_dict(), status_code=200 if readiness.ready else 503
+        )
     return JSONResponse(
         content=snapshot.to_safe_dict(),
         status_code=readiness_http_status(snapshot),
     )
+
+
+@app.get(settings.metrics_path, include_in_schema=False)
+async def metrics_endpoint(request: Request):
+    """暴露当前 API 进程的 Prometheus text exposition。"""
+    service = getattr(request.app.state, "observability_service", None)
+    if not isinstance(service, ObservabilityService) or not service.metrics_enabled:
+        raise HTTPException(status_code=404, detail="Not Found")
+    try:
+        job_service = getattr(request.app.state, "evaluation_job_service", None)
+        if isinstance(job_service, EvaluationJobService):
+            service.update_database_pool(await job_service.database.pool_snapshot())
+    except Exception:
+        pass
+    payload = service.render_metrics()
+    return Response(content=payload.body, headers={"Content-Type": payload.content_type})
 
 
 @app.post(

@@ -193,6 +193,8 @@ class OutboxEventRow(PersistenceBase):
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     payload_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    traceparent: Mapped[str | None] = mapped_column(String(55), nullable=True)
+    tracestate: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'PENDING'")
     )

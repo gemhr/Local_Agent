@@ -182,3 +182,12 @@ test-only AST Gate 只是全production Python surface的owner/sink oracle，不�
 | Durable Evaluation Job / Result | `EvaluationJobService`（transaction owner） | HTTP Job API、未来 WP5 Worker | PostgreSQL `evaluation_jobs` / `evaluation_results`；条件状态迁移；Result 与 `RUNNING→SUCCEEDED` 同事务 | Repository commit/rollback；Redis/RunRegistry 代替 Job authority |
 | Transactional Outbox / claim lease | `EvaluationJobService`（write intent）+ `OutboxPublisherService`（delivery） | 独立 publisher process | Job + Outbox 同一 PostgreSQL transaction；`FOR UPDATE SKIP LOCKED` + DB-time lease + fresh claim token；sink 在 transaction 外 | Publisher 改 Job 状态；Recording sink 在非 TEST 使用；exactly-once 宣称 |
 | Kafka transport / worker delivery | `KafkaEventSink`（producer ACK）+ `KafkaEvaluationWorker`（consumer） | 独立 publisher/worker process | `confluent-kafka`、`enable.auto.commit=false`、PG commit 后同步 offset；PG `consumer_processed_events` 是 dedup evidence | Kafka offset 成为业务 authority；DLQ publish 未 ACK 时提交原 offset；任意第二 evaluator |
+
+## Stage6-WP6 Observability Owners
+
+| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
+| --- | --- | --- | --- | --- | --- | --- |
+| Prometheus Registry / metric handles | `ObservabilityService`（PROCESS_SCOPE） | API `/metrics`、publisher/worker metrics server | 每进程构造一次 private Registry；业务边界只投影 bounded outcome | 进程内，重启可丢失 | metric state 决定 Job/cache/offset/recovery；global Registry；高基数 label | INTERNAL_RC |
+| OTel provider/export lifecycle | `ObservabilityService`（PROCESS_SCOPE） | OTLP exporter、tests | application/进程 composition 构造；bounded batch/flush/shutdown | exporter 外部系统可选 | exporter failure 传播业务；每请求/provider 重建；替代 Runtime semantic trace | INTERNAL_RC |
+| Durable distributed trace metadata | `EvaluationJobService` 写入 + Outbox PostgreSQL row 保存 | Publisher、Kafka header injector、Worker extractor | 只允许 nullable `traceparent/tracestate`；与 Job+Outbox 同事务 | PostgreSQL `outbox_events` | baggage/JWT/Principal/query/payload；成为 delivery/consumer authority | INTERNAL_RC |
+| Dependency readiness snapshot | `ComponentReadinessService`（只读 projection） | `/readyz`、healthcheck CLI、orchestrator | bounded PG SELECT 1 / Redis PING / Kafka full metadata | 无 | 写数据、auto-create topic、改变 lifecycle/admission/Outbox/offset | INTERNAL_RC |

@@ -737,6 +737,14 @@ class Settings:
     step_result_per_result_chars: int
     step_result_run_total_chars: int
     step_result_max_entries: int
+    observability_enabled: bool
+    metrics_enabled: bool
+    metrics_path: str
+    tracing_enabled: bool
+    otel_service_name: str
+    otel_exporter_otlp_endpoint: str = field(repr=False)
+    otel_trace_sample_ratio: float
+    health_check_timeout_seconds: float
     tool_allowed_read_roots: tuple[str, ...] = ()
     agentevalops_trace_export_enabled: bool = False
     agentevalops_base_url: str = ""
@@ -1010,6 +1018,43 @@ class Settings:
 
         runtime_component_close_timeout_seconds = _env_strict_float(
             "RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS", 5.0, minimum=0.0
+        )
+
+        observability_enabled = _env_strict_bool(
+            "LOCAL_AGENT_OBSERVABILITY_ENABLED", True
+        )
+        metrics_enabled = _env_strict_bool("LOCAL_AGENT_METRICS_ENABLED", True)
+        metrics_path = os.getenv("LOCAL_AGENT_METRICS_PATH", "/metrics").strip()
+        if (
+            not metrics_path.startswith("/")
+            or metrics_path == "/"
+            or any(marker in metrics_path for marker in ("?", "#", "{"))
+            or metrics_path.startswith("/api/")
+            or metrics_path in {"/health", "/readyz", "/docs", "/redoc", "/openapi.json"}
+        ):
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_METRICS_PATH",
+                "invalid_absolute_static_path",
+            )
+        tracing_enabled = _env_strict_bool("LOCAL_AGENT_TRACING_ENABLED", False)
+        otel_service_name = os.getenv(
+            "LOCAL_AGENT_OTEL_SERVICE_NAME", "localagent-api"
+        ).strip()
+        if not otel_service_name or len(otel_service_name) > 128:
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_OTEL_SERVICE_NAME",
+                "invalid_service_name",
+            )
+        otel_exporter_otlp_endpoint = os.getenv(
+            "LOCAL_AGENT_OTEL_EXPORTER_OTLP_ENDPOINT", ""
+        ).strip()
+        otel_trace_sample_ratio = _env_strict_float(
+            "LOCAL_AGENT_OTEL_TRACE_SAMPLE_RATIO", 0.1, minimum=0.0, maximum=1.0
+        )
+        health_check_timeout_seconds = _env_strict_float(
+            "LOCAL_AGENT_HEALTH_CHECK_TIMEOUT_SECONDS", 1.0, positive=True
         )
 
         # WP4-C：AgentEvalOps Trace export 最小配置。enabled=false 时其余字段
@@ -1357,6 +1402,14 @@ class Settings:
             step_result_per_result_chars=step_result_per_result_chars,
             step_result_run_total_chars=step_result_run_total_chars,
             step_result_max_entries=step_result_max_entries,
+            observability_enabled=observability_enabled,
+            metrics_enabled=metrics_enabled,
+            metrics_path=metrics_path,
+            tracing_enabled=tracing_enabled,
+            otel_service_name=otel_service_name,
+            otel_exporter_otlp_endpoint=otel_exporter_otlp_endpoint,
+            otel_trace_sample_ratio=otel_trace_sample_ratio,
+            health_check_timeout_seconds=health_check_timeout_seconds,
             tool_allowed_read_roots=tool_allowed_read_roots,
             agentevalops_trace_export_enabled=agentevalops_trace_export_enabled,
             agentevalops_base_url=agentevalops_base_url,

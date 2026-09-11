@@ -11,6 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from core.persistence.database import Database
 from core.persistence.repositories import evaluation_jobs as repository
@@ -138,8 +139,24 @@ def _project_job(row: object) -> EvaluationJob:
 class EvaluationJobService:
     """Job/Result/Outbox 的事务 Owner。"""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, *, observability: Any = None) -> None:
         self._database = database
+        self._observability = observability
+
+    def _observe(self, operation: str, *args: str) -> None:
+        try:
+            if self._observability is not None:
+                getattr(self._observability, operation)(*args)
+        except Exception:
+            pass
+
+    def _trace_context(self) -> dict[str, str]:
+        try:
+            if self._observability is not None:
+                return self._observability.capture_trace_context()
+        except Exception:
+            pass
+        return {}
 
     @property
     def database(self) -> Database:
@@ -157,6 +174,7 @@ class EvaluationJobService:
             "event_id": str(event_id),
             "job_id": str(job_id),
         }
+        trace_context = self._trace_context()
         async with self._database.transaction() as session:
             row = await repository.insert_job(
                 session,
@@ -179,9 +197,12 @@ class EvaluationJobService:
                     "schema_version": 1,
                     "payload": event_payload,
                     "payload_digest": canonical_json_digest(event_payload),
+                    "traceparent": trace_context.get("traceparent"),
+                    "tracestate": trace_context.get("tracestate"),
                     "status": "PENDING",
                 },
             )
+        self._observe("observe_job_created")
         return _project_job(row)
 
     async def get(self, job_id: uuid.UUID) -> EvaluationJob:
@@ -199,6 +220,8 @@ class EvaluationJobService:
                 if current is None:
                     raise JobError(JobErrorCode.JOB_NOT_FOUND)
                 raise JobError(JobErrorCode.JOB_NOT_CANCELLABLE)
+        self._observe("observe_job_transition", "QUEUED", "CANCELLED")
+        self._observe("observe_job_finalization", "cancelled")
         return _project_job(row)
 
     async def start(self, job_id: uuid.UUID) -> EvaluationJob:
@@ -209,6 +232,7 @@ class EvaluationJobService:
                 if current is None:
                     raise JobError(JobErrorCode.JOB_NOT_FOUND)
                 raise JobError(JobErrorCode.JOB_STATE_CONFLICT)
+        self._observe("observe_job_transition", "QUEUED", "RUNNING")
         return _project_job(row)
 
     async def claim_for_worker(

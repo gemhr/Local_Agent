@@ -36,6 +36,9 @@ class OutboxClaim:
     claim_owner: str
     claim_token: uuid.UUID
     claim_deadline: datetime
+    traceparent: str | None = None
+    tracestate: str | None = None
+    was_reclaimed: bool = False
 
 
 async def insert_job(session: AsyncSession, values: dict[str, object]) -> EvaluationJobRow:
@@ -239,7 +242,7 @@ async def fail_running_job(
 _CLAIM_SQL = text(
     """
     WITH candidates AS (
-        SELECT event_id
+        SELECT event_id, claim_deadline IS NOT NULL AS was_reclaimed
         FROM outbox_events
         WHERE status = 'PENDING'
           AND published_at IS NULL
@@ -258,7 +261,8 @@ _CLAIM_SQL = text(
     RETURNING event.event_id, event.event_type, event.aggregate_type,
               event.aggregate_id, event.schema_version, event.payload,
               event.payload_digest, event.attempt_count, event.claim_owner,
-              event.claim_token, event.claim_deadline
+              event.claim_token, event.claim_deadline, event.traceparent,
+              event.tracestate, candidates.was_reclaimed
     """
 )
 
@@ -293,6 +297,9 @@ async def claim_due_outbox_events(
             claim_owner=row.claim_owner,
             claim_token=row.claim_token,
             claim_deadline=row.claim_deadline,
+            traceparent=row.traceparent,
+            tracestate=row.tracestate,
+            was_reclaimed=bool(row.was_reclaimed),
         )
         for row in result.mappings().all()
     )

@@ -28,6 +28,7 @@ async def _run(args: argparse.Namespace) -> None:
     import server
 
     settings = server.settings
+    server.app.state.process_role = "worker"
     if not settings.kafka_enabled:
         raise SystemExit("Kafka worker requires LOCAL_AGENT_KAFKA_ENABLED=true")
     await validate_kafka_topic(
@@ -54,6 +55,9 @@ async def _run(args: argparse.Namespace) -> None:
         except NotImplementedError:  # pragma: no cover - Windows event loop
             signal.signal(signum, lambda *_: stop_event.set())
     async with server.lifespan(server.app):
+        server.app.state.observability_service.start_metrics_http_server(
+            args.metrics_port
+        )
         job_service = server.app.state.evaluation_job_service
         database = job_service.database
         worker = KafkaEvaluationWorker(
@@ -75,6 +79,7 @@ async def _run(args: argparse.Namespace) -> None:
                 sasl_password=settings.kafka_sasl_password,
             ),
             worker_id=args.worker_id or f"worker-{uuid.uuid4()}",
+            observability=server.app.state.observability_service,
         )
         await worker.run(stop_event)
 
@@ -82,6 +87,7 @@ async def _run(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker-id")
+    parser.add_argument("--metrics-port", type=int, default=0)
     asyncio.run(_run(parser.parse_args()))
 
 

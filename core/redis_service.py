@@ -11,6 +11,7 @@ import json
 import logging
 import random
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
@@ -61,12 +62,13 @@ class RagQueryCache:
 
     schema_version = 2
 
-    def __init__(self, client: redis.Redis, settings: Any) -> None:
+    def __init__(self, client: redis.Redis, settings: Any, *, observability: Any = None) -> None:
         self._client = client
         self._enabled = settings.rag_cache_enabled
         self._ttl = settings.rag_cache_ttl_seconds
         self._jitter = settings.rag_cache_ttl_jitter_seconds
         self._max_value_bytes = settings.rag_cache_max_value_bytes
+        self._observability = observability
 
     @staticmethod
     def key(*, authz_domain: str, index_generation: str, policy: object, query: str) -> str:
@@ -79,15 +81,19 @@ class RagQueryCache:
         ))
 
     async def get(self, key: str) -> dict[str, Any] | None:
+        started_at = time.perf_counter()
         if not self._enabled:
+            self._observe("bypass", started_at)
             return None
         try:
             raw = await self._client.get(key)
             if raw is None:
+                self._observe("miss", started_at)
                 return None
             envelope = json.loads(raw)
             if not isinstance(envelope, dict) or envelope.get("schema_version") != self.schema_version:
                 await self._delete_bad(key)
+                self._observe("miss", started_at)
                 return None
             payload = envelope.get("payload")
             if (
@@ -95,11 +101,23 @@ class RagQueryCache:
                 or envelope.get("payload_digest") != stable_digest(payload)
             ):
                 await self._delete_bad(key)
+                self._observe("miss", started_at)
                 return None
+            self._observe("hit", started_at)
             return payload
         except (RedisError, ValueError, TypeError, json.JSONDecodeError):
             self._log_error("get")
+            self._observe("error", started_at)
             return None
+
+    def _observe(self, outcome: str, started_at: float) -> None:
+        try:
+            if self._observability is not None:
+                self._observability.observe_cache(
+                    outcome, time.perf_counter() - started_at
+                )
+        except Exception:
+            pass
 
     async def set(self, key: str, payload: dict[str, Any]) -> None:
         if not self._enabled or not payload:
@@ -176,14 +194,17 @@ class RateLimitDecision:
 
 
 class RedisTokenBucketRateLimiter:
-    def __init__(self, client: redis.Redis, settings: Any) -> None:
+    def __init__(self, client: redis.Redis, settings: Any, *, observability: Any = None) -> None:
         self._client = client
         self._enabled = settings.rate_limit_enabled
         self._capacity = settings.rate_limit_capacity
         self._refill_rate = settings.rate_limit_refill_rate
+        self._observability = observability
 
     async def check(self, principal_domain: str) -> RateLimitDecision:
+        started_at = time.perf_counter()
         if not self._enabled:
+            self._observe("allowed", started_at)
             return RateLimitDecision(True, 0)
         key = "ratelimit:v1:" + hashlib.sha256(principal_domain.encode("utf-8")).hexdigest()
         try:
@@ -191,6 +212,23 @@ class RedisTokenBucketRateLimiter:
                 _TOKEN_BUCKET_LUA, 1, key, self._capacity, self._refill_rate / 1000.0
             )
             allowed, retry_ms = int(result[0]) == 1, max(0, int(result[1]))
+            self._observe("allowed" if allowed else "rejected", started_at)
             return RateLimitDecision(allowed, max(1, (retry_ms + 999) // 1000) if not allowed else 0)
         except (RedisError, OSError, ValueError, TypeError) as exc:
+            self._observe("unavailable", started_at)
+            logger.warning(
+                "Redis rate limiter unavailable",
+                extra={
+                    "component": "rate_limiter",
+                    "limiter_outcome": "unavailable",
+                    "safe_error_code": "RATE_LIMIT_UNAVAILABLE",
+                },
+            )
             raise RedisUnavailableError from exc
+
+    def _observe(self, outcome: str, started_at: float) -> None:
+        try:
+            if self._observability is not None:
+                self._observability.observe_limiter(outcome, time.perf_counter() - started_at)
+        except Exception:
+            pass

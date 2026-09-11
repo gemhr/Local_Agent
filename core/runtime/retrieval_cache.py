@@ -235,12 +235,14 @@ class CachedRetrievalExecutionService:
         *,
         index_generation_provider: Callable[[], str | None],
         codec: RetrievalCacheCodec | None = None,
+        observability: Any = None,
     ) -> None:
         self.origin = origin
         self.cache = cache
         self.bridge = bridge
         self.index_generation_provider = index_generation_provider
         self.codec = codec or RetrievalCacheCodec()
+        self.observability = observability
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.origin, name)
@@ -544,8 +546,12 @@ class CachedRetrievalExecutionService:
             ),
         )
 
-    @staticmethod
-    def _log(outcome: str) -> None:
+    def _log(self, outcome: str) -> None:
+        try:
+            if self.observability is not None and outcome in {"bypass", "error"}:
+                self.observability.observe_cache(outcome)
+        except Exception:
+            pass
         logger.info(
             "RAG cache outcome",
             extra={"component": "retrieval_cache", "cache_outcome": outcome},
