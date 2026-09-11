@@ -4,7 +4,8 @@
 
 ## 1. Composition Root
 
-唯一生产 Composition Root 是 `server.py` 的 FastAPI `lifespan()`：
+API 进程的生产 Composition Root 是 `server.py` 的 FastAPI `lifespan()`；独立
+Publisher/Worker 进程分别拥有自己的最小 Composition Root（见 WP5 三进程边界）：
 
 ```text
 Settings.load()
@@ -18,6 +19,21 @@ Settings.load()
 -> /api/chat 在请求入口捕获一次 mode
 -> GracefulShutdownCoordinator 在 lifespan 退出时编排唯一 shutdown
 ```
+
+### Stage6-WP5 三进程边界
+
+WP5 将生产部署拆为 API、Transactional Outbox Publisher、Evaluation Worker 三个
+独立进程。`server.py::lifespan()` 仍是 API 进程的 Composition Root；Publisher 与
+Worker 各自拥有独立的 `Settings.load()`、PostgreSQL `Database` 生命周期及 Kafka
+client 生命周期，不在 FastAPI startup background task 中运行。三者共享当前
+canonical `core` service/repository contract：Publisher 只通过 `EventSink` 发布
+Outbox，Worker 通过 PostgreSQL Job Authority、claim token/lease 与
+`consumer_processed_events` 完成业务事务。Worker 的 `RuntimeEvaluationExecutor`
+adapter 只调用现有 `ChatService.run_coordinated_agent` 边界，不引入第二 evaluator；
+独立 Worker 入口复用 `server.lifespan(server.app)` 的 canonical composition context，
+从 `app.state` 取得同一 `ChatService`、`EvaluationJobService` 与 `Database`，不启动
+HTTP server、不创建第二个数据库池。Kafka offset 仅在 PostgreSQL commit 后显式同步
+提交。
 
 装配事实：
 

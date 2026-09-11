@@ -240,3 +240,36 @@ fatal）：
 和可选的 `LOCAL_AGENT_JWT_CLOCK_SKEW_SECONDS`。算法固定为 `EdDSA`，API 验证路径只加载公钥。
 `LOCAL_AGENT_JWT_PRIVATE_KEY` 仅供 `scripts/manage_identity.py` 在 LOCAL/TEST 中签发受控测试令牌，
 不得配置到生产 API 进程。
+
+## Stage6-WP5 Kafka Reliable Messaging
+
+Kafka 由独立 Outbox Publisher 与 Evaluation Worker 进程使用；API 的普通查询不
+同步依赖 Kafka。`LOCAL_AGENT_KAFKA_ENABLED` 默认开启，正式 topic 为
+`evaluation.jobs.v1` 与 `evaluation.jobs.v1.dlq`，consumer group 为
+`localagent-evaluation-worker-v1`。Publisher 使用 `confluent-kafka` 的幂等 producer
+（`acks=all`），仅在 broker delivery ACK 后将 Outbox 标记为 `PUBLISHED`；Worker
+设置 `enable.auto.commit=false` 与 `enable.auto.offset.store=false`，在 PostgreSQL
+业务事务提交后同步提交 offset。Consumer dedup authority 为
+`consumer_processed_events(consumer_name,event_id)`，不是内存缓存或 Redis。
+
+可配置变量：`LOCAL_AGENT_KAFKA_BOOTSTRAP_SERVERS`、`LOCAL_AGENT_KAFKA_CLIENT_ID`、
+`LOCAL_AGENT_KAFKA_JOB_TOPIC`、`LOCAL_AGENT_KAFKA_JOB_DLQ_TOPIC`、
+`LOCAL_AGENT_KAFKA_CONSUMER_GROUP`、`LOCAL_AGENT_KAFKA_PRODUCE_TIMEOUT_SECONDS`、
+`LOCAL_AGENT_KAFKA_POLL_TIMEOUT_SECONDS`、`LOCAL_AGENT_KAFKA_MAX_POLL_INTERVAL_MS`、
+`LOCAL_AGENT_KAFKA_SESSION_TIMEOUT_MS`、`LOCAL_AGENT_KAFKA_SECURITY_PROTOCOL`、
+`LOCAL_AGENT_KAFKA_SASL_USERNAME` 与 `LOCAL_AGENT_KAFKA_SASL_PASSWORD`。密码仅存在
+于 `Settings` 的 `repr=False` 字段，不能写入日志或 DLQ。生产启动前 Publisher/Worker
+会显式读取 topic metadata 验证 topic 已存在，不依赖 broker auto-create。
+`LOCAL_AGENT_KAFKA_MAX_POLL_INTERVAL_MS` 必须严格大于 3660000 ms，以覆盖
+Evaluation 最大 3600 s、finalization 余量和 rebalance 余量；worker claim lease
+严格长于 Evaluation 与 finalization 余量，且严格短于 max poll interval。
+`SASL_PLAINTEXT`/`SASL_SSL` 必须同时配置 username/password，其他协议不得
+携带会被忽略的 SASL credential；违反上述不变量时 startup fail closed。
+
+Worker 另以 `asyncio.timeout(max_evaluation_seconds)` 约束单次 evaluator 等待；超时不写
+dedup、不提交 offset，保留 PostgreSQL lease 到期后的恢复路径。同步 Kafka poll、flush、
+offset commit 均在工作线程执行；取消时先等待底层有界调用退出，再关闭 client 或释放
+producer 锁。Consumer 的 `socket.timeout.ms=10000`，并禁用 topic auto-create。
+未提交消息处理失败时 worker 关闭 consumer 后抛错退出，供 supervisor 重启；不会继续
+poll 更高 offset。DLQ 仅保留 UUID identity、安全定位字段和有界协议版本
+（`evaluation-job-queued.v<1..6 位数字>` 或非负 32 位整数），不复制任意 schema 字符串。

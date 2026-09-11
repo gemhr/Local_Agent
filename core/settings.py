@@ -68,6 +68,11 @@ _PROFILE_ENVIRONMENT_ID_DEFAULT = {
 # 保证 shutdown 最坏情况下 transport 先于 dispatcher close deadline 返回。
 AGENTEVALOPS_TRANSPORT_CLEANUP_MARGIN_SECONDS = 0.5
 
+# WP5 最长 Evaluation 的 worker lease/finalization/rebalance 安全边界。
+KAFKA_EVALUATION_TIMEOUT_MAX_SECONDS = 3_600.0
+KAFKA_FINALIZATION_MARGIN_SECONDS = 30.0
+KAFKA_REBALANCE_MARGIN_SECONDS = 30.0
+
 _DEFAULT_EMBEDDING_MODEL_RELATIVE_PATH = os.path.join(
     "data", "models", "Qwen3-Embedding-0.6B"
 )
@@ -778,6 +783,20 @@ class Settings:
     rate_limit_enabled: bool = True
     rate_limit_capacity: int = 30
     rate_limit_refill_rate: float = 1.0
+    # Kafka transport（WP5）；仅 publisher/worker 建立网络连接。
+    kafka_enabled: bool = True
+    kafka_bootstrap_servers: str = "127.0.0.1:9092"
+    kafka_client_id: str = "localagent"
+    kafka_job_topic: str = "evaluation.jobs.v1"
+    kafka_job_dlq_topic: str = "evaluation.jobs.v1.dlq"
+    kafka_consumer_group: str = "localagent-evaluation-worker-v1"
+    kafka_produce_timeout_seconds: float = 10.0
+    kafka_poll_timeout_seconds: float = 1.0
+    kafka_max_poll_interval_ms: int = 3_900_000
+    kafka_session_timeout_ms: int = 45_000
+    kafka_security_protocol: str = "PLAINTEXT"
+    kafka_sasl_username: str = field(default="", repr=False)
+    kafka_sasl_password: str = field(default="", repr=False)
 
     @classmethod
     def load(cls) -> "Settings":
@@ -1070,6 +1089,86 @@ class Settings:
             "LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS", 10.0, positive=True
         )
 
+        kafka_enabled = _env_strict_bool("LOCAL_AGENT_KAFKA_ENABLED", True)
+        kafka_bootstrap_servers = os.getenv(
+            "LOCAL_AGENT_KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:9092"
+        ).strip()
+        kafka_client_id = os.getenv("LOCAL_AGENT_KAFKA_CLIENT_ID", "localagent").strip()
+        kafka_job_topic = os.getenv(
+            "LOCAL_AGENT_KAFKA_JOB_TOPIC", "evaluation.jobs.v1"
+        ).strip()
+        kafka_job_dlq_topic = os.getenv(
+            "LOCAL_AGENT_KAFKA_JOB_DLQ_TOPIC", "evaluation.jobs.v1.dlq"
+        ).strip()
+        kafka_consumer_group = os.getenv(
+            "LOCAL_AGENT_KAFKA_CONSUMER_GROUP", "localagent-evaluation-worker-v1"
+        ).strip()
+        kafka_produce_timeout_seconds = _env_strict_float(
+            "LOCAL_AGENT_KAFKA_PRODUCE_TIMEOUT_SECONDS", 10.0, positive=True
+        )
+        kafka_poll_timeout_seconds = _env_strict_float(
+            "LOCAL_AGENT_KAFKA_POLL_TIMEOUT_SECONDS", 1.0, positive=True
+        )
+        kafka_max_poll_interval_ms = _env_strict_int(
+            "LOCAL_AGENT_KAFKA_MAX_POLL_INTERVAL_MS", 3_900_000, minimum=1
+        )
+        kafka_session_timeout_ms = _env_strict_int(
+            "LOCAL_AGENT_KAFKA_SESSION_TIMEOUT_MS", 45_000, minimum=1
+        )
+        kafka_security_protocol = os.getenv(
+            "LOCAL_AGENT_KAFKA_SECURITY_PROTOCOL", "PLAINTEXT"
+        ).strip().upper()
+        kafka_sasl_username = os.getenv("LOCAL_AGENT_KAFKA_SASL_USERNAME", "")
+        kafka_sasl_password = os.getenv("LOCAL_AGENT_KAFKA_SASL_PASSWORD", "")
+        if kafka_enabled and not all(
+            (kafka_bootstrap_servers, kafka_client_id, kafka_job_topic,
+             kafka_job_dlq_topic, kafka_consumer_group)
+        ):
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR, "LOCAL_AGENT_KAFKA", "required_fields_empty"
+            )
+        minimum_max_poll_seconds = (
+            KAFKA_EVALUATION_TIMEOUT_MAX_SECONDS
+            + KAFKA_FINALIZATION_MARGIN_SECONDS
+            + KAFKA_REBALANCE_MARGIN_SECONDS
+        )
+        if kafka_max_poll_interval_ms / 1000 <= minimum_max_poll_seconds:
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_KAFKA_MAX_POLL_INTERVAL_MS",
+                "below_evaluation_lease_boundary",
+            )
+        if not kafka_poll_timeout_seconds * 1000 < kafka_session_timeout_ms < kafka_max_poll_interval_ms:
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_KAFKA_SESSION_TIMEOUT_MS",
+                "invalid_poll_session_interval_order",
+            )
+        allowed_kafka_security_protocols = {
+            "PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"
+        }
+        if kafka_security_protocol not in allowed_kafka_security_protocols:
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_KAFKA_SECURITY_PROTOCOL",
+                "unsupported_protocol",
+            )
+        sasl_configured = bool(kafka_sasl_username) and bool(kafka_sasl_password)
+        if kafka_security_protocol.startswith("SASL_") and not sasl_configured:
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_KAFKA_SASL",
+                "credentials_required",
+            )
+        if not kafka_security_protocol.startswith("SASL_") and (
+            kafka_sasl_username or kafka_sasl_password
+        ):
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_KAFKA_SASL",
+                "credentials_not_allowed",
+            )
+
         return cls(
             project_root=project_root,
             environment_profile=environment_profile,
@@ -1314,4 +1413,17 @@ class Settings:
             rate_limit_enabled=_env_strict_bool("LOCAL_AGENT_RATE_LIMIT_ENABLED", True),
             rate_limit_capacity=_env_strict_int("LOCAL_AGENT_RATE_LIMIT_CAPACITY", 30, minimum=1),
             rate_limit_refill_rate=_env_strict_float("LOCAL_AGENT_RATE_LIMIT_REFILL_RATE", 1.0, positive=True),
+            kafka_enabled=kafka_enabled,
+            kafka_bootstrap_servers=kafka_bootstrap_servers,
+            kafka_client_id=kafka_client_id,
+            kafka_job_topic=kafka_job_topic,
+            kafka_job_dlq_topic=kafka_job_dlq_topic,
+            kafka_consumer_group=kafka_consumer_group,
+            kafka_produce_timeout_seconds=kafka_produce_timeout_seconds,
+            kafka_poll_timeout_seconds=kafka_poll_timeout_seconds,
+            kafka_max_poll_interval_ms=kafka_max_poll_interval_ms,
+            kafka_session_timeout_ms=kafka_session_timeout_ms,
+            kafka_security_protocol=kafka_security_protocol,
+            kafka_sasl_username=kafka_sasl_username,
+            kafka_sasl_password=kafka_sasl_password,
         )

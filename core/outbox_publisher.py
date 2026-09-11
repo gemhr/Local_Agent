@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Transactional Outbox 的独立 Publisher Service（WP4 使用 Recording sink）。"""
+"""Transactional Outbox 的独立 Publisher Service（EventSink 可接 Kafka）。"""
 
 from __future__ import annotations
 

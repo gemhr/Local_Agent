@@ -15,7 +15,12 @@ from datetime import datetime
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.persistence.models import EvaluationJobRow, EvaluationResultRow, OutboxEventRow
+from core.persistence.models import (
+    ConsumerProcessedEventRow,
+    EvaluationJobRow,
+    EvaluationResultRow,
+    OutboxEventRow,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +59,21 @@ async def insert_outbox_event(session: AsyncSession, values: dict[str, object]) 
     return row
 
 
+async def insert_processed_event(
+    session: AsyncSession, values: dict[str, object]
+) -> ConsumerProcessedEventRow:
+    row = ConsumerProcessedEventRow(**values)
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def select_processed_event(
+    session: AsyncSession, *, consumer_name: str, event_id: uuid.UUID
+) -> ConsumerProcessedEventRow | None:
+    return await session.get(ConsumerProcessedEventRow, (consumer_name, event_id))
+
+
 async def select_job(session: AsyncSession, job_id: uuid.UUID) -> EvaluationJobRow | None:
     return await session.get(EvaluationJobRow, job_id)
 
@@ -62,6 +82,12 @@ async def select_result(session: AsyncSession, job_id: uuid.UUID) -> EvaluationR
     return await session.scalar(
         select(EvaluationResultRow).where(EvaluationResultRow.job_id == job_id)
     )
+
+
+async def select_outbox_event(
+    session: AsyncSession, event_id: uuid.UUID
+) -> OutboxEventRow | None:
+    return await session.get(OutboxEventRow, event_id)
 
 
 async def cancel_queued_job(session: AsyncSession, job_id: uuid.UUID) -> EvaluationJobRow | None:
@@ -97,16 +123,75 @@ async def start_queued_job(session: AsyncSession, job_id: uuid.UUID) -> Evaluati
     ).one_or_none()
 
 
-async def succeed_running_job(session: AsyncSession, job_id: uuid.UUID) -> EvaluationJobRow | None:
+async def claim_job(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    *,
+    claim_owner: str,
+    lease_seconds: float,
+) -> tuple[EvaluationJobRow | None, uuid.UUID]:
+    """Claim a queued job or reclaim an expired RUNNING lease using PG now()."""
+    token = uuid.uuid4()
+    statement = (
+        update(EvaluationJobRow)
+        .where(
+            EvaluationJobRow.id == job_id,
+            (
+                (EvaluationJobRow.status == "QUEUED")
+                | (
+                    (EvaluationJobRow.status == "RUNNING")
+                    & (
+                        EvaluationJobRow.worker_claim_deadline.is_(None)
+                        | (EvaluationJobRow.worker_claim_deadline <= func.now())
+                    )
+                )
+            ),
+        )
+        .values(
+            status="RUNNING",
+            started_at=func.now(),
+            updated_at=func.now(),
+            attempt=EvaluationJobRow.attempt + 1,
+            version=EvaluationJobRow.version + 1,
+            worker_claim_owner=claim_owner,
+            worker_claim_token=token,
+            worker_claim_deadline=func.now()
+            + text("CAST(:lease_seconds AS double precision) * interval '1 second'"),
+        )
+        .returning(EvaluationJobRow)
+    )
+    row = (await session.scalars(statement, {"lease_seconds": lease_seconds})).one_or_none()
+    return row, token
+
+
+async def succeed_running_job(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    *,
+    claim_owner: str | None = None,
+    claim_token: uuid.UUID | None = None,
+) -> EvaluationJobRow | None:
+    conditions = [EvaluationJobRow.id == job_id, EvaluationJobRow.status == "RUNNING"]
+    if claim_owner is not None or claim_token is not None:
+        conditions.extend(
+            [
+                EvaluationJobRow.worker_claim_owner == claim_owner,
+                EvaluationJobRow.worker_claim_token == claim_token,
+                EvaluationJobRow.worker_claim_deadline > func.now(),
+            ]
+        )
     return (
         await session.scalars(
             update(EvaluationJobRow)
-            .where(EvaluationJobRow.id == job_id, EvaluationJobRow.status == "RUNNING")
+            .where(*conditions)
             .values(
                 status="SUCCEEDED",
                 terminal_at=func.now(),
                 updated_at=func.now(),
                 version=EvaluationJobRow.version + 1,
+                worker_claim_owner=None,
+                worker_claim_token=None,
+                worker_claim_deadline=None,
             )
             .returning(EvaluationJobRow)
         )
@@ -119,11 +204,22 @@ async def fail_running_job(
     *,
     failure_code: str,
     failure_message: str | None,
+    claim_owner: str | None = None,
+    claim_token: uuid.UUID | None = None,
 ) -> EvaluationJobRow | None:
+    conditions = [EvaluationJobRow.id == job_id, EvaluationJobRow.status == "RUNNING"]
+    if claim_owner is not None or claim_token is not None:
+        conditions.extend(
+            [
+                EvaluationJobRow.worker_claim_owner == claim_owner,
+                EvaluationJobRow.worker_claim_token == claim_token,
+                EvaluationJobRow.worker_claim_deadline > func.now(),
+            ]
+        )
     return (
         await session.scalars(
             update(EvaluationJobRow)
-            .where(EvaluationJobRow.id == job_id, EvaluationJobRow.status == "RUNNING")
+            .where(*conditions)
             .values(
                 status="FAILED",
                 terminal_at=func.now(),
@@ -131,6 +227,9 @@ async def fail_running_job(
                 failure_code=failure_code,
                 failure_message=failure_message,
                 version=EvaluationJobRow.version + 1,
+                worker_claim_owner=None,
+                worker_claim_token=None,
+                worker_claim_deadline=None,
             )
             .returning(EvaluationJobRow)
         )
@@ -255,14 +354,18 @@ async def record_outbox_failure(
 __all__ = [
     "OutboxClaim",
     "cancel_queued_job",
+    "claim_job",
     "claim_due_outbox_events",
     "fail_running_job",
     "insert_job",
     "insert_outbox_event",
+    "insert_processed_event",
     "insert_result",
     "mark_outbox_published",
     "record_outbox_failure",
     "select_job",
+    "select_outbox_event",
+    "select_processed_event",
     "select_result",
     "start_queued_job",
     "succeed_running_job",

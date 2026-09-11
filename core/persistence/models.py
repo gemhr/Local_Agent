@@ -133,6 +133,11 @@ class EvaluationJobRow(PersistenceBase):
     )
     failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    worker_claim_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    worker_claim_token: Mapped[object | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    worker_claim_deadline: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -141,6 +146,11 @@ class EvaluationJobRow(PersistenceBase):
         ),
         CheckConstraint("attempt >= 0", name="ck_evaluation_jobs_attempt"),
         CheckConstraint("version >= 1", name="ck_evaluation_jobs_version"),
+        CheckConstraint(
+            "(worker_claim_owner IS NULL AND worker_claim_token IS NULL AND worker_claim_deadline IS NULL) "
+            "OR (worker_claim_owner IS NOT NULL AND worker_claim_token IS NOT NULL AND worker_claim_deadline IS NOT NULL)",
+            name="ck_evaluation_jobs_worker_claim_tuple",
+        ),
         Index(
             "ix_evaluation_jobs_active",
             "status",
@@ -186,6 +196,8 @@ class OutboxEventRow(PersistenceBase):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'PENDING'")
     )
+
+
     created_at: Mapped[object] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
@@ -233,6 +245,30 @@ class OutboxEventRow(PersistenceBase):
             "created_at",
             postgresql_where=text("published_at IS NULL"),
         ),
+    )
+
+
+class ConsumerProcessedEventRow(PersistenceBase):
+    """PostgreSQL business-processing evidence for Kafka at-least-once delivery."""
+
+    __tablename__ = "consumer_processed_events"
+
+    consumer_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    event_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    topic: Mapped[str] = mapped_column(String(255), nullable=False)
+    partition: Mapped[int] = mapped_column(Integer, nullable=False)
+    offset: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    processed_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('SUCCEEDED', 'FAILED', 'CANCELLED_NOOP', 'TERMINAL_NOOP', 'DUPLICATE')",
+            name="ck_consumer_processed_events_outcome",
+        ),
+        Index("ix_consumer_processed_events_event", "event_id"),
     )
 
 
@@ -615,6 +651,7 @@ CANONICAL_TABLES = (
     "runtime_event_journal",
     "runtime_snapshots",
     "event_consumption_checkpoint",
+    "consumer_processed_events",
     "messages",
     "conversation_summaries",
     "message_exchanges",
@@ -623,14 +660,13 @@ CANONICAL_TABLES = (
 )
 
 # 后续 WP 的表仍不属于当前 Canonical schema。
-TABLES_DEFERRED_TO_LATER_WORK_PACKAGES = (
-    "consumer_processed_events",
-)
+TABLES_DEFERRED_TO_LATER_WORK_PACKAGES = ()
 
 __all__ = [
     "CANONICAL_TABLES",
     "TABLES_DEFERRED_TO_LATER_WORK_PACKAGES",
     "ConversationSummaryRow",
+    "ConsumerProcessedEventRow",
     "EvaluationJobRow",
     "EvaluationResultRow",
     "EventConsumptionCheckpointRow",

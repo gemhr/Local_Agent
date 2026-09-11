@@ -421,3 +421,22 @@ def test_mcp_timeouts_positive_boundary_is_accepted(monkeypatch) -> None:
     )
     assert settings.mcp_connect_timeout_seconds == 0.1
     assert settings.mcp_request_timeout_seconds == 1.0
+
+
+def test_kafka_max_poll_interval_covers_long_evaluation_and_margins(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(monkeypatch, LOCAL_AGENT_KAFKA_MAX_POLL_INTERVAL_MS="1")
+    assert captured.value.field == "LOCAL_AGENT_KAFKA_MAX_POLL_INTERVAL_MS"
+    assert captured.value.reason_code == "below_evaluation_lease_boundary"
+
+
+def test_kafka_sasl_protocol_requires_complete_credentials(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(
+            monkeypatch,
+            LOCAL_AGENT_KAFKA_SECURITY_PROTOCOL="SASL_SSL",
+            LOCAL_AGENT_KAFKA_SASL_USERNAME="worker",
+            LOCAL_AGENT_KAFKA_SASL_PASSWORD=None,
+        )
+    assert captured.value.field == "LOCAL_AGENT_KAFKA_SASL"
+    assert captured.value.reason_code == "credentials_required"

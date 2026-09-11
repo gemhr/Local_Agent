@@ -79,7 +79,7 @@ def _request(suffix: str = "a") -> EvaluationJobRequest:
 @pytest.mark.asyncio
 async def test_submission_is_atomic_and_payload_is_minimal(clean_database, monkeypatch):
     readiness = await check_schema_readiness(clean_database)
-    assert readiness.ready and readiness.alembic_revision == "0004_wp4_evaluation_job_outbox"
+    assert readiness.ready and readiness.alembic_revision == readiness.alembic_head
     owner = await _create_user(clean_database)
     service = EvaluationJobService(clean_database)
     job = await service.submit(owner, _request())

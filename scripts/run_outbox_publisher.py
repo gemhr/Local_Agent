@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""WP4 独立 Outbox Publisher 进程入口；当前只允许 TEST Recording sink。"""
+"""独立 Outbox Publisher 进程入口；生产默认使用 Kafka ACK sink。"""
 
 from __future__ import annotations
 
@@ -15,18 +15,39 @@ from core.outbox_publisher import (
     OutboxPublisherService,
     RecordingEventSink,
 )
+from core.kafka_event_sink import KafkaEventSink, KafkaProducerConfig, validate_kafka_topic
 from core.persistence import Database, DatabaseConfig, assert_schema_ready
 from core.settings import EnvironmentProfile, Settings
 
 
 async def _run(args: argparse.Namespace) -> None:
     settings = Settings.load()
-    if settings.environment_profile is not EnvironmentProfile.TEST:
-        raise SystemExit(
-            "WP4 Recording sink is limited to TEST; Kafka delivery belongs to WP5"
+    if args.recording_sink:
+        if settings.environment_profile is not EnvironmentProfile.TEST:
+            raise SystemExit("Recording sink is limited to TEST")
+        sink = RecordingEventSink()
+    else:
+        if not settings.kafka_enabled:
+            raise SystemExit("Kafka publisher requires LOCAL_AGENT_KAFKA_ENABLED=true")
+        await validate_kafka_topic(
+            settings.kafka_bootstrap_servers,
+            settings.kafka_job_topic,
+            timeout_seconds=settings.kafka_produce_timeout_seconds,
+            security_protocol=settings.kafka_security_protocol,
+            sasl_username=settings.kafka_sasl_username,
+            sasl_password=settings.kafka_sasl_password,
         )
-    if not args.recording_sink:
-        raise SystemExit("WP4 requires explicit --recording-sink")
+        sink = KafkaEventSink(
+            KafkaProducerConfig(
+                bootstrap_servers=settings.kafka_bootstrap_servers,
+                client_id=settings.kafka_client_id,
+                topic=settings.kafka_job_topic,
+                delivery_timeout_seconds=settings.kafka_produce_timeout_seconds,
+                security_protocol=settings.kafka_security_protocol,
+                sasl_username=settings.kafka_sasl_username,
+                sasl_password=settings.kafka_sasl_password,
+            )
+        )
 
     database = Database(DatabaseConfig.from_settings(settings))
     stop_event = asyncio.Event()
@@ -39,7 +60,7 @@ async def _run(args: argparse.Namespace) -> None:
 
     service = OutboxPublisherService(
         database,
-        RecordingEventSink(),
+        sink,
         OutboxPublisherConfig(
             claim_owner=args.publisher_id or f"publisher-{uuid.uuid4()}",
             batch_size=args.batch_size,
@@ -51,6 +72,8 @@ async def _run(args: argparse.Namespace) -> None:
         await assert_schema_ready(database)
         await service.run(stop_event)
     finally:
+        if hasattr(sink, "close"):
+            await sink.close()
         await database.dispose()
 
 
