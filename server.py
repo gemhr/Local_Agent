@@ -25,6 +25,13 @@ from core.auth import (
     require_role,
 )
 from core.application_metadata import create_application_metadata
+from core.evaluation_jobs import (
+    EvaluationJob,
+    EvaluationJobRequest,
+    EvaluationJobService,
+    JobError,
+    JobErrorCode,
+)
 from core.chat_service import ChatRuntimeTransportError, ChatService
 from core.llm_engine import LocalLLMEngine, RemoteLLMEngine, ScriptedEvaluationLLMEngine
 from core.request_payload import (
@@ -514,6 +521,7 @@ async def lifespan(app: FastAPI):
     app.state.db_schema_revision = schema_readiness.alembic_revision
     app.state.auth_service = AuthService(persistence_database, settings)
     app.state.authorization_service = AuthorizationService(persistence_database)
+    app.state.evaluation_job_service = EvaluationJobService(persistence_database)
     # Redis owns only cache/admission state.  Connection establishment is lazy so
     # cache outage never prevents the PostgreSQL/RAG authority from starting.
     redis_service = await initialization_stack.create(
@@ -1163,6 +1171,7 @@ async def lifespan(app: FastAPI):
                     else ()
                 ),
                 ("redis_service", redis_service),
+                ("persistence_database", persistence_database),
             ),
         ),
         component="application_runtime_services",
@@ -1282,6 +1291,29 @@ async def auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
     return _api_error(request, exc.code, exc.status_code)
 
 
+_JOB_HTTP_STATUS = {
+    JobErrorCode.JOB_NOT_FOUND: 404,
+    JobErrorCode.JOB_NOT_CANCELLABLE: 409,
+    JobErrorCode.JOB_STATE_CONFLICT: 409,
+}
+
+
+@app.exception_handler(JobError)
+async def job_error_handler(request: Request, exc: JobError) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", "")
+    return JSONResponse(
+        status_code=_JOB_HTTP_STATUS[exc.code],
+        content={
+            "error": {
+                "code": exc.code.value,
+                "message": "Job operation failed.",
+                "request_id": request_id,
+            }
+        },
+        headers={"X-Request-ID": request_id},
+    )
+
+
 @app.middleware("http")
 async def request_id_and_auth_middleware(request: Request, call_next):
     """Request ID 与唯一 HTTP Auth 边界；Authorization 不进入日志或错误正文。"""
@@ -1378,6 +1410,44 @@ class RuntimeExecuteResponse(BaseModel):
     stop_reason: StrictStr
     error_code: StrictStr | None
     safe_message: StrictStr | None
+
+
+class EvaluationJobSubmitRequest(BaseModel):
+    """Durable Evaluation Job 输入；owner 只能来自认证 Principal。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: Annotated[
+        StrictStr,
+        Field(
+            min_length=1,
+            max_length=REQUEST_PAYLOAD_POLICY.AGENT_ID_MAX_CHARS,
+        ),
+    ]
+    query: Annotated[
+        StrictStr,
+        Field(
+            min_length=1,
+            max_length=REQUEST_PAYLOAD_POLICY.CHAT_QUERY_MAX_CHARS,
+        ),
+    ]
+    timeout_seconds: Annotated[
+        float,
+        Field(
+            gt=0,
+            le=RUNTIME_EXECUTE_TIMEOUT_MAX_SECONDS,
+            allow_inf_nan=False,
+        ),
+    ]
+
+
+class EvaluationJobResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: uuid.UUID
+    status: StrictStr
+    attempt: int
+    failure_code: StrictStr | None
 
 
 class ToolApprovalDecisionRequest(BaseModel):
@@ -1719,6 +1789,44 @@ def _authorization_service(request: Request) -> AuthorizationService:
     return service
 
 
+def _evaluation_job_service(request: Request) -> EvaluationJobService:
+    service = getattr(request.app.state, "evaluation_job_service", None)
+    if not isinstance(service, EvaluationJobService):
+        raise HTTPException(status_code=503, detail="EVALUATION_JOB_UNAVAILABLE")
+    return service
+
+
+def _evaluation_job_response(job: EvaluationJob) -> EvaluationJobResponse:
+    return EvaluationJobResponse(
+        job_id=job.job_id,
+        status=job.status.value,
+        attempt=job.attempt,
+        failure_code=job.failure_code,
+    )
+
+
+def _parse_job_id(job_id: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(job_id)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="invalid job_id") from exc
+
+
+async def _owned_evaluation_job(
+    request: Request, job_id: uuid.UUID
+) -> EvaluationJob:
+    job = await _evaluation_job_service(request).get(job_id)
+    try:
+        _authorization_service(request).require_owner_id(
+            request.state.principal, job.owner_user_id
+        )
+    except AuthError as exc:
+        if exc.status_code == 404:
+            raise JobError(JobErrorCode.JOB_NOT_FOUND) from None
+        raise
+    return job
+
+
 async def _bind_new_run_and_conversation(
     request: Request, *, run_id: str, agent_id: str
 ) -> None:
@@ -1800,6 +1908,48 @@ async def readiness_endpoint():
         content=snapshot.to_safe_dict(),
         status_code=readiness_http_status(snapshot),
     )
+
+
+@app.post(
+    "/api/evaluation/jobs",
+    response_model=EvaluationJobResponse,
+    status_code=202,
+)
+async def submit_evaluation_job_endpoint(
+    payload: EvaluationJobSubmitRequest, request: Request
+) -> EvaluationJobResponse:
+    job = await _evaluation_job_service(request).submit(
+        request.state.principal.user_id,
+        EvaluationJobRequest(
+            agent_id=payload.agent_id,
+            query=payload.query,
+            timeout_seconds=payload.timeout_seconds,
+        ),
+    )
+    return _evaluation_job_response(job)
+
+
+@app.get(
+    "/api/evaluation/jobs/{job_id}", response_model=EvaluationJobResponse
+)
+async def get_evaluation_job_endpoint(
+    job_id: Annotated[str, Path(max_length=36)], request: Request
+) -> EvaluationJobResponse:
+    job = await _owned_evaluation_job(request, _parse_job_id(job_id))
+    return _evaluation_job_response(job)
+
+
+@app.post(
+    "/api/evaluation/jobs/{job_id}/cancel",
+    response_model=EvaluationJobResponse,
+)
+async def cancel_evaluation_job_endpoint(
+    job_id: Annotated[str, Path(max_length=36)], request: Request
+) -> EvaluationJobResponse:
+    parsed_job_id = _parse_job_id(job_id)
+    await _owned_evaluation_job(request, parsed_job_id)
+    job = await _evaluation_job_service(request).cancel(parsed_job_id)
+    return _evaluation_job_response(job)
 
 
 @app.post("/api/chat")

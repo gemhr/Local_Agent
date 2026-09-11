@@ -125,3 +125,4 @@
 - LEGACY_ONLY：当前矩阵没有仅 Legacy 拥有且 Coordinated 缺失的目标能力。
 - DEPRECATED：能力级无；兼容字段见架构文档的 Deprecated / Compatibility Matrix。
 | Stage6-WP2 Authentication & API authorization | SUPPORTED | EdDSA JWT, Principal, USER/OPERATOR/ADMIN RBAC, API Request ID, auth error contract | `core/auth.py`, `server.py`, Alembic `0002_wp2_identity` | PostgreSQL must be migrated to head; password login/refresh/OAuth not implemented |
+| Stage6-WP4 Durable Evaluation Job + Transactional Outbox | SUPPORTED | PostgreSQL Job/Result authority；Principal owner；Job+Outbox atomic submission；conditional lifecycle；`SKIP LOCKED` + DB-time lease + claim token；at-least-once publisher | `core/evaluation_jobs.py`, `core/outbox_publisher.py`, Alembic `0004_wp4_evaluation_job_outbox`, `tests/test_stage6_wp4_job_outbox.py` | Kafka/Worker/DLQ/RUNNING cancellation/end-to-end exactly-once 未实现；Recording sink 仅 TEST |

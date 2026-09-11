@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     BigInteger,
+    CHAR,
     CheckConstraint,
     Computed,
     DateTime,
@@ -91,6 +92,147 @@ class ObjectOwnershipRow(PersistenceBase):
             name="ck_object_ownership_type",
         ),
         Index("ix_object_ownership_owner_type", "owner_user_id", "object_type"),
+    )
+
+
+class EvaluationJobRow(PersistenceBase):
+    """持久化 Evaluation Job；Job 状态的 PostgreSQL Authority。"""
+
+    __tablename__ = "evaluation_jobs"
+
+    id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    owner_user_id: Mapped[object] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    evaluator_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    request_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'QUEUED'")
+    )
+    attempt: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    version: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("1")
+    )
+    queued_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    updated_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    started_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    terminal_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')",
+            name="ck_evaluation_jobs_status",
+        ),
+        CheckConstraint("attempt >= 0", name="ck_evaluation_jobs_attempt"),
+        CheckConstraint("version >= 1", name="ck_evaluation_jobs_version"),
+        Index(
+            "ix_evaluation_jobs_active",
+            "status",
+            postgresql_where=text("status IN ('QUEUED', 'RUNNING')"),
+        ),
+        Index(
+            "ix_evaluation_jobs_owner_created",
+            "owner_user_id",
+            text("created_at DESC"),
+        ),
+    )
+
+
+class EvaluationResultRow(PersistenceBase):
+    """Evaluation 成功结果的持久化记录；每个 Job 至多一条。"""
+
+    __tablename__ = "evaluation_results"
+
+    id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    job_id: Mapped[object] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("evaluation_jobs.id", ondelete="RESTRICT"),
+        nullable=False, unique=True,
+    )
+    result_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    result_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class OutboxEventRow(PersistenceBase):
+    """Transactional Outbox；只保存待发布或已发布事件。"""
+
+    __tablename__ = "outbox_events"
+
+    event_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    aggregate_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    payload_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'PENDING'")
+    )
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    available_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    claim_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    claim_token: Mapped[object | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    claim_deadline: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version > 0", name="ck_outbox_events_schema_version"
+        ),
+        CheckConstraint(
+            "attempt_count >= 0", name="ck_outbox_events_attempt_count"
+        ),
+        CheckConstraint(
+            "status IN ('PENDING', 'PUBLISHED')", name="ck_outbox_events_status"
+        ),
+        CheckConstraint(
+            "(claim_owner IS NULL AND claim_token IS NULL AND claim_deadline IS NULL) "
+            "OR (claim_owner IS NOT NULL AND claim_token IS NOT NULL AND claim_deadline IS NOT NULL)",
+            name="ck_outbox_events_claim_tuple",
+        ),
+        CheckConstraint(
+            "(status = 'PENDING' AND published_at IS NULL) "
+            "OR (status = 'PUBLISHED' AND published_at IS NOT NULL)",
+            name="ck_outbox_events_publication_state",
+        ),
+        Index(
+            "ix_outbox_events_pending_available",
+            "available_at",
+            "created_at",
+            postgresql_where=text("published_at IS NULL"),
+        ),
     )
 
 
@@ -467,6 +609,9 @@ CANONICAL_TABLES = (
     "roles",
     "user_roles",
     "object_ownership",
+    "evaluation_jobs",
+    "evaluation_results",
+    "outbox_events",
     "runtime_event_journal",
     "runtime_snapshots",
     "event_consumption_checkpoint",
@@ -479,9 +624,6 @@ CANONICAL_TABLES = (
 
 # 后续 WP 的表仍不属于当前 Canonical schema。
 TABLES_DEFERRED_TO_LATER_WORK_PACKAGES = (
-    "evaluation_jobs",
-    "evaluation_results",
-    "outbox_events",
     "consumer_processed_events",
 )
 
@@ -489,6 +631,8 @@ __all__ = [
     "CANONICAL_TABLES",
     "TABLES_DEFERRED_TO_LATER_WORK_PACKAGES",
     "ConversationSummaryRow",
+    "EvaluationJobRow",
+    "EvaluationResultRow",
     "EventConsumptionCheckpointRow",
     "LongTermMemoryRow",
     "MessageExchangeRow",
@@ -497,6 +641,7 @@ __all__ = [
     "RoleRow",
     "UserRoleRow",
     "ObjectOwnershipRow",
+    "OutboxEventRow",
     "UserRow",
     "ProjectSemanticMemoryRow",
     "RuntimeEventJournalRow",

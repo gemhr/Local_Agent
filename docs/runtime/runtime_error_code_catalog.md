@@ -274,6 +274,17 @@ failure 的 category 归属与 retry disposition 仍由既有 `ToolExecutionServ
 evidence；其 category/phase/side_effect_state 语义见 Phase9-WP2 Gate C/E
 （`40_codex_mcp_runtime_final_confirmation.md`）。
 
+## Stage6-WP4 Durable Job / Outbox Codes
+
+| Code | Owner | Trigger | HTTP / publisher behavior |
+| --- | --- | --- | --- |
+| `JOB_NOT_FOUND` | `EvaluationJobService` | Job 不存在 | 隐藏 404 |
+| `JOB_NOT_CANCELLABLE` | `EvaluationJobService` | 非 `QUEUED` Job 请求取消 | 409；不修改状态 |
+| `JOB_STATE_CONFLICT` | `EvaluationJobService` | 条件状态迁移失败或第二个结果冲突 | 409 / typed worker failure；不生成第二 Result |
+| `OUTBOX_CLAIM_CONFLICT` | Outbox repository | 保留的显式 claim 冲突分类；空 batch 不是错误 | 不发布、不改变 Job |
+| `OUTBOX_STALE_CLAIM` | `OutboxPublisherService` | owner/token 不匹配或 lease 已过期 | 拒绝 mark/retry receipt；后续 event 继续处理 |
+| `OUTBOX_PUBLISH_FAILED` | `OutboxPublisherService` | sink 失败或 payload digest 不匹配 | attempt + 1、数据库时间 backoff、清除 claim；at-least-once retry |
+
 ## Semantic Categories
 
 - Retryable provider failure：仅 Model/Tool policy 明确允许且预算、deadline、幂等证据均允许时重试。

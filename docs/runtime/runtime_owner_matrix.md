@@ -179,3 +179,5 @@ test-only AST Gate 只是全production Python surface的owner/sink oracle，不�
 | Trace export metrics 第二计数状态机 | 已禁止；dispatcher health counters 是权威内部事实，metrics 只是 best-effort projection，reason/stage 词表单 owner（dispatcher） |
 | HTTP Principal / JWT verification | `core/auth.py::AuthService` | PostgreSQL users + server-verified EdDSA JWT | route 不解析 JWT、不信任 caller identity |
 | Identity schema | Alembic `0002_wp2_identity` + `core/persistence/models.py` | PostgreSQL `users` / `roles` / `user_roles` | startup 只读 readiness |
+| Durable Evaluation Job / Result | `EvaluationJobService`（transaction owner） | HTTP Job API、未来 WP5 Worker | PostgreSQL `evaluation_jobs` / `evaluation_results`；条件状态迁移；Result 与 `RUNNING→SUCCEEDED` 同事务 | Repository commit/rollback；Redis/RunRegistry 代替 Job authority |
+| Transactional Outbox / claim lease | `EvaluationJobService`（write intent）+ `OutboxPublisherService`（delivery） | 独立 publisher process | Job + Outbox 同一 PostgreSQL transaction；`FOR UPDATE SKIP LOCKED` + DB-time lease + fresh claim token；sink 在 transaction 外 | Publisher 改 Job 状态；Recording sink 在非 TEST 使用；exactly-once 宣称 |

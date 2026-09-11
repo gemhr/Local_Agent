@@ -166,6 +166,12 @@ class AuthorizationService:
             return
         await self.require_owner(principal, object_type, object_id)
 
+    def require_owner_id(
+        self, principal: Principal, owner_user_id: str | uuid.UUID | None
+    ) -> None:
+        """校验由业务表直接持有的 owner 列，不复制第二套授权策略。"""
+        require_owned(principal, owner_user_id)
+
 
 async def get_principal(request: Request) -> Principal:
     principal = getattr(request.state, "principal", None)
