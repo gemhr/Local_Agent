@@ -2,10 +2,10 @@
 
 ## Deployment Boundaries
 
-- **Windows Native 是 Stage 3 唯一 certified 部署目标**（Windows 11 / Windows Server + Python 3.12 + uv）。
-- **Single-process contract**：每个部署实例必须且只能有一个 LocalAgent server application process（`uv run python server.py`）。禁止 `uvicorn --workers N`、gunicorn、multi-process Runtime。多进程会破坏 RunRegistry 取消、OutputGate terminal 唯一性、StepResultStore 可见性、并发配额与 Shutdown 编排（这些 Owner 全部 process-local）。
-- 无 Docker / Compose / WSL2 依赖；无 Windows Service wrapper（operator/企业内部环境可托管 foreground process，LocalAgent 不提供 wrapper）。
-- 完整 Windows 部署、Rollback、持久化数据、Secret、Proxy 与 Shutdown 运维参见 `runtime_deployment_runbook.md`。
+- 支持 Windows Native、Docker Compose 与 Kubernetes backend；无 Windows Service wrapper。
+- **API single-active-replica contract**：禁止 `uvicorn --workers N`、gunicorn 或 API 多副本。RunRegistry、OutputGate、StepResultStore 等仍是 process-local Owner。
+- Publisher/Worker 可重叠运行；PostgreSQL claim/lease/fencing、Consumer Dedup 与 Kafka group 是并发边界。
+- 完整部署、Rollback、持久化数据、Secret、Proxy 与 Shutdown 运维参见 `runtime_deployment_runbook.md`。
 - Health / Readiness：`GET /health` 与 `GET /readyz`（SUPPORTED）；状态矩阵见下方「Health / Readiness」章节。Continuous monitoring / version compatibility：NOT_IMPLEMENTED。
 
 ## Startup Runbook

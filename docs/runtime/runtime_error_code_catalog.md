@@ -53,7 +53,7 @@
 
 这些 code 只进入 lifecycle result/`MEMORY_LIFECYCLE_RESOLVED` event/metric；
 不得写入 `StepCompletionResult.error_code` 或改变 delivered output/final
-Step/Run terminal。Business Authority 始终是 SQLite `SemanticMemoryRecord`。
+Step/Run terminal。Business Authority 始终是 PostgreSQL `SemanticMemoryRecord`。
 
 | Code / outcome | Trigger | Retry | Side effect / outcome |
 | --- | --- | --- | --- |
@@ -80,7 +80,7 @@ delivered output / final Step / Run terminal。失败策略固定为
 
 | Code | Trigger | Retry | Side effect / outcome |
 | --- | --- | --- | --- |
-| `MEMORY_RETRIEVAL_UNAVAILABLE` | SQLite authority read 失败（Store 不可用 / `PERSISTENCE_FAILED`）或 db_path 缺失 | 不重试（不跑第二次 retrieval） | `status=FAILED` safe observation + 空 bundle；Run 继续 |
+| `MEMORY_RETRIEVAL_UNAVAILABLE` | PostgreSQL authority read 失败（Store 不可用 / `PERSISTENCE_FAILED`） | 不重试（不跑第二次 retrieval） | `status=FAILED` safe observation + 空 bundle；Run 继续 |
 | `MEMORY_RETRIEVAL_FAILED` | 检索/排序/bundle 构造中的非预期内部错误的安全收口 | 不重试 | `status=FAILED` safe observation + 空 bundle；Run 继续；不投影 raw exception |
 
 Cancellation、run deadline 与 budget terminal signal 不映射为上述 code，

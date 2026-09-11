@@ -1,6 +1,6 @@
 # LocalAgent
 
-LocalAgent 是一个本地桌面智能体项目。PyQt6 客户端通过 FastAPI 后端进行流式对话；后端组合本地或远程 LLM、RAG 知识库、SQLite Memory、本地工具，以及默认启用的 Coordinated Runtime。
+LocalAgent 是一个本地桌面智能体项目。PyQt6 客户端通过 FastAPI 后端进行流式对话；后端组合本地或远程 LLM、RAG 知识库、PostgreSQL Memory、本地工具，以及默认启用的 Coordinated Runtime。
 
 > **安全提示**：API Key、Cookie、真实内网端点和用户私有绝对路径只能保存在环境变量或本机未提交配置中，不得写入仓库、日志、截图或运行证据。
 
@@ -15,7 +15,7 @@ FastAPI application (server.py::lifespan)
   → planning / scheduler / parallel executor
   → model / tool / retrieval contracts
   → RuntimeEventChannel
-  → SQLite Journal / observability / trace
+  → PostgreSQL Journal / Prometheus / OpenTelemetry trace
   → text/plain streaming response
 ```
 
@@ -34,7 +34,8 @@ FastAPI application (server.py::lifespan)
 - **运行控制**：状态机、Run/Step 生命周期、Budget、Deadline、Timeout、Cancellation、客户端断连处理和主动取消 API。
 - **模型策略**：基于 Profile 能力与成本元数据的选择、同 Profile Retry、受策略约束的候选模型 fallback、Circuit Breaker。模型能力不按 Qwen、DeepSeek 等名称推断。
 - **Tool / Retrieval 合同**：类型化调用、预算与超时、幂等/副作用 evidence、安全输出限制、RAG 检索阶段事件和 provenance。
-- **事件与持久证据**：Journal-first 事件发布、per-run 单调 sequence、单一 terminal、SQLite Journal v2（reader 兼容 v1/v2）。
+- **事件与持久证据**：Journal-first 事件发布、per-run 单调 sequence、单一 terminal，以及 PostgreSQL canonical Journal / Snapshot / Checkpoint。
+- **分布式后端主链**：PostgreSQL Durable Job + Transactional Outbox、Kafka at-least-once delivery、Consumer Dedup、Worker Lease/Fencing 与 DLQ；不宣称端到端 exactly-once。
 - **最终交付**：`OutputGate` at-most-once；只有已交付 final 可以通过 write-once writer 写入业务 Memory。
 - **可观测性**：结构化安全日志、进程内指标 recorder、Trace/span、健康快照和故障隔离。
 - **生命周期**：Run Registry、worker tracking、admission gate、断连 drain、优雅关闭和保守资源关闭报告。
@@ -51,7 +52,7 @@ FastAPI application (server.py::lifespan)
 | 全系统 exactly-once | `NOT_IMPLEMENTED` | 只有局部 at-most-once、幂等与持久 evidence，不能提升为全系统保证 |
 | 自动补偿 | `NOT_IMPLEMENTED` | Runtime 可记录补偿 evidence，但不自动执行通用补偿策略 |
 | 生产 Chaos / Fault 激活 | `NOT_IMPLEMENTED` | 无 Settings、HTTP、Prompt 或 Tool 参数激活入口 |
-| 生产指标 Exporter | `NOT_IMPLEMENTED` | 当前只有进程内 recorder/snapshot，不等于 Prometheus/Grafana 接入 |
+| 集中式可观测性后端 | `PARTIALLY_SUPPORTED` | 已有 Prometheus endpoint、真实 OTel SDK 与可选 OTLP；未内置 Prometheus Server、Collector、Dashboard 或 Alerting |
 
 完整状态和限制分别见 `docs/runtime/runtime_capability_matrix.md` 与 `docs/runtime/stage2_known_limitations_and_next_stage.md`。
 
@@ -153,7 +154,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 
 ### 4.5 部署边界
 
-当前唯一 certified 部署目标为 **Windows Native**（Windows 11 / Windows Server + Python 3.12 + uv），正式 server 入口是 `uv run python server.py`，每个部署实例**只能有一个 server application process**。禁止 `uvicorn --workers N`、gunicorn、multi-process Runtime。不支持 Docker / Compose / WSL2 部署。完整 Windows 部署、单进程合同、持久化数据、Secret、Proxy、Shutdown 与 Rollback 见 `docs/runtime/runtime_deployment_runbook.md`。
+当前支持 Windows Native、Docker Compose 与 Kubernetes backend 部署。API Runtime 仍固定单 active replica，禁止 `uvicorn --workers N`、gunicorn 或 API 多副本；Publisher/Worker 可依赖 PostgreSQL claim/lease/fencing 与 Kafka consumer group 横向重叠运行。完整边界见 `docs/runtime/runtime_deployment_runbook.md`。
 
 ## 5. 关键配置
 
@@ -179,9 +180,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_REMOTE_VERIFY_TLS` | Profile 默认：`LOCAL=0`、`TEST=1`、`PRODUCTION=1` | 严格布尔（`1`/`0`/`true`/`false`）；PRODUCTION 不可显式关闭 |
 | `LOCAL_AGENT_REMOTE_TRUST_ENV` | Profile 默认：`LOCAL=1`、`TEST=0`、`PRODUCTION=0` | 严格布尔；是否让远程 model Session 继承系统 proxy |
 | `LOCAL_AGENT_CLIENT_TRUST_ENV` | `1`（所有 Profile 一致） | 严格布尔；是否让 Desktop Client → LocalAgent Server Session 继承系统 proxy；与 `LOCAL_AGENT_REMOTE_TRUST_ENV` 独立 |
-| `LOCAL_AGENT_EVENT_JOURNAL_DB_PATH` | `data/database/runtime_event_journal.db` | Coordinated Runtime SQLite Journal |
 | `LOCAL_AGENT_SNAPSHOT_ENABLED` | `false` | 严格布尔值；启用 Snapshot 与 Recovery validation |
-| `LOCAL_AGENT_MEMORY_DB_PATH` | `data/database/agent_memory.db` | 业务 Memory SQLite 路径 |
 | `LOCAL_AGENT_CHROMA_DIR` | `chroma_db` | Chroma 持久化目录（含 `localagent_retrieval/<collection_key>/` generation 布局） |
 | `LOCAL_AGENT_KB_COLLECTION` | `huawei_wiki_collection` | 逻辑 KB collection 标签（非物理 generation 定位器） |
 | `LOCAL_AGENT_KB_CHUNK_SIZE` | `1400` | 生产 chunk policy chunk size；production 构建唯一 authority，production CLI 禁止覆盖 |
@@ -286,10 +285,10 @@ uv run python scripts/query_local_kb.py "检索问题"
 - `.env*`（示例模板除外）、模型、wheel、数据库、日志、Chroma 数据和知识库业务数据不得提交。
 - Runtime Event、Journal、Snapshot、Report、Metric、Span 和结构化日志只保存 allowlist 安全事实或 digest，不保存 Prompt、Tool 原始参数/结果、Provider 原始异常、路径或密钥。
 - 正常聊天 Wire 会承载面向用户的输出，Memory 和知识库有各自的业务持久化边界；“Runtime 安全投影不保存正文”不等于“任何业务面都不保存正文”。
-- 不得手工修改 Runtime SQLite row、digest、event sequence 或 terminal 事实。
+- 不得手工修改 PostgreSQL canonical row、digest、event sequence、terminal、Job/Outbox、Dedup 或 Lease/Fencing 事实。
 - Fault Injection 只能从测试或显式 operation seam 注入，生产配置和 API 没有启用入口。
 - File Tool 调用按 `Tool Governance -> ResourceAuthorizationService -> ToolExecutionService` 顺序执行；相对路径、UNC、device/extended path、越界、nonexistent 与类型不匹配均在业务访问前拒绝。
-- `PRODUCTION` 仅认证同机 loopback Desktop Client + Server：`LOCAL_AGENT_API_HOST` 与 `LOCAL_AGENT_API_BASE_URL` 必须使用 numeric loopback（IPv4 loopback 或 `::1`）。HTTP raw-body 与字段级 payload Gate 已启用，但它们不是 authenticated human IAM、inbound TLS、Rate Limit、DLP 或完整 Sandbox；LOCAL/TEST 的非 loopback 配置只属于开发边界。
+- `PRODUCTION` 仍要求 numeric loopback API；所有 `/api/*` 同时经过 EdDSA JWT、PostgreSQL Principal/RBAC/object ownership 与 Redis per-principal rate limit。项目仍不提供 inbound TLS、WAF、DLP 或完整 Sandbox。
 
 ## 9. 测试与验证
 
@@ -341,7 +340,7 @@ Release Gate 必须由当前测试和 `tests/_runtime_release_gate.py` 重新派
 - 安全边界：`docs/runtime/runtime_security_boundary.md`
 - 错误码：`docs/runtime/runtime_error_code_catalog.md`
 - 运维与恢复：`docs/runtime/runtime_operations_runbook.md`、`docs/runtime/runtime_recovery_runbook.md`
-- 部署：`docs/runtime/runtime_deployment_runbook.md`（Windows Native 单进程部署合同）
+- 部署：`docs/runtime/runtime_deployment_runbook.md`（Windows Native、Docker Compose、Kubernetes 与 API 单副本边界）
 - Release Gate：`docs/runtime/runtime_release_gate.md`、`docs/runtime/runtime_release_checklist.md`
 - 已知限制：`docs/runtime/stage2_known_limitations_and_next_stage.md`
 ### API authentication

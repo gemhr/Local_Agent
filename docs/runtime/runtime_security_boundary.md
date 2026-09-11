@@ -62,7 +62,7 @@ latency 与 safe reason/error code；严格禁止 canonical text、payload value
 forget query、source excerpt、prompt、CoT、raw exception 与文件路径。尤其 FORGET event
 不得重新保存刚 redacted 的正文或 logical key。event publication failure best-effort，不回滚
 已提交 lifecycle state。FORGET 只做 logical redaction：Conversation History 原消息仍在；
-不承诺 SQLite page secure erase、WAL/page residual 清除、VACUUM、全盘加密或 GDPR full
+不承诺 PostgreSQL page/WAL residual secure erase、全盘加密或 GDPR full
 deletion。
 
 ## Phase5 WP4-B / WP6-D Memory Retrieval / Context Injection Boundary
@@ -72,7 +72,7 @@ Long-term Memory retrieval 是 best-effort 只读派生能力：`MemoryRetrieval
 `direct` scope exact + `SEMANTIC` + `ACTIVE` + bounded limit）返回的 authority rows，
 不创造第二 identity（无 user/project/thread/tenant）、不做 lifecycle mutation、不做
 vector/semantic retrieval。`FORGOTTEN` / `SUPERSEDED` rows 由 SQL 谓词与 eligibility
-fail closed 排除；tombstone 正文与被取代版本不得进入 Model Context。检索失败（SQLite
+fail closed 排除；tombstone 正文与被取代版本不得进入 Model Context。检索失败（PostgreSQL
 unavailable / malformed row / ranking exception / bundle construction failure）按
 `BEST_EFFORT_EMPTY_BUNDLE_NO_STALE_FALLBACK` 收口：safe event/metric 观察后 Run
 携带空 bundle 继续，绝不使用 stale cache 或伪造 Memory；cancellation / run deadline /
@@ -109,11 +109,11 @@ Phase8 的 `workspace_read_file` / `workspace_write_file` 是独立的受限 Dem
 
 Wiki write不复用Tool read Authority；`WikiCrawler`校验remote `sn` 为单一Windows leaf，并对最终`.md/.pdf` candidate执行configured-output-root containment。拒绝只记录 `WIKI_REMOTE_FILENAME_INVALID` / `WIKI_OUTPUT_PATH_DENIED`，不记录raw metadata/path。
 
-`Settings.remote_api_key` 与 `Settings.wiki_cookie` 使用 `repr=False`，只解决这两个credential的dataclass `repr/str` 暴露。Provider 401/403/timeout/5xx/malformed response 继续只投影固定 safe facts，不允许 Authorization marker 进入异常、Event、Journal、结构化日志、Metric、Span、Wire 或 Health。PRODUCTION local API仅允许numeric loopback HTTP；这不是human authentication或inbound TLS。
+`Settings.remote_api_key` 与 `Settings.wiki_cookie` 使用 `repr=False`，只解决这两个credential的dataclass `repr/str` 暴露。Provider 401/403/timeout/5xx/malformed response 继续只投影固定 safe facts，不允许 Authorization marker 进入异常、Event、Journal、结构化日志、Metric、Span、Wire 或 Health。Stage6 已为全部 `/api/*` 增加 EdDSA JWT、PostgreSQL Principal、RBAC 与 object ownership；PRODUCTION local API仍只允许numeric loopback HTTP，这不等于 inbound TLS。
 
 HTTP request 已有 application-wide 1 MiB actual-byte Gate 和 endpoint 字段级 chars/count/range Gate。它们是 pre-Run 输入约束，不是 Runtime Budget、Tool Permission、Resource Authorization、human IAM、Rate Limit 或 DLP；400/413/422 拒绝不产生 Run、RuntimeEvent、Journal 或业务 mutation。
 
-Known Limitations：无authenticated human IAM、inbound TLS、Rate Limit、full Sandbox/OS isolation、handle-based TOCTOU elimination、generic DLP、egress sandbox、human approval authentication/authorization（WP2 已实现无认证的 human decision transport：`POST /api/runtime/runs/{run_id}/tool-approvals/{approval_id}/approve|reject` 命令面与 `[[ORCH]]` `TOOL_APPROVAL_REQUESTED/DECIDED` 安全投影，即 `HUMAN_DECISION_TRANSPORT = IMPLEMENTED`、`AUTHENTICATION/AUTHORIZATION/RBAC = NOT_IMPLEMENTED`；WP4 Desktop UI 只展示 allowlist 的 tool_name/risk_level/risk_facts，通过既有 HTTP route 发送 binding digest，不显示 raw args/prompt/path/secret；`approval_id` 与 `invocation_binding_digest` 只是 correlation 数据，不是授权凭据，`actor_id` 仅 audit label；无 reconnect、approval history/center 与 durable pause-resume）；FastAPI 默认422 detail可能回显被拒绝输入，留给WP3-C；authorized business content/path仍可进入正常Wire/Memory；UI/script raw logs与hardcoded Wiki endpoint仍是配置/日志债务；UNC不支持；real reparse测试可能受环境权限阻止；Resource contracts与payload contracts仍为INTERNAL_RC；Recovery仍validation-only、部署仍single-process Windows Native。
+Known Limitations：无密码登录、refresh token、OAuth、inbound TLS、WAF、full Sandbox/OS isolation、handle-based TOCTOU elimination、generic DLP、egress sandbox、approval history/center 与 durable pause-resume。Stage6 的 human decision HTTP transport 受统一 JWT、Principal 与 Run ownership 保护，实际 approval actor 只取 server-derived Principal；`approval_id` 与 `invocation_binding_digest` 仍只是 correlation 数据。FastAPI 默认422 detail可能回显被拒绝输入；authorized business content/path仍可进入正常Wire/Memory；UNC不支持；real reparse测试可能受环境权限阻止；Resource contracts与payload contracts仍为INTERNAL_RC；Recovery仍validation-only。Docker Compose 与 Kubernetes 已有真实本地证据，但不代表生产 HA、API 多副本或 inbound TLS。
 
 ## Security Non-capabilities / Deferred Scope
 
@@ -122,9 +122,9 @@ Known Limitations：无authenticated human IAM、inbound TLS、Rate Limit、full
 | WAF / generic abuse protection | `NOT_IMPLEMENTED` | WP3-B 的 fixed raw-body/semantic payload bounds 不是 Web Application Firewall（WAF）；当前没有 generic abuse detection、bot detection、distributed request filtering、per-user/per-principal traffic policy 或 WAF-style rule engine。 |
 | Prompt Injection protection | `PARTIALLY_SUPPORTED` | Stage 3 WP3-C 已建立确定性的 instruction/data trust boundary 与 typed security denial integrity：只有 code-owned trusted controls 可绑定 `system` role；User/RAG/Tool/Memory/Step 内容只能作为 data/proposal。它不保证模型不受恶意自然语言影响，也不是 generic injection classifier、WAF 或 DLP。 |
 | SQL Injection protection | `SUPPORTED` | 仅限 current LocalAgent production PostgreSQL/SQLAlchemy inventory：SQL structure owner 是 code，User/Model/RAG/Tool/Memory/HTTP 内容只可作为 bound values；test-only AST Gate 冻结 SQLAlchemy owner 与 sink 形状。它不是通用 SQL firewall、NL2SQL 或任意数据库技术认证。 |
-| Human IAM | `NOT_IMPLEMENTED` | numeric loopback、`agent_id` 和 Tool principal 均不是 authenticated human identity、RBAC/ABAC 或 tenant isolation。 |
+| Human IAM | `SUPPORTED` | Stage6 支持短效 EdDSA JWT、PostgreSQL Principal、USER/OPERATOR/ADMIN RBAC 与 object ownership；不包含密码登录、refresh token、OAuth、外部 IAM 管理界面或完整 tenant platform。 |
 | Inbound Local API TLS | `NOT_IMPLEMENTED` | 当前 certified boundary 仍是 numeric-loopback HTTP。 |
-| Inbound API rate limit | `NOT_IMPLEMENTED` | payload bounds、Runtime admission/concurrency 与 Provider rate handling 均不等于 caller rate limit；distributed/per-principal策略 defer to WAF/deployment edge。 |
+| Inbound API rate limit | `SUPPORTED` | `/api/*` 使用 Principal authz domain 维度的 Redis Lua Token Bucket；超额为 429，Redis unavailable fail-closed 503。它不是 WAF 或 generic abuse protection。 |
 | Generic DLP | `NOT_IMPLEMENTED` | fixed safe projection与credential-specific controls不等于通用内容/PII分类和输出扫描。 |
 | Full Sandbox | `NOT_IMPLEMENTED` | File Tool resource authorization不等于OS isolation或handle-based TOCTOU elimination。 |
 
@@ -266,7 +266,7 @@ EdDSA JWT 验证。Principal 由服务端 JWT claims 与 PostgreSQL `users`/`use
 
 - governance non-ALLOW 不产生 `TOOL_STARTED`/`TOOL_COMPLETED` 或任何 Tool evidence；denial 是直接安全 Wire 文本，不伪造 execution facts。
 - `ToolPermission != filesystem/path authorization`；WP3-A 已实现 frozen workspace read-root/path containment，仍不等于 OS Sandbox 或 TOCTOU elimination。两个 Settings credential 的 `repr=False` 与 Provider safe projection 已覆盖，但 generic secret isolation / DLP 仍未实现。
-- `ToolSideEffectKind.NONE` 不表示 permission-free；approval 不是 sandbox。approval evidence 是 governance 判定的输入，不是授权事实；human approve/reject 命令面已实现但无认证（见上方 truth boundary），durable pause/resume 未实现。
+- `ToolSideEffectKind.NONE` 不表示 permission-free；approval 不是 sandbox。approval evidence 是 governance 判定的输入，不是授权事实；human approve/reject 命令面经过 Stage6 JWT、Principal 与 Run ownership，actor 不取请求体；durable pause/resume 未实现。
 - **Known Limitation（Observability）**：WP2-B v1 不产生 dedicated governance RuntimeEvent / governance Journal fact；`DENY` / `APPROVAL_REQUIRED` 不会伪造 `TOOL_STARTED` / `TOOL_COMPLETED`（Tool 未执行）。rich governance observability 延后，不为此新增 RuntimeEvent / Journal schema。
 
 ## Stage6-WP6 Metrics / Trace / Health Boundary

@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from core.auth import AuthError, AuthService, AuthorizationService, Principal
 from core.persistence.models import ObjectOwnershipRow, RoleRow, UserRoleRow, UserRow
+from core.redis_service import RedisTokenBucketRateLimiter
 import server
 
 pytest_plugins = ("tests._pg_fixtures",)
@@ -66,6 +67,15 @@ def _token(private, user_id: uuid.UUID, roles: list[str]) -> str:
             "nbf": now, "exp": now + timedelta(minutes=2),
         }, private, algorithm="EdDSA",
     )
+
+
+def _disabled_rate_limiter() -> RedisTokenBucketRateLimiter:
+    settings = SimpleNamespace(
+        rate_limit_enabled=False,
+        rate_limit_capacity=1,
+        rate_limit_refill_rate=1.0,
+    )
+    return RedisTokenBucketRateLimiter(SimpleNamespace(), settings)
 
 
 @pytest.mark.asyncio
@@ -155,6 +165,9 @@ async def test_real_http_bearer_chain_hides_other_users_conversation(clean_datab
     monkeypatch.setattr(
         server.app.state, "authorization_service", AuthorizationService(clean_database), raising=False
     )
+    monkeypatch.setattr(
+        server.app.state, "rate_limiter", _disabled_rate_limiter(), raising=False
+    )
     client = TestClient(server.app)
     own = client.get("/api/history/conversation-a", headers={"Authorization": f"Bearer {_token(private, user_a, ['USER'])}"})
     other = client.get("/api/history/conversation-a", headers={"Authorization": f"Bearer {_token(private, user_b, ['USER'])}"})
@@ -198,6 +211,9 @@ async def test_real_http_approval_uses_run_owner_and_server_actor(clean_database
     )
     monkeypatch.setattr(
         server.app.state, "authorization_service", AuthorizationService(clean_database), raising=False
+    )
+    monkeypatch.setattr(
+        server.app.state, "rate_limiter", _disabled_rate_limiter(), raising=False
     )
     client = TestClient(server.app)
     path = (

@@ -400,9 +400,9 @@ def test_deployment_docs_never_list_multi_worker_as_supported() -> None:
         assert "gunicorn" not in text or "禁止" in text or "NOT_IMPLEMENTED" in text, doc_rel
 
 
-def test_deployment_runbook_declares_single_process_contract() -> None:
+def test_deployment_runbook_declares_single_active_api_contract() -> None:
     text = (ROOT / "docs/runtime/runtime_deployment_runbook.md").read_text(encoding="utf-8")
-    assert "exactly one LocalAgent server application process" in text
+    assert "API Runtime 固定单 active replica" in text
     assert "uv run python server.py" in text
     assert "Windows Native" in text
 
@@ -467,7 +467,9 @@ def test_deployment_docs_core_facts_present() -> None:
     text = (ROOT / "docs/runtime/runtime_deployment_runbook.md").read_text(encoding="utf-8")
     for required in (
         "Windows Native",
-        "single server process only",
+        "API Runtime 固定单 active replica",
+        "Docker Compose",
+        "Kubernetes",
         "persistent",
         "fully_closed",
         "backup",
@@ -504,13 +506,15 @@ def test_capability_matrix_health_readiness_supported() -> None:
     assert "Startup readiness handshake" in text and "SUPPORTED" in text
     assert "continuous monitoring" in text and "NOT_IMPLEMENTED" in text
     assert "version compatibility" in text and "NOT_IMPLEMENTED" in text
-    assert "post-start dependency aggregate health" in text and "NOT_IMPLEMENTED" in text
+    assert "Post-start dependency aggregate health history" in text and "NOT_IMPLEMENTED" in text
 
 
-def test_deployment_runbook_marks_windows_only_and_no_docker() -> None:
+def test_deployment_runbook_documents_stage6_deployment_targets() -> None:
     text = (ROOT / "docs/runtime/runtime_deployment_runbook.md").read_text(encoding="utf-8")
-    assert "Windows Native 是当前唯一 certified 部署目标" in text
-    assert "Docker" in text and "NOT_IMPLEMENTED" in text
+    assert "Windows Native" in text
+    assert "Docker Compose" in text and "SUPPORTED" in text
+    assert "Kubernetes" in text and "SUPPORTED" in text
+    assert "API multi-worker / multi-replica Runtime" in text and "NOT_SUPPORTED" in text
 
 
 # ---------------------------------------------------------------------------

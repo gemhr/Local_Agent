@@ -1,22 +1,19 @@
-# Runtime Deployment Runbook — Windows Native
+# Runtime Deployment Runbook
 
-Stage 3 WP1-B 正式冻结的部署合同。**Windows Native 是当前唯一 certified 部署目标**。
+Stage6 当前部署合同：Windows Native 仍可用；backend 同时支持 Docker Compose 与 Kubernetes。API Runtime 固定单 active replica，Publisher/Worker 可横向重叠；本地验证不等于 production HA。
 
 ## 1. Deployment Topology
 
 ```text
-Windows host（Windows 11 / Windows Server）
-│
-├─ LocalAgent FastAPI Server
-│    └─ exactly one LocalAgent server application process（uv run python server.py）
-│
-└─ PyQt6 Desktop Client
-     └─ separate native Windows process（uv run python main.py）
+PyQt6 Desktop Client（Windows native）
+  → LocalAgent API（Windows native / Docker Compose / Kubernetes，单 active replica）
+      → PostgreSQL + Redis
+      → Kafka → Publisher / Worker（允许重叠实例）
 ```
 
-- 两个独立 Windows 进程，各自进程启动时执行一次 `Settings.load()`。
-- 无 Docker / Compose / WSL2 依赖。
-- Server 单进程是合同：**每个部署实例必须且只能有一个 LocalAgent server application process**。
+- Windows Native 的 Client/Server 各自启动时执行一次 `Settings.load()`。
+- Docker Compose 与 Kubernetes 使用同一 non-root backend image、多角色 entrypoint。
+- API 单 active replica 是合同；Publisher/Worker 的并发正确性由 PostgreSQL 与 Kafka 合同承担。
 
 ### 禁止的启动方式
 
@@ -36,7 +33,7 @@ multi-process Runtime
 | Python | `>=3.12,<3.13`（以 `pyproject.toml` 为准） |
 | uv | 当前 lock/install 工作流以 `uv` 为标准 |
 | llama wheel | 当前 Windows 本机 wheel 前置：`llama_cpp_python-0.2.90-cp312-cp312-win_amd64.whl`（`pyproject.toml`/`uv.lock` 引用，与目标平台一致） |
-| Linux / Docker | **不要求**；不是当前 certification 目标 |
+| Linux / Docker | Stage6 backend image 与 Compose/Kubernetes 已完成本地真实验证 |
 
 ## 3. Installation
 
@@ -340,14 +337,18 @@ schema-changing migration committed
 
 **不实现 automatic deployment rollback。**
 
-## 14. Unsupported
+## 14. Stage6 Deployment Status
+
+本节由 Stage6-WP7/WP8 的当前部署事实取代早期 Stage3 Windows-only 结论。
 
 | 项 | 状态 |
 | --- | --- |
-| Linux certification | Out of Scope（Stage 3 Windows-only） |
-| Docker | NOT_IMPLEMENTED（Stage 3 不引入） |
-| Docker Compose | NOT_IMPLEMENTED（与 Docker 同步撤销） |
-| Multi-worker / multi-process | NOT_IMPLEMENTED（单进程合同） |
+| Linux backend image | SUPPORTED（Python 3.12 Debian slim，同镜像多进程角色） |
+| Docker | SUPPORTED（non-root application image） |
+| Docker Compose | SUPPORTED（真实本地单节点验证） |
+| Kubernetes | SUPPORTED（Kustomize manifests + Docker Desktop real smoke） |
+| API multi-worker / multi-replica Runtime | NOT_SUPPORTED（process-local Run Owner；API 固定单 active replica） |
+| Publisher / Worker overlap | SUPPORTED（PG claim/lease/fencing 与 Kafka group/dedup 保证正确性基础） |
 | Windows Service wrapper | NOT_IMPLEMENTED（NSSM/WinSW/Task Scheduler 集成代码不提供） |
 | Continuous Health/Readiness monitoring | NOT_IMPLEMENTED（Health / Readiness endpoint 与 startup readiness handshake 已 SUPPORTED，但无连续轮询 / auto reconnect / manual readiness button） |
 | version compatibility / fingerprint | NOT_IMPLEMENTED（DEFER_TO_WP4；无 `/metadata` / `/version`，无 version compatibility contract） |
@@ -360,9 +361,9 @@ schema-changing migration committed
 
 ## 15. Known Limitations
 
-- Windows-only certified target；Linux certification Out of Scope，不代表永久不支持。
-- single server process only。
-- 无 Docker / Compose。
+- Desktop 仍是 Windows 客户端；backend 已支持 Linux container runtime。
+- API Agent Runtime 仍是单 active replica，Recreate rollout 有短暂不可用。
+- Docker Compose 与 Kubernetes 只证明当前单节点/本地部署，不代表生产 HA。
 - 无 Windows Service wrapper。
 - Continuous Health/Readiness monitoring NOT_IMPLEMENTED（Health / Readiness endpoint 与 startup handshake 为 SUPPORTED，但仅 startup-only，无连续轮询）。
 - version compatibility / fingerprint NOT_IMPLEMENTED（DEFER_TO_WP4）。

@@ -6,7 +6,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS` | ResourceAuthorizationService | semicolon-separated Windows paths -> `tuple[str,...]` | LOCAL=canonical project root；TEST=empty；PRODUCTION=无 | existing drive-qualified absolute local directories；拒绝relative/drive-relative/UNC/device/extended/file/nonexistent；canonical去重 | PRODUCTION | APPLICATION_SCOPE | yes | sensitive path/security policy | unmatched quote、NUL、empty middle segment、invalid/unavailable root或PRODUCTION missing/empty -> `SETTINGS_SECURITY_POLICY_ERROR`；LOCAL/TEST explicit empty=deny all | `<absolute-local-root-1>;<absolute-local-root-2>` |
 
-PRODUCTION 的 `LOCAL_AGENT_API_HOST` 必须是 numeric loopback（IPv4 `127.0.0.0/8` 或 `::1`）；derived IPv6 URL使用brackets。`LOCAL_AGENT_API_BASE_URL` 必须为 `http`、numeric loopback、无userinfo/query/fragment，path仅empty或`/`。LOCAL/TEST不强制loopback，但只属于无认证、无inbound TLS的开发边界。
+PRODUCTION 的 `LOCAL_AGENT_API_HOST` 必须是 numeric loopback（IPv4 `127.0.0.0/8` 或 `::1`）；derived IPv6 URL使用brackets。`LOCAL_AGENT_API_BASE_URL` 必须为 `http`、numeric loopback、无userinfo/query/fragment，path仅empty或`/`。LOCAL/TEST不强制loopback，但仍不提供 inbound TLS；所有 profile 的 `/api/*` 都经过 Stage6 EdDSA JWT、PostgreSQL Principal 与 Redis limiter 边界。
 
 ## Configuration Source
 

@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Callable
 
@@ -279,7 +280,9 @@ class CachedRetrievalExecutionService:
             )
         except Exception:
             self._log("error")
-            return self.origin.execute(invocation, **kwargs)
+            return self.origin.execute(
+                self._with_current_run_budget(invocation, run_context), **kwargs
+            )
         if payload is not None:
             try:
                 decoded = self.codec.decode(payload, retrieval_id=invocation.retrieval_id)
@@ -289,7 +292,9 @@ class CachedRetrievalExecutionService:
                 self._log("miss")
         else:
             self._log("miss")
-        result = self.origin.execute(invocation, **kwargs)
+        result = self.origin.execute(
+            self._with_current_run_budget(invocation, run_context), **kwargs
+        )
         projection = self.codec.encode(result)
         remaining = run_context.remaining_seconds()
         if projection is not None and (remaining is None or remaining > 0):
@@ -301,6 +306,18 @@ class CachedRetrievalExecutionService:
             except Exception:
                 self._log("error")
         return result
+
+    @staticmethod
+    def _with_current_run_budget(
+        invocation: RetrievalInvocation, run_context: Any
+    ) -> RetrievalInvocation:
+        """避免 Cache lookup 后为 Origin 重新获得完整的调用超时窗口。"""
+        remaining = run_context.remaining_seconds()
+        if remaining is None or remaining <= 0:
+            return invocation
+        if remaining >= invocation.requested_timeout_seconds:
+            return invocation
+        return replace(invocation, requested_timeout_seconds=max(1e-9, remaining))
 
     def _policy_identity(self, invocation: RetrievalInvocation) -> dict[str, Any]:
         adapter = self.origin.adapter
