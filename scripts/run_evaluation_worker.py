@@ -56,7 +56,7 @@ async def _run(args: argparse.Namespace) -> None:
             signal.signal(signum, lambda *_: stop_event.set())
     async with server.lifespan(server.app):
         server.app.state.observability_service.start_metrics_http_server(
-            args.metrics_port
+            args.metrics_port, address=args.metrics_address
         )
         job_service = server.app.state.evaluation_job_service
         database = job_service.database
@@ -88,6 +88,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker-id")
     parser.add_argument("--metrics-port", type=int, default=0)
+    parser.add_argument("--metrics-address", default="127.0.0.1")
     asyncio.run(_run(parser.parse_args()))
 
 

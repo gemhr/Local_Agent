@@ -1,0 +1,176 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-localagent}
+      POSTGRES_USER: ${POSTGRES_USER:-localagent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [localagent]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    networks: [localagent]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  kafka:
+    image: apache/kafka:4.3.1
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks: [localagent]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  migrate:
+    image: localagent:compose
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      LOCAL_AGENT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-localagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-localagent}
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [localagent]
+    restart: "no"
+
+  kafka-init:
+    image: localagent:compose
+    build: .
+    command: ["python", "-m", "scripts.provision_kafka_topics"]
+    environment:
+      LOCAL_AGENT_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      LOCAL_AGENT_KAFKA_JOB_TOPIC: evaluation.jobs.v1
+      LOCAL_AGENT_KAFKA_JOB_DLQ_TOPIC: evaluation.jobs.v1.dlq
+      LOCAL_AGENT_KAFKA_TOPIC_PARTITIONS: "2"
+    depends_on:
+      kafka: {condition: service_healthy}
+    networks: [localagent]
+    restart: "no"
+
+  api:
+    image: localagent:compose
+    build: .
+    environment: &app-env
+      LOCAL_AGENT_ENVIRONMENT_PROFILE: ${LOCAL_AGENT_ENVIRONMENT_PROFILE:-LOCAL}
+      LOCAL_AGENT_ENVIRONMENT_ID: ${LOCAL_AGENT_ENVIRONMENT_ID:-local}
+      LOCAL_AGENT_RUNTIME_PROFILE: ${LOCAL_AGENT_RUNTIME_PROFILE:-PRODUCTION}
+      LOCAL_AGENT_API_HOST: 0.0.0.0
+      LOCAL_AGENT_API_PORT: 8000
+      LOCAL_AGENT_API_BASE_URL: http://127.0.0.1:8000
+      LOCAL_AGENT_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-localagent}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-localagent}
+      LOCAL_AGENT_REDIS_URL: redis://redis:6379/0
+      LOCAL_AGENT_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      LOCAL_AGENT_KAFKA_ENABLED: "false"
+      LOCAL_AGENT_LLM_BACKEND: ${LOCAL_AGENT_LLM_BACKEND:-remote}
+      LOCAL_AGENT_REMOTE_API_BASE_URL: ${LOCAL_AGENT_REMOTE_API_BASE_URL:-https://api.deepseek.com}
+      LOCAL_AGENT_REMOTE_API_KEY: ${LOCAL_AGENT_REMOTE_API_KEY:-}
+      LOCAL_AGENT_JWT_PUBLIC_KEY: ${LOCAL_AGENT_JWT_PUBLIC_KEY:-}
+      LOCAL_AGENT_KB_REQUIRED: "false"
+      LOCAL_AGENT_CHROMA_DIR: /app/chroma_db
+    ports:
+      - "127.0.0.1:${LOCAL_AGENT_API_PORT:-8000}:8000"
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    networks: [localagent]
+    volumes:
+      - chroma_data:/app/chroma_db
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-m", "scripts.healthcheck", "--component", "api"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  publisher:
+    image: localagent:compose
+    environment:
+      <<: *app-env
+      LOCAL_AGENT_KAFKA_ENABLED: "true"
+    command: ["python", "-m", "scripts.run_outbox_publisher", "--metrics-port", "9101", "--metrics-address", "0.0.0.0"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      kafka-init: {condition: service_completed_successfully}
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    networks: [localagent]
+    expose: ["9101"]
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-m", "scripts.healthcheck", "--component", "publisher"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  worker:
+    image: localagent:compose
+    environment:
+      <<: *app-env
+      LOCAL_AGENT_KAFKA_ENABLED: "true"
+    command: ["python", "-m", "scripts.run_evaluation_worker", "--metrics-port", "9102", "--metrics-address", "0.0.0.0"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      kafka-init: {condition: service_completed_successfully}
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+    networks: [localagent]
+    volumes:
+      - chroma_data:/app/chroma_db
+    expose: ["9102"]
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD", "python", "-m", "scripts.healthcheck", "--component", "worker"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+networks:
+  localagent:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  kafka_data:
+  chroma_data:

@@ -27,7 +27,9 @@ async def _run(args: argparse.Namespace) -> None:
     sink = None
     database = None
     try:
-        observability.start_metrics_http_server(args.metrics_port)
+        observability.start_metrics_http_server(
+            args.metrics_port, address=args.metrics_address
+        )
         if args.recording_sink:
             if settings.environment_profile is not EnvironmentProfile.TEST:
                 raise SystemExit("Recording sink is limited to TEST")
@@ -94,6 +96,7 @@ def main() -> None:
     parser.add_argument("--lease-seconds", type=float, default=30.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
     parser.add_argument("--metrics-port", type=int, default=0)
+    parser.add_argument("--metrics-address", default="127.0.0.1")
     logging.basicConfig(level=logging.INFO)
     asyncio.run(_run(parser.parse_args()))
 

@@ -310,6 +310,19 @@ def test_settings_file_cannot_be_root(monkeypatch, tmp_path: Path) -> None:
     assert captured.value.reason_code == "root_not_directory"
 
 
+def test_settings_nonexistent_absolute_root_fails_closed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _clear_security_env(monkeypatch)
+    monkeypatch.setenv("LOCAL_AGENT_ENVIRONMENT_PROFILE", "TEST")
+    monkeypatch.setenv(
+        "LOCAL_AGENT_TOOL_ALLOWED_READ_ROOTS", str(tmp_path / "missing-root")
+    )
+    with pytest.raises(SettingsValidationError) as captured:
+        Settings.load()
+    assert captured.value.reason_code == "root_unavailable"
+
+
 @pytest.mark.parametrize("raw", ["relative", r"C:relative", r"\\server\share", r"\\?\C:\x", ";", "C:\\x;;D:\\y"])
 def test_settings_invalid_roots_are_safe(monkeypatch, raw: str) -> None:
     _clear_security_env(monkeypatch)

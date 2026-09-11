@@ -360,16 +360,24 @@ def _strip_matching_outer_quotes(value: str, *, env_name: str) -> str:
     return stripped
 
 
-def _is_drive_qualified_local_path(value: str) -> bool:
-    normalized = value.replace("/", "\\")
-    if normalized.lower().startswith(("\\\\", "\\?\\", "\\.\\")):
+def _is_platform_local_absolute_path(value: str) -> bool:
+    """只接受当前平台的本地绝对路径，不接受网络/设备命名空间。"""
+
+    if "\x00" in value:
         return False
-    drive, tail = ntpath.splitdrive(normalized)
-    return bool(
-        re.fullmatch(r"[A-Za-z]:", drive)
-        and tail.startswith("\\")
-        and not tail.startswith("\\\\")
-    )
+    if os.name == "nt":
+        normalized = value.replace("/", "\\")
+        if normalized.lower().startswith(("\\\\", "\\?\\", "\\.\\")):
+            return False
+        drive, tail = ntpath.splitdrive(normalized)
+        return bool(
+            re.fullmatch(r"[A-Za-z]:", drive)
+            and tail.startswith("\\")
+            and not tail.startswith("\\\\")
+        )
+    if os.name == "posix":
+        return value.startswith("/") and not value.startswith("//")
+    return False
 
 
 def _tool_allowed_read_roots(
@@ -408,7 +416,7 @@ def _tool_allowed_read_roots(
     canonical: list[str] = []
     seen: set[str] = set()
     for value in values:
-        if not _is_drive_qualified_local_path(value):
+        if not _is_platform_local_absolute_path(value):
             raise SettingsValidationError(
                 SETTINGS_SECURITY_POLICY_ERROR, env_name, "invalid_local_root"
             )
@@ -424,7 +432,11 @@ def _tool_allowed_read_roots(
                 SETTINGS_SECURITY_POLICY_ERROR, env_name, "root_not_directory"
             )
         canonical_value = str(resolved)
-        comparison_key = ntpath.normcase(ntpath.normpath(canonical_value))
+        comparison_key = (
+            ntpath.normcase(ntpath.normpath(canonical_value))
+            if os.name == "nt"
+            else canonical_value
+        )
         if comparison_key not in seen:
             seen.add(comparison_key)
             canonical.append(canonical_value)
