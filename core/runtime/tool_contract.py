@@ -80,6 +80,145 @@ class ToolExecutionPhase(str, Enum):
     COMPLETION = "COMPLETION"
 
 
+class SandboxExecutionMode(str, Enum):
+    """Tool 执行隔离模式；只能由 code-owned ToolExecutionSpec 选择。"""
+
+    TRUSTED_IN_PROCESS = "TRUSTED_IN_PROCESS"
+    ISOLATED = "ISOLATED"
+
+
+class SandboxNetworkMode(str, Enum):
+    """Execution backend network policy；trusted 模式不宣称网络隔离。"""
+
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    NO_NETWORK = "NO_NETWORK"
+    ALLOW_NETWORK = "ALLOW_NETWORK"
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxFilesystemCapability:
+    """固定的 sandbox 文件能力描述，不接受通用 mount 表达式。"""
+
+    capability_id: str
+    container_path: str
+    mode: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.capability_id, "capability_id")
+        _require_text(self.container_path, "container_path")
+        if not self.container_path.startswith("/"):
+            raise ValueError("container_path 必须是绝对容器路径")
+        if self.mode not in {"READ_ONLY_INPUT", "DEDICATED_OUTPUT"}:
+            raise ValueError("filesystem capability mode 不受支持")
+
+
+def _trusted_sandbox_policy() -> "SandboxExecutionPolicy":
+    return SandboxExecutionPolicy(
+        policy_id="trusted-in-process",
+        policy_version="1",
+        mode=SandboxExecutionMode.TRUSTED_IN_PROCESS,
+        network_mode=SandboxNetworkMode.NOT_APPLICABLE,
+        timeout_seconds=30.0,
+        memory_bytes=0,
+        cpu_units=0.0,
+        process_limit=0,
+        output_bytes=16_384,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxExecutionPolicy:
+    """Runtime-owned、不可变的 sandbox execution policy。"""
+
+    policy_id: str
+    policy_version: str
+    mode: SandboxExecutionMode = SandboxExecutionMode.TRUSTED_IN_PROCESS
+    network_mode: SandboxNetworkMode = SandboxNetworkMode.NOT_APPLICABLE
+    timeout_seconds: float = 30.0
+    memory_bytes: int = 0
+    cpu_units: float = 0.0
+    process_limit: int = 0
+    output_bytes: int = 16_384
+    filesystem_capabilities: tuple[SandboxFilesystemCapability, ...] = ()
+    environment_values: Mapping[str, str] = field(default_factory=dict)
+    environment_allowlist: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_text(self.policy_id, "policy_id")
+        _require_text(self.policy_version, "policy_version")
+        if not isinstance(self.mode, SandboxExecutionMode):
+            raise TypeError("mode 必须是 SandboxExecutionMode")
+        if not isinstance(self.network_mode, SandboxNetworkMode):
+            raise TypeError("network_mode 必须是 SandboxNetworkMode")
+        _require_positive_number(self.timeout_seconds, "timeout_seconds")
+        if self.timeout_seconds > 300:
+            raise ValueError("timeout_seconds 超出 sandbox contract 上限")
+        for name in ("memory_bytes", "process_limit"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} 必须是非负整数")
+        if self.memory_bytes > 2 * 1024 * 1024 * 1024:
+            raise ValueError("memory_bytes 超出 sandbox contract 上限")
+        if self.process_limit > 256:
+            raise ValueError("process_limit 超出 sandbox contract 上限")
+        if (
+            isinstance(self.cpu_units, bool)
+            or not isinstance(self.cpu_units, (int, float))
+            or not isfinite(self.cpu_units)
+            or self.cpu_units < 0
+        ):
+            raise ValueError("cpu_units 必须是非负有限数")
+        if self.cpu_units > 4:
+            raise ValueError("cpu_units 超出 sandbox contract 上限")
+        _require_positive_integer(self.output_bytes, "output_bytes")
+        if self.output_bytes > 1024 * 1024:
+            raise ValueError("output_bytes 超出 sandbox contract 上限")
+        if not isinstance(self.filesystem_capabilities, tuple) or any(
+            not isinstance(item, SandboxFilesystemCapability)
+            for item in self.filesystem_capabilities
+        ):
+            raise TypeError("filesystem_capabilities 必须是 capability tuple")
+        if len({item.capability_id for item in self.filesystem_capabilities}) != len(
+            self.filesystem_capabilities
+        ):
+            raise ValueError("filesystem_capabilities 不允许重复 capability_id")
+        for key, value in self.environment_values.items():
+            if (
+                not isinstance(key, str)
+                or not key
+                or not isinstance(value, str)
+                or "\x00" in key
+                or "\x00" in value
+            ):
+                raise ValueError("environment_values 只能包含安全字符串")
+        if not isinstance(self.environment_allowlist, tuple) or any(
+            not isinstance(item, str) or not item.strip()
+            for item in self.environment_allowlist
+        ):
+            raise TypeError("environment_allowlist 必须是字符串 tuple")
+        if len(set(self.environment_allowlist)) != len(self.environment_allowlist):
+            raise ValueError("environment_allowlist 不允许重复 key")
+        if set(self.environment_values) - set(self.environment_allowlist):
+            raise ValueError("environment_values 必须同时出现在 environment_allowlist")
+        if self.mode is SandboxExecutionMode.ISOLATED:
+            if self.network_mode is SandboxNetworkMode.NOT_APPLICABLE:
+                raise ValueError("ISOLATED policy 必须显式声明 network policy")
+            if self.memory_bytes <= 0 or self.cpu_units <= 0 or self.process_limit <= 0:
+                raise ValueError("ISOLATED policy 必须显式声明 bounded resource limits")
+        else:
+            if self.network_mode is not SandboxNetworkMode.NOT_APPLICABLE:
+                raise ValueError("TRUSTED_IN_PROCESS 不应声明 network containment")
+            if any((self.memory_bytes, self.process_limit)) or self.cpu_units:
+                raise ValueError("TRUSTED_IN_PROCESS 不应声明 Docker resource limits")
+        object.__setattr__(self, "environment_values", MappingProxyType(dict(self.environment_values)))
+
+
+def default_trusted_sandbox_policy() -> SandboxExecutionPolicy:
+    """返回默认的 trusted policy，避免 ToolExecutionSpec 共享 mutable state。"""
+
+    return _trusted_sandbox_policy()
+
+
 def _require_text(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} 必须是非空字符串")
@@ -217,6 +356,9 @@ class ToolExecutionSpec:
     max_output_bytes: int = 16_384
     max_concurrency: int = 1
     supports_idempotency_replay: bool = False
+    sandbox_policy: SandboxExecutionPolicy = field(
+        default_factory=default_trusted_sandbox_policy
+    )
 
     def __post_init__(self) -> None:
         _require_text(self.tool_name, "tool_name")
@@ -235,6 +377,8 @@ class ToolExecutionSpec:
         _require_positive_number(self.default_timeout_seconds, "default_timeout_seconds")
         _require_positive_integer(self.max_output_bytes, "max_output_bytes")
         _require_positive_integer(self.max_concurrency, "max_concurrency")
+        if not isinstance(self.sandbox_policy, SandboxExecutionPolicy):
+            raise TypeError("sandbox_policy 必须是 SandboxExecutionPolicy")
 
 
 @dataclass(frozen=True, slots=True)

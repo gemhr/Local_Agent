@@ -31,6 +31,9 @@ SAFE_SPAN_ATTRIBUTES = frozenset({
     "timeout_reason", "cancellation_reason", "side_effect_kind",
     "side_effect_state", "retry_disposition", "provider_started",
     "execution_detached", "worker_terminated", "resource_release_pending",
+    "sandbox_backend", "execution_mode", "sandbox_policy_id",
+    "sandbox_policy_version", "network_policy_mode", "cleanup_status",
+    "resource_limit_reason",
     "degraded", "input_count", "output_count", "citation_count", "tool_name",
     # Trace Contract v1（Stage 2.5 WP5）：运行/规划/步骤/交付/Memory 安全属性。
     "plan_id", "plan_version", "plan_fingerprint", "planning_source",

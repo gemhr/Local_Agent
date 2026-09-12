@@ -568,6 +568,10 @@ def register_default_tool_policies(catalog: ToolPolicyCatalog) -> None:
     """
     policies = (
         (
+            "sandbox_execution_demo",
+            (),
+        ),
+        (
             "workspace_read_file",
             (ToolRiskFact.RESTRICTED_WORKSPACE_READ,),
         ),

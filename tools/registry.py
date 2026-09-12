@@ -5,6 +5,7 @@
 from core.runtime.tool_adapters import (
     ComplexWorkflowToolAdapter,
     LegacyStringToolAdapter,
+    SandboxExecutionDemoToolAdapter,
 )
 from core.runtime.tool_registry import ToolDescriptor, ToolRegistration
 from core.runtime.workspace_tool_adapters import (
@@ -22,6 +23,20 @@ from tools.local_tools import (
 def build_builtin_tool_registrations() -> tuple[ToolRegistration, ...]:
     """构造全部内置 Tool Registration（builtin name 的唯一事实源）。"""
     return (
+        ToolRegistration(
+            descriptor=ToolDescriptor(
+                name="sandbox_execution_demo",
+                description=(
+                    "Run a fixed-purpose operation inside an isolated Docker sandbox."
+                ),
+                llm_instructions=(
+                    "仅用于验证固定 sandbox 能力；operation 只能是 READ_INPUT、WRITE_OUTPUT、"
+                    "SLEEP、NETWORK_PROBE、ENV_PROBE、CHILD_PROCESS 或 OUTPUT_STRESS。不要填写 command、"
+                    "script、executable、image、network policy 或 host path。"
+                ),
+            ),
+            adapter=SandboxExecutionDemoToolAdapter(),
+        ),
         ToolRegistration(
             descriptor=ToolDescriptor(
                 name="workspace_read_file",

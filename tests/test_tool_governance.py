@@ -1,7 +1,7 @@
 """WP2-B Tool Governance v1 测试（INTERNAL_RC）。
 
 覆盖：ToolPolicy / ToolPolicyCatalog lifecycle 与 validation、静态 Permission、
-dynamic Risk / Approval、production coverage（6 policies × 5 agents）、
+dynamic Risk / Approval、production coverage（7 policies × 5 agents）、
 AgentRouter 两级 Gate 的 deny / approval-required / allow parity、错误安全、
 deny 不发 Tool event、model 文本不可 self-approve、complex 无副作用不变更。
 """
@@ -519,7 +519,7 @@ def test_catalog_disabled_agent_reference_fails_freeze():
 # ---------------------------------------------------------------------------
 
 
-def test_production_catalog_covers_exactly_six_tools():
+def test_production_catalog_covers_exactly_seven_tools():
     registry = production_registry()
     catalog = ToolPolicyCatalog(
         tool_registry=registry,
@@ -532,6 +532,7 @@ def test_production_catalog_covers_exactly_six_tools():
     }
     catalog_names = {policy.tool_name for policy in catalog.policies()}
     assert registry_names == catalog_names == {
+        "sandbox_execution_demo",
         "workspace_read_file",
         "workspace_write_file",
         "list_files",
@@ -539,7 +540,7 @@ def test_production_catalog_covers_exactly_six_tools():
         "get_system_status",
         "complex_workflow_simulator",
     }
-    assert len(catalog_names) == 6
+    assert len(catalog_names) == 7
 
 
 def test_production_policies_allow_exactly_five_explicit_agents():

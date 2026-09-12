@@ -105,6 +105,16 @@ episodic candidate/selected/context-record counts，不携带 episode identity �
 
 `Tool Permission != Resource Authorization != Sandbox`。File Tool 的真实链为 `ToolRegistry -> ToolGovernanceService -> ResourceAuthorizationService -> ToolExecutionService -> Adapter -> Tool -> Windows filesystem/ACL`。`list_files` 与 `analyze_excel` 使用同一 frozen application-wide read roots；relative、drive-relative、UNC、device/extended path、outside/traversal/prefix collision、nonexistent、wrong type及resolved link escape均在业务I/O前拒绝。固定拒绝不包含path/root/OSError，不产生 `TOOL_STARTED` / `TOOL_COMPLETED`，不调用final-answer model；RuntimeEvent和Journal schema未扩展。
 
+WP12 新增的 `sandbox_execution_demo` 是当前唯一显式 `ISOLATED` Tool。其
+`SandboxExecutionPolicy`、backend selection 和 fixed workload 均为 code-owned；
+Docker backend 只做 execution containment，不拥有 Permission、Risk、HITL、Retry、
+Idempotency、Resource Authorization、Cancellation 或 Tool Result Contract。
+`TRUSTED_IN_PROCESS` 仍不是 Sandbox。真实 Docker local/demo containment 包括
+read-only rootfs、non-root、drop all capabilities、no host devices、无 Docker
+socket、固定 input/output mount boundary、默认 `network none`、不继承 parent env、
+CPU/memory/PIDs limits 和 bounded protocol capture。生产 API/worker 不挂 Docker
+socket；MCP 当前仍不 sandboxed。
+
 Phase8 的 `workspace_read_file` / `workspace_write_file` 是独立的受限 Demo Workspace 业务工具：Model 仅能给出相对 `path`，Adapter 在业务 I/O 前以 canonical resolved candidate 相对固定 `data/demo_workspace` 的 containment 判定，拒绝 traversal、盘符/drive-relative、UNC、device/extended path 与 resolved symlink/junction escape。它们不进入 arbitrary filesystem read-roots 授权面；此 fixed-root containment 不是 generic filesystem Sandbox，也不扩大 `ResourceAuthorizationService` 的 Owner。
 
 Wiki write不复用Tool read Authority；`WikiCrawler`校验remote `sn` 为单一Windows leaf，并对最终`.md/.pdf` candidate执行configured-output-root containment。拒绝只记录 `WIKI_REMOTE_FILENAME_INVALID` / `WIKI_OUTPUT_PATH_DENIED`，不记录raw metadata/path。
@@ -113,7 +123,7 @@ Wiki write不复用Tool read Authority；`WikiCrawler`校验remote `sn` 为单�
 
 HTTP request 已有 application-wide 1 MiB actual-byte Gate 和 endpoint 字段级 chars/count/range Gate。它们是 pre-Run 输入约束，不是 Runtime Budget、Tool Permission、Resource Authorization、human IAM、Rate Limit 或 DLP；400/413/422 拒绝不产生 Run、RuntimeEvent、Journal 或业务 mutation。
 
-Known Limitations：无密码登录、refresh token、OAuth、inbound TLS、WAF、full Sandbox/OS isolation、handle-based TOCTOU elimination、generic DLP、egress sandbox、approval history/center 与 durable pause-resume。Stage6 的 human decision HTTP transport 受统一 JWT、Principal 与 Run ownership 保护，实际 approval actor 只取 server-derived Principal；`approval_id` 与 `invocation_binding_digest` 仍只是 correlation 数据。FastAPI 默认422 detail可能回显被拒绝输入；authorized business content/path仍可进入正常Wire/Memory；UNC不支持；real reparse测试可能受环境权限阻止；Resource contracts与payload contracts仍为INTERNAL_RC；Recovery仍validation-only。Docker Compose 与 Kubernetes 已有真实本地证据，但不代表生产 HA、API 多副本或 inbound TLS。
+Known Limitations：无密码登录、refresh token、OAuth、inbound TLS、WAF、通用 OS Sandbox、handle-based TOCTOU elimination、generic DLP、egress sandbox、approval history/center 与 durable pause-resume。WP12 当前只隔离固定 demo Tool；不提供 hard disk quota、domain/IP allowlist、DNS filter、generic mount expression 或生产 dedicated sandbox executor。Stage6 的 human decision HTTP transport 受统一 JWT、Principal 与 Run ownership 保护，实际 approval actor 只取 server-derived Principal；`approval_id` 与 `invocation_binding_digest` 仍只是 correlation 数据。FastAPI 默认422 detail可能回显被拒绝输入；authorized business content/path仍可进入正常Wire/Memory；UNC不支持；real reparse测试可能受环境权限阻止；Resource contracts与payload contracts仍为INTERNAL_RC；Recovery仍validation-only。Docker Compose 与 Kubernetes 已有真实本地证据，但不代表生产 HA、API 多副本或 inbound TLS。
 
 ## Security Non-capabilities / Deferred Scope
 
@@ -126,7 +136,7 @@ Known Limitations：无密码登录、refresh token、OAuth、inbound TLS、WAF�
 | Inbound Local API TLS | `NOT_IMPLEMENTED` | 当前 certified boundary 仍是 numeric-loopback HTTP。 |
 | Inbound API rate limit | `SUPPORTED` | `/api/*` 使用 Principal authz domain 维度的 Redis Lua Token Bucket；超额为 429，Redis unavailable fail-closed 503。它不是 WAF 或 generic abuse protection。 |
 | Generic DLP | `NOT_IMPLEMENTED` | fixed safe projection与credential-specific controls不等于通用内容/PII分类和输出扫描。 |
-| Full Sandbox | `NOT_IMPLEMENTED` | File Tool resource authorization不等于OS isolation或handle-based TOCTOU elimination。 |
+| Full Sandbox | `PARTIALLY_SUPPORTED` | 仅固定 `sandbox_execution_demo` 有真实 Docker local/demo containment；一般 Tool、MCP 和生产 API/worker 不自动 sandboxed。 |
 
 现有 Tool Permission、Risk/Approval、Resource Authorization、Payload Bounds 与 Context trust binding 都是 code-owned deterministic security controls；Model/User text不能直接重配置、关闭这些policy或把自身升级为security Authority。该事实不等价于完整Prompt Injection防护。
 

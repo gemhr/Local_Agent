@@ -242,6 +242,30 @@ fatal）：
   -> session_for(server_id) -> tools/call` 路径，Runtime
   timeout/cancellation authority 不变；结果归一化仅支持 text content +
   `isError`，其它内容形态 safe failure（`MCP_TOOL_RESULT_UNSUPPORTED`）。
+
+## WP12 Sandbox / Isolated Tool Execution
+
+`ToolExecutionSpec.sandbox_policy` 是 code-owned immutable
+`SandboxExecutionPolicy`，不是用户、模型、MCP annotation、provider metadata 或
+Tool result 的输入。`TRUSTED_IN_PROCESS` 由
+`TrustedInProcessExecutionBackend` 保持现有行为，network policy 记录为
+`NOT_APPLICABLE`；它不是 Sandbox，也不提供网络隔离。
+`ISOLATED` 当前只支持固定用途 `sandbox_execution_demo`，由
+`DockerIsolatedExecutionBackend` 使用固定 digest image 与固定 worker 执行。
+
+Docker local/demo backend 强制使用 `--read-only` rootfs、non-root、
+`--cap-drop ALL`、`no-new-privileges`、`--init`、CPU/memory/PIDs limits，默认
+`--network none`，且不继承 Agent process environment。只挂载 backend 创建的
+read-only input staging root（含 backend 注入的固定 worker）和 dedicated writable output root；不挂载
+repo root、host device 或 Docker socket。Docker 不可用时 isolated execution typed
+fail closed，不回退到 in-process。现有 `ToolExecutionService` 继续拥有 retry、
+idempotency、effective deadline、cancellation 与 `ToolExecutionResult`。
+
+当前不提供 hard disk quota、domain/IP network allowlist、DNS filter、generic
+mount expression 或任意 shell/code runner。Docker local/demo 的真实容器隔离不等于
+生产 API/worker 已获得 Docker socket；生产无安全 isolated backend 时必须 typed
+fail closed，未来 production 方向是 dedicated sandbox executor service。MCP 当前
+仍不 sandboxed，MCP lifecycle 未被 WP12 重构。
 ## Stage6-WP2 Authentication
 
 服务端配置 `LOCAL_AGENT_JWT_PUBLIC_KEY`、`LOCAL_AGENT_JWT_ISSUER`、`LOCAL_AGENT_JWT_AUDIENCE`

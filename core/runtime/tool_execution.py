@@ -51,6 +51,7 @@ from core.runtime.tool_adapters import (
     ToolAdapterInvocationError,
     ToolAdapterResponse,
 )
+from core.runtime.sandbox_execution import ToolExecutionBackendResolver
 from core.runtime.tool_concurrency import (
     ToolConcurrencyController,
     ToolResourceAcquireError,
@@ -58,6 +59,7 @@ from core.runtime.tool_concurrency import (
 )
 from core.runtime.tool_contract import (
     RetryDisposition,
+    SandboxExecutionMode,
     ToolErrorCategory,
     ToolExecutionError,
     ToolExecutionPhase,
@@ -135,6 +137,23 @@ class AttemptSideEffectTracker:
             return self._state
 
 
+class AttemptWorkerTerminationTracker:
+    """记录 backend 对 worker 已终止状态的显式验证；False 优先。"""
+
+    def __init__(self) -> None:
+        self._verified: bool | None = None
+
+    def record(self, verified: bool) -> None:
+        if type(verified) is not bool:
+            raise TypeError("verified 必须是 bool")
+        if self._verified is not False:
+            self._verified = verified
+
+    @property
+    def verified(self) -> bool | None:
+        return self._verified
+
+
 @dataclass(frozen=True, slots=True)
 class ToolExecutionContext:
     run_context: RunContext
@@ -147,6 +166,7 @@ class ToolExecutionContext:
     effective_deadline_monotonic: float
     attempt_cancellation_token: CancellationToken
     side_effect_tracker: AttemptSideEffectTracker
+    worker_termination_tracker: AttemptWorkerTerminationTracker
     before_side_effect_fault: Callable[[], None] | None = None
 
     def raise_if_cancelled(self) -> None:
@@ -175,6 +195,13 @@ class ToolExecutionContext:
     @property
     def side_effect_state(self) -> ToolSideEffectState:
         return self.side_effect_tracker.state
+
+    def record_worker_termination(self, verified: bool) -> None:
+        self.worker_termination_tracker.record(verified)
+
+    @property
+    def worker_termination_verified(self) -> bool | None:
+        return self.worker_termination_tracker.verified
 
 
 class ToolAttemptFailed(RuntimeError):
@@ -209,6 +236,7 @@ class ToolAttemptExecutor:
         sync_timeout_grace_seconds: float = 0.05,
         sync_workers: int = 16,
         span_recorder=None,
+        backend_resolver: ToolExecutionBackendResolver | None = None,
     ) -> None:
         if sync_timeout_grace_seconds < 0:
             raise ValueError("sync_timeout_grace_seconds 必须是非负数")
@@ -217,6 +245,7 @@ class ToolAttemptExecutor:
             max_workers=sync_workers, thread_name_prefix="tool-attempt"
         )
         self.span_recorder = span_recorder
+        self.backend_resolver = backend_resolver or ToolExecutionBackendResolver()
 
     async def execute(
         self,
@@ -244,6 +273,17 @@ class ToolAttemptExecutor:
         if handle.context is not None:
             handle.set_safe_attribute("tool_name", invocation.tool_name)
             handle.set_safe_attribute("retry_index", retry_index)
+            policy = spec.sandbox_policy
+            handle.set_safe_attribute(
+                "sandbox_backend",
+                "docker_isolated"
+                if policy.mode.value == "ISOLATED"
+                else "trusted_in_process",
+            )
+            handle.set_safe_attribute("execution_mode", policy.mode.value)
+            handle.set_safe_attribute("sandbox_policy_id", policy.policy_id)
+            handle.set_safe_attribute("sandbox_policy_version", policy.policy_version)
+            handle.set_safe_attribute("network_policy_mode", policy.network_mode.value)
         token = install_trace_context(handle.context)
         recorder_token = install_span_recorder(recorder)
         activity_tracker = run_context.activity_tracker
@@ -341,6 +381,7 @@ class ToolAttemptExecutor:
             effective_deadline_monotonic=effective_deadline,
             attempt_cancellation_token=attempt_source.token,
             side_effect_tracker=tracker,
+            worker_termination_tracker=AttemptWorkerTerminationTracker(),
             before_side_effect_fault=before_side_effect_fault,
         )
         lease: ToolResourceLease | None = None
@@ -416,6 +457,7 @@ class ToolAttemptExecutor:
                 response = await self._invoke_adapter(
                     adapter=adapter,
                     invocation=invocation,
+                    spec=spec,
                     context=context,
                     attempt_source=attempt_source,
                     lease=lease,
@@ -673,6 +715,12 @@ class ToolAttemptExecutor:
         except RunCancelledError:
             state = tracker.mark_unknown_if_started()
             detached = release_deferred["value"]
+            worker_terminated = not detached
+            if (
+                provider_started
+                and spec.sandbox_policy.mode is SandboxExecutionMode.ISOLATED
+            ):
+                worker_terminated = context.worker_termination_verified is True
             if detached:
                 tracker.resolve_authoritative(ToolSideEffectState.UNKNOWN)
                 state = ToolSideEffectState.UNKNOWN
@@ -699,7 +747,7 @@ class ToolAttemptExecutor:
                         ),
                         retry_index=retry_index,
                         status=ToolExecutionStatus.CANCELLED,
-                        worker_terminated=not detached,
+                        worker_terminated=worker_terminated,
                         execution_detached=detached,
                         resource_release_pending=detached,
                     ),
@@ -788,6 +836,33 @@ class ToolAttemptExecutor:
                 concurrency_controller.complete_worker(attempt_id)
 
     async def _invoke_adapter(
+        self,
+        *,
+        adapter: ToolAdapter,
+        invocation: ToolInvocation,
+        spec: ToolExecutionSpec,
+        context: ToolExecutionContext,
+        attempt_source: CancellationSource,
+        lease: ToolResourceLease,
+        release_deferred: dict[str, bool],
+    ) -> ToolAdapterResponse:
+        backend = self.backend_resolver.resolve(spec)
+        return await backend.execute(
+            adapter=adapter,
+            invocation=invocation,
+            spec=spec,
+            execution_context=context,
+            invoke_in_process=lambda: self._invoke_trusted_adapter(
+                adapter=adapter,
+                invocation=invocation,
+                context=context,
+                attempt_source=attempt_source,
+                lease=lease,
+                release_deferred=release_deferred,
+            ),
+        )
+
+    async def _invoke_trusted_adapter(
         self,
         *,
         adapter: ToolAdapter,
@@ -960,6 +1035,14 @@ class ToolAttemptExecutor:
             compensation_succeeded=exc.compensation_succeeded,
             retry_index=retry_index,
             output_started=exc.output_started,
+            worker_terminated=exc.worker_terminated,
+            execution_detached=exc.execution_detached,
+            resource_release_pending=exc.resource_release_pending,
+            status=(
+                ToolExecutionStatus.TIMED_OUT
+                if exc.category is ToolErrorCategory.TIMEOUT
+                else ToolExecutionStatus.FAILED
+            ),
         )
 
     @staticmethod
@@ -1529,6 +1612,8 @@ def _effective_timeout(
     invocation: ToolInvocation, spec: ToolExecutionSpec, run_context: RunContext
 ) -> float:
     values = [spec.default_timeout_seconds]
+    if spec.sandbox_policy.mode is SandboxExecutionMode.ISOLATED:
+        values.append(spec.sandbox_policy.timeout_seconds)
     if invocation.requested_timeout_seconds is not None:
         values.append(invocation.requested_timeout_seconds)
     run_remaining = run_context.remaining_seconds()

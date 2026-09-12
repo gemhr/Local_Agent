@@ -12,6 +12,10 @@ from uuid import uuid4
 
 from core.runtime.retry import OperationIdempotency
 from core.runtime.tool_contract import (
+    SandboxExecutionMode,
+    SandboxExecutionPolicy,
+    SandboxFilesystemCapability,
+    SandboxNetworkMode,
     ToolErrorCategory,
     ToolExecutionPhase,
     ToolExecutionSpec,
@@ -64,6 +68,9 @@ class ToolAdapterInvocationError(RuntimeError):
         compensation_succeeded: bool = False,
         output_started: bool = False,
         partial_result: Mapping[str, Any] | None = None,
+        worker_terminated: bool = True,
+        execution_detached: bool = False,
+        resource_release_pending: bool = False,
     ) -> None:
         self.category = category
         self.safe_error_code = safe_error_code
@@ -75,6 +82,9 @@ class ToolAdapterInvocationError(RuntimeError):
         self.compensation_succeeded = compensation_succeeded
         self.output_started = output_started
         self.partial_result = partial_result
+        self.worker_terminated = worker_terminated
+        self.execution_detached = execution_detached
+        self.resource_release_pending = resource_release_pending
         super().__init__(safe_message)
 
 
@@ -107,6 +117,138 @@ class ToolAdapter(ABC):
         self, invocation: ToolInvocation, context: ToolAdapterContext
     ) -> ToolAdapterResponse:
         """执行一次，不重试、不记预算、不修改 Run/Step 状态。"""
+
+
+class SandboxExecutionDemoToolAdapter(ToolAdapter):
+    """固定用途 sandbox workload；不接受 command、script 或 executable。"""
+
+    _OPERATIONS = {
+        "READ_INPUT",
+        "WRITE_OUTPUT",
+        "SLEEP",
+        "NETWORK_PROBE",
+        "ENV_PROBE",
+        "CHILD_PROCESS",
+        "OUTPUT_STRESS",
+    }
+    spec = ToolExecutionSpec(
+        tool_name="sandbox_execution_demo",
+        side_effect_kind=ToolSideEffectKind.NONE,
+        idempotency=OperationIdempotency.READ_ONLY,
+        supports_cooperative_cancellation=False,
+        default_timeout_seconds=5.0,
+        max_output_bytes=4_096,
+        max_concurrency=2,
+        sandbox_policy=SandboxExecutionPolicy(
+            policy_id="sandbox-demo-docker",
+            policy_version="1",
+            mode=SandboxExecutionMode.ISOLATED,
+            network_mode=SandboxNetworkMode.NO_NETWORK,
+            timeout_seconds=5.0,
+            memory_bytes=128 * 1024 * 1024,
+            cpu_units=0.5,
+            process_limit=32,
+            output_bytes=4_096,
+            filesystem_capabilities=(
+                SandboxFilesystemCapability(
+                    capability_id="demo-input",
+                    container_path="/sandbox/input",
+                    mode="READ_ONLY_INPUT",
+                ),
+                SandboxFilesystemCapability(
+                    capability_id="demo-output",
+                    container_path="/sandbox/output",
+                    mode="DEDICATED_OUTPUT",
+                ),
+            ),
+            environment_values={"WP12_SANDBOX_WORKER": "1"},
+            environment_allowlist=("WP12_SANDBOX_WORKER",),
+        ),
+    )
+
+    def llm_input_schema(self) -> dict[str, object]:
+        return {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "enum": sorted(self._OPERATIONS)},
+                "input_path": {"type": "string", "maxLength": 256},
+                "output_path": {"type": "string", "maxLength": 256},
+                "output_text": {"type": "string", "maxLength": 4096},
+                "sleep_seconds": {"type": "number", "minimum": 0, "maximum": 5},
+                "output_size": {"type": "integer", "minimum": 1, "maximum": 65536},
+            },
+            "required": ["operation"],
+            "additionalProperties": False,
+        }
+
+    def build_invocation(self, argument_text: str) -> ToolInvocation:
+        try:
+            payload = json.loads(argument_text)
+            if not isinstance(payload, dict):
+                raise ValueError
+            if set(payload) - {
+                "operation",
+                "input_path",
+                "output_path",
+                "output_text",
+                "sleep_seconds",
+                "output_size",
+            }:
+                raise ValueError
+            operation = payload.get("operation")
+            if operation not in self._OPERATIONS:
+                raise ValueError
+            for key in ("input_path", "output_path"):
+                if key in payload and not _safe_relative_sandbox_path(payload[key]):
+                    raise ValueError
+            if "output_text" in payload and (
+                not isinstance(payload["output_text"], str)
+                or len(payload["output_text"].encode("utf-8")) > 4096
+            ):
+                raise ValueError
+            if "sleep_seconds" in payload and (
+                isinstance(payload["sleep_seconds"], bool)
+                or not isinstance(payload["sleep_seconds"], (int, float))
+                or not 0 <= payload["sleep_seconds"] <= 5
+            ):
+                raise ValueError
+            if "output_size" in payload and (
+                isinstance(payload["output_size"], bool)
+                or not isinstance(payload["output_size"], int)
+                or not 1 <= payload["output_size"] <= 65_536
+            ):
+                raise ValueError
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raise ToolAdapterInvocationError(
+                category=ToolErrorCategory.VALIDATION,
+                safe_error_code="TOOL_VALIDATION_ERROR",
+                safe_message="Sandbox demo Tool 参数无效。",
+                phase=ToolExecutionPhase.VALIDATION,
+            ) from None
+        return ToolInvocation.create(tool_name=self.spec.tool_name, arguments=payload)
+
+    def sandbox_payload(self, invocation: ToolInvocation) -> dict[str, object]:
+        payload = thaw_json(invocation.arguments)
+        return {"operation": payload["operation"], **{key: value for key, value in payload.items() if key != "operation"}}
+
+    def invoke_once(
+        self, invocation: ToolInvocation, context: ToolAdapterContext
+    ) -> ToolAdapterResponse:
+        # ISOLATED specs must be resolved to Docker; this method remains a
+        # defensive typed failure if a caller bypasses ToolAttemptExecutor.
+        del invocation, context
+        raise ToolAdapterInvocationError(
+            category=ToolErrorCategory.INTERNAL,
+            safe_error_code="SANDBOX_BACKEND_UNAVAILABLE",
+            safe_message="Sandbox demo Tool 必须通过 isolated backend 执行。",
+        )
+
+
+def _safe_relative_sandbox_path(value: object) -> bool:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    path = value.replace("\\", "/")
+    return not path.startswith("/") and path != "."
 
 
 class _RuntimeOwnedWorkflowLockManager:
