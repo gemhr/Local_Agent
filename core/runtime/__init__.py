@@ -582,6 +582,14 @@ from core.runtime.tool_execution import (
     AttemptSideEffectTracker, ToolAttemptExecutor, ToolExecutionContext,
     ToolExecutionFailed, ToolExecutionService,
 )
+from core.runtime.run_control import (
+    CancelIntent,
+    DurableRunControlService,
+    OwnershipLost,
+    RunControlConflict,
+    RunControlError,
+    RunLease,
+)
 from core.runtime.sandbox_execution import (
     DockerIsolatedExecutionBackend,
     ToolExecutionBackend,

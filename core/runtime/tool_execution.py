@@ -1259,6 +1259,7 @@ class ToolExecutionService:
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
     ) -> ToolExecutionResult | ToolExecutionError:
+        await run_context.validate_execution_ownership()
         ledger = run_context.budget_ledger
         if not isinstance(ledger, BudgetLedger):
             raise RuntimeError("Tool Execution 需要 RunContext 已绑定 BudgetLedger")
@@ -1313,6 +1314,7 @@ class ToolExecutionService:
         async def attempt(retry_index: int) -> ToolExecutionResult:
             nonlocal last_error
             try:
+                await run_context.validate_execution_ownership()
                 await _execute_tool_fault_point(
                     fault_controller,
                     FaultPoint.TOOL_BEFORE_ATTEMPT,

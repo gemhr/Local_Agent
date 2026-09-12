@@ -171,6 +171,8 @@ class CoordinatedRunScope:
     driver: CoordinatedSingleAgentDriver | ResolvedSingleStepDriver
     run_registry: object
     run_handle: ActiveRunControlHandle
+    durable_lease: object | None = field(default=None, repr=False)
+    durable_run_control: object | None = field(default=None, repr=False)
     fault_controller: FaultInjectionController | None = field(
         default=None,
         repr=False,
@@ -179,6 +181,11 @@ class CoordinatedRunScope:
     _closed: bool = field(default=False, init=False, repr=False)
     _executed: bool = field(default=False, init=False, repr=False)
     _producer_task: asyncio.Task | None = field(default=None, init=False, repr=False)
+    _control_task: asyncio.Task | None = field(default=None, init=False, repr=False)
+    _control_stop: asyncio.Event = field(
+        default_factory=asyncio.Event, init=False, repr=False
+    )
+    _control_error: BaseException | None = field(default=None, init=False, repr=False)
     _close_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock, init=False, repr=False
     )
@@ -205,15 +212,72 @@ class CoordinatedRunScope:
         if self._executed:
             raise RuntimeError("coordinated run scope is single-use")
         self._executed = True
+        if self.durable_run_control is not None and self.durable_lease is not None:
+            self.durable_lease = await self.durable_run_control.renew(
+                self.durable_lease
+            )
+            intent = await self.durable_run_control.cancel_intent(self.run_id)
+            if intent is not None:
+                self.cancellation_source.cancel(intent.reason, intent.created_at)
+            self._control_task = asyncio.create_task(self._maintain_durable_control())
         try:
-            return await self.coordinator.execute(
+            result = await self.coordinator.execute(
                 driver=self.driver,
                 execution_mode=StepExecutionMode.SYNC_BLOCKING,
             )
+            if self._control_error is not None:
+                raise self._control_error
+            return result
         finally:
+            await self._stop_durable_control()
             self.plan = self.coordinator.plan
             self.scheduler = self.coordinator.scheduler
             self.executor = self.coordinator.executor
+
+    async def _maintain_durable_control(self) -> None:
+        """续租并观察跨实例 CANCEL；任何 DB 不确定性都 fail closed。"""
+        control = self.durable_run_control
+        lease = self.durable_lease
+        assert control is not None and lease is not None
+        renew_interval = max(0.05, float(control.lease_seconds) / 3.0)
+        poll_interval = min(1.0, renew_interval)
+        next_renew = time.monotonic() + renew_interval
+        try:
+            while not self._control_stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._control_stop.wait(), timeout=poll_interval
+                    )
+                    return
+                except TimeoutError:
+                    pass
+                intent = await control.cancel_intent(self.run_id)
+                if intent is not None:
+                    self.cancellation_source.cancel(
+                        intent.reason, intent.created_at
+                    )
+                if time.monotonic() >= next_renew:
+                    lease = await control.renew(lease)
+                    self.durable_lease = lease
+                    next_renew = time.monotonic() + renew_interval
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            if getattr(self.agent_state.status, "value", None) not in {
+                "SUCCEEDED",
+                "FAILED",
+                "CANCELLED",
+            }:
+                self._control_error = exc
+                self.cancellation_source.cancel("OWNERSHIP_LOST")
+
+    async def _stop_durable_control(self) -> None:
+        self._control_stop.set()
+        task = self._control_task
+        if task is None:
+            return
+        await asyncio.gather(task, return_exceptions=True)
+        self._control_task = None
 
     def bind_producer_task(self, task: asyncio.Task) -> None:
         if self._producer_task is not None:
@@ -281,6 +345,12 @@ class CoordinatedRunScope:
         if self._closed:
             return
         self._closed = True
+        control = self.durable_run_control
+        if control is not None and self.durable_lease is not None:
+            try:
+                await control.release(self.durable_lease)
+            except Exception:
+                pass
         if self.run_registry.get(self.run_id) is self.run_handle:
             self.run_registry.unregister(self.run_id)
         if self.gauge_provider is not None:
@@ -524,6 +594,16 @@ class CoordinatedRuntimeFactory:
                 run_id=run_id,
                 timeout_seconds=timeout_seconds,
             )
+            durable_lease = None
+            durable_control = self._services.durable_run_control
+            if durable_control is not None:
+                durable_lease = await durable_control.claim(
+                    run_context.run_id,
+                    self._services.run_control_owner_id or "localagent",
+                )
+                run_context.attach_ownership_validator(
+                    lambda: durable_control.assert_current(durable_lease)
+                )
             run_context.attach_project_memory_access(project_identity, project_grants)
             ledger = BudgetLedger(
                 budget or RunBudget(),
@@ -547,6 +627,13 @@ class CoordinatedRuntimeFactory:
                 run_id=run_context.run_id,
                 cancellation_token=run_context.cancellation_token,
                 journal=self._services.event_journal,
+                terminal_append=(
+                    lambda event: durable_control.finalize_terminal(
+                        durable_lease, event, self._services.event_journal
+                    )
+                )
+                if durable_control is not None and durable_lease is not None
+                else None,
                 observability_dispatcher=self._services.observability_dispatcher,
                 fault_controller=fault_controller,
             )
@@ -682,6 +769,8 @@ class CoordinatedRuntimeFactory:
                 driver=driver,
                 run_registry=self._services.run_registry,
                 run_handle=run_handle,
+                durable_lease=durable_lease,
+                durable_run_control=durable_control,
                 fault_controller=fault_controller,
                 gauge_provider=gauge_provider if registered_channel else None,
             )
@@ -689,6 +778,11 @@ class CoordinatedRuntimeFactory:
             self._services.run_registry.register(run_handle)
             return scope
         except BaseException:
+            if locals().get("durable_lease") is not None and durable_control is not None:
+                try:
+                    await durable_control.release(durable_lease)
+                except Exception:
+                    pass
             if registered_channel and channel is not None:
                 try:
                     gauge_provider.unregister_channel(channel)

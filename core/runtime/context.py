@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 import math
 import time
@@ -136,6 +137,7 @@ class RunContext:
         self._project_identity: ProjectIdentity | None = None
         self._project_grants: tuple[ProjectMemoryGrant, ...] = ()
         self._retrieval_cache_authz_domain: str | None = None
+        self._ownership_validator: Callable[[], Awaitable[None]] | None = None
 
     @property
     def budget_ledger(self):
@@ -199,6 +201,23 @@ class RunContext:
         if not isinstance(authz_domain, str) or not authz_domain.strip():
             raise ValueError("authz_domain 必须是非空字符串或 None")
         self._retrieval_cache_authz_domain = authz_domain
+
+    def attach_ownership_validator(
+        self, validator: Callable[[], Awaitable[None]]
+    ) -> None:
+        """绑定 durable fencing 校验；供 Tool/Approval execution seam 复用。"""
+        if self._ownership_validator is not None:
+            raise RuntimeError("RunContext 已绑定 ownership validator")
+        if not callable(validator):
+            raise TypeError("ownership validator 必须可调用")
+        self._ownership_validator = validator
+
+    async def validate_execution_ownership(self) -> None:
+        """在新的受保护执行授权前 fail closed 验证 current fencing。"""
+        self.raise_if_inactive()
+        if self._ownership_validator is not None:
+            await self._ownership_validator()
+        self.raise_if_inactive()
 
     @classmethod
     def create(

@@ -335,6 +335,48 @@ class RuntimeEventJournalRow(PersistenceBase):
     )
 
 
+class RunControlRow(PersistenceBase):
+    """Durable Run control aggregate；不承接 Journal terminal truth。"""
+
+    __tablename__ = "runtime_run_control"
+
+    run_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    owner_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_until: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'ACTIVE'"))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    cancel_command_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cancel_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cancel_requested_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    terminal_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint("state IN ('ACTIVE', 'CLOSED')", name="ck_runtime_run_control_state"),
+        CheckConstraint("fencing_token >= 0", name="ck_runtime_run_control_fencing_token"),
+        CheckConstraint("version > 0", name="ck_runtime_run_control_version"),
+    )
+
+
+class RunControlCommandRow(PersistenceBase):
+    """Durable idempotency record for Run control commands."""
+
+    __tablename__ = "runtime_run_control_commands"
+
+    command_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    command_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "command_type", name="uq_runtime_run_control_command_type"),
+        CheckConstraint("command_type = 'CANCEL'", name="ck_runtime_run_control_command_type"),
+    )
+
+
 class RuntimeSnapshotRow(PersistenceBase):
     """Snapshot 持久检查点证据；不是 active-run recovery authority。"""
 
@@ -651,6 +693,8 @@ CANONICAL_TABLES = (
     "evaluation_results",
     "outbox_events",
     "runtime_event_journal",
+    "runtime_run_control_commands",
+    "runtime_run_control",
     "runtime_snapshots",
     "event_consumption_checkpoint",
     "consumer_processed_events",
@@ -683,5 +727,7 @@ __all__ = [
     "UserRow",
     "ProjectSemanticMemoryRow",
     "RuntimeEventJournalRow",
+    "RunControlRow",
+    "RunControlCommandRow",
     "RuntimeSnapshotRow",
 ]

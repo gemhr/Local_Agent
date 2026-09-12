@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import threading
-from typing import AsyncIterator, Protocol
+from typing import AsyncIterator, Awaitable, Callable, Protocol
 
 from core.runtime.cancellation import CancellationToken
 from core.runtime.awaitable_compat import resolve
@@ -199,6 +199,8 @@ class RuntimeEventChannel:
         run_id: str,
         cancellation_token: CancellationToken | None = None,
         journal: RunEventJournal | None = None,
+        terminal_append: Callable[[RuntimeEvent], Awaitable[JournalAppendStatus]]
+        | None = None,
         observability_dispatcher: ObservabilityRecordSubmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
     ) -> None:
@@ -222,6 +224,7 @@ class RuntimeEventChannel:
         self._close_lock = asyncio.Lock()
         self._abort_event = asyncio.Event()
         self._journal = journal
+        self._terminal_append = terminal_append
         self._observability_dispatcher = observability_dispatcher
         self._fault_controller = fault_controller
         self._sequence = 0
@@ -330,7 +333,13 @@ class RuntimeEventChannel:
                             event,
                             partially_persisted=False,
                         )
-                    append_status = await resolve(self._journal.append(event))
+                    if (
+                        event.event_type.value == "RUN_COMPLETED"
+                        and self._terminal_append is not None
+                    ):
+                        append_status = await self._terminal_append(event)
+                    else:
+                        append_status = await resolve(self._journal.append(event))
                     self._sequence = sequence
                     await self._execute_publication_fault(
                         FaultPoint.EVENT_AFTER_JOURNAL_APPEND,

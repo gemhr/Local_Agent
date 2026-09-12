@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,11 @@ from core.runtime import ChatRuntimeMode, RuntimeLifecycleState
 
 
 class ConnectedRequest:
+    def __init__(self) -> None:
+        self.state = SimpleNamespace(
+            principal=SimpleNamespace(authz_domain_id="test-user")
+        )
+
     async def is_disconnected(self) -> bool:
         return False
 
@@ -40,6 +46,13 @@ async def test_default_chat_endpoint_captures_mode_once_and_routes_coordinated(
 ) -> None:
     service = RoutingService(ChatRuntimeMode.COORDINATED)
     monkeypatch.setattr(server, "chat_service", service)
+
+    async def bind_for_routing_test(_request, *, run_id: str, agent_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        server, "_bind_new_run_and_conversation", bind_for_routing_test
+    )
 
     response = await server.chat_endpoint(
         server.ChatRequest(

@@ -350,6 +350,40 @@ class PostgresRunEventJournal:
             pass
         return status
 
+    async def append_in_transaction(
+        self, session, event: RuntimeEvent
+    ) -> JournalAppendStatus:
+        """在调用方已持有的 PostgreSQL transaction 内追加一条事件。
+
+        仅供需要把 Journal 与同一 domain mutation 原子收口的 Owner 使用；
+        本方法不创建、提交或回滚事务。
+        """
+        record = JournalRecord.from_event(event)
+        await runtime_repository.lock_run_scope(session, record.run_id)
+        existing_id_row = await runtime_repository.select_journal_by_event_id(
+            session, record.event_id
+        )
+        existing_sequence_row = await runtime_repository.select_journal_by_sequence(
+            session, record.run_id, record.sequence
+        )
+        last_sequence = await runtime_repository.select_last_journal_sequence(
+            session, record.run_id
+        )
+        terminal_sequence = await runtime_repository.select_terminal_sequence(
+            session, record.run_id, _TERMINAL_EVENT_TYPE.value
+        )
+        decision = _append_decision(
+            record,
+            existing_id=journal_record_from_row(existing_id_row) if existing_id_row else None,
+            existing_sequence=journal_record_from_row(existing_sequence_row) if existing_sequence_row else None,
+            last_sequence=last_sequence,
+            terminal_sequence=terminal_sequence,
+        )
+        if decision is not None:
+            return decision
+        await runtime_repository.insert_journal_row(session, journal_row_values(record))
+        return JournalAppendStatus.APPENDED
+
     async def _append_with_constraint_retry(
         self, event: RuntimeEvent
     ) -> JournalAppendStatus:

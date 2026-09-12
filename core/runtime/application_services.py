@@ -226,6 +226,8 @@ class ApplicationRuntimeServices:
     blocking_executors: tuple[object, ...]
     worker_trackers: tuple[object, ...]
     run_registry: object
+    durable_run_control: object | None = None
+    run_control_owner_id: str | None = None
     hybrid_validated_generation: object | None = None
     admission_gate: RuntimeAdmissionGate = field(
         default_factory=RuntimeAdmissionGate
@@ -281,6 +283,8 @@ class ApplicationRuntimeServices:
             self.tool_execution_service,
             self.retrieval_execution_service,
             self.run_registry,
+            self.durable_run_control,
+            self.run_control_owner_id,
             self.coordinated_step_executor,
             self.legacy_step_executor,
             *self.blocking_executors,

@@ -53,6 +53,7 @@ from core.persistence import (
     SyncPersistenceBridge,
     check_schema_readiness,
 )
+from core.runtime.run_control import DurableRunControlService
 from core.observability import HttpObservabilityMiddleware, ObservabilityService
 from core.redis_service import (
     RagQueryCache,
@@ -529,6 +530,8 @@ async def lifespan(app: FastAPI):
             RuntimeInitializationError("database_readiness")
         )
     app.state.db_schema_revision = schema_readiness.alembic_revision
+    durable_run_control = DurableRunControlService(persistence_database)
+    app.state.durable_run_control = durable_run_control
     app.state.auth_service = AuthService(persistence_database, settings)
     app.state.authorization_service = AuthorizationService(persistence_database)
     app.state.evaluation_job_service = EvaluationJobService(
@@ -1181,6 +1184,8 @@ async def lifespan(app: FastAPI):
                 router.tool_execution_service.concurrency_controller,
             ),
             run_registry=run_registry,
+            durable_run_control=durable_run_control,
+            run_control_owner_id=app.state.application_metadata.instance_id,
             hybrid_validated_generation=hybrid_validated_generation,
             coordinated_step_executor=coordinated_step_executor,
             legacy_step_executor=legacy_step_executor,
@@ -1880,6 +1885,10 @@ async def _require_run_owner(request: Request, run_id: str) -> None:
 def _run_registry_for(service) -> object:
     """Use the lifespan-owned registry, preserving test/legacy compatibility."""
     return getattr(service, "run_registry", process_run_registry)
+
+
+def _run_control_for(service):
+    return getattr(service, "durable_run_control", None)
 
 
 def _close_legacy_stream(stream) -> None:
@@ -2866,12 +2875,24 @@ async def cancel_run_endpoint(
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
     await _require_run_owner(request, run_id)
     service = require_service()
-    result = _run_registry_for(service).cancel(
+    control = _run_control_for(service)
+    if control is None:
+        result = _run_registry_for(service).cancel(
+            run_id, CancellationReason.REQUEST_CANCELLED
+        )
+        if result is None:
+            return {"status": "inactive", "run_id": run_id}
+        return {"status": "cancelled" if result else "already_cancelled", "run_id": run_id}
+    await control.request_cancel(run_id, CancellationReason.REQUEST_CANCELLED.value)
+    # Local handle is only a wake-up acceleration; the durable intent above is
+    # the cross-instance authority and remains effective after a cache miss.
+    local_result = _run_registry_for(service).cancel(
         run_id, CancellationReason.REQUEST_CANCELLED
     )
-    if result is None:
-        return {"status": "inactive", "run_id": run_id}
-    return {"status": "cancelled" if result else "already_cancelled", "run_id": run_id}
+    return {
+        "status": "cancelled" if local_result is not False else "already_cancelled",
+        "run_id": run_id,
+    }
 
 
 # WP2 Frozen Contract：approval 命令面的 domain error → HTTP 投影。

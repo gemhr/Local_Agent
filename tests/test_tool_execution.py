@@ -9,6 +9,7 @@ from core.runtime import (
     BudgetLedger,
     InMemorySpanRecorder,
     OperationIdempotency,
+    OwnershipLost,
     RetryPolicy,
     RetryDisposition,
     RunCancelledError,
@@ -90,6 +91,25 @@ async def test_success_reserves_one_tool_call_and_limits_output():
     assert result.output.content == "12345678"
     assert result.output.truncated
     assert context.budget_ledger.snapshot().committed_usage.tool_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_durable_ownership_is_validated_before_tool_authorization():
+    context = make_context()
+    adapter = ScriptedAdapter(["must-not-run"])
+
+    async def reject_stale_owner() -> None:
+        raise OwnershipLost("stale fencing token")
+
+    context.attach_ownership_validator(reject_stale_owner)
+    with pytest.raises(OwnershipLost):
+        await ToolExecutionService().execute(
+            invocation=adapter.build_invocation("x"),
+            adapter=adapter,
+            run_context=context,
+            step_id="step",
+        )
+    assert adapter.calls == []
 
 
 @pytest.mark.asyncio
