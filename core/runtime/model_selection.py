@@ -63,6 +63,12 @@ class ModelProfile:
     cost_profile: ModelCostProfile | None = None
     is_remote: bool | None = None
     breaker_key: str | None = None
+    # 新增 startup-frozen capability seam：明确区分 plain-text strict JSON、
+    # provider-native structured output 与 provider native function calling。
+    supports_native_tool_calling: bool = False
+    supports_provider_structured_output: bool = False
+    provider_kind: str = ""
+    model_identity: str = ""
     def __post_init__(self) -> None:
         for name in ("context_window", "max_output_tokens", "quality_tier", "latency_tier"):
             value = getattr(self, name)
@@ -70,8 +76,18 @@ class ModelProfile:
         if self.cost_profile is not None and self.cost_profile.profile_id != self.profile_id: raise ValueError("cost_profile.profile_id 必须匹配 profile_id")
         if self.is_remote is not None and type(self.is_remote) is not bool: raise ValueError("is_remote 必须是 bool 或 None")
         if self.breaker_key is not None and not self.breaker_key.strip(): raise ValueError("breaker_key 必须是非空字符串或 None")
-        for name in ("supports_tools", "supports_structured_output", "supports_code_reasoning", "supports_long_reasoning"):
+        for name in (
+            "supports_tools",
+            "supports_structured_output",
+            "supports_code_reasoning",
+            "supports_long_reasoning",
+            "supports_native_tool_calling",
+            "supports_provider_structured_output",
+        ):
             if type(getattr(self, name)) is not bool: raise ValueError(f"{name} 必须是 bool")
+        for value, name in ((self.provider_kind, "provider_kind"), (self.model_identity, "model_identity")):
+            if not isinstance(value, str):
+                raise ValueError(f"{name} 必须是字符串")
 
     @property
     def effective_is_remote(self) -> bool:

@@ -597,7 +597,8 @@ async def test_production_formation_failure_never_fails_run(tmp_path) -> None:
         # Formation FAILED：delivery / Run terminal 完全不受影响。
         assert result.status is RunStatus.SUCCEEDED
         assert result.error_code is None
-        assert model.formation_calls == 1
+        # WP11：schema invalid 恰好触发一次 bounded repair，第二次仍失败。
+        assert model.formation_calls == 2
         advanced = AdvancedMemoryStore(str(tmp_path / "memory.db"))
         assert advanced.list_by_agent("core_router") == []
         journal_records = services.event_journal.read_after(result.run_id, 0, 1000)

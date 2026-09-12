@@ -253,6 +253,10 @@ class RemoteLLMEngine:
         """声明当前实例可用的 provider native function calling 能力。"""
         return self.provider_kind == "deepseek"
 
+    def supports_provider_structured_output(self) -> bool:
+        """当前 Engine 未发送 response_format/json_schema，不能声明 provider guarantee。"""
+        return False
+
     @staticmethod
     def _extract_content(payload: dict[str, Any]) -> str:
         choices = payload.get("choices")

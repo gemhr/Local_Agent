@@ -54,6 +54,11 @@ SAFE_SPAN_ATTRIBUTES = frozenset({
     "persistence_duration_ms",
     "owning_agent_id", "attempt_index", "requested_top_k", "returned_count",
     "grounded_count", "shape",
+    # WP11 Context/Prompt/Provider content-free invocation evidence。
+    "prompt_id", "prompt_digest", "provider_kind", "model_identity",
+    "estimated_input_tokens", "reserved_output_tokens",
+    "context_budget_utilization", "selected_context_items",
+    "dropped_context_items", "structured_repair_count",
 })
 DENIED_SPAN_ATTRIBUTES = frozenset({
     "prompt", "messages", "user_input", "model_output", "tool_arguments",

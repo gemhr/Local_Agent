@@ -125,6 +125,8 @@ class ModelStartedPayload:
     retry_index: int
     routing_adjustment: str
     breaker_key: str
+    provider_kind: str = ""
+    model_identity: str = ""
 
     def __post_init__(self) -> None:
         _require_text(self.profile_id, "profile_id")
@@ -132,6 +134,10 @@ class ModelStartedPayload:
         _require_index(self.retry_index, "retry_index")
         _require_text(self.routing_adjustment, "routing_adjustment")
         _require_text(self.breaker_key, "breaker_key")
+        if self.provider_kind:
+            _require_text(self.provider_kind, "provider_kind")
+        if self.model_identity:
+            _require_text(self.model_identity, "model_identity")
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +148,8 @@ class ModelCompletedPayload:
     succeeded: bool
     safe_error_code: str | None = None
     duration_ms: int = 0
+    provider_kind: str = ""
+    model_identity: str = ""
 
     def __post_init__(self) -> None:
         _require_text(self.profile_id, "profile_id")
@@ -152,6 +160,10 @@ class ModelCompletedPayload:
         if self.safe_error_code is not None:
             _require_text(self.safe_error_code, "safe_error_code")
         _require_index(self.duration_ms, "duration_ms")
+        if self.provider_kind:
+            _require_text(self.provider_kind, "provider_kind")
+        if self.model_identity:
+            _require_text(self.model_identity, "model_identity")
 
 
 @dataclass(frozen=True, slots=True)

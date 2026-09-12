@@ -47,6 +47,7 @@ from core.runtime.events import (
     ModelStartedPayload,
     RuntimeEventType,
 )
+from core.runtime.trace_contract import set_span_attributes
 from core.runtime.tracing import (
     NoopSpanRecorder,
     current_span_recorder,
@@ -218,6 +219,8 @@ class ModelInvocationAttempt:
     retry_index: int = 0
     backoff_before_seconds: float = 0.0
     circuit_state: str | None = None
+    provider_kind: str = ""
+    model_identity: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +232,39 @@ class ModelInvocationResult:
     attempts: tuple[ModelInvocationAttempt, ...]
     quality_tradeoff_disclosed: bool
     response: ModelAdapterResponse | None = None
+    prompt_id: str = ""
+    prompt_version: str = ""
+    prompt_digest: str = ""
+    provider_kind: str = ""
+    model_identity: str = ""
+    estimated_input_tokens: int = 0
+    reserved_output_tokens: int = 0
+    context_budget_utilization: float = 0.0
+    selected_context_items: int = 0
+    dropped_context_items: int = 0
+    structured_repair_count: int = 0
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.prompt_id, "prompt_id"),
+            (self.prompt_version, "prompt_version"),
+            (self.prompt_digest, "prompt_digest"),
+            (self.provider_kind, "provider_kind"),
+            (self.model_identity, "model_identity"),
+        ):
+            if not isinstance(value, str):
+                raise TypeError(f"{name} 必须是字符串")
+        for value, name in (
+            (self.estimated_input_tokens, "estimated_input_tokens"),
+            (self.reserved_output_tokens, "reserved_output_tokens"),
+            (self.selected_context_items, "selected_context_items"),
+            (self.dropped_context_items, "dropped_context_items"),
+            (self.structured_repair_count, "structured_repair_count"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} 必须是非负整数")
+        if not 0.0 <= self.context_budget_utilization <= 1.0:
+            raise ValueError("context_budget_utilization 必须在 [0,1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +436,7 @@ class ModelInvocationRouter:
         event_emitter: RunEventEmitter | StepEventEmitter | None = None,
         generation_options: Mapping[str, object] | None = None,
         fault_controller: FaultInjectionController | None = None,
+        invocation_evidence: Mapping[str, object] | None = None,
     ) -> ModelInvocationResult:
         recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
@@ -413,6 +450,19 @@ class ModelInvocationRouter:
                 if event_emitter is not None
                 else None
             ),
+        )
+        evidence_for_span = invocation_evidence or {}
+        set_span_attributes(
+            handle,
+            prompt_id=evidence_for_span.get("prompt_id"),
+            prompt_version=evidence_for_span.get("prompt_version"),
+            prompt_digest=evidence_for_span.get("prompt_digest"),
+            estimated_input_tokens=evidence_for_span.get("estimated_input_tokens"),
+            reserved_output_tokens=evidence_for_span.get("reserved_output_tokens"),
+            context_budget_utilization=evidence_for_span.get("context_budget_utilization"),
+            selected_context_items=evidence_for_span.get("selected_context_items"),
+            dropped_context_items=evidence_for_span.get("dropped_context_items"),
+            structured_repair_count=evidence_for_span.get("structured_repair_count"),
         )
         token = install_trace_context(handle.context)
         recorder_token = install_span_recorder(recorder)
@@ -451,6 +501,7 @@ class ModelInvocationRouter:
                 event_emitter=event_emitter,
                 generation_options=generation_options,
                 fault_controller=fault_controller,
+                invocation_evidence=invocation_evidence,
             )
         except RunCancelledError:
             handle.end_cancelled("RUN_CANCELLED")
@@ -491,6 +542,7 @@ class ModelInvocationRouter:
         event_emitter: RunEventEmitter | StepEventEmitter | None = None,
         generation_options: Mapping[str, object] | None = None,
         fault_controller: FaultInjectionController | None = None,
+        invocation_evidence: Mapping[str, object] | None = None,
     ) -> ModelInvocationResult:
         if routing_decision.confirmation_required:
             raise ModelInvocationConfirmationRequired()
@@ -898,6 +950,10 @@ class ModelInvocationRouter:
                     attempt_span.set_safe_attribute("provider_started", True)
                 attempt_span.end_ok()
                 reset_trace_context(attempt_trace_token)
+            evidence = dict(invocation_evidence or {})
+            def _safe_int(name: str) -> int:
+                value = evidence.get(name, 0)
+                return value if isinstance(value, int) and not isinstance(value, bool) else 0
             return ModelInvocationResult(
                 response.output,
                 routing_decision.capability_preferred_profile_id,
@@ -913,6 +969,17 @@ class ModelInvocationRouter:
                     )
                 ),
                 response,
+                str(evidence.get("prompt_id", "")),
+                str(evidence.get("prompt_version", "")),
+                str(evidence.get("prompt_digest", "")),
+                candidate.profile.provider_kind,
+                candidate.profile.model_identity,
+                _safe_int("estimated_input_tokens"),
+                _safe_int("reserved_output_tokens"),
+                float(evidence.get("context_budget_utilization", 0.0)) if isinstance(evidence.get("context_budget_utilization", 0.0), (int, float)) and not isinstance(evidence.get("context_budget_utilization", 0.0), bool) else 0.0,
+                _safe_int("selected_context_items"),
+                _safe_int("dropped_context_items"),
+                _safe_int("structured_repair_count"),
             )
         raise ModelInvocationChainError(
             ModelInvocationFailure(
@@ -992,6 +1059,10 @@ class ModelInvocationRouter:
             handle.set_safe_attribute("model_profile", candidate.profile_id.value)
             handle.set_safe_attribute("candidate_index", candidate_index)
             handle.set_safe_attribute("retry_index", retry_index)
+            if candidate.profile.provider_kind:
+                handle.set_safe_attribute("provider_kind", candidate.profile.provider_kind)
+            if candidate.profile.model_identity:
+                handle.set_safe_attribute("model_identity", candidate.profile.model_identity)
         return handle, install_trace_context(handle.context)
 
     def _record_pre_provider_attempt_span(
@@ -1054,6 +1125,8 @@ class ModelInvocationRouter:
                     succeeded=succeeded,
                     safe_error_code=safe_error_code,
                     duration_ms=duration_ms,
+                    provider_kind=candidate.profile.provider_kind,
+                    model_identity=candidate.profile.model_identity,
                 ),
                 component="model_invocation",
             )
@@ -1083,6 +1156,8 @@ class ModelInvocationRouter:
                     retry_index=retry_index,
                     routing_adjustment=candidate.adjustment.value,
                     breaker_key=candidate.breaker_key,
+                    provider_kind=candidate.profile.provider_kind,
+                    model_identity=candidate.profile.model_identity,
                 ),
                 component="model_invocation",
             )
@@ -1172,6 +1247,8 @@ class ModelInvocationRouter:
             error_code,
             candidate.adjustment,
             usage_source,
+            provider_kind=candidate.profile.provider_kind,
+            model_identity=candidate.profile.model_identity,
         )
 
     @staticmethod

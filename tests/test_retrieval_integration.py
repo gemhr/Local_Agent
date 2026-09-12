@@ -467,8 +467,11 @@ async def test_mandatory_retrieval_context_overflow_is_typed_failure() -> None:
         FakeMemory(),
         ExplicitVectorDB(),
         max_tokens=100,
-        model_context_window=128,
+        model_context_window=4096,
     )
+    # Canonical session/system instruction 是 mandatory context；即使 Retrieval 成功，
+    # 最终 Context Build 无法完整容纳它时仍必须 typed fail，而不是静默截断。
+    router._build_system_prompt = lambda *args, **kwargs: "MANDATORY_SYSTEM " * 5000
     router.knowledge_rewrite_max_tokens = 8
     context, _source = create_run_context(entry_agent_id="knowledge_expert")
     context.attach_budget_ledger(BudgetLedger(RunBudget()))

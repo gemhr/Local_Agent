@@ -145,6 +145,11 @@ class SynthesisAgentAdapter:
         view: DependencyResultView,
     ) -> tuple[ContextItem, ...]:
         now = datetime.now(UTC)
+        current_step_text = instruction
+        user_request_text = instruction
+        marker = "\n\nUser request: "
+        if marker in instruction:
+            current_step_text, user_request_text = instruction.split(marker, 1)
         items = [
             ContextItem(
                 "synthesis-system-instruction",
@@ -155,14 +160,25 @@ class SynthesisAgentAdapter:
                 now,
             ),
             ContextItem(
-                "synthesis-current-step",
-                ContextSourceType.CURRENT_STEP,
+                "synthesis-current-user-request",
+                ContextSourceType.CURRENT_USER_REQUEST,
                 ContextTrustLevel.USER_CONTENT,
-                instruction,
-                900,
+                user_request_text or instruction,
+                1000,
                 now,
             ),
         ]
+        if current_step_text.strip():
+            items.append(
+                ContextItem(
+                    "synthesis-current-step",
+                    ContextSourceType.CURRENT_STEP,
+                    ContextTrustLevel.USER_CONTENT,
+                    current_step_text,
+                    900,
+                    now,
+                )
+            )
         for index, entry in enumerate(view, start=1):
             items.append(
                 ContextItem(

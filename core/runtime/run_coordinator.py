@@ -1595,7 +1595,9 @@ class RunCoordinator:
             selected_entry_agent_id=selected_agent_id,
             runtime_mode=runtime_mode,
             runtime_version="not_configured",
-            prompt_version="not_configured",
+            # Run root 是聚合 span；真实 prompt identity 由每次 Model Invocation
+            # evidence 记录（prompt_id/version/digest），不在 root 上虚构单一版本。
+            prompt_version=None,
             model_config_hash="not_configured",
             toolset_hash="not_configured",
             kb_version="not_configured",

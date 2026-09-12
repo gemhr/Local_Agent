@@ -445,6 +445,7 @@ class PlanResolver:
                     RunCancelledError,
                     RunDeadlineExceededError,
                     BudgetExceededError,
+                    PlanningError,
                     asyncio.CancelledError,
                 ),
             ):

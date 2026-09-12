@@ -33,8 +33,11 @@ from core.runtime.tool_governance import (
     governance_denial_message,
 )
 from core.runtime import (
-    CANONICAL_SECURITY_INSTRUCTION, ContextBuildRequest, ContextBuilder, ContextBudgetExceededError, ContextItem, ContextSourceType, ContextTrustLevel, wrap_untrusted_tool_output,
-    DeterministicTokenEstimator, ModelContextRequirements, ModelCostProfile, ModelPreference, ModelProfile,
+    CANONICAL_SECURITY_INSTRUCTION, ContextBuildRequest, ContextBuilder, ContextBudgetExceededError, ContextItem, ContextSelectionRecord, ContextSourceType, ContextTrustLevel, ConversationTurnGroup, wrap_untrusted_tool_output,
+    DeterministicTokenEstimator, FinalProviderMessageBudget, ModelContextRequirements, ModelCostProfile, ModelPreference, ModelProfile,
+    PromptIdentity, build_prompt_identity, PROMPT_ID_ANSWER, PROMPT_ID_PLANNER, PROMPT_ID_SYNTHESIS,
+    PROMPT_ID_SUMMARY, PROMPT_ID_QUERY_REWRITE, PROMPT_ID_TOOL_PLAN, PROMPT_ID_TOOL_REPAIR,
+    PROMPT_ID_NATIVE_TOOL_REPAIR, PROMPT_ID_FORMATION, PROMPT_ID_FORGET,
     ModelProfileId, ModelResolver, ModelSelectionPolicy, ModelSelectionRequest,
     Plan, RiskLevel, RunContext, TaskCapabilityRequirements, create_single_step_plan,
     BudgetUsage, BudgetedModelStream,
@@ -142,6 +145,9 @@ class AgentRouter:
         self.max_tokens = max_tokens
         self.model_context_window = model_context_window
         self.context_builder = ContextBuilder(DeterministicTokenEstimator())
+        # 完整 AgentRouter 启用 bounded structured repair；只有历史 object.__new__
+        # 最小测试桩才因缺少该属性而跳过应用层 schema orchestration。
+        self.structured_invocation_repair_enabled = True
         self.orchestration_enabled = orchestration_enabled
         self.orchestration_max_agents = orchestration_max_agents
         self.knowledge_base_error = knowledge_base_error
@@ -218,7 +224,7 @@ class AgentRouter:
             model_context_window,
             max_tokens,
             False,
-            False,
+            True,
             False,
             False,
             1,
@@ -226,6 +232,10 @@ class AgentRouter:
             default_cost,
             False,
             "local_default",
+            supports_native_tool_calling=False,
+            supports_provider_structured_output=False,
+            provider_kind="local",
+            model_identity="local_default",
         )
         self.model_profiles = model_profiles or (default_profile,)
         self.model_selection_policy = ModelSelectionPolicy()
@@ -436,12 +446,30 @@ class AgentRouter:
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
         enable_thinking: bool | None = None,
+        prompt_identity: PromptIdentity | None = None,
     ) -> str:
-        """收集一次完整的模型输出。"""
+        """收集一次完整的模型输出；真实 Provider 调用前经过最终预算 gate。"""
+        effective_max_tokens = max_tokens or self.max_tokens
+        prepared = self._final_provider_messages(
+            list(messages),
+            max_tokens=effective_max_tokens,
+            model_context_window=self.model_profiles[0].context_window,
+        )
+        if prompt_identity is not None:
+            logger.info(
+                "Code-owned prompt invocation",
+                extra={
+                    "component": "agent_router",
+                    "phase": "model_invocation",
+                    "prompt_id": prompt_identity.prompt_id,
+                    "prompt_version": prompt_identity.prompt_version,
+                    "prompt_digest": prompt_identity.prompt_digest,
+                },
+            )
         response_text = ""
         for chunk in self.llm.generate(
-            messages,
-            max_tokens=max_tokens or self.max_tokens,
+            prepared,
+            max_tokens=effective_max_tokens,
             temperature=temperature,
             enable_thinking=enable_thinking,
         ):
@@ -497,6 +525,9 @@ class AgentRouter:
             max_tokens=self.summary_plan_max_tokens,
             temperature=0.1,
             enable_thinking=False,
+            prompt_identity=build_prompt_identity(
+                PROMPT_ID_SUMMARY, "1", summary_messages[0]["content"]
+            ),
         ).strip()
         if not summary:
             return self._fallback_summary(existing_summary, new_messages)
@@ -600,6 +631,9 @@ class AgentRouter:
             },
             {"role": "user", "content": user_query},
         ]
+        rewrite_prompt_identity = build_prompt_identity(
+            PROMPT_ID_QUERY_REWRITE, "1", rewrite_messages[0]["content"]
+        )
         estimated = self._estimate_messages_tokens(rewrite_messages)
         requirements = ModelContextRequirements(
             estimated_input_tokens=estimated,
@@ -633,6 +667,7 @@ class AgentRouter:
                     "enable_thinking": False,
                 },
                 fault_controller=fault_controller,
+                prompt_identity=rewrite_prompt_identity,
             )
         except ModelInvocationChainError as exc:
             if exc.failure_category in {
@@ -874,17 +909,8 @@ class AgentRouter:
         return f"{source} ({', '.join(suffix_parts)})"
 
     def _estimate_messages_tokens(self, messages: list[dict[str, str]]) -> int:
-        """估算 Builder 之外既有消息正文的近似 Token 数。
-
-        DeepSeek native tool_calls 消息的 ``content`` 可为 None（provider
-        wire 合同允许）；估算只计文本正文，None 按 0 处理。
-        """
-        return sum(
-            self.context_builder.estimator.estimate(
-                message.get("content") or ""
-            )
-            for message in messages
-        )
+        """复用最终 wire-message estimator，包含 native protocol 字段。"""
+        return self.context_builder.estimate_messages_tokens(messages)
 
     def _dedupe_current_user_message(
         self,
@@ -898,6 +924,156 @@ class AgentRouter:
         if last_message["role"] == "user" and last_message["content"] == user_query:
             return history[:-1]
         return history
+
+    def _get_recent_history(
+        self,
+        agent_id: str,
+        *,
+        limit: int,
+        memory_scope: str = DIRECT_MEMORY_SCOPE,
+    ) -> list[dict[str, object]]:
+        """查询最近 N 条，再按时间正序返回给模型。"""
+        rows = self.memory_manager.get_chat_history(
+            agent_id=agent_id,
+            limit=limit,
+            ascending=False,
+            memory_scope=memory_scope,
+        )
+        return list(reversed(rows))
+
+    def _group_history(
+        self, history: list[dict[str, object]]
+    ) -> tuple[ConversationTurnGroup, ...]:
+        """把 user/assistant 消息按完整 turn/group 分组；不得逐条随意删除。"""
+        groups: list[ConversationTurnGroup] = []
+        current: list[dict[str, str]] = []
+        for row in history:
+            if not isinstance(row, dict):
+                raise TypeError("history entry 必须是 dict")
+            role = row.get("role")
+            content = row.get("content")
+            if role not in {"user", "assistant"}:
+                raise ValueError("持久化 History role 只允许 user/assistant")
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("持久化 History content 必须是非空字符串")
+            message = {"role": str(role), "content": content}
+            # recent-N 的窗口边界可能落在一个 assistant 回复中间；没有对应
+            # user 的前导 assistant 不能作为完整 turn 送模。
+            if role == "assistant" and not current:
+                continue
+            if role == "user" and current:
+                groups.append(self._make_history_group(groups, current, history))
+                current = [message]
+            else:
+                current.append(message)
+        if current:
+            groups.append(self._make_history_group(groups, current, history))
+        return tuple(groups)
+
+    def _make_history_group(
+        self,
+        existing_groups: list[ConversationTurnGroup],
+        messages: list[dict[str, str]],
+        history: list[dict[str, object]],
+    ) -> ConversationTurnGroup:
+        group_id = f"history-turn-{len(existing_groups):04d}"
+        estimated = sum(
+            self.context_builder.estimator.estimate(message["content"])
+            for message in messages
+        )
+        return ConversationTurnGroup(group_id, tuple(messages), estimated, 650)
+
+    @staticmethod
+    def _looks_like_json_content(content: str) -> bool:
+        stripped = content.strip()
+        if not stripped.startswith(("{", "[")):
+            return False
+        try:
+            json.loads(stripped)
+        except (ValueError, RecursionError):
+            return False
+        return True
+
+    @staticmethod
+    def _bounded_tool_observation(output: object) -> str:
+        """Tool contract 后的 observation 预算：structured 不二次字符截断。"""
+        content = str(getattr(output, "content", ""))
+        content_type = str(getattr(output, "content_type", "")).lower()
+        if "json" in content_type or AgentRouter._looks_like_json_content(content):
+            return content
+        compact = " ".join(content.split())
+        if len(compact) <= 1600:
+            return compact
+        return compact[:1597] + "..."
+
+    @staticmethod
+    def _structured_repair_instruction(safe_error_code: str) -> str:
+        """code-owned repair prompt；不包含前一次 raw output。"""
+        return (
+            "上一次结构化输出未满足 system message 中指定的 schema"
+            f"（{safe_error_code}）。请严格按该 schema 只输出一个 JSON 对象，"
+            "不要输出 Markdown 或解释；不得修改业务值，也不得补写 schema 不允许的字段。"
+        )
+
+    def _final_provider_messages(
+        self,
+        messages: list[dict[str, object]],
+        *,
+        max_tokens: int | None = None,
+        model_context_window: int | None = None,
+    ) -> list[dict[str, object]]:
+        budget = self.context_builder.prepare_final_provider_messages(
+            messages,
+            max_input_tokens=model_context_window or self.model_context_window,
+            reserved_output_tokens=max_tokens or self.max_tokens,
+        )
+        return list(budget.messages)
+
+    @staticmethod
+    def _with_canonical_security(instruction: str) -> str:
+        if CANONICAL_SECURITY_INSTRUCTION in instruction:
+            return instruction
+        return f"{instruction}\n{CANONICAL_SECURITY_INSTRUCTION}"
+
+    def _items_with_canonical_security(
+        self, items: tuple[ContextItem, ...]
+    ) -> tuple[ContextItem, ...]:
+        """确保 code-owned security instruction 在 selection/budget 前是 mandatory item。"""
+        typed_items = tuple(items)
+        for index, item in enumerate(typed_items):
+            if (
+                item.source_type is ContextSourceType.SYSTEM_INSTRUCTION
+                and CANONICAL_SECURITY_INSTRUCTION in item.content
+            ):
+                return typed_items
+        system_index = next(
+            (
+                index
+                for index, item in enumerate(typed_items)
+                if item.source_type is ContextSourceType.SYSTEM_INSTRUCTION
+            ),
+            None,
+        )
+        now = datetime.now(timezone.utc)
+        if system_index is None:
+            return typed_items + (
+                ContextItem(
+                    "canonical-security-instruction",
+                    ContextSourceType.SYSTEM_INSTRUCTION,
+                    ContextTrustLevel.TRUSTED_INSTRUCTION,
+                    CANONICAL_SECURITY_INSTRUCTION,
+                    1000,
+                    now,
+                ),
+            )
+        item = typed_items[system_index]
+        updated = replace(
+            item,
+            content=self._with_canonical_security(item.content),
+        )
+        result = list(typed_items)
+        result[system_index] = updated
+        return tuple(result)
 
     def _build_messages(
         self,
@@ -913,6 +1089,8 @@ class AgentRouter:
         fault_controller: FaultInjectionController | None = None,
         memory_context_bundle=None,
         memory_injection_report_out: list | None = None,
+        prompt_identity_out: list[PromptIdentity] | None = None,
+        context_selection_records_out: list[ContextSelectionRecord] | None = None,
     ) -> list[dict[str, str]]:
         """构建一次推理所需的完整消息序列。
 
@@ -929,18 +1107,23 @@ class AgentRouter:
             summary_text = self._update_summary_if_needed(agent_id)
 
         history = ()
+        history_groups: tuple[ConversationTurnGroup, ...] = ()
         if history_policy is HistoryPolicy.AGENT_SCOPE:
-            history = self.memory_manager.get_chat_history(
+            history = self._get_recent_history(
                 agent_id=agent_id,
                 limit=self.history_window_size,
-                ascending=True,
                 memory_scope=history_scope,
             )
             history = self._dedupe_current_user_message(history, user_query)
+            history_groups = self._group_history(history)
 
         system_prompt = self._build_system_prompt(
             agent_id, allow_delegation=allow_delegation
         )
+        if prompt_identity_out is not None:
+            prompt_identity_out.append(
+                build_prompt_identity(PROMPT_ID_ANSWER, "1", system_prompt)
+            )
         now = datetime.now(timezone.utc)
         context_items = [
             ContextItem(
@@ -1021,9 +1204,10 @@ class AgentRouter:
                         source_ref=chunk.citation.display_label,
                         citation_id=chunk.citation.citation_id,
                         dedup_key=chunk.provenance.context_content_hash,
-                        # Retrieval 已完成最终选择和 Citation Binding；模型上下文
-                        # 不得再次静默截断或丢弃而留下错误引用。
-                        mandatory=True,
+                        # Retriever 已完成 ranking/materialization/citation；Context
+                        # selection 按 rank 做 citation-atomic whole-chunk keep/drop，
+                        # 不再次截断正文，也不把全部 final chunks 无条件设 mandatory。
+                        mandatory=False,
                         preserve_content=True,
                         payload_content_hash=chunk.citation.context_content_hash,
                     )
@@ -1048,13 +1232,9 @@ class AgentRouter:
                         items=context_items,
                         max_input_tokens=self.model_context_window,
                         reserved_output_tokens=self.max_tokens,
-                        preexisting_messages_tokens=self._estimate_messages_tokens(
-                            [
-                                {"role": row["role"], "content": row["content"]}
-                                for row in history
-                            ]
-                        ),
+                        preexisting_messages_tokens=0,
                         preexisting_mandatory_tokens=0,
+                        history_groups=history_groups,
                     )
                 )
             except ContextBudgetExceededError:
@@ -1082,7 +1262,7 @@ class AgentRouter:
                     error=RetrievalExecutionError(
                         RetrievalErrorCategory.CONTEXT_BUILD_FAILED,
                         "CONTEXT_BUILD_FAILED",
-                        "最终模型上下文无法完整容纳 mandatory Retrieval 正文。",
+                        "最终模型上下文无法完整容纳 mandatory instruction/request 内容。",
                         RetrievalStage.CONTEXT_BUILD,
                     ),
                 )
@@ -1118,17 +1298,15 @@ class AgentRouter:
                     items=tuple(context_items),
                     max_input_tokens=self.model_context_window,
                     reserved_output_tokens=self.max_tokens,
-                    preexisting_messages_tokens=self._estimate_messages_tokens(
-                        [
-                            {"role": row["role"], "content": row["content"]}
-                            for row in history
-                        ]
-                    ),
+                    preexisting_messages_tokens=0,
                     preexisting_mandatory_tokens=0,
+                    history_groups=history_groups,
                 )
             )
         if context_requirements_out is not None:
             context_requirements_out.append(context_result.model_requirements)
+        if context_selection_records_out is not None:
+            context_selection_records_out.extend(context_result.selection_records)
         if (
             memory_context_bundle is not None
             and memory_injection_report_out is not None
@@ -1155,10 +1333,7 @@ class AgentRouter:
             )
         return self.context_builder.bind_messages(
             context_result.included_items,
-            history=tuple(
-                {"role": row["role"], "content": row["content"]}
-                for row in history
-            ),
+            history=context_result.included_history_messages(),
         )
 
     def _capability_requirements(self, agent_id: str, user_query: str) -> TaskCapabilityRequirements:
@@ -1246,6 +1421,13 @@ class AgentRouter:
             run_context,
             capability_requirements,
         )
+        profile = next(
+            profile
+            for profile in self.model_profiles
+            if profile.profile_id == decision.selected_profile
+        )
+        if not profile.supports_native_tool_calling:
+            return False
         adapter = self.model_adapter_resolver.resolve(decision.selected_profile)
         capability = getattr(adapter, "supports_native_tool_calling", None)
         return bool(capability()) if callable(capability) else False
@@ -1410,6 +1592,9 @@ class AgentRouter:
             max_tokens=self.tool_plan_max_tokens,
             temperature=0.1,
             enable_thinking=False,
+            prompt_identity=build_prompt_identity(
+                PROMPT_ID_TOOL_PLAN, "1", planner_messages[0]["content"]
+            ),
         )
         return self._parse_tool_call(planner_response)
 
@@ -1438,6 +1623,9 @@ class AgentRouter:
                 max_tokens=self.tool_plan_max_tokens,
                 temperature=0.1,
                 enable_thinking=False,
+                prompt_identity=build_prompt_identity(
+                    PROMPT_ID_TOOL_REPAIR, "1", repair_messages[0]["content"]
+                ),
             )
         )
         if repaired is None or repaired[0] != tool_name:
@@ -1591,6 +1779,8 @@ class AgentRouter:
         tool_call: tuple[str, str] | None = None,
         native_assistant_message: dict[str, object] | None = None,
         validated_invocation: ToolInvocation | None = None,
+        prompt_identity_out: list[PromptIdentity] | None = None,
+        context_selection_records_out: list[ContextSelectionRecord] | None = None,
     ) -> list[dict[str, str]]:
         """构建回答消息，并在需要时注入工具观察结果。"""
         if run_context is not None:
@@ -1607,6 +1797,8 @@ class AgentRouter:
             fault_controller=fault_controller,
             memory_context_bundle=memory_context_bundle,
             memory_injection_report_out=memory_injection_report_out,
+            prompt_identity_out=prompt_identity_out,
+            context_selection_records_out=context_selection_records_out,
         )
         if native_selection:
             return messages
@@ -1735,10 +1927,9 @@ class AgentRouter:
         )
         if isinstance(outcome, ToolExecutionError):
             raise ToolExecutionFailed(outcome)
-        observation = outcome.output.content
+        observation = self._bounded_tool_observation(outcome.output)
         if run_context is not None:
             run_context.raise_if_inactive()
-        observation = self._truncate_text(observation, 1600)
         if native_assistant_message is not None:
             messages.append(native_assistant_message)
             provider_kind = "mcp" if hasattr(adapter, "server_id") else "local"
@@ -1785,6 +1976,8 @@ class AgentRouter:
                 preexisting_mandatory_tokens=0,
             )
         )
+        if context_selection_records_out is not None:
+            context_selection_records_out.extend(tool_context.selection_records)
         messages.extend(
             context_builder.bind_messages(tool_context.included_items)
         )
@@ -1800,6 +1993,7 @@ class AgentRouter:
     ) -> Generator[str, None, str]:
         """流式生成最终可见回答。"""
         context_requirements_out: list[ModelContextRequirements] = []
+        prompt_identity_out: list[PromptIdentity] = []
         try:
             messages = self._prepare_answer_messages(
                 agent_id=agent_id,
@@ -1807,6 +2001,7 @@ class AgentRouter:
                 history_scope=history_scope,
                 run_context=run_context,
                 context_requirements_out=context_requirements_out,
+                prompt_identity_out=prompt_identity_out,
             )
         except (ToolGovernanceError, ResourceAuthorizationError) as denied:
             # WP2-B：governance non-ALLOW 直接输出固定 safe denial；不调用
@@ -1817,6 +2012,11 @@ class AgentRouter:
             run_context.raise_if_inactive()
         final_response = ""
         selected_model, selected_profile = self._select_model(agent_id, user_query, messages, context_requirements_out[0] if context_requirements_out else None, run_context)
+        messages = self._final_provider_messages(
+            messages,
+            max_tokens=self.max_tokens,
+            model_context_window=selected_profile.context_window,
+        )
         model_reservation = self._reserve_model_call(run_context, messages, self.max_tokens, selected_profile)
         stream = selected_model.generate(messages, max_tokens=self.max_tokens)
         if model_reservation is not None:
@@ -1853,6 +2053,8 @@ class AgentRouter:
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
+        prompt_identity_out: list[PromptIdentity] = []
+        context_selection_records: list[ContextSelectionRecord] = []
         native_selection = unified_invocation
         try:
             messages = self._prepare_answer_messages(
@@ -1868,6 +2070,8 @@ class AgentRouter:
                 memory_injection_report_out=memory_injection_report_out,
                 approval_controller=approval_controller,
                 native_selection=native_selection,
+                prompt_identity_out=prompt_identity_out,
+                context_selection_records_out=context_selection_records,
             )
         except (ToolGovernanceError, ResourceAuthorizationError) as denied:
             # WP2-B：governance non-ALLOW 直接返回固定 safe denial 作为本步业务
@@ -1876,6 +2080,13 @@ class AgentRouter:
             if raise_security_denial:
                 raise
             return denied.safe_message
+        answer_prompt_identity = (
+            prompt_identity_out[0]
+            if prompt_identity_out
+            else build_prompt_identity(
+                PROMPT_ID_ANSWER, "1", "answer-system-prompt-v1"
+            )
+        )
         if native_selection:
             if (
                 run_context is None
@@ -1904,6 +2115,7 @@ class AgentRouter:
                     fault_controller=fault_controller,
                     approval_controller=approval_controller,
                     base_messages=messages,
+                    context_selection_records_out=context_selection_records,
                 )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -1930,6 +2142,8 @@ class AgentRouter:
                     max_tokens=self.max_tokens,
                     event_emitter=event_emitter,
                     fault_controller=fault_controller,
+                    prompt_identity=answer_prompt_identity,
+                    context_selection_records=tuple(context_selection_records),
                 )
                 if invocation_result_out is not None:
                     invocation_result_out.append(invocation_result)
@@ -1953,6 +2167,8 @@ class AgentRouter:
                 event_emitter=event_emitter,
                 generation_options={"tools": tools, "tool_choice": "auto", "enable_thinking": False},
                 fault_controller=fault_controller,
+                prompt_identity=answer_prompt_identity,
+                context_selection_records=tuple(context_selection_records),
             )
             native_call = invocation_result.response.native_tool_call
             if native_call is not None:
@@ -1983,15 +2199,16 @@ class AgentRouter:
                 except ToolAdapterInvocationError as validation_error:
                     # 修复只位于模型参数构造边界：不携带异常正文、不进入
                     # Governance，且只暴露原工具，最多一次。
+                    native_repair_instruction = (
+                        f"The previous call to {native_call.tool_name} has invalid "
+                        f"business arguments ({validation_error.safe_error_code}). "
+                        "Return exactly one corrected native function call for the same "
+                        "tool. Use only its business fields; do not add system, runtime, "
+                        "test, approval, or internal fields."
+                    )
                     repair_messages = list(messages) + [{
                         "role": "user",
-                        "content": (
-                            f"The previous call to {native_call.tool_name} has invalid "
-                            f"business arguments ({validation_error.safe_error_code}). "
-                            "Return exactly one corrected native function call for the same "
-                            "tool. Use only its business fields; do not add system, runtime, "
-                            "test, approval, or internal fields."
-                        ),
+                        "content": native_repair_instruction,
                     }]
                     repair_result = self._invoke_model_contract(
                         agent_id=agent_id, user_query=user_query,
@@ -2005,6 +2222,10 @@ class AgentRouter:
                             "tool_choice": "auto", "enable_thinking": False,
                         },
                         fault_controller=fault_controller,
+                        prompt_identity=build_prompt_identity(
+                            PROMPT_ID_NATIVE_TOOL_REPAIR, "1",
+                            f"{messages[0]['content']}\n{native_repair_instruction}",
+                        ),
                     )
                     repaired = repair_result.response.native_tool_call
                     if (
@@ -2039,6 +2260,7 @@ class AgentRouter:
                     tool_call=(final_native_call.tool_name, final_native_call.arguments_json),
                     native_assistant_message=final_assistant_message,
                     validated_invocation=validated_invocation,
+                    context_selection_records_out=context_selection_records,
                 )
                 # 仅重试 Phase C：此处不再回到 selection 或 Tool execution。
                 invocation_result = self._invoke_model_contract(
@@ -2047,6 +2269,8 @@ class AgentRouter:
                     capability_requirements=capability_requirements,
                     max_tokens=self.max_tokens, event_emitter=event_emitter,
                     fault_controller=fault_controller,
+                    prompt_identity=answer_prompt_identity,
+                    context_selection_records=tuple(context_selection_records),
                 )
             if invocation_result_out is not None:
                 invocation_result_out.append(invocation_result)
@@ -2057,6 +2281,11 @@ class AgentRouter:
             selected_model, selected_profile = self._select_model(
                 *selection_args, capability_requirements=capability_requirements
             )
+        messages = self._final_provider_messages(
+            messages,
+            max_tokens=self.max_tokens,
+            model_context_window=selected_profile.context_window,
+        )
         model_reservation = self._reserve_model_call(
             run_context,
             messages,
@@ -2091,19 +2320,66 @@ class AgentRouter:
         event_emitter: RunEventEmitter | StepEventEmitter | None,
         generation_options: dict[str, object] | None = None,
         fault_controller: FaultInjectionController | None = None,
+        prompt_identity: PromptIdentity | None = None,
+        context_selection_records: tuple[ContextSelectionRecord, ...] = (),
+        structured_repair_count: int = 0,
     ) -> ModelInvocationResult:
         """Model Adapter 的唯一同步入口；复用既有 Budget/Circuit/Retry/Event。"""
         if run_context.budget_ledger is None:
             raise RuntimeError("统一 Model Invocation 需要 BudgetLedger")
-        messages = self.context_builder.ensure_canonical_security_instruction(messages)
-        decision, _selected_profile, requirements = self._select_model_decision(
+        final_budget = self.context_builder.prepare_final_provider_messages(
+            messages,
+            max_input_tokens=self.model_context_window,
+            reserved_output_tokens=max_tokens,
+        )
+        messages = list(final_budget.messages)
+        final_minimum_context_window = final_budget.estimated_input_tokens + max_tokens
+        if context_requirements is None:
+            final_context_requirements = ModelContextRequirements(
+                final_budget.estimated_input_tokens,
+                final_minimum_context_window,
+                final_budget.estimated_input_tokens >= 2048,
+                False,
+                False,
+                len(messages),
+                0,
+                0,
+                False,
+                False,
+            )
+        else:
+            final_context_requirements = replace(
+                context_requirements,
+                estimated_input_tokens=final_budget.estimated_input_tokens,
+                minimum_context_window=max(
+                    context_requirements.minimum_context_window,
+                    final_minimum_context_window,
+                ),
+            )
+        decision, selected_profile, requirements = self._select_model_decision(
             agent_id,
             user_query,
             messages,
-            context_requirements,
+            final_context_requirements,
             run_context,
             capability_requirements,
         )
+        final_budget = self.context_builder.prepare_final_provider_messages(
+            messages,
+            max_input_tokens=selected_profile.context_window,
+            reserved_output_tokens=max_tokens,
+        )
+        messages = list(final_budget.messages)
+        effective_generation_options = dict(generation_options or {})
+        if (
+            capability_requirements.requires_structured_output
+            and selected_profile.supports_provider_structured_output
+        ):
+            # 只有 Profile 显式声明 provider-native structured output 时才发送；
+            # 否则继续使用 plain-text strict JSON + Domain Parser。
+            effective_generation_options.setdefault(
+                "response_format", {"type": "json_object"}
+            )
         breaker_snapshots = self.circuit_breaker_registry.snapshots(
             tuple(
                 profile.effective_breaker_key
@@ -2119,6 +2395,26 @@ class AgentRouter:
             budget_snapshot=run_context.budget_ledger.snapshot(),
             breaker_snapshots=breaker_snapshots,
         )
+        invocation_evidence: dict[str, object] = {
+            "estimated_input_tokens": final_budget.estimated_input_tokens,
+            "reserved_output_tokens": max_tokens,
+            "context_budget_utilization": final_budget.context_budget_utilization,
+            "selected_context_items": sum(
+                1 for record in context_selection_records if record.decision != "drop"
+            ),
+            "dropped_context_items": sum(
+                1 for record in context_selection_records if record.decision == "drop"
+            ),
+            "structured_repair_count": structured_repair_count,
+        }
+        if prompt_identity is not None:
+            invocation_evidence.update(
+                {
+                    "prompt_id": prompt_identity.prompt_id,
+                    "prompt_version": prompt_identity.prompt_version,
+                    "prompt_digest": prompt_identity.prompt_digest,
+                }
+            )
         return self.model_invocation_router.invoke(
             run_context=run_context,
             budget_ledger=run_context.budget_ledger,
@@ -2130,8 +2426,9 @@ class AgentRouter:
             max_tokens=max_tokens,
             output_started=False,
             event_emitter=event_emitter,
-            generation_options=generation_options,
+            generation_options=effective_generation_options,
             fault_controller=fault_controller,
+            invocation_evidence=invocation_evidence,
         )
 
     def _parse_delegate_plan(self, response_text: str) -> list[dict[str, str]]:
@@ -2172,10 +2469,9 @@ class AgentRouter:
     def _build_orchestration_messages(self, user_query: str) -> list[dict[str, str]]:
         """构建核心 Agent 的委派规划消息。"""
         summary_text = self._update_summary_if_needed("core_router")
-        history = self.memory_manager.get_chat_history(
+        history = self._get_recent_history(
             agent_id="core_router",
             limit=self.history_window_size,
-            ascending=True,
             memory_scope=self.DIRECT_MEMORY_SCOPE,
         )
         history = self._dedupe_current_user_message(history, user_query)
@@ -2336,11 +2632,12 @@ class AgentRouter:
         fault_controller: FaultInjectionController | None = None,
     ) -> str:
         """按已绑定 source/trust 的上下文调用统一模型合同，不经过 Tool planner。"""
+        secured_items = self._items_with_canonical_security(context_items)
         context_result = self.context_builder.build(
             ContextBuildRequest(
                 run_id=run_context.run_id,
                 agent_id=agent_id,
-                items=context_items,
+                items=secured_items,
                 max_input_tokens=self.model_context_window,
                 reserved_output_tokens=self.max_tokens,
             )
@@ -2348,6 +2645,14 @@ class AgentRouter:
         messages = self.context_builder.bind_messages(
             context_result.included_items,
             separate_data_messages=True,
+        )
+        synthesis_system = next(
+            (
+                item.content
+                for item in secured_items
+                if item.source_type is ContextSourceType.SYSTEM_INSTRUCTION
+            ),
+            "synthesis-system-rules-v1",
         )
         invocation_result = self._invoke_model_contract(
             agent_id=agent_id,
@@ -2359,6 +2664,10 @@ class AgentRouter:
             max_tokens=self.max_tokens,
             event_emitter=event_emitter,
             fault_controller=fault_controller,
+            prompt_identity=build_prompt_identity(
+                PROMPT_ID_SYNTHESIS, "1", synthesis_system
+            ),
+            context_selection_records=context_result.selection_records,
         )
         return invocation_result.output
 
@@ -2398,6 +2707,11 @@ class AgentRouter:
             "只有单个 knowledge_expert task 可以设置 "
             "synthesis_required=false；其他专业任务必须设置 synthesis_required=true。"
         )
+        system_prompt = self._with_canonical_security(system_prompt)
+        planner_identity = build_prompt_identity(
+            PROMPT_ID_PLANNER, "1", system_prompt
+        )
+        context_result = None
         memory_records = (
             tuple(memory_context_bundle.all_records)
             if memory_context_bundle is not None
@@ -2467,6 +2781,7 @@ class AgentRouter:
             ]
         capabilities = TaskCapabilityRequirements(
             requires_multi_agent=True,
+            requires_structured_output=True,
             risk_level=RiskLevel.LOW,
             estimated_steps=1,
         )
@@ -2481,7 +2796,55 @@ class AgentRouter:
             event_emitter=event_emitter,
             generation_options={"enable_thinking": False, "temperature": 0.2},
             fault_controller=fault_controller,
+            prompt_identity=planner_identity,
+            context_selection_records=(
+                context_result.selection_records if context_result is not None else ()
+            ),
         )
+        if not getattr(self, "structured_invocation_repair_enabled", False):
+            return result.output
+        from core.runtime.multi_agent_planning import (
+            PlanningError,
+            PlanningErrorCode,
+            StrictPlanningDecisionParser,
+        )
+        try:
+            StrictPlanningDecisionParser.parse(result.output)
+        except PlanningError as first_error:
+            repair_instruction = self._structured_repair_instruction(
+                first_error.error_code.value
+            )
+            repair_messages = list(messages) + [{
+                "role": "user",
+                "content": repair_instruction,
+            }]
+            repair_identity = build_prompt_identity(
+                PROMPT_ID_PLANNER + "_repair",
+                "1",
+                f"{system_prompt}\n{repair_instruction}",
+            )
+            repaired = self._invoke_model_contract(
+                agent_id="core_router",
+                user_query=user_request,
+                messages=repair_messages,
+                context_requirements=None,
+                run_context=run_context,
+                capability_requirements=capabilities,
+                max_tokens=min(self.max_tokens, 1024),
+                event_emitter=event_emitter,
+                generation_options={"enable_thinking": False, "temperature": 0.2},
+                fault_controller=fault_controller,
+                prompt_identity=repair_identity,
+                structured_repair_count=1,
+            )
+            try:
+                StrictPlanningDecisionParser.parse(repaired.output)
+            except PlanningError:
+                raise PlanningError(
+                    PlanningErrorCode.PLANNER_SCHEMA_INVALID,
+                    "Planner 输出在 bounded repair 后仍不符合 schema",
+                ) from None
+            result = repaired
         return result.output
 
     def complete_memory_formation_decision(
@@ -2529,6 +2892,10 @@ class AgentRouter:
             "memory_scope、时间戳、formation_method、supersede、forget 或 SQL。"
             "没有值得长期记住的内容时输出空 candidates 数组。"
         )
+        system_prompt = self._with_canonical_security(system_prompt)
+        formation_identity = build_prompt_identity(
+            PROMPT_ID_FORMATION, "1", system_prompt
+        )
         messages = [
             {"role": "system", "content": system_prompt},
             {
@@ -2544,6 +2911,7 @@ class AgentRouter:
         ]
         capabilities = TaskCapabilityRequirements(
             requires_multi_agent=False,
+            requires_structured_output=True,
             risk_level=RiskLevel.LOW,
             estimated_steps=1,
         )
@@ -2558,7 +2926,51 @@ class AgentRouter:
             event_emitter=event_emitter,
             generation_options={"enable_thinking": False},
             fault_controller=fault_controller,
+            prompt_identity=formation_identity,
         )
+        if not getattr(self, "structured_invocation_repair_enabled", False):
+            return result.output
+        from core.runtime.semantic_memory_formation import (
+            SemanticFormationError,
+            SemanticFormationErrorCode,
+            StrictFormationProposalParser,
+        )
+        try:
+            StrictFormationProposalParser.parse(result.output)
+        except SemanticFormationError as first_error:
+            repair_instruction = self._structured_repair_instruction(
+                first_error.error_code.value
+            )
+            repair_messages = list(messages) + [{
+                "role": "user",
+                "content": repair_instruction,
+            }]
+            repair_identity = build_prompt_identity(
+                PROMPT_ID_FORMATION + "_repair",
+                "1",
+                f"{system_prompt}\n{repair_instruction}",
+            )
+            repaired = self._invoke_model_contract(
+                agent_id="core_router",
+                user_query=user_query,
+                messages=repair_messages,
+                context_requirements=None,
+                run_context=run_context,
+                capability_requirements=capabilities,
+                max_tokens=min(self.max_tokens, 1024),
+                event_emitter=event_emitter,
+                generation_options={"enable_thinking": False},
+                fault_controller=fault_controller,
+                prompt_identity=repair_identity,
+                structured_repair_count=1,
+            )
+            try:
+                StrictFormationProposalParser.parse(repaired.output)
+            except SemanticFormationError:
+                raise SemanticFormationError(
+                    SemanticFormationErrorCode.OUTPUT_INVALID
+                ) from None
+            result = repaired
         return result.output
 
     def complete_forget_proposal(
@@ -2589,6 +3001,10 @@ class AgentRouter:
             "safe_reason 必须输出固定值 EXPLICIT_FORGET。"
             "不得输出 memory_id、status、agent、scope、SQL、operation 或 supersede。"
         )
+        system_prompt = self._with_canonical_security(system_prompt)
+        forget_identity = build_prompt_identity(
+            PROMPT_ID_FORGET, "1", system_prompt
+        )
         messages = [
             {"role": "system", "content": system_prompt},
             {
@@ -2603,6 +3019,7 @@ class AgentRouter:
         ]
         capabilities = TaskCapabilityRequirements(
             requires_multi_agent=False,
+            requires_structured_output=True,
             risk_level=RiskLevel.LOW,
             estimated_steps=1,
         )
@@ -2617,7 +3034,51 @@ class AgentRouter:
             event_emitter=event_emitter,
             generation_options={"enable_thinking": False},
             fault_controller=fault_controller,
+            prompt_identity=forget_identity,
         )
+        if not getattr(self, "structured_invocation_repair_enabled", False):
+            return result.output
+        from core.runtime.memory_lifecycle import (
+            ExplicitForgetIntentParser,
+            ForgetProposalError,
+            ForgetProposalErrorCode,
+        )
+        try:
+            ExplicitForgetIntentParser.parse(result.output)
+        except ForgetProposalError as first_error:
+            repair_instruction = self._structured_repair_instruction(
+                first_error.error_code
+            )
+            repair_messages = list(messages) + [{
+                "role": "user",
+                "content": repair_instruction,
+            }]
+            repair_identity = build_prompt_identity(
+                PROMPT_ID_FORGET + "_repair",
+                "1",
+                f"{system_prompt}\n{repair_instruction}",
+            )
+            repaired = self._invoke_model_contract(
+                agent_id="core_router",
+                user_query=user_query,
+                messages=repair_messages,
+                context_requirements=None,
+                run_context=run_context,
+                capability_requirements=capabilities,
+                max_tokens=min(self.max_tokens, 256),
+                event_emitter=event_emitter,
+                generation_options={"enable_thinking": False},
+                fault_controller=fault_controller,
+                prompt_identity=repair_identity,
+                structured_repair_count=1,
+            )
+            try:
+                ExplicitForgetIntentParser.parse(repaired.output)
+            except ForgetProposalError:
+                raise ForgetProposalError(
+                    ForgetProposalErrorCode.OUTPUT_INVALID
+                ) from None
+            result = repaired
         return result.output
 
     def _build_orchestration_event(self, event_type: str, **payload: object) -> str:
@@ -2753,7 +3214,7 @@ class AgentRouter:
             ContextBuildRequest(
                 run_id=run_context.run_id if run_context is not None else "legacy-synthesis",
                 agent_id=agent_id,
-                items=context_items,
+                items=self._items_with_canonical_security(context_items),
                 max_input_tokens=self.model_context_window,
                 reserved_output_tokens=self.max_tokens,
             )
@@ -2768,6 +3229,11 @@ class AgentRouter:
             messages,
             context_result.model_requirements,
             run_context,
+        )
+        messages = self._final_provider_messages(
+            messages,
+            max_tokens=self.max_tokens,
+            model_context_window=selected_profile.context_window,
         )
         reservation = self._reserve_model_call(
             run_context, messages, self.max_tokens, selected_profile

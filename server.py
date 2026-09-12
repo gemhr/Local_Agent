@@ -861,6 +861,10 @@ async def lifespan(app: FastAPI):
                 ),
                 False,
                 "episodic_layer1_scripted",
+                supports_native_tool_calling=False,
+                supports_provider_structured_output=False,
+                provider_kind="scripted",
+                model_identity="scripted_evaluation",
             )
         )
     if settings.llm_backend in {"local", "hybrid"}:
@@ -880,7 +884,7 @@ async def lifespan(app: FastAPI):
                 settings.model_context,
                 settings.model_max_tokens,
                 False,
-                False,
+                True,
                 False,
                 False,
                 1,
@@ -895,6 +899,10 @@ async def lifespan(app: FastAPI):
                 ),
                 False,
                 "local_inference",
+                supports_native_tool_calling=False,
+                supports_provider_structured_output=False,
+                provider_kind="local",
+                model_identity="local_inference",
             )
         )
     if settings.llm_backend in {"remote", "hybrid"}:
@@ -933,6 +941,10 @@ async def lifespan(app: FastAPI):
                 ),
                 True,
                 "remote_openai_compatible",
+                supports_native_tool_calling=(settings.remote_provider_kind == "deepseek"),
+                supports_provider_structured_output=False,
+                provider_kind=settings.remote_provider_kind,
+                model_identity=settings.remote_model_name,
             )
         )
     if not engines:
