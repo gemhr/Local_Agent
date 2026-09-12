@@ -55,6 +55,8 @@ class ToolRiskFact(str, Enum):
     ARBITRARY_LOCAL_FILESYSTEM_READ = "ARBITRARY_LOCAL_FILESYSTEM_READ"
     SYSTEM_INFORMATION_READ = "SYSTEM_INFORMATION_READ"
     RESTRICTED_WORKSPACE_READ = "RESTRICTED_WORKSPACE_READ"
+    EXTERNAL_NETWORK = "EXTERNAL_NETWORK"
+    DATA_EGRESS = "DATA_EGRESS"
 
 
 class ToolRiskLevel(str, Enum):
@@ -362,6 +364,28 @@ _FULL_RISK_COMBINATIONS: dict[
         OperationIdempotency.NON_IDEMPOTENT,
     ): ToolRiskLevel.HIGH,
 }
+
+# 网络能力必须由 operator 显式分类；DATA_EGRESS 固定为 HIGH，不能由
+# provider annotation 降级。未知完整组合仍保持 fail closed。
+for _facts, _level in (
+    (frozenset({ToolRiskFact.EXTERNAL_NETWORK}), ToolRiskLevel.MEDIUM),
+    (frozenset({ToolRiskFact.DATA_EGRESS}), ToolRiskLevel.HIGH),
+    (frozenset({ToolRiskFact.EXTERNAL_NETWORK, ToolRiskFact.DATA_EGRESS}), ToolRiskLevel.HIGH),
+):
+    for _side_effect, _idempotency in (
+        (ToolSideEffectKind.NONE, OperationIdempotency.READ_ONLY),
+        (ToolSideEffectKind.LOCAL_STATE_MUTATION, OperationIdempotency.IDEMPOTENT),
+        (ToolSideEffectKind.LOCAL_STATE_MUTATION, OperationIdempotency.IDEMPOTENT_WITH_KEY),
+        (ToolSideEffectKind.LOCAL_STATE_MUTATION, OperationIdempotency.NON_IDEMPOTENT),
+    ):
+        # 显式冻结该 full key；增加 EXTERNAL_NETWORK fact 不能把既有
+        # NON_IDEMPOTENT mutation 从 HIGH 降到 MEDIUM。
+        _effective_level = (
+            ToolRiskLevel.HIGH
+            if _idempotency is OperationIdempotency.NON_IDEMPOTENT
+            else _level
+        )
+        _FULL_RISK_COMBINATIONS[(_facts, _side_effect, _idempotency)] = _effective_level
 
 # 用户可见固定 safe denial；不包含 raw principal / args / path / policy allowlist。
 _USER_VISIBLE_DENIAL = {

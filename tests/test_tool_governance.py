@@ -51,6 +51,7 @@ from core.runtime.tool_governance import (
     ToolRiskLevel,
     governance_denial_message,
     register_default_tool_policies,
+    classify_full_risk_combination,
 )
 from core.runtime.tool_registry import (
     ToolDescriptor,
@@ -237,6 +238,58 @@ def complex_payload(**changes) -> str:
 
 def _denial_message(code: ToolGovernanceErrorCode) -> str:
     return governance_denial_message(code.value)
+
+
+def test_egress_risk_facts_are_explicit_and_data_egress_is_high():
+    assert classify_full_risk_combination(
+        frozenset({ToolRiskFact.EXTERNAL_NETWORK}),
+        ToolSideEffectKind.NONE,
+        OperationIdempotency.READ_ONLY,
+    ) is ToolRiskLevel.MEDIUM
+    assert classify_full_risk_combination(
+        frozenset({ToolRiskFact.DATA_EGRESS}),
+        ToolSideEffectKind.NONE,
+        OperationIdempotency.READ_ONLY,
+    ) is ToolRiskLevel.HIGH
+    assert classify_full_risk_combination(
+        frozenset({ToolRiskFact.EXTERNAL_NETWORK, ToolRiskFact.DATA_EGRESS}),
+        ToolSideEffectKind.NONE,
+        OperationIdempotency.READ_ONLY,
+    ) is ToolRiskLevel.HIGH
+    assert classify_full_risk_combination(
+        frozenset({ToolRiskFact.EXTERNAL_NETWORK}),
+        ToolSideEffectKind.LOCAL_STATE_MUTATION,
+        OperationIdempotency.NON_IDEMPOTENT,
+    ) is ToolRiskLevel.HIGH
+    assert classify_full_risk_combination(
+        frozenset(
+            {
+                ToolRiskFact.DATA_EGRESS,
+                ToolRiskFact.ARBITRARY_LOCAL_FILESYSTEM_READ,
+            }
+        ),
+        ToolSideEffectKind.NONE,
+        OperationIdempotency.READ_ONLY,
+    ) is None
+
+    adapter = CountingGovernedAdapter(
+        tool_name="egress_tool",
+        side_effect=ToolSideEffectKind.NONE,
+        idempotency=OperationIdempotency.READ_ONLY,
+    )
+    catalog = catalog_with_policy(
+        adapter,
+        allowed_agents=frozenset(PRODUCTION_AGENT_IDS),
+        risk_facts=(ToolRiskFact.DATA_EGRESS,),
+    )
+    service = ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
+    decision = _invoke_decision(
+        service,
+        tool_registry_with(adapter).require("egress_tool"),
+        "payload",
+    )
+    assert decision.outcome is ToolGovernanceOutcome.APPROVAL_REQUIRED
+    assert decision.risk_level is ToolRiskLevel.HIGH
 
 
 # ---------------------------------------------------------------------------

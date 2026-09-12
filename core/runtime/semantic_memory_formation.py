@@ -86,6 +86,17 @@ FORMATION_METHOD_HYBRID = "HYBRID"
 FORMATION_ORIGIN_TYPE = "DELIVERED_EXCHANGE"
 FORMATION_MEMORY_SCOPE = "direct"
 
+# 这是 Semantic Memory 自身的窄写入校验，不复用 PromptInjectionDetector：
+# detector 只能产生 signal/evidence，不能成为 Memory deny/allow Authority。
+# 仅拒绝以命令式攻击动词开头的 canonical text，避免误伤描述工具使用方式、
+# 用户角色或安全文章内容的普通事实型 Memory。
+_SEMANTIC_DIRECTIVE_REJECTION_PATTERN = re.compile(
+    r"(?is)^\s*(?:please\s+|请)?(?:"
+    r"(?:ignore|disregard|forget|忽略|无视).{0,32}(?:previous|prior|system|developer|instruction|rule|之前|系统|指令|规则)"
+    r"|(?:call|invoke|execute|run|send|upload|delete|write|调用|执行|发送|上传|删除|写入).{0,32}(?:tool|工具|secret|credential|token|密钥|凭据|令牌|file|文件)"
+    r")"
+)
+
 #: bounded candidate batch 上限（代码常量，不是配置系统）。
 FORMATION_MAX_CANDIDATES = 8
 FORMATION_MAX_CANONICAL_TEXT_CHARS = 400
@@ -497,6 +508,8 @@ def validate_candidate(
         or not proposal.canonical_text.strip()
         or len(proposal.canonical_text) > FORMATION_MAX_CANONICAL_TEXT_CHARS
     ):
+        return None
+    if _SEMANTIC_DIRECTIVE_REJECTION_PATTERN.search(proposal.canonical_text):
         return None
     # value：仅 string / number / boolean；禁止 null、list、嵌套 object
     value = proposal.value

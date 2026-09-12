@@ -49,6 +49,8 @@ from core.runtime.agent_loop import (
     LegacyAgentRouterDriver,
 )
 from core.runtime.model_context import (
+    CANONICAL_SECURITY_INSTRUCTION, InjectionRiskCategory, InjectionRiskSignal,
+    PromptInjectionDetector, wrap_untrusted_tool_output,
     ContextBuilder, ContextBuildRequest, ContextBuildResult, ContextBudgetExceededError, ContextDropRecord,
     ContextItem, ContextSourceType, ContextStats, ContextTrustLevel, DeterministicTokenEstimator,
     EpisodicMemoryContextRecord, MemoryContextRecord, MemoryProvenance, ModelContextRequirements, TokenEstimator,

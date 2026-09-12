@@ -59,6 +59,26 @@ def test_valid_config_loads_frozen_configs(tmp_path: Path) -> None:
     assert configs[1].enabled is False
 
 
+def test_operator_can_explicitly_map_network_and_egress_risk(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path,
+        {
+            "schema_version": MCP_CONFIG_SCHEMA_VERSION,
+            "servers": [_server_payload(tools={
+                "remote_echo": {
+                    "local_name": "remote_echo",
+                    "side_effect_kind": "NONE",
+                    "idempotency": "READ_ONLY",
+                    "risk_facts": ["EXTERNAL_NETWORK", "DATA_EGRESS"],
+                }
+            })],
+        },
+    )
+    mapping = load_mcp_server_configs(path)[0].tool_mapping_for("remote_echo")
+    assert mapping is not None
+    assert mapping.risk_facts == ("EXTERNAL_NETWORK", "DATA_EGRESS")
+
+
 def test_defaults_are_applied(tmp_path: Path) -> None:
     path = _write_config(
         tmp_path,
