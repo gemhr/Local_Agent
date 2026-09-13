@@ -25,6 +25,7 @@ Pydantic validation / status code / JSON）。需要"pending 中并发命令"的
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 import json
 import uuid
 from types import SimpleNamespace
@@ -33,7 +34,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
+from core.auth import AuthService, AuthorizationService, AuthError, Principal
 from core.chat_service import ChatService
+from core.redis_service import RedisTokenBucketRateLimiter
 from core.runtime import (
     CoordinatedRuntimeFactory,
     RunRegistry,
@@ -46,6 +49,66 @@ from tests.test_tool_governance import production_registry, production_service
 
 APPROVE_PATH = "/api/runtime/runs/{run_id}/tool-approvals/{approval_id}/approve"
 REJECT_PATH = "/api/runtime/runs/{run_id}/tool-approvals/{approval_id}/reject"
+TEST_AUTHORIZATION = "Bearer tool-approval-transport-test"
+
+
+class _TransportAuthService(AuthService):
+    """只为本文件 transport 测试提供显式已认证 Principal。"""
+
+    async def authenticate(self, authorization: str | None) -> Principal:
+        if authorization != TEST_AUTHORIZATION:
+            raise AuthError("AUTH_INVALID_TOKEN")
+        now = datetime.now(UTC)
+        user_id = uuid.UUID("10000000-0000-0000-0000-000000000001")
+        return Principal(
+            user_id=user_id,
+            subject=str(user_id),
+            roles=frozenset({"USER"}),
+            token_id="tool-approval-transport-test",
+            issued_at=now,
+            expires_at=now + timedelta(hours=1),
+        )
+
+
+class _TransportAuthorizationService(AuthorizationService):
+    async def bind_new(
+        self, principal: Principal, object_type: str, object_id: str
+    ) -> None:
+        return None
+
+    async def require_owner(
+        self, principal: Principal, object_type: str, object_id: str
+    ) -> None:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_transport(monkeypatch):
+    monkeypatch.setattr(
+        server.app.state,
+        "auth_service",
+        _TransportAuthService.__new__(_TransportAuthService),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "authorization_service",
+        _TransportAuthorizationService.__new__(_TransportAuthorizationService),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "rate_limiter",
+        RedisTokenBucketRateLimiter(
+            SimpleNamespace(),
+            SimpleNamespace(
+                rate_limit_enabled=False,
+                rate_limit_capacity=1,
+                rate_limit_refill_rate=1.0,
+            ),
+        ),
+        raising=False,
+    )
 
 
 def _tool_args(operation_id: str) -> str:
@@ -123,7 +186,10 @@ class _ToolChainDriverRouter(FakeRouter):
 
 
 def _asgi_scope(method: str, path: str, payload: bytes) -> dict:
-    headers = [(b"content-type", b"application/json")]
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"authorization", TEST_AUTHORIZATION.encode("ascii")),
+    ]
     if payload:
         headers.append((b"content-length", str(len(payload)).encode("ascii")))
     return {
@@ -872,10 +938,14 @@ def test_validation_matrix_422_and_registry_not_called(
     )
     client = TestClient(server.app)
     approve = client.post(
-        APPROVE_PATH.format(run_id=run_id, approval_id=approval_id), json=body
+        APPROVE_PATH.format(run_id=run_id, approval_id=approval_id),
+        json=body,
+        headers={"Authorization": TEST_AUTHORIZATION},
     )
     reject = client.post(
-        REJECT_PATH.format(run_id=run_id, approval_id=approval_id), json=body
+        REJECT_PATH.format(run_id=run_id, approval_id=approval_id),
+        json=body,
+        headers={"Authorization": TEST_AUTHORIZATION},
     )
     assert approve.status_code == 422
     assert reject.status_code == 422
@@ -892,6 +962,7 @@ def test_missing_run_via_testclient_returns_410_inactive(monkeypatch):
     response = client.post(
         APPROVE_PATH.format(run_id=uuid.uuid4(), approval_id=uuid.uuid4()),
         json={"invocation_binding_digest": "a" * 64},
+        headers={"Authorization": TEST_AUTHORIZATION},
     )
     assert response.status_code == 410
     assert response.json()["error_code"] == "APPROVAL_RUN_INACTIVE"
@@ -907,7 +978,8 @@ def test_approval_routes_do_not_accept_get(monkeypatch):
     )
     client = TestClient(server.app)
     response = client.get(
-        APPROVE_PATH.format(run_id=uuid.uuid4(), approval_id=uuid.uuid4())
+        APPROVE_PATH.format(run_id=uuid.uuid4(), approval_id=uuid.uuid4()),
+        headers={"Authorization": TEST_AUTHORIZATION},
     )
     assert response.status_code == 405
     assert counting.decide_calls == 0

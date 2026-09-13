@@ -15,6 +15,7 @@ from core.runtime.admission import (
     RuntimeAdmissionState,
 )
 from core.runtime.timeout import OperationTimeoutError, OperationType, effective_timeout_seconds
+from core.runtime.durable_approval import DurableApprovalService, DurableExecutionClaim
 
 from core.runtime.state import (
     AGENT_STATE_SCHEMA_VERSION,
@@ -279,6 +280,8 @@ __all__ = [
     "ApprovalStatus",
     "ApprovalStepStateBridge",
     "ToolApprovalController",
+    "DurableApprovalService",
+    "DurableExecutionClaim",
     "compute_actor_id_digest",
     "compute_invocation_binding_digest",
     "RunContextData",

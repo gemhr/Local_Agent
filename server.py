@@ -54,6 +54,7 @@ from core.persistence import (
     check_schema_readiness,
 )
 from core.runtime.run_control import DurableRunControlService
+from core.runtime.durable_approval import DurableApprovalService
 from core.observability import HttpObservabilityMiddleware, ObservabilityService
 from core.redis_service import (
     RagQueryCache,
@@ -531,6 +532,7 @@ async def lifespan(app: FastAPI):
         )
     app.state.db_schema_revision = schema_readiness.alembic_revision
     durable_run_control = DurableRunControlService(persistence_database)
+    durable_approval = DurableApprovalService(persistence_database)
     app.state.durable_run_control = durable_run_control
     app.state.auth_service = AuthService(persistence_database, settings)
     app.state.authorization_service = AuthorizationService(persistence_database)
@@ -1185,6 +1187,7 @@ async def lifespan(app: FastAPI):
             ),
             run_registry=run_registry,
             durable_run_control=durable_run_control,
+            durable_approval=durable_approval,
             run_control_owner_id=app.state.application_metadata.instance_id,
             hybrid_validated_generation=hybrid_validated_generation,
             coordinated_step_executor=coordinated_step_executor,
@@ -1889,6 +1892,12 @@ def _run_registry_for(service) -> object:
 
 def _run_control_for(service):
     return getattr(service, "durable_run_control", None)
+
+
+def _durable_approval_for(service):
+    services = getattr(service, "_coordinated_runtime_factory", None)
+    services = getattr(services, "services", None)
+    return getattr(services, "durable_approval", None)
 
 
 def _close_legacy_stream(stream) -> None:
@@ -2927,10 +2936,11 @@ async def _handle_tool_approval_decision(
 ) -> JSONResponse:
     """approve/reject 共用的 transport-only 转发实现。
 
-    route → DTO/path validation → RunRegistry typed forwarding →
-    ToolApprovalController decision CAS。HTTP 不直接 mutate AgentState、不读取
-    Journal、不执行 Tool；domain result（含 404/409/410）一律投影公共 DTO，
-    不以 HTTPException detail 回显 controller internals。
+    route → DTO/path validation → ownership authorization →
+    DurableApprovalService decision CAS。HTTP 不直接 mutate AgentState、不读取
+    Journal、不执行 Tool；本地 controller 仅由 worker 观察 durable state 后负责
+    wakeup。domain result（含 404/409/410）一律投影公共 DTO，不以
+    HTTPException detail 回显内部实现。
     """
     _validate_uuid_path_value(run_id, "run_id")
     _validate_uuid_path_value(approval_id, "approval_id")
@@ -2938,13 +2948,23 @@ async def _handle_tool_approval_decision(
     principal = request.state.principal
     service = require_service()
     try:
-        result = await _run_registry_for(service).decide_tool_approval(
-            run_id,
-            approval_id,
-            payload.invocation_binding_digest,
-            decision,
-            actor_id=str(principal.user_id),
-        )
+        durable_approval = _durable_approval_for(service)
+        if durable_approval is not None:
+            result = await durable_approval.decide(
+                run_id=run_id,
+                approval_id=approval_id,
+                invocation_binding_digest=payload.invocation_binding_digest,
+                decision=decision,
+                actor_id=str(principal.user_id),
+            )
+        else:
+            result = await _run_registry_for(service).decide_tool_approval(
+                run_id,
+                approval_id,
+                payload.invocation_binding_digest,
+                decision,
+                actor_id=str(principal.user_id),
+            )
         error_code = result.safe_error_code
         status_code = (
             200

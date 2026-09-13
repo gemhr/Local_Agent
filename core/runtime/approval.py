@@ -14,9 +14,10 @@
   进入 ToolExecution。
 - ``ApprovalCommandResult``：不返回 raw invocation / tool result / raw args 的
   安全命令结果。
-- ``ToolApprovalController``：严格 run-scoped。它是唯一 pending truth owner、
-  decision CAS owner、execution-claim owner、wait/wakeup owner。它不拥有持久化、
-  不执行工具、不判断风险、不做 RBAC。
+- ``ToolApprovalController``：严格 run-scoped。生产 durable 路径中仅作为
+  request/claim facade 与本地 waiter/wakeup；PostgreSQL 中的
+  ``DurableApprovalService`` 拥有 pending/decision/claim truth。无 durable
+  service 的旧单进程路径仍保留原本的进程内语义。
 
 Atomicity model：
 所有 mutation（create/decide/invalidate/claim）都通过一个 async critical
@@ -103,6 +104,7 @@ class ApprovalStatus(str, Enum):
     REJECTED = "REJECTED"
     INVALIDATED_CANCELLED = "INVALIDATED_CANCELLED"
     INVALIDATED_TIMEOUT = "INVALIDATED_TIMEOUT"
+    INVALIDATED_RUN_TERMINAL = "INVALIDATED_RUN_TERMINAL"
     EXECUTION_CLAIMED = "EXECUTION_CLAIMED"
 
 
@@ -366,7 +368,7 @@ class _ApprovalRecord:
 
 
 class ToolApprovalController:
-    """Strictly run-scoped pending/decision/claim owner。
+    """Strictly run-scoped approval facade and local waiter/wakeup owner。
 
     线程模型：所有 mutation 经 owner Event Loop 上的单一 ``asyncio.Lock``
     串行化（create/decide/invalidate/claim 同一临界区）。非 owner loop 线程调用
@@ -374,8 +376,10 @@ class ToolApprovalController:
     loop 线程必须调用 async variant。Journal-first：evidence 可靠 publish 后状态
     才对 waiter effective。
 
-    任何调用方都不能直接执行工具；``claim_execution()`` 成功后原 invocation 才
-    可进入既有 resource authorization / ToolExecution 链。
+    生产路径的 approval/claim truth 由注入的 durable service 持有；本对象只投影
+    本地 Step 状态并唤醒原 worker。任何调用方都不能直接执行工具；
+    ``claim_execution()`` 成功后原 invocation 才可进入既有 resource
+    authorization / ToolExecution 链。
     """
 
     def __init__(
@@ -386,6 +390,8 @@ class ToolApprovalController:
         state_bridge: ApprovalStepStateBridge,
         deadline_check: Callable[[], float | None],
         loop: asyncio.AbstractEventLoop | None = None,
+        durable_service=None,
+        durable_lease=None,
     ) -> None:
         if not isinstance(run_id, str) or not run_id.strip():
             raise ValueError("run_id must be a non-empty string")
@@ -404,6 +410,8 @@ class ToolApprovalController:
         self._active_by_invocation: dict[str, str] = {}
         self._step_emitter_resolver: Callable[[str], StepEventEmitter | None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = loop
+        self._durable_service = durable_service
+        self._durable_lease = durable_lease
         self._lock = asyncio.Lock()
         self._mutations = 0
         if self._loop is not None and (
@@ -650,10 +658,22 @@ class ToolApprovalController:
                     ApprovalCommandErrorCode.DUPLICATE_INVOCATION,
                     "同一 invocation 已存在 active approval",
                 )
-            # Journal-first：先可靠发布 Requested evidence。
+            # Durable authority 先提交 PENDING，并使用它返回的 canonical
+            # request。Recovery/re-entry 可能命中同一 invocation 的既有
+            # approval；后续 evidence、local record 与 waiter 必须共用该 ID。
+            if self._durable_service is not None:
+                try:
+                    request = await self._durable_service.create(request)
+                except Exception as exc:
+                    raise ApprovalError(
+                        ApprovalCommandErrorCode.PUBLICATION_FAILED,
+                        "Durable Tool Approval 创建失败",
+                    ) from exc
+            # 可靠发布 Requested evidence。Durable 路径只在 canonical
+            # approval 提交后发布，避免 Journal 暴露不存在的新 ID。
             if event_emitter is not None:
                 payload = ToolApprovalRequestedPayload(
-                    approval_id=approval_id,
+                    approval_id=request.approval_id,
                     tool_name=request.tool_name,
                     invocation_identity_digest=request.invocation_identity_digest,
                     arguments_digest=request.arguments_digest,
@@ -682,15 +702,19 @@ class ToolApprovalController:
                         "Tool Approval 请求证据无法可靠发布",
                     ) from exc
             try:
-                self._state_bridge.running_to_waiting(step_id, utc_now())
+                self._state_bridge.running_to_waiting(request.step_id, utc_now())
             except Exception as exc:
                 raise ApprovalError(
                     ApprovalCommandErrorCode.STATE_TRANSITION_FAILED,
                     "Step 无法进入 WAITING_FOR_APPROVAL",
                 ) from exc
-            record = _ApprovalRecord(approval_id=approval_id, request=request)
-            self._approvals[approval_id] = record
-            self._active_by_invocation[invocation.invocation_id] = approval_id
+            record = _ApprovalRecord(
+                approval_id=request.approval_id, request=request
+            )
+            self._approvals[request.approval_id] = record
+            self._active_by_invocation[invocation.invocation_id] = (
+                request.approval_id
+            )
             self._mutations += 1
             return request
 
@@ -714,6 +738,32 @@ class ToolApprovalController:
                 effective_status=ApprovalStatus.PENDING,
                 safe_error_code=ApprovalCommandErrorCode.UNKNOWN_RUN.value,
             )
+        if self._durable_service is not None:
+            result = await self._durable_service.decide(
+                run_id=run_id,
+                approval_id=approval_id,
+                invocation_binding_digest=invocation_binding_digest,
+                decision=decision,
+                actor_id=actor_id,
+            )
+            async with self._lock:
+                record = self._approvals.get(approval_id)
+                if record is not None and result.safe_error_code is None:
+                    record.status = result.effective_status
+                    record.decision = ApprovalDecision(
+                        approval_id=approval_id, decision=decision,
+                        decided_at=result.decided_at or utc_now(),
+                        actor_id_digest=compute_actor_id_digest(actor_id),
+                    )
+                    record._wake_event.set()
+                    try:
+                        if result.effective_status is ApprovalStatus.APPROVED:
+                            self._state_bridge.waiting_to_running(record.request.step_id, result.decided_at or utc_now())
+                        elif result.effective_status is ApprovalStatus.REJECTED:
+                            self._state_bridge.waiting_to_failed_rejected(record.request.step_id, result.decided_at or utc_now())
+                    except Exception:
+                        pass
+            return result
         async with self._lock:
             self._raise_if_closed()
             record = self._approvals.get(approval_id)
@@ -850,6 +900,38 @@ class ToolApprovalController:
     ) -> ApprovalCommandResult:
         if not isinstance(invocation, ToolInvocation):
             raise TypeError("invocation 必须是 ToolInvocation")
+        if self._durable_service is not None:
+            request = await self._durable_service.get(approval_id)
+            if request is None:
+                return ApprovalCommandResult(
+                    self.run_id, approval_id, ApprovalStatus.PENDING,
+                    safe_error_code=ApprovalCommandErrorCode.UNKNOWN_APPROVAL.value,
+                )
+            if self._durable_lease is None:
+                raise ApprovalError(ApprovalCommandErrorCode.CLAIM_NOT_APPROVED, "缺少 current Run lease")
+            binding = compute_invocation_binding_digest(
+                invocation_identity_digest=safe_key_digest(invocation.invocation_id),
+                tool_name=invocation.tool_name,
+                arguments_digest=invocation.arguments_digest,
+                idempotency_key_digest=safe_key_digest(invocation.idempotency_key),
+                resource_key_digest=safe_key_digest(invocation.resource_key),
+                risk_level=request.risk_level,
+                risk_facts=request.risk_facts,
+            )
+            if binding != request.invocation_binding_digest:
+                return ApprovalCommandResult(self.run_id, approval_id, ApprovalStatus.APPROVED, safe_error_code=ApprovalCommandErrorCode.CLAIM_BINDING_MISMATCH.value)
+            try:
+                await self._durable_service.claim_execution(
+                    lease=self._durable_lease,
+                    approval_id=approval_id,
+                    invocation_binding_digest=binding,
+                )
+            except Exception as exc:
+                from core.runtime.run_control import OwnershipLost
+                if isinstance(exc, OwnershipLost):
+                    raise
+                return ApprovalCommandResult(self.run_id, approval_id, ApprovalStatus.APPROVED, safe_error_code=ApprovalCommandErrorCode.CLAIM_ALREADY_EXECUTED.value)
+            return ApprovalCommandResult(self.run_id, approval_id, ApprovalStatus.EXECUTION_CLAIMED)
         async with self._lock:
             self._raise_if_closed()
             record = self._approvals.get(approval_id)
@@ -910,6 +992,52 @@ class ToolApprovalController:
                 approval_id=approval_id,
                 effective_status=ApprovalStatus.EXECUTION_CLAIMED,
             )
+
+    async def _observe_durable_status_coro(
+        self, approval_id: str
+    ) -> ApprovalStatus | None:
+        """Read PostgreSQL authority and project a terminal decision locally.
+
+        该 coroutine 只由 ``_run_on_loop`` 提交到 controller owner loop；
+        因此 State Bridge 与 local record mutation 仍遵守原线程模型。
+        """
+        durable_status = await self._durable_service.status(approval_id)
+        if durable_status is None or durable_status is ApprovalStatus.PENDING:
+            return durable_status
+        async with self._lock:
+            self._raise_if_closed()
+            record = self._approvals.get(approval_id)
+            if record is None or record.status is not ApprovalStatus.PENDING:
+                return record.status if record is not None else None
+            now = utc_now()
+            try:
+                if durable_status is ApprovalStatus.APPROVED:
+                    self._state_bridge.waiting_to_running(
+                        record.request.step_id, now
+                    )
+                elif durable_status is ApprovalStatus.REJECTED:
+                    self._state_bridge.waiting_to_failed_rejected(
+                        record.request.step_id, now
+                    )
+                elif durable_status in {
+                    ApprovalStatus.INVALIDATED_CANCELLED,
+                    ApprovalStatus.INVALIDATED_TIMEOUT,
+                    ApprovalStatus.INVALIDATED_RUN_TERMINAL,
+                }:
+                    self._state_bridge.waiting_to_cancelled(
+                        record.request.step_id, now
+                    )
+                else:
+                    return durable_status
+            except Exception as exc:
+                raise ApprovalError(
+                    ApprovalCommandErrorCode.STATE_TRANSITION_FAILED,
+                    "Durable Tool Approval 本地 Step 状态投影失败",
+                ) from exc
+            record.status = durable_status
+            self._mutations += 1
+            record._wake_event.set()
+            return durable_status
 
     async def _invalidate_coro(
         self,
@@ -1005,6 +1133,7 @@ class ToolApprovalController:
         ):
             raise ValueError("poll_seconds 必须是正数")
         deadline_exhausted = False
+        loop = self._require_loop() if self._durable_service is not None else None
         while True:
             self._run_context.raise_if_inactive()
             record = self._approvals.get(approval_id)
@@ -1028,6 +1157,15 @@ class ToolApprovalController:
                         else None
                     ),
                 )
+            if loop is not None:
+                durable_status = _run_on_loop(
+                    loop, self._observe_durable_status_coro(approval_id)
+                )
+                if (
+                    durable_status is not None
+                    and durable_status is not ApprovalStatus.PENDING
+                ):
+                    continue
             remaining = self._deadline_check()
             if remaining is not None and remaining <= 0:
                 if deadline_exhausted:

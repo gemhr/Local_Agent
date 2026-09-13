@@ -248,6 +248,8 @@ class RunCoordinator:
         snapshot_store=None,
         runtime_metadata=None,
         metrics_recorder=None,
+        durable_approval_service=None,
+        durable_lease=None,
     ) -> None:
         self._initialize_base(
             run_context=run_context,
@@ -262,6 +264,8 @@ class RunCoordinator:
             snapshot_store=snapshot_store,
             runtime_metadata=runtime_metadata,
             metrics_recorder=metrics_recorder,
+            durable_approval_service=durable_approval_service,
+            durable_lease=durable_lease,
         )
         self._bind_static_plan(plan, scheduler, executor)
 
@@ -298,6 +302,8 @@ class RunCoordinator:
         fault_controller: FaultInjectionController | None = None,
         memory_retrieval_service: MemoryRetrievalService | None = None,
         episodic_evaluation_observer: EpisodicEvaluationObserver | None = None,
+        durable_approval_service=None,
+        durable_lease=None,
     ) -> "RunCoordinator":
         """构造尚无 Plan/Scheduler/Checkpoint 的动态规划 Runtime。"""
         if not isinstance(plan_resolver, PlanResolver):
@@ -346,6 +352,8 @@ class RunCoordinator:
             snapshot_store=snapshot_store,
             runtime_metadata=runtime_metadata,
             metrics_recorder=metrics_recorder,
+            durable_approval_service=durable_approval_service,
+            durable_lease=durable_lease,
         )
         self._dynamic = True
         self._dynamic_plan_state = DynamicPlanState.UNRESOLVED
@@ -405,6 +413,8 @@ class RunCoordinator:
         snapshot_store,
         runtime_metadata,
         metrics_recorder,
+        durable_approval_service=None,
+        durable_lease=None,
     ) -> None:
         self.run_context = run_context
         self._plan: Plan | None = None
@@ -448,6 +458,8 @@ class RunCoordinator:
         self._memory_context_bundle = None
         self._memory_retrieval_observation = None
         self._episodic_evaluation_observer = None
+        self._durable_approval_service = durable_approval_service
+        self._durable_approval_lease = durable_lease
         self._tool_approval_controller: ToolApprovalController | None = None
 
         self._start_lock = threading.Lock()
@@ -519,6 +531,8 @@ class RunCoordinator:
             ),
             deadline_check=self.run_context.remaining_seconds,
             loop=running_loop,
+            durable_service=self._durable_approval_service,
+            durable_lease=self._durable_approval_lease,
         )
         controller.bind_step_emitter_resolver(
             lambda step_id: emitter.for_step(step_id)
@@ -545,14 +559,23 @@ class RunCoordinator:
         的请求沿用既有 CancellationToken / deadline / before_side_effect 语义。
         """
         controller = self._tool_approval_controller
-        if controller is None:
-            return
         if decision.status is RunStatus.CANCELLED:
             status = ApprovalStatus.INVALIDATED_CANCELLED
+            durable_reason = "CANCELLED"
         elif decision.stop_reason is StopReason.DEADLINE_EXCEEDED:
             status = ApprovalStatus.INVALIDATED_TIMEOUT
+            durable_reason = "DEADLINE_EXCEEDED"
         else:
             status = ApprovalStatus.INVALIDATED_CANCELLED
+            durable_reason = "RUN_TERMINAL"
+        durable_service = self._durable_approval_service
+        if durable_service is not None:
+            try:
+                await durable_service.invalidate_run(self.run_context.run_id, durable_reason)
+            except Exception:
+                cleanup_error_codes.append("DURABLE_APPROVAL_INVALIDATION_FAILED")
+        if controller is None:
+            return
         try:
             await controller.invalidate_async(status=status)
         except Exception:

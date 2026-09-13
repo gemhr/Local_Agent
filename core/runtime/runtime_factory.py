@@ -688,6 +688,8 @@ class CoordinatedRuntimeFactory:
                     span_recorder=span_recorder,
                     snapshot_store=snapshot_store,
                     metrics_recorder=self._services.runtime_metrics_recorder,
+                    durable_approval_service=getattr(self._services, "durable_approval", None),
+                    durable_lease=durable_lease,
                 )
                 approval_controller = coordinator._ensure_tool_approval_controller()
                 driver = CoordinatedSingleAgentDriver(
@@ -734,6 +736,8 @@ class CoordinatedRuntimeFactory:
                     step_result_max_entries=self._step_result_max_entries,
                     fault_controller=fault_controller,
                     episodic_evaluation_observer=episodic_evaluation_observer,
+                    durable_approval_service=getattr(self._services, "durable_approval", None),
+                    durable_lease=durable_lease,
                 )
                 multi_agent_driver = MultiAgentDriver(
                     router=self._router,

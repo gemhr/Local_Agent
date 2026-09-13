@@ -34,6 +34,8 @@ from core.persistence.models import (
     RoleRow,
     UserRoleRow,
     ObjectOwnershipRow,
+    DurableApprovalRow,
+    DurableToolExecutionClaimRow,
 )
 from core.persistence.readiness import (
     SchemaReadiness,
@@ -64,6 +66,8 @@ __all__ = [
     "RoleRow",
     "UserRoleRow",
     "ObjectOwnershipRow",
+    "DurableApprovalRow",
+    "DurableToolExecutionClaimRow",
     "PersistenceError",
     "SchemaReadiness",
     "SyncPersistenceBridge",

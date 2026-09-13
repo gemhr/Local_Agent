@@ -377,6 +377,51 @@ class RunControlCommandRow(PersistenceBase):
     )
 
 
+class DurableApprovalRow(PersistenceBase):
+    """PostgreSQL canonical HITL approval aggregate (no raw invocation data)."""
+
+    __tablename__ = "runtime_tool_approvals"
+    approval_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    step_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    invocation_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    invocation_identity_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    arguments_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key_digest: Mapped[str | None] = mapped_column(String(64))
+    resource_key_digest: Mapped[str | None] = mapped_column(String(64))
+    invocation_binding_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    risk_level: Mapped[str | None] = mapped_column(String(64))
+    risk_facts: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'PENDING'"))
+    decision: Mapped[str | None] = mapped_column(String(16))
+    actor_id_digest: Mapped[str | None] = mapped_column(String(64))
+    invalidated_reason: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    decided_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    invalidated_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    __table_args__ = (
+        UniqueConstraint("run_id", "invocation_id", name="uq_runtime_tool_approval_invocation"),
+        CheckConstraint("state IN ('PENDING', 'APPROVED', 'REJECTED', 'INVALIDATED')", name="ck_runtime_tool_approval_state"),
+        CheckConstraint("version > 0", name="ck_runtime_tool_approval_version"),
+        Index("ix_runtime_tool_approvals_run_state", "run_id", "state"),
+    )
+
+
+class DurableToolExecutionClaimRow(PersistenceBase):
+    """One durable authorization claim per immutable approved invocation."""
+
+    __tablename__ = "runtime_tool_execution_claims"
+    claim_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    approval_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    invocation_binding_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class RuntimeSnapshotRow(PersistenceBase):
     """Snapshot 持久检查点证据；不是 active-run recovery authority。"""
 
@@ -695,6 +740,8 @@ CANONICAL_TABLES = (
     "runtime_event_journal",
     "runtime_run_control_commands",
     "runtime_run_control",
+    "runtime_tool_approvals",
+    "runtime_tool_execution_claims",
     "runtime_snapshots",
     "event_consumption_checkpoint",
     "consumer_processed_events",
@@ -729,5 +776,7 @@ __all__ = [
     "RuntimeEventJournalRow",
     "RunControlRow",
     "RunControlCommandRow",
+    "DurableApprovalRow",
+    "DurableToolExecutionClaimRow",
     "RuntimeSnapshotRow",
 ]
