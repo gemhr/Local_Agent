@@ -81,6 +81,7 @@ class AgentExecutionRequest:
         "_fault_controller",
         "_memory_context_bundle",
         "_approval_controller",
+        "_final_output_sink",
         "_locked",
     )
 
@@ -101,6 +102,7 @@ class AgentExecutionRequest:
         fault_controller=None,
         memory_context_bundle=None,
         approval_controller=None,
+        final_output_sink=None,
     ) -> None:
         if not isinstance(step_id, str) or not step_id.strip():
             raise AgentAdapterError(
@@ -177,6 +179,7 @@ class AgentExecutionRequest:
         object.__setattr__(self, "_fault_controller", fault_controller)
         object.__setattr__(self, "_memory_context_bundle", memory_context_bundle)
         object.__setattr__(self, "_approval_controller", approval_controller)
+        object.__setattr__(self, "_final_output_sink", final_output_sink)
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name, value) -> None:
@@ -248,6 +251,11 @@ class AgentExecutionRequest:
         恒为 None 时 Router 对 APPROVAL_REQUIRED fail closed，绝不降级为 ALLOW。
         """
         return self._approval_controller
+
+    @property
+    def final_output_sink(self):
+        """仅由 Runtime 为唯一 USER_VISIBLE final Step 注入。"""
+        return self._final_output_sink
 
     def __repr__(self) -> str:
         return (
@@ -454,6 +462,7 @@ class AgentRouterSingleAgentAdapter:
                 fault_controller=request.fault_controller,
                 memory_context_bundle=request.memory_context_bundle,
                 approval_controller=request.approval_controller,
+                final_output_sink=request.final_output_sink,
             )
         except (
             asyncio.CancelledError,

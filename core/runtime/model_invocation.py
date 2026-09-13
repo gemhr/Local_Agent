@@ -7,8 +7,10 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
+import asyncio
+import inspect
 import time
-from typing import Callable, Mapping, Protocol, Sequence
+from typing import Awaitable, Callable, Mapping, Protocol, Sequence
 
 from core.runtime.budget import (
     BudgetExceededError,
@@ -99,6 +101,10 @@ class ModelAdapter(Protocol):
 
     def supports_native_tool_calling(self) -> bool: ...
 
+    async def ainvoke(
+        self, messages: Sequence[Mapping[str, str]], *, max_tokens: int
+    ) -> ModelAdapterResponse: ...
+
 
 class ModelAdapterInvocationError(RuntimeError):
     """Adapter 将 Provider 异常转换为安全属性，不保留原始正文。"""
@@ -138,6 +144,8 @@ class GeneratorModelAdapter:
         max_tokens: int,
         on_started: Callable[[], None] | None = None,
         generation_options: Mapping[str, object] | None = None,
+        run_context: RunContext | None = None,
+        on_delta: Callable[[], None] | None = None,
     ) -> ModelAdapterResponse:
         chunks: list[str] = []
         provider_started = False
@@ -155,16 +163,22 @@ class GeneratorModelAdapter:
                     )
                 return self._engine.generate_native(
                     list(messages), max_tokens=max_tokens,
-                    **dict(generation_options),
+                    **self._engine_options(
+                        generation_options, run_context, self._engine.generate_native
+                    ),
                 )
             stream = self._engine.generate(
                 list(messages),
                 max_tokens=max_tokens,
-                **dict(generation_options or {}),
+                **self._engine_options(
+                    generation_options or {}, run_context, self._engine.generate
+                ),
             )
             for chunk in stream:
                 if chunk:
                     chunks.append(str(chunk))
+                    if on_delta is not None:
+                        on_delta()
         except Exception as exc:
             category = classify_model_failure(exc)
             raise ModelAdapterInvocationError(
@@ -178,6 +192,112 @@ class GeneratorModelAdapter:
                 or bool(getattr(exc, "output_started", False)),
             ) from None
         return ModelAdapterResponse("".join(chunks))
+
+    @staticmethod
+    def _engine_options(
+        options: Mapping[str, object],
+        run_context: RunContext | None,
+        callable_object: Callable[..., object],
+    ) -> dict[str, object]:
+        values = dict(options)
+        if run_context is not None:
+            try:
+                parameters = inspect.signature(callable_object).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            if "run_context" in parameters or any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            ):
+                values["run_context"] = run_context
+        return values
+
+    async def ainvoke(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        max_tokens: int,
+        on_started: Callable[[], None] | None = None,
+        generation_options: Mapping[str, object] | None = None,
+        run_context: RunContext | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+    ) -> ModelAdapterResponse:
+        """Async provider path; no synchronous HTTP is used here."""
+        options = dict(generation_options or {})
+        accepted_output = False
+        try:
+            if on_started is not None:
+                on_started()
+            if "tools" in options:
+                if not self.supports_native_tool_calling():
+                    raise ModelAdapterInvocationError(
+                        ModelFailureCategory.PROVIDER_CONFIGURATION_ERROR,
+                        safe_error_code="NATIVE_TOOL_CALLING_UNSUPPORTED",
+                        provider_started=False,
+                        provider_responded=False,
+                    )
+                native = getattr(self._engine, "agenerate_native", None)
+                if callable(native):
+                    return await native(
+                        list(messages),
+                        max_tokens=max_tokens,
+                        run_context=run_context,
+                        **options,
+                    )
+                return await asyncio.to_thread(
+                    self.invoke,
+                    messages,
+                    max_tokens=max_tokens,
+                    generation_options=options,
+                    run_context=run_context,
+                )
+            native_stream = getattr(self._engine, "agenerate", None)
+            if not callable(native_stream):
+                return await asyncio.to_thread(
+                    self.invoke,
+                    messages,
+                    max_tokens=max_tokens,
+                    generation_options=options,
+                    run_context=run_context,
+                    on_delta=on_delta,
+                )
+            chunks: list[str] = []
+            actual_usage = None
+            from core.llm_engine import TextDelta, UsageDelta
+
+            async for delta in native_stream(
+                [dict(message) for message in messages],
+                max_tokens=max_tokens,
+                run_context=run_context,
+                **options,
+            ):
+                if isinstance(delta, TextDelta):
+                    chunks.append(delta.text)
+                    if on_delta is not None:
+                        await on_delta(delta.text)
+                        accepted_output = True
+                elif isinstance(delta, UsageDelta):
+                    from core.runtime.budget import BudgetUsage
+
+                    actual_usage = BudgetUsage(
+                        input_tokens=delta.input_tokens,
+                        output_tokens=delta.output_tokens,
+                        total_tokens=delta.input_tokens + delta.output_tokens,
+                    )
+            return ModelAdapterResponse("".join(chunks), actual_usage=actual_usage)
+        except Exception as exc:
+            if isinstance(exc, ModelAdapterInvocationError):
+                raise
+            category = classify_model_failure(exc)
+            raise ModelAdapterInvocationError(
+                category,
+                safe_error_code=_safe_error_code(exc, category),
+                provider_started=bool(getattr(exc, "provider_started", True)),
+                provider_responded=getattr(exc, "provider_responded", None),
+                # Provider 看到/生成 delta 不等于 Runtime 已接纳输出。这里只
+                # 传播成功完成 Runtime acceptance callback 的单调事实。
+                output_started=accepted_output,
+            ) from None
 
 
 class ModelAdapterResolver:
@@ -437,6 +557,8 @@ class ModelInvocationRouter:
         generation_options: Mapping[str, object] | None = None,
         fault_controller: FaultInjectionController | None = None,
         invocation_evidence: Mapping[str, object] | None = None,
+        async_submit: Callable[[object], object] | None = None,
+        on_output_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> ModelInvocationResult:
         recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
@@ -502,6 +624,8 @@ class ModelInvocationRouter:
                 generation_options=generation_options,
                 fault_controller=fault_controller,
                 invocation_evidence=invocation_evidence,
+                async_submit=async_submit,
+                on_output_delta=on_output_delta,
             )
         except RunCancelledError:
             handle.end_cancelled("RUN_CANCELLED")
@@ -527,6 +651,200 @@ class ModelInvocationRouter:
             reset_trace_context(token)
             reset_span_recorder(recorder_token)
 
+    async def ainvoke(
+        self,
+        *,
+        run_context: RunContext,
+        budget_ledger: BudgetLedger,
+        routing_decision: ModelRoutingDecision,
+        messages: Sequence[Mapping[str, str]],
+        adapter_resolver: ModelAdapterResolver,
+        circuit_breaker_registry: ModelCircuitBreakerRegistry,
+        token_estimate: int,
+        max_tokens: int,
+        output_started: bool = False,
+        generation_options: Mapping[str, object] | None = None,
+        invocation_evidence: Mapping[str, object] | None = None,
+    ) -> ModelInvocationResult:
+        """Async Router path with first-accepted-output retry barrier.
+
+        Event/Journal publication remains owned by the surrounding Runtime;
+        this method only coordinates typed Provider deltas and attempt policy.
+        """
+        attempts: list[ModelInvocationAttempt] = []
+        candidates = list(routing_decision.candidates)
+        retry_indexes: dict[ModelProfileId, int] = {}
+        last_category = ModelFailureCategory.UNKNOWN_FAILURE
+        index = 0
+        accepted_output = bool(output_started)
+        while index < len(candidates):
+            candidate = candidates[index]
+            retry_index = retry_indexes.get(candidate.profile_id, 0)
+            run_context.raise_if_inactive()
+            self._check_deadline(run_context, candidate, index)
+            breaker = circuit_breaker_registry.get(candidate.breaker_key)
+            try:
+                permit = breaker.acquire_permission()
+            except CircuitOpenError:
+                last_category = ModelFailureCategory.CIRCUIT_OPEN
+                attempts.append(self._attempt(index, candidate, False, False, last_category, "MODEL_CIRCUIT_OPEN"))
+                index += 1
+                continue
+            reservation = None
+            try:
+                reservation = budget_ledger.reserve(
+                    self._estimated_usage(candidate, token_estimate, max_tokens, retry_index),
+                    reservation_type="model_invocation",
+                )
+                adapter = adapter_resolver.resolve(candidate.profile_id)
+
+                async def accept_delta(_text: str) -> None:
+                    nonlocal accepted_output
+                    run_context.raise_if_inactive()
+                    accepted_output = True
+
+                if callable(getattr(adapter, "ainvoke", None)):
+                    response = await adapter.ainvoke(
+                        messages,
+                        max_tokens=max_tokens,
+                        generation_options=generation_options,
+                        run_context=run_context,
+                        on_delta=accept_delta,
+                    )
+                else:
+                    response = await asyncio.to_thread(
+                        adapter.invoke, messages, max_tokens=max_tokens
+                    )
+                run_context.raise_if_inactive()
+                budget_ledger.commit(
+                    reservation,
+                    response.actual_usage,
+                    usage_source=(
+                        UsageSource.ACTUAL
+                        if response.actual_usage is not None
+                        else UsageSource.ESTIMATED
+                    ),
+                )
+                permit.record_success()
+                attempts.append(
+                    self._attempt(
+                        index,
+                        candidate,
+                        True,
+                        True,
+                        None,
+                        None,
+                        UsageSource.ACTUAL
+                        if response.actual_usage is not None
+                        else UsageSource.ESTIMATED,
+                    )
+                )
+                evidence = dict(invocation_evidence or {})
+                return ModelInvocationResult(
+                    output=response.output,
+                    capability_preferred_profile_id=routing_decision.capability_preferred_profile_id,
+                    initial_selected_profile_id=routing_decision.initial_selected_profile_id,
+                    executed_profile_id=candidate.profile_id,
+                    attempts=self._with_retry_metadata(attempts, routing_decision.candidates),
+                    quality_tradeoff_disclosed=(
+                        candidate.adjustment == RoutingAdjustment.DOWNGRADE_TO_LOCAL
+                        or (
+                            routing_decision.quality_tradeoff_disclosed
+                            and routing_decision.capability_preferred_profile_id
+                            != routing_decision.initial_selected_profile_id
+                        )
+                    ),
+                    response=response,
+                    prompt_id=str(evidence.get("prompt_id", "")),
+                    prompt_version=str(evidence.get("prompt_version", "")),
+                    prompt_digest=str(evidence.get("prompt_digest", "")),
+                    provider_kind=candidate.profile.provider_kind,
+                    model_identity=candidate.profile.model_identity,
+                )
+            except asyncio.CancelledError:
+                if reservation is not None:
+                    budget_ledger.release(reservation)
+                permit.abandon()
+                raise
+            except Exception as exc:
+                category = classify_model_failure(exc)
+                last_category = category
+                # Async Router 只信任其 acceptance callback 已完成的事实；
+                # Provider/Adapter 自报的 output_started 不能越过 Runtime barrier。
+                partial_output = accepted_output
+                started = bool(getattr(exc, "provider_started", True))
+                if reservation is not None:
+                    if started:
+                        budget_ledger.commit(reservation, None, usage_source=UsageSource.ESTIMATED)
+                    else:
+                        budget_ledger.release(reservation)
+                if category in {ModelFailureCategory.CANCELLED, ModelFailureCategory.DEADLINE_EXCEEDED}:
+                    permit.record_indeterminate()
+                    if category is ModelFailureCategory.CANCELLED:
+                        run_context.cancellation_token.raise_if_cancelled()
+                        raise RunCancelledError("MODEL_CANCELLED") from None
+                    raise RunDeadlineExceededError("model invocation deadline exceeded") from None
+                if partial_output:
+                    permit.record_indeterminate()
+                elif category in _BREAKER_FAILURES:
+                    permit.record_failure()
+                else:
+                    permit.record_indeterminate()
+                attempts.append(
+                    self._attempt(
+                        index,
+                        candidate,
+                        started,
+                        False,
+                        category,
+                        _safe_error_code(exc, category),
+                        UsageSource.ESTIMATED if started else None,
+                    )
+                )
+                decision = self.retry_executor.decide(
+                    category=category,
+                    retry_index=retry_index + 1,
+                    output_started=partial_output,
+                    remaining_seconds=run_context.remaining_seconds(),
+                    has_fallback=self._has_allowed_next(
+                        tuple(candidates), index, candidate, category, partial_output
+                    ),
+                    estimated_attempt_seconds=self._estimated_latency_seconds(candidate),
+                )
+                if decision.should_retry:
+                    retry_indexes[candidate.profile_id] = retry_index + 1
+                    if decision.delay_seconds:
+                        await asyncio.sleep(decision.delay_seconds)
+                    run_context.raise_if_inactive()
+                    candidates.insert(index + 1, candidate)
+                    index += 1
+                    continue
+                if self._has_allowed_next(
+                    tuple(candidates), index, candidate, category, partial_output
+                ):
+                    index += 1
+                    continue
+                raise ModelInvocationChainError(
+                    ModelInvocationFailure(
+                        routing_decision.capability_preferred_profile_id,
+                        routing_decision.initial_selected_profile_id,
+                        None,
+                        self._with_retry_metadata(attempts, routing_decision.candidates),
+                    ),
+                    category,
+                    _safe_error_code(exc, category),
+                ) from None
+            index += 1
+        raise ModelInvocationChainError(
+            ModelInvocationFailure(
+                routing_decision.capability_preferred_profile_id,
+                routing_decision.initial_selected_profile_id,
+                None,
+                self._with_retry_metadata(attempts, routing_decision.candidates),
+            ),
+            last_category,
+        )
+
     def _invoke_impl(
         self,
         *,
@@ -543,6 +861,8 @@ class ModelInvocationRouter:
         generation_options: Mapping[str, object] | None = None,
         fault_controller: FaultInjectionController | None = None,
         invocation_evidence: Mapping[str, object] | None = None,
+        async_submit: Callable[[object], object] | None = None,
+        on_output_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> ModelInvocationResult:
         if routing_decision.confirmation_required:
             raise ModelInvocationConfirmationRequired()
@@ -558,6 +878,7 @@ class ModelInvocationRouter:
         if len({candidate.profile_id for candidate in candidates}) != len(candidates):
             raise RuntimeError("Routing Chain 不允许重复 Profile")
         retry_indexes: dict[ModelProfileId, int] = {}
+        accepted_output = bool(output_started)
         for index, candidate in enumerate(candidates):
             retry_index = retry_indexes.get(candidate.profile_id, 0)
             if candidate.profile_id in seen and retry_index == 0:
@@ -701,12 +1022,35 @@ class ModelInvocationRouter:
                     # 这里只确认事实，不重复发布第二个 MODEL_STARTED。
                     return None
 
-                if isinstance(adapter, GeneratorModelAdapter):
+                if isinstance(adapter, GeneratorModelAdapter) and async_submit is not None:
+                    async def accept_delta(text: str) -> None:
+                        nonlocal accepted_output
+                        run_context.raise_if_inactive()
+                        if on_output_delta is not None:
+                            try:
+                                await on_output_delta(text)
+                            except Exception as exc:
+                                if bool(getattr(exc, "output_started", False)):
+                                    accepted_output = True
+                                raise
+                        accepted_output = True
+                        run_context.raise_if_inactive()
+
+                    response = async_submit(adapter.ainvoke(
+                        messages,
+                        max_tokens=max_tokens,
+                        on_started=on_started,
+                        generation_options=generation_options,
+                        run_context=run_context,
+                        on_delta=accept_delta,
+                    ))
+                elif isinstance(adapter, GeneratorModelAdapter):
                     response = adapter.invoke(
                         messages,
                         max_tokens=max_tokens,
                         on_started=on_started,
                         generation_options=generation_options,
+                        run_context=run_context,
                     )
                 else:
                     response = adapter.invoke(messages, max_tokens=max_tokens)
@@ -721,8 +1065,11 @@ class ModelInvocationRouter:
                 category = classify_model_failure(exc)
                 last_category = category
                 started = bool(getattr(exc, "provider_started", True))
-                partial_output = output_started or bool(
-                    getattr(exc, "output_started", False)
+                partial_output = accepted_output or (
+                    bool(getattr(exc, "output_started", False))
+                    if async_submit is None
+                    else isinstance(adapter, GeneratorModelAdapter)
+                    and bool(getattr(exc, "output_started", False))
                 )
                 if started:
                     budget_ledger.commit(

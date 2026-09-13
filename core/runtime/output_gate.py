@@ -9,7 +9,8 @@ Ownership:
     - the gate is never snapshotted, checkpointed, journaled or recovered;
     - after a terminal attempt the gate can never publish again.
 
-The gate only publishes ``OUTPUT_DELTA`` with the final StepResult content.
+The gate accepts incremental ``OUTPUT_DELTA`` for the unique final Step and
+uses the final StepResult only to verify/complete delivery without duplication.
 It never writes Memory, never calls a model, never joins specialist results,
 and never returns raw content into any report.
 """
@@ -22,6 +23,7 @@ import threading
 import time
 from typing import Callable
 import asyncio
+import hashlib
 
 from core.runtime.event_channel import (
     EventChannelClosedError,
@@ -175,6 +177,9 @@ class OutputGate:
         self._state = OutputGateState.NOT_STARTED
         self._lock = threading.Lock()
         self._last_attempt: DeliveryAttempt | None = None
+        self._stream_step_id: str | None = None
+        self._streamed_digest = hashlib.sha256()
+        self._streamed_char_count = 0
 
     @property
     def state(self) -> OutputGateState:
@@ -203,6 +208,51 @@ class OutputGate:
                 OutputGateState.FAILED,
                 OutputGateState.OUTCOME_UNKNOWN,
             }
+
+    def stream_sink(self, claim: StepClaim):
+        """返回仅绑定唯一 USER_VISIBLE final Step 的 Runtime acceptance sink。"""
+        plan_step = self._plan_step(claim.step_id)
+        if (
+            plan_step is None
+            or claim.step_id != self._final_step_id
+            or claim.preferred_agent != plan_step.preferred_agent
+            or plan_step.output_policy is OutputPolicy.INTERNAL
+        ):
+            return None
+
+        async def accept(text: str) -> None:
+            if not isinstance(text, str) or not text:
+                return
+            with self._lock:
+                if self._state is not OutputGateState.NOT_STARTED:
+                    raise RuntimeError("OutputGate 已终态，拒绝新的流式输出")
+                if self._stream_step_id not in {None, claim.step_id}:
+                    raise RuntimeError("OutputGate 流式 source 不一致")
+                if self._run_active is not None and not self._run_active():
+                    raise RuntimeError("Run 已不再接受流式输出")
+                self._stream_step_id = claim.step_id
+            if self._event_emitter is None:
+                raise EventChannelClosedError("OutputGate 没有可用的 EventEmitter")
+            try:
+                await self._event_emitter.for_step(claim.step_id).emit(
+                    RuntimeEventType.OUTPUT_DELTA,
+                    OutputDeltaPayload(text),
+                    component="output_gate",
+                )
+            except EventPublicationError as exc:
+                if exc.partially_persisted:
+                    with self._lock:
+                        self._streamed_digest.update(text.encode("utf-8"))
+                        self._streamed_char_count += len(text)
+                    # Journal sequence 已不可撤回；Router 必须 fail-stop，不能
+                    # 将该失败误当作 pre-output 后 retry/fallback。
+                    exc.output_started = True
+                raise
+            with self._lock:
+                self._streamed_digest.update(text.encode("utf-8"))
+                self._streamed_char_count += len(text)
+
+        return accept
 
     def _plan_step(self, step_id: str):
         for step in self._plan.steps:
@@ -340,7 +390,20 @@ class OutputGate:
             )
         partially_persisted = False
         try:
-            await self._publish_output(claim, result)
+            with self._lock:
+                stream_step_id = self._stream_step_id
+                streamed_digest = self._streamed_digest.copy().hexdigest()
+                streamed_char_count = self._streamed_char_count
+            if stream_step_id is not None:
+                result_digest = hashlib.sha256(result.content.encode("utf-8")).hexdigest()
+                if (
+                    stream_step_id != claim.step_id
+                    or streamed_char_count != len(result.content)
+                    or streamed_digest != result_digest
+                ):
+                    raise RuntimeError("流式输出与最终 StepResult 不一致")
+            else:
+                await self._publish_output(claim, result)
         except EventPublicationError as exc:
             partially_persisted = exc.partially_persisted
             status = (

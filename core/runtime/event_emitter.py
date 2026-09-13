@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import Any, TypeVar
 
 from core.runtime.event_channel import RuntimeEventChannel
 from core.runtime.event_channel import EventPublicationError
@@ -27,6 +27,9 @@ class EventEmitterSyncError(RuntimeError):
         self.error_code = error_code
         self.safe_message = safe_message
         super().__init__(f"{safe_message} (error_code={error_code})")
+
+
+_T = TypeVar("_T")
 
 
 class RunEventEmitter:
@@ -135,6 +138,34 @@ class RunEventEmitter:
                     "Event Emitter 所属 Event Loop 不可用",
                 ) from exc
             raise
+
+    def submit_coroutine_from_worker(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        """在所属 Runtime loop 执行 coroutine，并让 blocking worker 等待结果。"""
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is not None:
+            coroutine.close()
+            raise EventEmitterSyncError(
+                "EMITTER_ASYNC_LOOP_SYNC_CALL",
+                "Event Loop 线程中不能同步等待 Runtime coroutine",
+            )
+        if self._loop.is_closed() or not self._loop.is_running():
+            coroutine.close()
+            raise EventEmitterSyncError(
+                "EMITTER_EVENT_LOOP_UNAVAILABLE",
+                "Event Emitter 所属 Event Loop 不可用",
+            )
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        except RuntimeError as exc:
+            coroutine.close()
+            raise EventEmitterSyncError(
+                "EMITTER_EVENT_LOOP_UNAVAILABLE",
+                "Event Emitter 所属 Event Loop 不可用",
+            ) from exc
+        return future.result()
 
 
 class StepEventEmitter:

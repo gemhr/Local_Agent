@@ -2050,6 +2050,7 @@ class AgentRouter:
         memory_context_bundle=None,
         memory_injection_report_out: list | None = None,
         approval_controller: ToolApprovalController | None = None,
+        final_output_sink=None,
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
@@ -2144,6 +2145,7 @@ class AgentRouter:
                     fault_controller=fault_controller,
                     prompt_identity=answer_prompt_identity,
                     context_selection_records=tuple(context_selection_records),
+                    final_output_sink=final_output_sink,
                 )
                 if invocation_result_out is not None:
                     invocation_result_out.append(invocation_result)
@@ -2271,6 +2273,7 @@ class AgentRouter:
                     fault_controller=fault_controller,
                     prompt_identity=answer_prompt_identity,
                     context_selection_records=tuple(context_selection_records),
+                    final_output_sink=final_output_sink,
                 )
             if invocation_result_out is not None:
                 invocation_result_out.append(invocation_result)
@@ -2323,6 +2326,7 @@ class AgentRouter:
         prompt_identity: PromptIdentity | None = None,
         context_selection_records: tuple[ContextSelectionRecord, ...] = (),
         structured_repair_count: int = 0,
+        final_output_sink=None,
     ) -> ModelInvocationResult:
         """Model Adapter 的唯一同步入口；复用既有 Budget/Circuit/Retry/Event。"""
         if run_context.budget_ledger is None:
@@ -2415,6 +2419,7 @@ class AgentRouter:
                     "prompt_digest": prompt_identity.prompt_digest,
                 }
             )
+        owner_emitter = event_emitter.parent if isinstance(event_emitter, StepEventEmitter) else event_emitter
         return self.model_invocation_router.invoke(
             run_context=run_context,
             budget_ledger=run_context.budget_ledger,
@@ -2429,6 +2434,8 @@ class AgentRouter:
             generation_options=effective_generation_options,
             fault_controller=fault_controller,
             invocation_evidence=invocation_evidence,
+            async_submit=(owner_emitter.submit_coroutine_from_worker if owner_emitter is not None else None),
+            on_output_delta=final_output_sink,
         )
 
     def _parse_delegate_plan(self, response_text: str) -> list[dict[str, str]]:
@@ -2542,6 +2549,7 @@ class AgentRouter:
         memory_context_bundle=None,
         memory_injection_report_out: list | None = None,
         approval_controller: ToolApprovalController | None = None,
+        final_output_sink=None,
     ) -> str:
         """执行一次非流式智能体调用。"""
         if run_context is not None:
@@ -2568,6 +2576,7 @@ class AgentRouter:
             memory_context_bundle=memory_context_bundle,
             memory_injection_report_out=memory_injection_report_out,
             approval_controller=approval_controller,
+            final_output_sink=final_output_sink,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -2596,6 +2605,7 @@ class AgentRouter:
         memory_context_bundle=None,
         memory_injection_report_out: list | None = None,
         approval_controller: ToolApprovalController | None = None,
+        final_output_sink=None,
     ) -> str:
         """供 RunCoordinator Driver 使用的真实单 Agent 非流式业务入口。
 
@@ -2618,6 +2628,7 @@ class AgentRouter:
             memory_context_bundle=memory_context_bundle,
             memory_injection_report_out=memory_injection_report_out,
             approval_controller=approval_controller,
+            final_output_sink=final_output_sink,
         )
 
     def complete_context_items(
@@ -2630,6 +2641,7 @@ class AgentRouter:
         user_query: str,
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
+        final_output_sink=None,
     ) -> str:
         """按已绑定 source/trust 的上下文调用统一模型合同，不经过 Tool planner。"""
         secured_items = self._items_with_canonical_security(context_items)
@@ -2668,6 +2680,7 @@ class AgentRouter:
                 PROMPT_ID_SYNTHESIS, "1", synthesis_system
             ),
             context_selection_records=context_result.selection_records,
+            final_output_sink=final_output_sink,
         )
         return invocation_result.output
 

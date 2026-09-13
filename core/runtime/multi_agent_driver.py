@@ -183,6 +183,11 @@ class MultiAgentDriver:
             approval_controller=getattr(
                 self._coordinator, "tool_approval_controller", None
             ),
+            final_output_sink=(
+                getattr(self._coordinator, "output_gate", None).stream_sink(claim)
+                if getattr(self._coordinator, "output_gate", None) is not None
+                else None
+            ),
         )
         if (
             plan_step.execution_kind is ExecutionKind.SYNTHESIS

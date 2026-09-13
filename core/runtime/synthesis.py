@@ -119,6 +119,7 @@ class SynthesisAgentAdapter:
                 user_query=request.instruction,
                 event_emitter=request.event_emitter,
                 fault_controller=request.fault_controller,
+                final_output_sink=request.final_output_sink,
             )
         except (
             asyncio.CancelledError,

@@ -22,12 +22,25 @@ class FakeResponse:
 def _capture_request(monkeypatch, payload: dict | None = None):
     captured = {}
 
-    def fake_post(url, **kwargs):
-        captured["url"] = url
-        captured.update(kwargs)
-        return FakeResponse(payload or {"choices": [{"message": {"content": "ok"}}]})
+    class CapturingSession:
+        def __init__(self) -> None:
+            self.trust_env = True
+            self.adapters = {}
 
-    monkeypatch.setattr("core.llm_engine.requests.Session.post", lambda self, url, **kwargs: fake_post(url, **kwargs))
+        def mount(self, prefix, adapter) -> None:
+            self.adapters[prefix] = adapter
+
+        def post(self, url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return FakeResponse(
+                payload or {"choices": [{"message": {"content": "ok"}}]}
+            )
+
+        def close(self) -> None:
+            return None
+
+    captured["_session"] = CapturingSession()
     return captured
 
 
@@ -38,6 +51,7 @@ def test_deepseek_thinking_enabled_is_explicit(monkeypatch) -> None:
         "deepseek-v4-flash",
         enable_thinking=True,
         provider_kind="deepseek",
+        session=captured.pop("_session"),
     )
 
     assert list(engine.generate([{"role": "user", "content": "hi"}])) == ["ok"]
@@ -52,6 +66,7 @@ def test_deepseek_thinking_disabled_is_explicit(monkeypatch) -> None:
         "deepseek-v4-flash",
         enable_thinking=False,
         provider_kind="deepseek",
+        session=captured.pop("_session"),
     )
 
     list(engine.generate([{"role": "user", "content": "hi"}]))
@@ -63,7 +78,7 @@ def test_deepseek_thinking_disabled_is_explicit(monkeypatch) -> None:
 
 def test_deepseek_native_tool_call_sends_wire_and_normalizes(monkeypatch) -> None:
     captured = _capture_request(monkeypatch, {"choices": [{"message": {"content": None, "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "get_system_status", "arguments": "{}"}}]}}]})
-    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek")
+    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek", session=captured.pop("_session"))
 
     assert engine.supports_native_tool_calling() is True
 
@@ -114,8 +129,8 @@ def test_permissive_fake_without_native_capability_cannot_silently_ignore_tools(
 
 
 def test_deepseek_native_multiple_tool_calls_fail_closed(monkeypatch) -> None:
-    _capture_request(monkeypatch, {"choices": [{"message": {"tool_calls": [{"id": "one", "function": {"name": "a", "arguments": "{}"}}, {"id": "two", "function": {"name": "b", "arguments": "{}"}}]}}]})
-    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek")
+    captured_request = _capture_request(monkeypatch, {"choices": [{"message": {"tool_calls": [{"id": "one", "function": {"name": "a", "arguments": "{}"}}, {"id": "two", "function": {"name": "b", "arguments": "{}"}}]}}]})
+    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek", session=captured_request.pop("_session"))
 
     with pytest.raises(RuntimeError) as captured:
         engine.generate_native([{"role": "user", "content": "x"}], tools=[])
@@ -125,7 +140,8 @@ def test_deepseek_native_multiple_tool_calls_fail_closed(monkeypatch) -> None:
 def test_deepseek_parameters_are_not_sent_to_other_providers(monkeypatch) -> None:
     captured = _capture_request(monkeypatch)
     engine = RemoteLLMEngine(
-        "https://example.test/v1", "Qwen3.5-27B", enable_thinking=False
+        "https://example.test/v1", "Qwen3.5-27B", enable_thinking=False,
+        session=captured.pop("_session"),
     )
 
     list(engine.generate([{"role": "user", "content": "hi"}]))
@@ -135,7 +151,7 @@ def test_deepseek_parameters_are_not_sent_to_other_providers(monkeypatch) -> Non
 
 
 def test_empty_content_at_length_has_clear_truncation_error(monkeypatch) -> None:
-    _capture_request(
+    captured_request = _capture_request(
         monkeypatch,
         {
             "choices": [
@@ -150,6 +166,7 @@ def test_empty_content_at_length_has_clear_truncation_error(monkeypatch) -> None
         "https://api.deepseek.com",
         "deepseek-v4-flash",
         provider_kind="deepseek",
+        session=captured_request.pop("_session"),
     )
 
     with pytest.raises(RuntimeError, match="truncated before producing final content") as captured:

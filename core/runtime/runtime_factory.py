@@ -59,6 +59,7 @@ class CoordinatedSingleAgentDriver:
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
         approval_controller=None,
+        output_gate=None,
     ) -> None:
         self._router = router
         self._user_query = user_query
@@ -67,6 +68,7 @@ class CoordinatedSingleAgentDriver:
         self._event_emitter = event_emitter
         self._fault_controller = fault_controller
         self._approval_controller = approval_controller
+        self._output_gate = output_gate
         self.emits_user_output = True
         self.output: str | None = None
         self.invocation_result: ModelInvocationResult | None = None
@@ -85,6 +87,11 @@ class CoordinatedSingleAgentDriver:
             event_emitter=self._event_emitter,
             fault_controller=self._fault_controller,
             approval_controller=self._approval_controller,
+            final_output_sink=(
+                self._output_gate.stream_sink(claim)
+                if self._output_gate is not None
+                else None
+            ),
         )
         self.invocation_result = (
             invocation_results[0] if invocation_results else None
@@ -146,6 +153,11 @@ class ResolvedSingleStepDriver:
             memory_context_bundle=memory_context_bundle,
             approval_controller=getattr(
                 self._coordinator, "tool_approval_controller", None
+            ),
+            final_output_sink=(
+                self._coordinator.output_gate.stream_sink(claim)
+                if self._coordinator.output_gate is not None
+                else None
             ),
         )
         self.invocation_result = invocation_results[0] if invocation_results else None
@@ -700,6 +712,7 @@ class CoordinatedRuntimeFactory:
                     event_emitter=emitter.for_step("answer"),
                     fault_controller=fault_controller,
                     approval_controller=approval_controller,
+                    output_gate=coordinator.output_gate,
                 )
                 plan = static_plan
             else:
