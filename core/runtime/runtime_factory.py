@@ -616,6 +616,7 @@ class CoordinatedRuntimeFactory:
                 run_context.attach_ownership_validator(
                     lambda: durable_control.assert_current(durable_lease)
                 )
+                run_context.attach_durable_lease(durable_lease)
             run_context.attach_project_memory_access(project_identity, project_grants)
             ledger = BudgetLedger(
                 budget or RunBudget(),

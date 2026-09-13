@@ -25,6 +25,7 @@ from core.runtime.tool_contract import (
     ToolSideEffectState,
     thaw_json,
 )
+from core.runtime.tool_idempotency import ProviderReconciliationResult
 from tools.complex_workflow_simulator import (
     ComplexWorkflowRequest,
     ComplexWorkflowResult,
@@ -50,6 +51,7 @@ class ToolAdapterResponse:
     side_effect_state: ToolSideEffectState = ToolSideEffectState.NOT_STARTED
     idempotency_replayed: bool = False
     side_effect_state_authoritative: bool = True
+    provider_operation_id: str | None = None
 
 
 class ToolAdapterInvocationError(RuntimeError):
@@ -409,6 +411,28 @@ class ComplexWorkflowToolAdapter(ToolAdapter):
         context.raise_if_cancelled()
         return self._map_result(result)
 
+    def reconcile_provider(
+        self,
+        invocation: ToolInvocation,
+        *,
+        provider_operation_id: str | None,
+    ) -> ProviderReconciliationResult:
+        """查询本地 deterministic provider 并只返回标准化 provider 结果。"""
+        request = ComplexWorkflowRequest.from_dict(thaw_json(invocation.arguments))
+        operation_id = provider_operation_id or request.operation_id
+        for record in getattr(self._state_store, "committed_operations", ()):
+            if record.get("operation_id") == operation_id and not record.get("compensated"):
+                return ProviderReconciliationResult.COMMITTED
+        if request.idempotency_key:
+            stored = self._state_store.get_idempotency_record(request.idempotency_key)
+            if stored is not None:
+                return (
+                    ProviderReconciliationResult.COMMITTED
+                    if stored.result.side_effect_committed
+                    else ProviderReconciliationResult.NOT_COMMITTED
+                )
+        return ProviderReconciliationResult.NOT_COMMITTED
+
     def _map_result(self, result: ComplexWorkflowResult) -> ToolAdapterResponse:
         side_effect_state = ToolSideEffectState.NOT_STARTED
         if result.compensation_attempted and result.compensation_succeeded:
@@ -431,6 +455,7 @@ class ComplexWorkflowToolAdapter(ToolAdapter):
                 safe_summary="复杂流程 Tool 已完成。",
                 side_effect_state=side_effect_state,
                 idempotency_replayed=result.idempotency_replayed,
+                provider_operation_id=result.operation_id,
             )
         if result.status == WorkflowResultStatus.PARTIALLY_SUCCEEDED:
             return ToolAdapterResponse(
@@ -440,6 +465,7 @@ class ComplexWorkflowToolAdapter(ToolAdapter):
                 status=ToolExecutionStatus.PARTIALLY_SUCCEEDED,
                 side_effect_state=side_effect_state,
                 idempotency_replayed=result.idempotency_replayed,
+                provider_operation_id=result.operation_id,
             )
         code = result.safe_error_code or "TOOL_UNKNOWN_FAILURE"
         raise ToolAdapterInvocationError(

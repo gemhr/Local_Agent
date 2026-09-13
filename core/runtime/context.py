@@ -138,6 +138,7 @@ class RunContext:
         self._project_grants: tuple[ProjectMemoryGrant, ...] = ()
         self._retrieval_cache_authz_domain: str | None = None
         self._ownership_validator: Callable[[], Awaitable[None]] | None = None
+        self._durable_lease = None
 
     @property
     def budget_ledger(self):
@@ -218,6 +219,18 @@ class RunContext:
         if self._ownership_validator is not None:
             await self._ownership_validator()
         self.raise_if_inactive()
+
+    @property
+    def durable_lease(self):
+        """当前 Run 的 WP1 lease；仅供受保护 durable Tool mutation 使用。"""
+        return self._durable_lease
+
+    def attach_durable_lease(self, lease: object) -> None:
+        if self._durable_lease is not None:
+            raise RuntimeError("RunContext 已绑定 durable lease")
+        if lease is None:
+            raise ValueError("durable lease 不能为空")
+        self._durable_lease = lease
 
     @classmethod
     def create(

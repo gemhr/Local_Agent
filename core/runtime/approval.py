@@ -283,6 +283,8 @@ class ApprovalCommandResult:
     idempotent: bool = False
     safe_error_code: str | None = None
     decided_at: datetime | None = None
+    invocation_binding_digest: str | None = None
+    execution_claim_id: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -921,7 +923,7 @@ class ToolApprovalController:
             if binding != request.invocation_binding_digest:
                 return ApprovalCommandResult(self.run_id, approval_id, ApprovalStatus.APPROVED, safe_error_code=ApprovalCommandErrorCode.CLAIM_BINDING_MISMATCH.value)
             try:
-                await self._durable_service.claim_execution(
+                durable_claim = await self._durable_service.claim_execution(
                     lease=self._durable_lease,
                     approval_id=approval_id,
                     invocation_binding_digest=binding,
@@ -931,7 +933,13 @@ class ToolApprovalController:
                 if isinstance(exc, OwnershipLost):
                     raise
                 return ApprovalCommandResult(self.run_id, approval_id, ApprovalStatus.APPROVED, safe_error_code=ApprovalCommandErrorCode.CLAIM_ALREADY_EXECUTED.value)
-            return ApprovalCommandResult(self.run_id, approval_id, ApprovalStatus.EXECUTION_CLAIMED)
+            return ApprovalCommandResult(
+                self.run_id,
+                approval_id,
+                ApprovalStatus.EXECUTION_CLAIMED,
+                invocation_binding_digest=binding,
+                execution_claim_id=durable_claim.claim_id,
+            )
         async with self._lock:
             self._raise_if_closed()
             record = self._approvals.get(approval_id)
@@ -991,6 +999,7 @@ class ToolApprovalController:
                 run_id=self.run_id,
                 approval_id=approval_id,
                 effective_status=ApprovalStatus.EXECUTION_CLAIMED,
+                invocation_binding_digest=request.invocation_binding_digest,
             )
 
     async def _observe_durable_status_coro(

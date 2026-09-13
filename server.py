@@ -58,6 +58,7 @@ from core.persistence import (
 )
 from core.runtime.run_control import DurableRunControlService
 from core.runtime.durable_approval import DurableApprovalService
+from core.runtime.tool_idempotency import DurableToolInvocationService
 from core.observability import HttpObservabilityMiddleware, ObservabilityService
 from core.redis_service import (
     RagQueryCache,
@@ -536,6 +537,7 @@ async def lifespan(app: FastAPI):
     app.state.db_schema_revision = schema_readiness.alembic_revision
     durable_run_control = DurableRunControlService(persistence_database)
     durable_approval = DurableApprovalService(persistence_database)
+    durable_tool_invocation = DurableToolInvocationService(persistence_database)
     app.state.durable_run_control = durable_run_control
     app.state.auth_service = AuthService(persistence_database, settings)
     app.state.authorization_service = AuthorizationService(persistence_database)
@@ -1086,6 +1088,9 @@ async def lifespan(app: FastAPI):
             ),
         ),
     )
+    router.tool_execution_service.attach_durable_invocation_service(
+        durable_tool_invocation
+    )
     if router.retrieval_execution_service is not None:
         redis_bridge = SyncRedisBridge(
             asyncio.get_running_loop(),
@@ -1191,6 +1196,7 @@ async def lifespan(app: FastAPI):
             run_registry=run_registry,
             durable_run_control=durable_run_control,
             durable_approval=durable_approval,
+            durable_tool_invocation=durable_tool_invocation,
             run_control_owner_id=app.state.application_metadata.instance_id,
             hybrid_validated_generation=hybrid_validated_generation,
             coordinated_step_executor=coordinated_step_executor,

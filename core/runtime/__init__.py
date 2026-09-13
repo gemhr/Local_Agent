@@ -585,6 +585,13 @@ from core.runtime.tool_execution import (
     AttemptSideEffectTracker, ToolAttemptExecutor, ToolExecutionContext,
     ToolExecutionFailed, ToolExecutionService,
 )
+from core.runtime.tool_idempotency import (
+    DurableToolInvocation,
+    DurableToolInvocationService,
+    ProviderReconciliationResult,
+    ToolInvocationState,
+    tool_invocation_binding_digest,
+)
 from core.runtime.run_control import (
     CancelIntent,
     DurableRunControlService,
@@ -645,6 +652,9 @@ __all__ += [
     "ToolAdapterInvocationError", "ToolAdapterResponse",
     "AttemptSideEffectTracker", "ToolAttemptExecutor", "ToolExecutionContext",
     "ToolExecutionFailed", "ToolExecutionService",
+    "DurableToolInvocation", "DurableToolInvocationService",
+    "ProviderReconciliationResult", "ToolInvocationState",
+    "tool_invocation_binding_digest",
     "DockerIsolatedExecutionBackend", "ToolExecutionBackendResolver",
     "ToolExecutionBackend",
     "TrustedInProcessExecutionBackend",

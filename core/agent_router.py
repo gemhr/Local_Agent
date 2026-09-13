@@ -1887,12 +1887,13 @@ class AgentRouter:
         invocation_decision = self.tool_governance_service.evaluate_invocation(
             governance_context, registration, invocation, execution_spec
         )
+        durable_approval_id = None
         if invocation_decision.outcome is not ToolGovernanceOutcome.ALLOW:
             if (
                 invocation_decision.outcome
                 is ToolGovernanceOutcome.APPROVAL_REQUIRED
             ):
-                self._await_tool_approval(
+                approval_result = self._await_tool_approval(
                     agent_id=agent_id,
                     invocation=invocation,
                     invocation_decision=invocation_decision,
@@ -1901,6 +1902,7 @@ class AgentRouter:
                     event_emitter=event_emitter,
                     approval_controller=approval_controller,
                 )
+                durable_approval_id = approval_result.approval_id
             else:
                 raise ToolGovernanceError(
                     ToolGovernanceErrorCode(
@@ -1924,6 +1926,17 @@ class AgentRouter:
             step_id=step_id,
             event_emitter=event_emitter,
             fault_controller=fault_controller,
+            durable_approval_id=durable_approval_id,
+            durable_execution_claim_id=(
+                getattr(approval_result, "execution_claim_id", None)
+                if durable_approval_id is not None
+                else None
+            ),
+            durable_binding_digest=(
+                getattr(approval_result, "invocation_binding_digest", None)
+                if durable_approval_id is not None
+                else None
+            ),
         )
         if isinstance(outcome, ToolExecutionError):
             raise ToolExecutionFailed(outcome)

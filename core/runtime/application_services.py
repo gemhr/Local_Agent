@@ -228,6 +228,7 @@ class ApplicationRuntimeServices:
     run_registry: object
     durable_run_control: object | None = None
     durable_approval: object | None = None
+    durable_tool_invocation: object | None = None
     run_control_owner_id: str | None = None
     hybrid_validated_generation: object | None = None
     admission_gate: RuntimeAdmissionGate = field(

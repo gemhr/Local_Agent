@@ -424,6 +424,49 @@ class DurableToolExecutionClaimRow(PersistenceBase):
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class DurableToolInvocationRow(PersistenceBase):
+    """PostgreSQL side-effect invocation aggregate owned by Tool Runtime."""
+
+    __tablename__ = "runtime_tool_invocations"
+
+    invocation_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    step_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    invocation_binding_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_key_digest: Mapped[str | None] = mapped_column(String(64))
+    owner_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    approval_id: Mapped[str | None] = mapped_column(String(255))
+    execution_claim_id: Mapped[str | None] = mapped_column(String(255))
+    state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'PREPARED'"))
+    provider_operation_id: Mapped[str | None] = mapped_column(String(255))
+    uncertainty_reason: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    started_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    committed_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    unknown_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    reconciled_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_id", "invocation_id", name="uq_runtime_tool_invocation_identity"),
+        UniqueConstraint(
+            "run_id",
+            "tool_name",
+            "idempotency_key_digest",
+            name="uq_runtime_tool_invocation_idempotency",
+        ),
+        CheckConstraint(
+            "state IN ('PREPARED', 'STARTED', 'COMMITTED', 'UNKNOWN', 'NOT_COMMITTED')",
+            name="ck_runtime_tool_invocation_state",
+        ),
+        CheckConstraint("version > 0", name="ck_runtime_tool_invocation_version"),
+        Index("ix_runtime_tool_invocations_run_state", "run_id", "state"),
+    )
+
+
 class RuntimeSnapshotRow(PersistenceBase):
     """Snapshot 持久检查点证据；不是 active-run recovery authority。"""
 
@@ -744,6 +787,7 @@ CANONICAL_TABLES = (
     "runtime_run_control",
     "runtime_tool_approvals",
     "runtime_tool_execution_claims",
+    "runtime_tool_invocations",
     "runtime_snapshots",
     "event_consumption_checkpoint",
     "consumer_processed_events",
@@ -780,5 +824,6 @@ __all__ = [
     "RunControlCommandRow",
     "DurableApprovalRow",
     "DurableToolExecutionClaimRow",
+    "DurableToolInvocationRow",
     "RuntimeSnapshotRow",
 ]

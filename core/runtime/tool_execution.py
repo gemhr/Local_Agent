@@ -73,6 +73,7 @@ from core.runtime.tool_contract import (
     retry_disposition_for,
     safe_key_digest,
 )
+from core.runtime.tool_idempotency import DurableToolInvocationService
 from core.runtime.tracing import (
     NoopSpanRecorder,
     current_span_recorder,
@@ -260,6 +261,10 @@ class ToolAttemptExecutor:
         retry_index: int,
         event_emitter: StepEventEmitter | None,
         fault_controller: FaultInjectionController | None = None,
+        durable_invocation_service: DurableToolInvocationService | None = None,
+        durable_approval_id: str | None = None,
+        durable_execution_claim_id: str | None = None,
+        durable_binding_digest: str | None = None,
     ) -> ToolExecutionResult:
         recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
@@ -301,6 +306,10 @@ class ToolAttemptExecutor:
                 retry_index=retry_index,
                 event_emitter=event_emitter,
                 fault_controller=fault_controller,
+                durable_invocation_service=durable_invocation_service,
+                durable_approval_id=durable_approval_id,
+                durable_execution_claim_id=durable_execution_claim_id,
+                durable_binding_digest=durable_binding_digest,
             )
         except ToolAttemptFailed as failed:
             error = failed.error
@@ -352,6 +361,10 @@ class ToolAttemptExecutor:
         retry_index: int,
         event_emitter: StepEventEmitter | None,
         fault_controller: FaultInjectionController | None,
+        durable_invocation_service: DurableToolInvocationService | None,
+        durable_approval_id: str | None,
+        durable_execution_claim_id: str | None,
+        durable_binding_digest: str | None,
     ) -> ToolExecutionResult:
         attempt_id = uuid4().hex
         tracker = AttemptSideEffectTracker()
@@ -389,11 +402,34 @@ class ToolAttemptExecutor:
         reservation = None
         started_event_emitted = False
         provider_started = False
+        durable_started = False
+        durable_finalized = False
+        durable_unknown = False
         started_at = datetime.now(UTC)
         started_monotonic = time.monotonic()
 
         def elapsed_ms() -> int:
             return max(0, int((time.monotonic() - started_monotonic) * 1000))
+
+        async def mark_durable_unknown(reason: str, provider_operation_id: str | None = None) -> None:
+            nonlocal durable_finalized, durable_unknown
+            if not durable_started or durable_finalized or durable_invocation_service is None:
+                return
+            await durable_invocation_service.unknown(
+                lease=run_context.durable_lease,
+                invocation_id=invocation.invocation_id,
+                reason=reason,
+                provider_operation_id=provider_operation_id,
+            )
+            durable_finalized = True
+            durable_unknown = True
+            tracker.resolve_authoritative(ToolSideEffectState.UNKNOWN)
+
+        def failure_state(state: ToolSideEffectState) -> ToolSideEffectState:
+            return ToolSideEffectState.UNKNOWN if durable_unknown else state
+
+        def failure_disposition(disposition: RetryDisposition) -> RetryDisposition:
+            return RetryDisposition.OUTCOME_UNKNOWN if durable_unknown else disposition
 
         try:
             context.raise_if_cancelled()
@@ -452,6 +488,14 @@ class ToolAttemptExecutor:
                 remaining_seconds=context.remaining_seconds,
             )
             context.raise_if_cancelled()
+            if durable_invocation_service is not None and spec.side_effect_kind.value != "NONE":
+                if run_context.durable_lease is None:
+                    raise RuntimeError("durable Tool invocation requires current Run lease")
+                await durable_invocation_service.start(
+                    lease=run_context.durable_lease,
+                    invocation_id=invocation.invocation_id,
+                )
+                durable_started = True
             provider_started = True
             try:
                 response = await self._invoke_adapter(
@@ -475,6 +519,13 @@ class ToolAttemptExecutor:
             else:
                 tracker.observe(response.side_effect_state)
             if tracker.state is ToolSideEffectState.COMMITTED:
+                if durable_started and durable_invocation_service is not None:
+                    await durable_invocation_service.committed(
+                        lease=run_context.durable_lease,
+                        invocation_id=invocation.invocation_id,
+                        provider_operation_id=response.provider_operation_id,
+                    )
+                    durable_finalized = True
                 await _execute_tool_fault_point(
                     fault_controller,
                     FaultPoint.TOOL_AFTER_AUTHORITATIVE_SIDE_EFFECT_RESOLUTION,
@@ -484,6 +535,11 @@ class ToolAttemptExecutor:
                     raise_if_cancelled=context.raise_if_cancelled,
                     remaining_seconds=context.remaining_seconds,
                     side_effect_phase="AUTHORITATIVE_COMMITTED",
+                )
+            elif durable_started:
+                await mark_durable_unknown(
+                    "PROVIDER_RETURN_WITHOUT_COMMIT_PROOF",
+                    response.provider_operation_id,
                 )
             await _execute_tool_fault_point(
                 fault_controller,
@@ -531,7 +587,8 @@ class ToolAttemptExecutor:
         except JournalError as exc:
             # Started 写入失败时 Tool 尚未调用；Completed 写入失败时也禁止重试，
             # 避免重复业务副作用。统一返回安全、不可重试的 Journal 错误。
-            state = tracker.mark_unknown_if_started()
+            await mark_durable_unknown("JOURNAL_FAILURE_AFTER_SIDE_EFFECT_BOUNDARY")
+            state = failure_state(tracker.mark_unknown_if_started())
             raise ToolAttemptFailed(
                 ToolExecutionError(
                     invocation_id=invocation.invocation_id,
@@ -543,11 +600,13 @@ class ToolAttemptExecutor:
                     phase=ToolExecutionPhase.INVOCATION,
                     provider_started=provider_started,
                     side_effect_state=state,
-                    retry_disposition=RetryDisposition.UNSAFE,
+                    retry_disposition=failure_disposition(RetryDisposition.UNSAFE),
                     retry_index=retry_index,
                 )
             ) from None
         except ToolOutputValidationError as exc:
+            await mark_durable_unknown("OUTPUT_VALIDATION_AFTER_PROVIDER")
+            state = failure_state(tracker.state)
             error = ToolExecutionError(
                 invocation_id=invocation.invocation_id,
                 attempt_id=attempt_id,
@@ -557,8 +616,8 @@ class ToolAttemptExecutor:
                 safe_message=exc.safe_message,
                 phase=ToolExecutionPhase.OUTPUT,
                 provider_started=provider_started,
-                side_effect_state=tracker.state,
-                retry_disposition=RetryDisposition.UNSAFE,
+                side_effect_state=state,
+                retry_disposition=failure_disposition(RetryDisposition.UNSAFE),
                 partial_result=exc.safe_metadata,
                 retry_index=retry_index,
             )
@@ -574,6 +633,7 @@ class ToolAttemptExecutor:
                 )
             raise ToolAttemptFailed(error) from None
         except ToolAdapterInvocationError as exc:
+            await mark_durable_unknown("PROVIDER_ERROR_OUTCOME_UNCERTAIN")
             if exc.side_effect_state_authoritative:
                 tracker.resolve_authoritative(exc.side_effect_state)
             else:
@@ -586,6 +646,7 @@ class ToolAttemptExecutor:
                 tracker=tracker,
                 provider_started=provider_started,
                 exc=exc,
+                force_outcome_unknown=durable_unknown,
             )
             if started_event_emitted:
                 error = await self._emit_completed(
@@ -599,6 +660,10 @@ class ToolAttemptExecutor:
                 )
             raise ToolAttemptFailed(error) from None
         except _ToolTimedOut as exc:
+            await mark_durable_unknown(
+                "PROVIDER_TIMEOUT_AFTER_SIDE_EFFECT_BOUNDARY",
+                exc.response.provider_operation_id if exc.response is not None else None,
+            )
             if exc.response is not None:
                 if exc.response.side_effect_state_authoritative:
                     tracker.resolve_authoritative(exc.response.side_effect_state)
@@ -608,7 +673,7 @@ class ToolAttemptExecutor:
                 tracker.mark_unknown_if_started()
             if exc.lingering:
                 tracker.resolve_authoritative(ToolSideEffectState.UNKNOWN)
-            state = tracker.state
+            state = failure_state(tracker.state)
             disposition = retry_disposition_for(
                 category=ToolErrorCategory.TIMEOUT,
                 idempotency=spec.idempotency,
@@ -626,7 +691,7 @@ class ToolAttemptExecutor:
                 phase=ToolExecutionPhase.INVOCATION,
                 provider_started=provider_started,
                 side_effect_state=state,
-                retry_disposition=disposition,
+                retry_disposition=failure_disposition(disposition),
                 retry_index=retry_index,
                 status=ToolExecutionStatus.TIMED_OUT,
                 worker_terminated=not exc.lingering,
@@ -683,7 +748,8 @@ class ToolAttemptExecutor:
                 )
             ) from None
         except InjectedFaultError as exc:
-            state = tracker.mark_unknown_if_started()
+            await mark_durable_unknown("INJECTED_FAULT_AFTER_SIDE_EFFECT_BOUNDARY")
+            state = failure_state(tracker.mark_unknown_if_started())
             error = _tool_injected_error(
                 exc,
                 invocation=invocation,
@@ -713,7 +779,8 @@ class ToolAttemptExecutor:
                 )
             raise ToolAttemptFailed(error) from None
         except RunCancelledError:
-            state = tracker.mark_unknown_if_started()
+            await mark_durable_unknown("CANCELLED_AFTER_SIDE_EFFECT_BOUNDARY")
+            state = failure_state(tracker.mark_unknown_if_started())
             detached = release_deferred["value"]
             worker_terminated = not detached
             if (
@@ -740,7 +807,7 @@ class ToolAttemptExecutor:
                         phase=ToolExecutionPhase.INVOCATION,
                         provider_started=provider_started,
                         side_effect_state=state,
-                        retry_disposition=(
+                        retry_disposition=failure_disposition(
                             RetryDisposition.OUTCOME_UNKNOWN
                             if state == ToolSideEffectState.UNKNOWN
                             else RetryDisposition.UNSAFE
@@ -762,7 +829,8 @@ class ToolAttemptExecutor:
                     raise ToolAttemptFailed(completed)
             raise
         except RunDeadlineExceededError:
-            state = tracker.mark_unknown_if_started()
+            await mark_durable_unknown("DEADLINE_AFTER_SIDE_EFFECT_BOUNDARY")
+            state = failure_state(tracker.mark_unknown_if_started())
             error = ToolExecutionError(
                 invocation_id=invocation.invocation_id,
                 attempt_id=attempt_id,
@@ -777,7 +845,7 @@ class ToolAttemptExecutor:
                 ),
                 provider_started=provider_started,
                 side_effect_state=state,
-                retry_disposition=(
+                retry_disposition=failure_disposition(
                     RetryDisposition.OUTCOME_UNKNOWN
                     if state == ToolSideEffectState.UNKNOWN
                     else RetryDisposition.UNSAFE
@@ -799,7 +867,8 @@ class ToolAttemptExecutor:
         except ToolAttemptFailed:
             raise
         except BaseException:
-            state = tracker.mark_unknown_if_started()
+            await mark_durable_unknown("LOCAL_FAILURE_AFTER_SIDE_EFFECT_BOUNDARY")
+            state = failure_state(tracker.mark_unknown_if_started())
             error = ToolExecutionError(
                 invocation_id=invocation.invocation_id,
                 attempt_id=attempt_id,
@@ -810,7 +879,7 @@ class ToolAttemptExecutor:
                 phase=ToolExecutionPhase.INVOCATION,
                 provider_started=provider_started,
                 side_effect_state=state,
-                retry_disposition=(
+                retry_disposition=failure_disposition(
                     RetryDisposition.OUTCOME_UNKNOWN
                     if state == ToolSideEffectState.UNKNOWN
                     else RetryDisposition.UNSAFE
@@ -1008,17 +1077,23 @@ class ToolAttemptExecutor:
         tracker: AttemptSideEffectTracker,
         provider_started: bool,
         exc: ToolAdapterInvocationError,
+        force_outcome_unknown: bool = False,
     ) -> ToolExecutionError:
+        side_effect_state = (
+            ToolSideEffectState.UNKNOWN if force_outcome_unknown else tracker.state
+        )
         disposition = retry_disposition_for(
             category=exc.category,
             idempotency=spec.idempotency,
             idempotency_key=invocation.idempotency_key,
-            side_effect_state=tracker.state,
+            side_effect_state=side_effect_state,
             compensation_attempted=exc.compensation_attempted,
             compensation_succeeded=exc.compensation_succeeded,
             supports_idempotency_replay=spec.supports_idempotency_replay,
             output_started=exc.output_started,
         )
+        if force_outcome_unknown:
+            disposition = RetryDisposition.OUTCOME_UNKNOWN
         return ToolExecutionError(
             invocation_id=invocation.invocation_id,
             attempt_id=attempt_id,
@@ -1028,7 +1103,7 @@ class ToolAttemptExecutor:
             safe_message=exc.safe_message,
             phase=exc.phase,
             provider_started=provider_started,
-            side_effect_state=tracker.state,
+            side_effect_state=side_effect_state,
             retry_disposition=disposition,
             partial_result=exc.partial_result,
             compensation_attempted=exc.compensation_attempted,
@@ -1184,6 +1259,7 @@ class ToolExecutionService:
         retry_executor: RetryExecutor | None = None,
         attempt_executor: ToolAttemptExecutor | None = None,
         span_recorder=None,
+        durable_invocation_service: DurableToolInvocationService | None = None,
     ) -> None:
         self.concurrency_controller = (
             concurrency_controller or ToolConcurrencyController()
@@ -1193,6 +1269,16 @@ class ToolExecutionService:
         )
         self.attempt_executor = attempt_executor or ToolAttemptExecutor()
         self.span_recorder = span_recorder
+        self.durable_invocation_service = durable_invocation_service
+
+    def attach_durable_invocation_service(
+        self, service: DurableToolInvocationService
+    ) -> None:
+        if not isinstance(service, DurableToolInvocationService):
+            raise TypeError("service 必须是 DurableToolInvocationService")
+        if self.durable_invocation_service is not None and self.durable_invocation_service is not service:
+            raise RuntimeError("ToolExecutionService 已绑定 durable invocation service")
+        self.durable_invocation_service = service
 
     async def execute(
         self,
@@ -1203,6 +1289,9 @@ class ToolExecutionService:
         step_id: str,
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
+        durable_approval_id: str | None = None,
+        durable_execution_claim_id: str | None = None,
+        durable_binding_digest: str | None = None,
     ) -> ToolExecutionResult | ToolExecutionError:
         recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
@@ -1225,6 +1314,9 @@ class ToolExecutionService:
                 step_id=step_id,
                 event_emitter=event_emitter,
                 fault_controller=fault_controller,
+                durable_approval_id=durable_approval_id,
+                durable_execution_claim_id=durable_execution_claim_id,
+                durable_binding_digest=durable_binding_digest,
             )
             if isinstance(result, ToolExecutionError):
                 if result.status is ToolExecutionStatus.TIMED_OUT:
@@ -1258,6 +1350,9 @@ class ToolExecutionService:
         step_id: str,
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
+        durable_approval_id: str | None = None,
+        durable_execution_claim_id: str | None = None,
+        durable_binding_digest: str | None = None,
     ) -> ToolExecutionResult | ToolExecutionError:
         await run_context.validate_execution_ownership()
         ledger = run_context.budget_ledger
@@ -1292,6 +1387,62 @@ class ToolExecutionService:
                 side_effect_state=ToolSideEffectState.NOT_STARTED,
                 retry_disposition=RetryDisposition.UNSAFE,
             )
+
+        durable_service = self.durable_invocation_service
+        durable_lease = run_context.durable_lease
+        side_effecting = spec.side_effect_kind.value != "NONE"
+        if side_effecting and durable_lease is not None and durable_service is None:
+            raise RuntimeError("durable Run 的 side-effect Tool 缺少 invocation service")
+        durable_enabled = (
+            durable_service is not None
+            and side_effecting
+        )
+        if durable_enabled:
+            if durable_lease is None:
+                raise RuntimeError("side-effect Tool 缺少 current durable Run lease")
+            durable_record = await durable_service.prepare(
+                lease=durable_lease,
+                step_id=step_id,
+                invocation=invocation,
+                tool_name=spec.tool_name,
+                approval_id=durable_approval_id,
+                execution_claim_id=durable_execution_claim_id,
+                invocation_binding_digest=durable_binding_digest,
+            )
+            if durable_record.state.value != "PREPARED":
+                side_effect_state = (
+                    ToolSideEffectState.COMMITTED
+                    if durable_record.state.value == "COMMITTED"
+                    else ToolSideEffectState.UNKNOWN
+                )
+                return ToolExecutionError(
+                    invocation_id=invocation.invocation_id,
+                    attempt_id=None,
+                    tool_name=spec.tool_name,
+                    category=(
+                        ToolErrorCategory.SIDE_EFFECT_UNKNOWN
+                        if side_effect_state is ToolSideEffectState.UNKNOWN
+                        else ToolErrorCategory.RESOURCE_CONFLICT
+                    ),
+                    safe_error_code=(
+                        "TOOL_INVOCATION_OUTCOME_UNKNOWN"
+                        if side_effect_state is ToolSideEffectState.UNKNOWN
+                        else "TOOL_INVOCATION_ALREADY_COMMITTED"
+                    ),
+                    safe_message=(
+                        "Tool invocation outcome requires reconciliation before execution."
+                        if side_effect_state is ToolSideEffectState.UNKNOWN
+                        else "Tool invocation has already been committed."
+                    ),
+                    phase=ToolExecutionPhase.INVOCATION,
+                    provider_started=side_effect_state is not ToolSideEffectState.UNKNOWN,
+                    side_effect_state=side_effect_state,
+                    retry_disposition=(
+                        RetryDisposition.OUTCOME_UNKNOWN
+                        if side_effect_state is ToolSideEffectState.UNKNOWN
+                        else RetryDisposition.UNSAFE
+                    ),
+                )
 
         try:
             await _execute_tool_fault_point(
@@ -1333,6 +1484,10 @@ class ToolExecutionService:
                     retry_index=retry_index,
                     event_emitter=event_emitter,
                     fault_controller=fault_controller,
+                    durable_invocation_service=durable_service if durable_enabled else None,
+                    durable_approval_id=durable_approval_id,
+                    durable_execution_claim_id=durable_execution_claim_id,
+                    durable_binding_digest=durable_binding_digest,
                 )
             except InjectedFaultError as exc:
                 last_error = _tool_injected_error(
@@ -1397,6 +1552,9 @@ class ToolExecutionService:
         step_id: str,
         event_emitter: StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
+        durable_approval_id: str | None = None,
+        durable_execution_claim_id: str | None = None,
+        durable_binding_digest: str | None = None,
     ) -> ToolExecutionResult | ToolExecutionError:
         coroutine = self.execute(
             invocation=invocation,
@@ -1405,6 +1563,9 @@ class ToolExecutionService:
             step_id=step_id,
             event_emitter=event_emitter,
             fault_controller=fault_controller,
+            durable_approval_id=durable_approval_id,
+            durable_execution_claim_id=durable_execution_claim_id,
+            durable_binding_digest=durable_binding_digest,
         )
         if event_emitter is not None:
             loop = event_emitter.parent._loop
