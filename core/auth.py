@@ -24,6 +24,7 @@ AUTH_UNKNOWN_PRINCIPAL = "AUTH_UNKNOWN_PRINCIPAL"
 AUTH_PRINCIPAL_DISABLED = "AUTH_PRINCIPAL_DISABLED"
 AUTHORIZATION_FORBIDDEN = "AUTHORIZATION_FORBIDDEN"
 AUTHORIZATION_OBJECT_NOT_OWNED = "AUTHORIZATION_OBJECT_NOT_OWNED"
+EVALUATION_EXECUTE_SCOPE = "localagent:evaluation:execute"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,8 @@ class Principal:
     token_id: str
     issued_at: datetime
     expires_at: datetime
+    principal_kind: str = "HUMAN"
+    scopes: frozenset[str] = frozenset()
 
     @property
     def authz_domain_id(self) -> str:
@@ -96,7 +99,7 @@ class AuthService:
         if not isinstance(subject, str) or not isinstance(token_id, str) or not token_id:
             raise AuthError(AUTH_INVALID_TOKEN)
         if not isinstance(roles, list) or not roles or any(
-            not isinstance(role, str) or role not in {"USER", "OPERATOR", "ADMIN"} for role in roles
+            not isinstance(role, str) or role not in {"USER", "OPERATOR", "ADMIN", "SERVICE"} for role in roles
         ):
             raise AuthError(AUTH_INVALID_TOKEN)
         try:
@@ -114,11 +117,30 @@ class AuthService:
         token_roles = frozenset(roles)
         if not token_roles.issubset(assigned_roles):
             raise AuthError(AUTH_INVALID_TOKEN)
-        return Principal(user_id, subject, token_roles, token_id, _claim_datetime(payload, "iat"), _claim_datetime(payload, "exp"))
+        principal_kind = user.principal_kind
+        if principal_kind not in {"HUMAN", "SERVICE"}:
+            raise AuthError(AUTH_INVALID_TOKEN)
+        if principal_kind == "SERVICE" and "SERVICE" not in assigned_roles:
+            raise AuthError(AUTH_INVALID_TOKEN)
+        raw_scopes = payload.get("scopes", [])
+        if not isinstance(raw_scopes, list) or any(not isinstance(scope, str) for scope in raw_scopes):
+            raise AuthError(AUTH_INVALID_TOKEN)
+        scopes = frozenset(raw_scopes)
+        if principal_kind == "SERVICE":
+            configured_scopes = frozenset(user.service_scopes or [])
+            if not scopes.issubset(configured_scopes):
+                raise AuthError(AUTH_INVALID_TOKEN)
+        return Principal(user_id, subject, token_roles, token_id, _claim_datetime(payload, "iat"), _claim_datetime(payload, "exp"), principal_kind, scopes)
 
 
 def require_role(principal: Principal, *roles: str) -> None:
     if not principal.roles.intersection(roles):
+        raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+
+
+def require_scope(principal: Principal, scope: str) -> None:
+    """校验 service principal 的窄 endpoint scope；human 不得走 service path。"""
+    if principal.principal_kind != "SERVICE" or scope not in principal.scopes:
         raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
 
 
@@ -180,4 +202,4 @@ async def get_principal(request: Request) -> Principal:
     return principal
 
 
-__all__ = ["AuthError", "AuthService", "AuthorizationService", "Principal", "get_principal", "require_owned", "require_role"]
+__all__ = ["EVALUATION_EXECUTE_SCOPE", "AuthError", "AuthService", "AuthorizationService", "Principal", "get_principal", "require_owned", "require_role", "require_scope"]

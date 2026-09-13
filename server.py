@@ -19,10 +19,13 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from core.agent_router import AgentRouter
 from core.auth import (
     AUTH_INVALID_TOKEN,
+    AUTHORIZATION_FORBIDDEN,
     AuthError,
     AuthService,
     AuthorizationService,
     require_role,
+    require_scope,
+    EVALUATION_EXECUTE_SCOPE,
 )
 from core.application_metadata import create_application_metadata
 from core.evaluation_jobs import (
@@ -1368,8 +1371,15 @@ async def request_id_and_auth_middleware(request: Request, call_next):
             if not isinstance(service, AuthService):
                 return _api_error(request, AUTH_INVALID_TOKEN, 401)
             request.state.principal = await service.authenticate(request.headers.get("Authorization"))
-            if request.url.path in _ADMIN_ONLY_API_PATHS:
+            if request.url.path.startswith("/api/runtime/evaluation-execute/"):
+                require_scope(request.state.principal, EVALUATION_EXECUTE_SCOPE)
+            elif request.url.path in _ADMIN_ONLY_API_PATHS:
                 require_role(request.state.principal, "ADMIN")
+            elif request.state.principal.principal_kind == "SERVICE" and not (
+                request.url.path.startswith("/api/runtime/runs/")
+                and request.url.path.endswith("/cancel")
+            ):
+                raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
             limiter = getattr(request.app.state, "rate_limiter", None)
             if not isinstance(limiter, RedisTokenBucketRateLimiter):
                 return _api_error(request, "RATE_LIMIT_UNAVAILABLE", 503)

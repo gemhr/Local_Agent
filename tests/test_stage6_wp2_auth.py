@@ -6,7 +6,16 @@ from datetime import UTC, datetime, timedelta
 import jwt
 import pytest
 
-from core.auth import AUTH_INVALID_TOKEN, AuthError, AuthService, Principal, require_owned, require_role
+from core.auth import (
+    AUTH_INVALID_TOKEN,
+    AUTHORIZATION_FORBIDDEN,
+    AuthError,
+    AuthService,
+    Principal,
+    require_owned,
+    require_role,
+    require_scope,
+)
 
 
 class _Settings:
@@ -42,3 +51,22 @@ def test_principal_is_immutable_and_ownership_is_server_side() -> None:
     assert forbidden.value.status_code == 403
     with pytest.raises((AttributeError, TypeError)):
         principal.roles = frozenset({"ADMIN"})  # type: ignore[misc]
+
+
+def test_evaluation_scope_requires_service_principal() -> None:
+    user = Principal(
+        uuid.uuid4(), "human", frozenset({"ADMIN"}), "jti", datetime.now(UTC),
+        datetime.now(UTC) + timedelta(minutes=1), "HUMAN", frozenset(),
+    )
+    with pytest.raises(AuthError) as human_denied:
+        require_scope(user, "localagent:evaluation:execute")
+    assert human_denied.value.code == AUTHORIZATION_FORBIDDEN
+    assert human_denied.value.status_code == 403
+
+    service = Principal(
+        uuid.uuid4(), "service", frozenset({"SERVICE"}), "jti", datetime.now(UTC),
+        datetime.now(UTC) + timedelta(minutes=1), "SERVICE", frozenset(),
+    )
+    with pytest.raises(AuthError) as scope_denied:
+        require_scope(service, "localagent:evaluation:execute")
+    assert scope_denied.value.status_code == 403

@@ -52,6 +52,8 @@ class UserRow(PersistenceBase):
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    principal_kind: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'HUMAN'"))
+    service_scopes: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
 
 
 class RoleRow(PersistenceBase):
@@ -61,7 +63,7 @@ class RoleRow(PersistenceBase):
 
     __table_args__ = (
         CheckConstraint(
-            "code IN ('USER', 'OPERATOR', 'ADMIN')",
+            "code IN ('USER', 'OPERATOR', 'ADMIN', 'SERVICE')",
             name="ck_roles_code",
         ),
     )

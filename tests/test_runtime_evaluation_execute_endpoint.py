@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from starlette.requests import Request
 
 import server
 from core.chat_service import ChatService
@@ -188,11 +189,38 @@ class _RagAndAnswerEvalService:
 
 
 async def _execute(payload: server.RuntimeExecuteRequest):
-    return await server.runtime_evaluation_execute_endpoint(payload)
+    return await server.runtime_evaluation_execute_endpoint(payload, _test_request())
 
 
 async def _execute_v2(payload: server.RuntimeExecuteRequest):
-    return await server.runtime_evaluation_execute_v2_endpoint(payload)
+    return await server.runtime_evaluation_execute_v2_endpoint(payload, _test_request())
+
+
+def _test_request() -> Request:
+    """为 direct-call endpoint 单测提供现行 Request 参数；认证由 HTTP middleware 覆盖。"""
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/runtime/evaluation-execute/v2",
+            "raw_path": b"/api/runtime/evaluation-execute/v2",
+            "query_string": b"",
+            "headers": [],
+            "scheme": "http",
+            "server": ("test", 80),
+            "client": ("test", 1),
+            "root_path": "",
+        }
+    )
+
+
+@pytest.fixture(autouse=True)
+def _bypass_http_ownership_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """这些 direct-call tests 覆盖 endpoint contract，HTTP auth 在 middleware 测试。"""
+    async def _noop(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(server, "_bind_new_run_and_conversation", _noop)
 
 
 # ---------------------------------------------------------------------------

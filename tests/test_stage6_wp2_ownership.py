@@ -23,6 +23,7 @@ _ROLE_IDS = {
     "USER": uuid.UUID("00000000-0000-0000-0000-000000000001"),
     "OPERATOR": uuid.UUID("00000000-0000-0000-0000-000000000002"),
     "ADMIN": uuid.UUID("00000000-0000-0000-0000-000000000003"),
+    "SERVICE": uuid.UUID("00000000-0000-0000-0000-000000000004"),
 }
 
 
@@ -35,13 +36,25 @@ async def _ensure_roles(database) -> None:
         )
 
 
-async def _create_user(database, roles: tuple[str, ...]) -> uuid.UUID:
+async def _create_user(
+    database,
+    roles: tuple[str, ...],
+    *,
+    principal_kind: str = "HUMAN",
+    service_scopes: list[str] | None = None,
+) -> uuid.UUID:
     await _ensure_roles(database)
     user_id = uuid.uuid4()
     session = database.session_factory()
     try:
       async with session.begin():
-        session.add(UserRow(id=user_id, subject=str(user_id), display_name="test"))
+        session.add(UserRow(
+            id=user_id,
+            subject=str(user_id),
+            display_name="test",
+            principal_kind=principal_kind,
+            service_scopes=service_scopes or [],
+        ))
         await session.flush()
         role_rows = (await session.scalars(
             select(RoleRow).where(RoleRow.code.in_(roles))
@@ -58,13 +71,20 @@ def _principal(user_id: uuid.UUID, *roles: str) -> Principal:
     return Principal(user_id, str(user_id), frozenset(roles), "test-jti", now, now + timedelta(minutes=5))
 
 
-def _token(private, user_id: uuid.UUID, roles: list[str]) -> str:
+def _token(
+    private,
+    user_id: uuid.UUID,
+    roles: list[str],
+    *,
+    scopes: list[str] | None = None,
+) -> str:
     now = datetime.now(UTC)
     return jwt.encode(
         {
             "iss": "test-issuer", "aud": "test-api", "sub": str(user_id),
             "roles": roles, "jti": uuid.uuid4().hex, "iat": now,
             "nbf": now, "exp": now + timedelta(minutes=2),
+            "scopes": scopes or [],
         }, private, algorithm="EdDSA",
     )
 
@@ -91,7 +111,9 @@ async def test_real_postgresql_identity_constraints_and_ownership(clean_database
     async with clean_database.session() as session:
         ownership = await session.get(ObjectOwnershipRow, {"object_type": "RUN", "object_id": "run-a"})
         assert ownership is not None and ownership.owner_user_id == user_a
-        assert set((await session.scalars(select(RoleRow.code))).all()) == {"USER", "OPERATOR", "ADMIN"}
+        assert set((await session.scalars(select(RoleRow.code))).all()) == {
+            "USER", "OPERATOR", "ADMIN", "SERVICE"
+        }
 
     await authz.require_owner(principal_a, "RUN", "run-a")
     with pytest.raises(AuthError) as denied:
@@ -260,3 +282,156 @@ async def test_real_http_evaluation_controls_are_admin_only(clean_database, monk
         assert response.status_code == 403
         assert response.json()["error"]["request_id"]
         assert response.headers["X-Request-ID"]
+
+
+@pytest.mark.asyncio
+async def test_real_http_evaluation_requires_service_principal_and_scope(clean_database, monkeypatch):
+    human_id = await _create_user(clean_database, ("USER",))
+    admin_id = await _create_user(clean_database, ("ADMIN",))
+    service_id = await _create_user(
+        clean_database,
+        ("SERVICE",),
+        principal_kind="SERVICE",
+        service_scopes=["localagent:evaluation:execute"],
+    )
+    private = Ed25519PrivateKey.generate()
+    settings = SimpleNamespace(
+        jwt_public_key=private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
+        jwt_issuer="test-issuer", jwt_audience="test-api",
+        jwt_allowed_algorithm="EdDSA", jwt_clock_skew_seconds=0,
+    )
+    monkeypatch.setattr(
+        server.app.state, "auth_service", AuthService(clean_database, settings), raising=False
+    )
+    monkeypatch.setattr(
+        server.app.state, "rate_limiter", _disabled_rate_limiter(), raising=False
+    )
+    client = TestClient(server.app)
+    payload = {"agent_id": "core_router", "query": "test", "run_id": str(uuid.uuid4()), "timeout_seconds": 1}
+
+    missing = client.post("/api/runtime/evaluation-execute/v1", json=payload)
+    human = client.post(
+        "/api/runtime/evaluation-execute/v1", json=payload,
+        headers={"Authorization": f"Bearer {_token(private, human_id, ['USER'])}"},
+    )
+    admin = client.post(
+        "/api/runtime/evaluation-execute/v1", json=payload,
+        headers={"Authorization": f"Bearer {_token(private, admin_id, ['ADMIN'])}"},
+    )
+    missing_scope = client.post(
+        "/api/runtime/evaluation-execute/v1", json=payload,
+        headers={
+            "Authorization": f"Bearer {_token(private, service_id, ['SERVICE'], scopes=[])}"
+        },
+    )
+
+    async with clean_database.transaction() as session:
+        service_row = await session.get(UserRow, service_id)
+        assert service_row is not None
+        service_row.disabled_at = datetime.now(UTC)
+    disabled = client.post(
+        "/api/runtime/evaluation-execute/v1", json=payload,
+        headers={
+            "Authorization": f"Bearer {_token(private, service_id, ['SERVICE'], scopes=['localagent:evaluation:execute'])}"
+        },
+    )
+
+    assert missing.status_code == 401
+    assert human.status_code == 403
+    assert admin.status_code == 403
+    assert missing_scope.status_code == 403
+    assert disabled.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_real_http_service_principal_cannot_call_regular_chat_api(clean_database, monkeypatch):
+    service_id = await _create_user(
+        clean_database,
+        ("SERVICE",),
+        principal_kind="SERVICE",
+        service_scopes=["localagent:evaluation:execute"],
+    )
+    private = Ed25519PrivateKey.generate()
+    settings = SimpleNamespace(
+        jwt_public_key=private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
+        jwt_issuer="test-issuer", jwt_audience="test-api",
+        jwt_allowed_algorithm="EdDSA", jwt_clock_skew_seconds=0,
+    )
+    monkeypatch.setattr(
+        server.app.state, "auth_service", AuthService(clean_database, settings), raising=False
+    )
+    response = TestClient(server.app).get(
+        "/api/history/any-conversation",
+        headers={
+            "Authorization": f"Bearer {_token(private, service_id, ['SERVICE'], scopes=['localagent:evaluation:execute'])}"
+        },
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_real_http_service_cancel_is_limited_to_owned_run(clean_database, monkeypatch):
+    owner_id = await _create_user(
+        clean_database,
+        ("SERVICE",),
+        principal_kind="SERVICE",
+        service_scopes=["localagent:evaluation:execute"],
+    )
+    other_id = await _create_user(
+        clean_database,
+        ("SERVICE",),
+        principal_kind="SERVICE",
+        service_scopes=["localagent:evaluation:execute"],
+    )
+    run_id = "10000000-0000-0000-0000-000000000001"
+    await AuthorizationService(clean_database).bind_new(
+        Principal(
+            owner_id,
+            str(owner_id),
+            frozenset({"SERVICE"}),
+            "owner-jti",
+            datetime.now(UTC),
+            datetime.now(UTC) + timedelta(minutes=5),
+            "SERVICE",
+            frozenset({"localagent:evaluation:execute"}),
+        ),
+        "RUN",
+        run_id,
+    )
+    private = Ed25519PrivateKey.generate()
+    settings = SimpleNamespace(
+        jwt_public_key=private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
+        jwt_issuer="test-issuer", jwt_audience="test-api",
+        jwt_allowed_algorithm="EdDSA", jwt_clock_skew_seconds=0,
+    )
+    monkeypatch.setattr(
+        server.app.state, "auth_service", AuthService(clean_database, settings), raising=False
+    )
+    monkeypatch.setattr(
+        server.app.state, "authorization_service", AuthorizationService(clean_database), raising=False
+    )
+    monkeypatch.setattr(
+        server.app.state, "rate_limiter", _disabled_rate_limiter(), raising=False
+    )
+    monkeypatch.setattr(
+        server,
+        "chat_service",
+        SimpleNamespace(run_registry=SimpleNamespace(cancel=lambda *_: True)),
+    )
+    path = f"/api/runtime/runs/{run_id}/cancel"
+    owner = TestClient(server.app).post(
+        path,
+        headers={
+            "Authorization": f"Bearer {_token(private, owner_id, ['SERVICE'], scopes=['localagent:evaluation:execute'])}"
+        },
+    )
+    foreign = TestClient(server.app).post(
+        path,
+        headers={
+            "Authorization": f"Bearer {_token(private, other_id, ['SERVICE'], scopes=['localagent:evaluation:execute'])}"
+        },
+    )
+
+    assert owner.status_code == 200
+    assert owner.json()["status"] == "cancelled"
+    assert foreign.status_code == 404

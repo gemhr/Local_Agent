@@ -19,11 +19,18 @@ async def _run(args: argparse.Namespace) -> None:
         raise SystemExit("identity management is limited to LOCAL/TEST")
     database = Database(DatabaseConfig.from_settings(settings))
     try:
-        if args.command == "create-user":
+        if args.command in {"create-user", "create-service"}:
             user_id = uuid.uuid4()
-            role_id = {"USER": "00000000-0000-0000-0000-000000000001", "OPERATOR": "00000000-0000-0000-0000-000000000002", "ADMIN": "00000000-0000-0000-0000-000000000003"}[args.role]
+            is_service = args.command == "create-service"
+            role_id = {"USER": "00000000-0000-0000-0000-000000000001", "OPERATOR": "00000000-0000-0000-0000-000000000002", "ADMIN": "00000000-0000-0000-0000-000000000003", "SERVICE": "00000000-0000-0000-0000-000000000004"}["SERVICE" if is_service else args.role]
             async with database.transaction() as session:
-                session.add(UserRow(id=user_id, subject=str(user_id), display_name=args.display_name))
+                session.add(UserRow(
+                    id=user_id,
+                    subject=str(user_id),
+                    display_name=args.display_name,
+                    principal_kind="SERVICE" if is_service else "HUMAN",
+                    service_scopes=(args.scope if is_service else []),
+                ))
                 # UserRoleRow 没有 ORM relationship；显式 flush 保证 FK parent
                 # 在同一 application-owned transaction 内先于关联行写入。
                 await session.flush()
@@ -40,7 +47,9 @@ async def _run(args: argparse.Namespace) -> None:
             roles = await session.scalars(select(RoleRow.code).join(UserRoleRow, UserRoleRow.role_id == RoleRow.id).where(UserRoleRow.user_id == user.id))
             role_values = list(roles.all())
         now = datetime.now(UTC)
-        print(jwt.encode({"iss": issuer, "aud": audience, "sub": str(user.id), "roles": role_values, "jti": uuid.uuid4().hex, "iat": now, "nbf": now, "exp": now + timedelta(seconds=args.ttl)}, private_key, algorithm=algorithm))
+        scopes = list(user.service_scopes or []) if user.principal_kind == "SERVICE" else []
+        claims = {"iss": issuer, "aud": audience, "sub": str(user.id), "roles": role_values, "scopes": scopes, "jti": uuid.uuid4().hex, "iat": now, "nbf": now, "exp": now + timedelta(seconds=args.ttl)}
+        print(jwt.encode(claims, private_key, algorithm=algorithm))
     finally:
         await database.dispose()
 
@@ -51,6 +60,9 @@ def main() -> None:
     create = sub.add_parser("create-user")
     create.add_argument("--display-name", required=True)
     create.add_argument("--role", choices=("USER", "OPERATOR", "ADMIN"), default="USER")
+    service = sub.add_parser("create-service")
+    service.add_argument("--display-name", required=True)
+    service.add_argument("--scope", action="append", default=["localagent:evaluation:execute"])
     issue = sub.add_parser("issue-test-token")
     issue.add_argument("user_id")
     issue.add_argument("--ttl", type=int, default=900)
