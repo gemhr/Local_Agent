@@ -9,8 +9,6 @@ import pytest
 
 from core.runtime import (
     CancellationPayload,
-    AgentState,
-    BudgetLedger,
     ErrorPayload,
     InMemoryStructuredRuntimeLogger,
     JsonStructuredRuntimeLogger,
@@ -19,16 +17,9 @@ from core.runtime import (
     RuntimeEvent,
     RuntimeEventType,
     RuntimeLogLevel,
-    RunBudget,
-    RunStatus,
-    StepState,
-    StepStatus,
-    StopReason,
     StructuredLogProjector,
     ToolCompletedPayload,
-    create_run_context,
 )
-from core.runtime.agent_loop import _log_safe_agent_state
 from server import _close_model_engines
 
 
@@ -158,31 +149,11 @@ def test_standard_and_structured_logs_never_emit_sensitive_markers(caplog):
         r"C:\Users\private-user\kb",
         "provider-secret-error",
     )
-    run_context, _ = create_run_context(entry_agent_id="test")
-    run_context.attach_budget_ledger(BudgetLedger(RunBudget()))
-    now = datetime.now(UTC)
-    state = AgentState.for_run_context(run_context.run_id)
-    state.status = RunStatus.FAILED
-    state.stop_reason = StopReason.UNHANDLED_ERROR
-    state.final_output = " ".join(markers[:2])
-    state.error_message = markers[5]
-    state.steps["step-a"] = StepState(
-        "step-a",
-        markers[2],
-        status=StepStatus.FAILED,
-        created_at=now,
-        started_at=now,
-        ended_at=now,
-        error_code="SAFE_ERROR",
-        error_message=markers[3],
-    )
-
     class BrokenEngine:
         def close(self):
             raise RuntimeError(f"{markers[4]} {markers[5]}")
 
     caplog.set_level(logging.INFO)
-    _log_safe_agent_state(state, run_context)
     assert _close_model_engines({"local": BrokenEngine()}) == (
         "MODEL_ENGINE_CLOSE_FAILED",
     )

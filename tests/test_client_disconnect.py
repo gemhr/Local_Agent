@@ -5,7 +5,6 @@ import asyncio
 import pytest
 
 import server
-from core.runtime import ChatRuntimeMode
 
 
 class _DisconnectRegistry:
@@ -29,9 +28,6 @@ class _CoordinatedService:
         self.run_registry = _DisconnectRegistry()
         self.closed = False
 
-    def selected_runtime_mode(self):
-        return ChatRuntimeMode.COORDINATED
-
     async def stream_coordinated_agent_text(self, **kwargs):
         try:
             await self.run_registry.cancelled.wait()
@@ -43,7 +39,7 @@ class _CoordinatedService:
 @pytest.mark.asyncio
 async def test_disconnect_watcher_stops_output_and_is_awaited(monkeypatch):
     service = _CoordinatedService()
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     before = set(asyncio.all_tasks())
 
     response = await server.chat_endpoint(
@@ -69,9 +65,6 @@ async def test_disconnect_watcher_stops_output_and_is_awaited(monkeypatch):
 
 
 class _CancelledService:
-    def selected_runtime_mode(self):
-        return ChatRuntimeMode.COORDINATED
-
     async def stream_coordinated_agent_text(self, **kwargs):
         raise asyncio.CancelledError()
         yield  # pragma: no cover
@@ -84,7 +77,9 @@ class _Connected:
 
 @pytest.mark.asyncio
 async def test_asgi_cancelled_error_is_cleaned_then_reraised(monkeypatch):
-    monkeypatch.setattr(server, "chat_service", _CancelledService())
+    monkeypatch.setattr(
+        server.app.state, "chat_service", _CancelledService(), raising=False
+    )
     response = await server.chat_endpoint(
         server.ChatRequest(
             agent_id="core_router",

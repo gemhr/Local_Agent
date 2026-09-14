@@ -20,7 +20,7 @@ from core.runtime.events import (
 
 
 JOURNAL_SCHEMA_VERSION = 2
-SUPPORTED_JOURNAL_SCHEMA_VERSIONS = frozenset({1, JOURNAL_SCHEMA_VERSION})
+SUPPORTED_JOURNAL_SCHEMA_VERSIONS = frozenset({JOURNAL_SCHEMA_VERSION})
 MAX_READ_LIMIT = 1000
 
 
@@ -246,24 +246,15 @@ class JournalRecord:
             "safe_payload": self.safe_payload,
             "payload_digest": payload_digest,
         }
-        if self.journal_schema_version >= 2:
-            source["span_id"] = self.span_id
-            source["parent_span_id"] = self.parent_span_id
+        source["span_id"] = self.span_id
+        source["parent_span_id"] = self.parent_span_id
         return source
 
     def is_duplicate_of(self, candidate: "JournalRecord") -> bool:
         """Use the stored record's schema when identifying a duplicate."""
         if self.run_id != candidate.run_id or self.sequence != candidate.sequence:
             return False
-        if self.journal_schema_version >= 2:
-            return self.event_digest == candidate.event_digest
-        if candidate.span_id is not None or candidate.parent_span_id is not None:
-            return False
-        legacy_source = dict(candidate._event_digest_source(candidate.payload_digest))
-        legacy_source["journal_schema_version"] = 1
-        legacy_source.pop("span_id", None)
-        legacy_source.pop("parent_span_id", None)
-        return self.event_digest == _digest(legacy_source)
+        return self.event_digest == candidate.event_digest
 
     def __repr__(self) -> str:
         return (

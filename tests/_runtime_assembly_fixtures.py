@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 
 from core.memory_manager import MemoryExchangeError
 from core.runtime import (
@@ -49,6 +50,47 @@ class FakeDispatcher:
 
     async def close(self, timeout: float) -> bool:
         self.closed += 1
+        return True
+
+
+class FakeDurableRunControl:
+    """最小 durable control seam，供 canonical runtime assembly fixture 使用。"""
+
+    def __init__(self) -> None:
+        self.leases: dict[str, object] = {}
+        self.lease_seconds = 30
+
+    async def claim(self, run_id: str, owner_id: str) -> object:
+        lease = (run_id, owner_id)
+        self.leases[run_id] = lease
+        return lease
+
+    async def renew(self, lease: object) -> object:
+        await self.assert_current(lease)
+        renewed = (lease[0], lease[1])
+        self.leases[lease[0]] = renewed
+        return renewed
+
+    async def cancel_intent(self, run_id: str):
+        return None
+
+    async def request_cancel(self, run_id: str, reason: str, **kwargs):
+        return None
+
+    async def assert_current(self, lease: object) -> None:
+        if not isinstance(lease, tuple) or self.leases.get(lease[0]) != lease:
+            raise RuntimeError("lease is not current")
+
+    async def finalize_terminal(self, lease: object, event, journal):
+        await self.assert_current(lease)
+        result = journal.append(event)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def release(self, lease: object) -> bool:
+        if isinstance(lease, tuple):
+            self.leases.pop(lease[0], None)
         return True
 
 
@@ -210,6 +252,10 @@ def make_services(
         blocking_executors=(),
         worker_trackers=(),
         run_registry=run_registry or RunRegistry(),
+        durable_run_control=FakeDurableRunControl(),
+        durable_approval=object(),
+        durable_tool_invocation=object(),
+        run_control_owner_id="test-owner",
         coordinated_step_executor=process_blocking_executor,
         snapshot_enabled=snapshot_enabled,
         recovery_enabled=snapshot_enabled,
@@ -237,7 +283,6 @@ def make_coordinated_chat_service(
     return ChatService(
         router,
         state_observer=state_observer,
-        event_channel_capacity=event_channel_capacity,
         event_journal=services.event_journal,
         observability_dispatcher=services.observability_dispatcher,
         gauge_provider=services.observability_dispatcher.gauge_provider,

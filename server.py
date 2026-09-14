@@ -73,8 +73,6 @@ from core.runtime import (
     ApprovalDecisionValue,
     ApprovalError,
     ApprovalStatus,
-    ChatRuntimeMode,
-    ChatRuntimeSelector,
     CancellationReason,
     CoordinatedRuntimeFactory,
     GracefulShutdownCoordinator,
@@ -89,15 +87,10 @@ from core.runtime import (
     RuntimeInitializationError,
     RuntimeInitializationStack,
     RunRegistry,
-    RunCancelledError,
     PostgresEventConsumptionCheckpointStore,
     PostgresRunEventJournal,
     PostgresSnapshotStore,
     RuntimeLifecycleState,
-    RuntimeAdmissionRejectedError,
-    BlockingExecutorAdmissionTimeout,
-    BlockingExecutorClosedError,
-    BlockingTaskKind,
     StartupDependencySnapshot,
     FilesystemResourcePolicy,
     ResourceAuthorizationService,
@@ -105,8 +98,6 @@ from core.runtime import (
     ResourceOperation,
     ToolResourceExtractorCatalog,
     ToolResourceExtractorDescriptor,
-    process_legacy_step_executor,
-    process_run_registry,
     RunStatus,
 )
 from core.runtime.generation_evidence import (
@@ -250,8 +241,6 @@ except Exception as exc:  # pragma: no cover
 
 
 settings = Settings.load()
-chat_service: Optional[ChatService] = None
-application_runtime_services: Optional[ApplicationRuntimeServices] = None
 evaluation_generation_pin: EvaluationGenerationPin | None = None
 evaluation_rewrite_fixture: EvaluationRewriteFixture | None = None
 evaluation_hybrid_rrf_profile = None
@@ -412,9 +401,10 @@ def _retrieval_evaluation_collector(run_id: str):
     provenance 只在 validated Hybrid generation 存在时填充；BASELINE 不伪造
     Hybrid provenance（truthful emission，WP2 冻结 §22）。
     """
+    runtime_services = getattr(app.state, "runtime_services", None)
     generation = evaluation_validated_generation or (
-        application_runtime_services.hybrid_validated_generation
-        if application_runtime_services is not None
+        runtime_services.hybrid_validated_generation
+        if runtime_services is not None
         else None
     )
     provenance_sha256 = (
@@ -430,23 +420,6 @@ def _retrieval_evaluation_collector(run_id: str):
     )
 
 
-def _publish_compatibility_handles(app: FastAPI, service, services) -> None:
-    """Publish identical application-scope compatibility handles."""
-    global application_runtime_services, chat_service
-    chat_service = service
-    application_runtime_services = services
-    app.state.chat_service = service
-    app.state.runtime_services = services
-
-def _clear_compatibility_handles(app: FastAPI) -> None:
-    """Invalidate both compatibility views after application shutdown."""
-    global application_runtime_services, chat_service
-    chat_service = None
-    application_runtime_services = None
-    app.state.chat_service = None
-    app.state.runtime_services = None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """构建 FastAPI 生命周期内共享的服务对象。
@@ -457,7 +430,6 @@ async def lifespan(app: FastAPI):
     Yields:
         None: 启动阶段创建服务，关闭阶段释放引用。
     """
-    global application_runtime_services, chat_service
     global evaluation_generation_pin, evaluation_rewrite_fixture, evaluation_hybrid_rrf_profile, evaluation_validated_generation
 
     evaluation_generation_pin = None
@@ -585,15 +557,6 @@ async def lifespan(app: FastAPI):
         "coordinated_step_executor",
         lambda: BoundedBlockingExecutor(
             thread_name_prefix="coordinated-step",
-            max_workers=settings.blocking_max_workers,
-            max_pending_tasks=settings.blocking_max_pending_tasks,
-        ),
-        close_operation="shutdown",
-    )
-    legacy_step_executor = await initialization_stack.create(
-        "legacy_step_executor",
-        lambda: BoundedBlockingExecutor(
-            thread_name_prefix="legacy-step",
             max_workers=settings.blocking_max_workers,
             max_pending_tasks=settings.blocking_max_pending_tasks,
         ),
@@ -1173,7 +1136,7 @@ async def lifespan(app: FastAPI):
         if snapshot_store is not None
         else None
     )
-    application_runtime_services = await initialization_stack.run(
+    runtime_services = await initialization_stack.run(
         lambda: ApplicationRuntimeServices(
             event_journal=event_journal,
             observability_dispatcher=observability_dispatcher,
@@ -1188,7 +1151,6 @@ async def lifespan(app: FastAPI):
             blocking_executors=(
                 blocking_executor,
                 coordinated_step_executor,
-                legacy_step_executor,
             ),
             worker_trackers=(
                 router.tool_execution_service.concurrency_controller,
@@ -1200,7 +1162,6 @@ async def lifespan(app: FastAPI):
             run_control_owner_id=app.state.application_metadata.instance_id,
             hybrid_validated_generation=hybrid_validated_generation,
             coordinated_step_executor=coordinated_step_executor,
-            legacy_step_executor=legacy_step_executor,
             trace_export_dispatcher=trace_export_dispatcher,
             snapshot_enabled=settings.snapshot_store_enabled,
             recovery_enabled=settings.snapshot_store_enabled,
@@ -1230,13 +1191,13 @@ async def lifespan(app: FastAPI):
     initialization_stack = RuntimeInitializationStack()
     initialization_stack.track(
         "application_runtime_services",
-        application_runtime_services,
+        runtime_services,
     )
     coordinated_runtime_factory = await initialization_stack.create(
         "coordinated_runtime_factory",
         lambda: CoordinatedRuntimeFactory(
             router,
-            application_runtime_services,
+            runtime_services,
             event_channel_capacity=settings.event_channel_capacity,
             planning_timeout_seconds=settings.planning_timeout_seconds,
             step_result_per_result_chars=settings.step_result_per_result_chars,
@@ -1251,28 +1212,23 @@ async def lifespan(app: FastAPI):
             event_journal=event_journal,
             observability_dispatcher=observability_dispatcher,
             gauge_provider=gauge_provider,
-            runtime_selector=ChatRuntimeSelector(settings.chat_runtime_mode),
             coordinated_runtime_factory=coordinated_runtime_factory,
             run_registry=run_registry,
-            admission_gate=application_runtime_services.admission_gate,
-            legacy_step_executor=legacy_step_executor,
+            admission_gate=runtime_services.admission_gate,
             disconnect_grace_seconds=(
                 settings.runtime_disconnect_grace_seconds
             ),
         ),
     )
     shutdown_coordinator = GracefulShutdownCoordinator(
-        application_runtime_services,
+        runtime_services,
         shutdown_grace_seconds=settings.runtime_shutdown_grace_seconds,
         component_timeout_seconds=(
             settings.runtime_component_close_timeout_seconds
         ),
     )
-    _publish_compatibility_handles(
-        app,
-        chat_service,
-        application_runtime_services,
-    )
+    app.state.chat_service = chat_service
+    app.state.runtime_services = runtime_services
     app.state.coordinated_runtime_factory = coordinated_runtime_factory
     app.state.runtime_metrics = runtime_metrics
     app.state.runtime_metrics_collector = RuntimeMetricsCollector(
@@ -1280,7 +1236,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.runtime_observability = observability_dispatcher
     app.state.runtime_admission_gate = (
-        application_runtime_services.admission_gate
+        runtime_services.admission_gate
     )
     app.state.runtime_shutdown_coordinator = shutdown_coordinator
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
@@ -1310,7 +1266,8 @@ async def lifespan(app: FastAPI):
                     ),
                 },
             )
-        _clear_compatibility_handles(app)
+        app.state.chat_service = None
+        app.state.runtime_services = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
 
@@ -1377,10 +1334,10 @@ async def request_id_and_auth_middleware(request: Request, call_next):
             if not isinstance(service, AuthService):
                 return _api_error(request, AUTH_INVALID_TOKEN, 401)
             request.state.principal = await service.authenticate(request.headers.get("Authorization"))
-            if request.url.path.startswith("/api/runtime/evaluation-execute/"):
-                require_scope(request.state.principal, EVALUATION_EXECUTE_SCOPE)
-            elif request.url.path in _ADMIN_ONLY_API_PATHS:
+            if request.url.path in _ADMIN_ONLY_API_PATHS:
                 require_role(request.state.principal, "ADMIN")
+            elif request.url.path.startswith("/api/runtime/evaluation-execute/"):
+                require_scope(request.state.principal, EVALUATION_EXECUTE_SCOPE)
             elif request.state.principal.principal_kind == "SERVICE" and not (
                 request.url.path.startswith("/api/runtime/runs/")
                 and request.url.path.endswith("/cancel")
@@ -1542,22 +1499,6 @@ class ToolApprovalDecisionResponse(BaseModel):
     idempotent: bool
     error_code: StrictStr | None
     decided_at: StrictStr | None
-
-
-class RuntimeEvaluationExecuteResponse(BaseModel):
-    """Run terminal 与 request-scoped RAG capture 的严格协议投影。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    protocol_version: StrictStr
-    run_id: StrictStr
-    status: StrictStr
-    stop_reason: StrictStr
-    error_code: StrictStr | None
-    safe_message: StrictStr | None
-    capture_status: StrictStr
-    capture_error_code: StrictStr | None
-    rag_evaluation_artifacts: list[dict[str, object]]
 
 
 class RuntimeEvaluationExecuteV2Response(BaseModel):
@@ -1835,9 +1776,10 @@ def require_service() -> ChatService:
     Raises:
         HTTPException: 服务尚未完成启动。
     """
-    if chat_service is None:
+    service = getattr(app.state, "chat_service", None)
+    if service is None:
         raise HTTPException(status_code=503, detail="Service not ready")
-    return chat_service
+    return service
 
 
 def _authorization_service(request: Request) -> AuthorizationService:
@@ -1902,43 +1844,18 @@ async def _require_run_owner(request: Request, run_id: str) -> None:
 
 
 def _run_registry_for(service) -> object:
-    """Use the lifespan-owned registry, preserving test/legacy compatibility."""
-    return getattr(service, "run_registry", process_run_registry)
+    """Local registry is only a wake-up acceleration cache."""
+    registry = getattr(service, "run_registry", None)
+    if registry is None:
+        raise HTTPException(status_code=503, detail="RUNTIME_NOT_READY")
+    return registry
 
 
-def _run_control_for(service):
-    return getattr(service, "durable_run_control", None)
-
-
-def _durable_approval_for(service):
-    services = getattr(service, "_coordinated_runtime_factory", None)
-    services = getattr(services, "services", None)
-    return getattr(services, "durable_approval", None)
-
-
-def _close_legacy_stream(stream) -> None:
-    """Best-effort close after the worker has stopped touching the generator."""
-    close = getattr(stream, "close", None)
-    if close is None:
-        return
-    try:
-        close()
-    except (RuntimeError, ValueError):
-        # A running generator is closed by the worker completion callback.
-        pass
-
-
-def _submit_legacy_stream_step(service, stream, run_id: str):
-    submit = getattr(service, "submit_legacy_stream_step", None)
-    if callable(submit):
-        return submit(lambda: _next_or_none(stream), run_id=run_id)
-    return process_legacy_step_executor.submit_nowait(
-        lambda: _next_or_none(stream),
-        kind=BlockingTaskKind.LEGACY_STREAM_STEP,
-        run_id=run_id,
-        operation_id="legacy_stream_next",
-        cancellation_check=lambda: None,
-    )
+def _require_runtime_services() -> ApplicationRuntimeServices:
+    services = getattr(app.state, "runtime_services", None)
+    if not isinstance(services, ApplicationRuntimeServices):
+        raise HTTPException(status_code=503, detail="RUNTIME_NOT_READY")
+    return services
 
 
 @app.get("/health")
@@ -1948,7 +1865,7 @@ async def health_endpoint():
     不证明可以接受新 Run、所有依赖健康或所有 endpoint 可用。
     """
     snapshot = resolve_application_diagnostic(
-        application_runtime_services,
+        getattr(app.state, "runtime_services", None),
         fallback_lifecycle=getattr(
             app.state, "runtime_lifecycle_state", None
         ),
@@ -1967,7 +1884,7 @@ async def readiness_endpoint():
     唯一 allowlisted KB degradation 不阻止该结论。
     """
     snapshot = resolve_application_diagnostic(
-        application_runtime_services,
+        getattr(app.state, "runtime_services", None),
         fallback_lifecycle=getattr(
             app.state, "runtime_lifecycle_state", None
         ),
@@ -2055,7 +1972,6 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         StreamingResponse: 纯文本增量响应流。
     """
     service = require_service()
-    mode = service.selected_runtime_mode()
     run_registry = _run_registry_for(service)
     admission_gate = getattr(service, "admission_gate", None)
     if (
@@ -2075,149 +1991,51 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         request, run_id=run_id, agent_id=payload.agent_id
     )
 
-    if mode is ChatRuntimeMode.LEGACY:
-        stream = service.stream_chat(
-            agent_id=payload.agent_id,
-            query=payload.query,
-            file_path=payload.file_path,
-            run_id=run_id,
-            retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
+    coordinated_query = payload.query
+    if payload.file_path:
+        coordinated_query += (
+            f"\n\nPlease analyze this file path: '{payload.file_path}'"
         )
+    stream = service.stream_coordinated_agent_text(
+        agent_id=payload.agent_id,
+        query=coordinated_query,
+        run_id=run_id,
+        retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
+    )
 
-        async def generate():
-            """Bridge the selected synchronous Legacy text stream."""
-            disconnected = asyncio.Event()
-            stopped = asyncio.Event()
-            watcher = asyncio.create_task(
-                _watch_request_disconnect(
-                    request,
-                    run_registry=run_registry,
-                    run_id=run_id,
-                    disconnected=disconnected,
-                    stopped=stopped,
-                )
+    async def generate():
+        """Forward the canonical coordinated text-chunk stream."""
+        disconnected = asyncio.Event()
+        stopped = asyncio.Event()
+        watcher = asyncio.create_task(
+            _watch_request_disconnect(
+                request,
+                run_registry=run_registry,
+                run_id=run_id,
+                disconnected=disconnected,
+                stopped=stopped,
             )
-            active_worker = None
-            try:
-                while True:
-                    if disconnected.is_set():
-                        return
-                    active_worker = _submit_legacy_stream_step(
-                        service, stream, run_id
-                    )
-                    next_task = asyncio.create_task(
-                        active_worker.result_async()
-                    )
-                    disconnect_task = asyncio.create_task(
-                        disconnected.wait()
-                    )
-                    done, _ = await asyncio.wait(
-                        {next_task, disconnect_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if disconnect_task in done and disconnected.is_set():
-                        if not next_task.done():
-                            next_task.cancel()
-                        await asyncio.gather(
-                            next_task, return_exceptions=True
-                        )
-                        return
-                    disconnect_task.cancel()
-                    await asyncio.gather(
-                        disconnect_task, return_exceptions=True
-                    )
-                    chunk = await next_task
-                    active_worker = None
-                    if chunk is None:
-                        return
-                    if disconnected.is_set():
-                        return
-                    yield chunk
-            except RuntimeAdmissionRejectedError:
-                if not disconnected.is_set():
-                    yield "[runtime-error] RUNTIME_SHUTTING_DOWN\n"
-            except BlockingExecutorClosedError:
-                if not disconnected.is_set():
-                    yield "[runtime-error] RUNTIME_SHUTTING_DOWN\n"
-            except BlockingExecutorAdmissionTimeout:
-                if not disconnected.is_set():
-                    yield (
-                        "[runtime-error] "
-                        "LEGACY_WORKER_ADMISSION_REJECTED\n"
-                    )
-            except RunCancelledError:
-                return
-            except asyncio.CancelledError:
-                run_registry.cancel(
-                    run_id, CancellationReason.CLIENT_DISCONNECTED
-                )
-                raise
-            except (BrokenPipeError, ConnectionResetError):
-                run_registry.cancel(
-                    run_id, CancellationReason.CLIENT_DISCONNECTED
-                )
-            except Exception:
-                if not disconnected.is_set():
-                    yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
-            finally:
-                if active_worker is not None:
-                    wait_state = active_worker.cancel_or_detach()
-                    if wait_state.background_work_pending:
-                        active_worker.add_done_callback(
-                            lambda: _close_legacy_stream(stream)
-                        )
-                await _stop_disconnect_watcher(watcher, stopped)
-                _close_legacy_stream(stream)
-
-    elif mode is ChatRuntimeMode.COORDINATED:
-        coordinated_query = payload.query
-        if payload.file_path:
-            coordinated_query += (
-                f"\n\nPlease analyze this file path: '{payload.file_path}'"
-            )
-        stream = service.stream_coordinated_agent_text(
-            agent_id=payload.agent_id,
-            query=coordinated_query,
-            run_id=run_id,
-            retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
         )
-
-        async def generate():
-            """Forward the selected custom coordinated text-chunk stream."""
-            disconnected = asyncio.Event()
-            stopped = asyncio.Event()
-            watcher = asyncio.create_task(
-                _watch_request_disconnect(
-                    request,
-                    run_registry=run_registry,
-                    run_id=run_id,
-                    disconnected=disconnected,
-                    stopped=stopped,
-                )
+        try:
+            async for chunk in stream:
+                if disconnected.is_set():
+                    return
+                yield chunk
+        except asyncio.CancelledError:
+            run_registry.cancel(
+                run_id, CancellationReason.CLIENT_DISCONNECTED
             )
-            try:
-                async for chunk in stream:
-                    if disconnected.is_set():
-                        return
-                    yield chunk
-            except asyncio.CancelledError:
-                run_registry.cancel(
-                    run_id, CancellationReason.CLIENT_DISCONNECTED
-                )
-                raise
-            except (BrokenPipeError, ConnectionResetError):
-                run_registry.cancel(
-                    run_id, CancellationReason.CLIENT_DISCONNECTED
-                )
-            except Exception:
-                if not disconnected.is_set():
-                    yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
-            finally:
-                await _stop_disconnect_watcher(watcher, stopped)
-                await stream.aclose()
-
-    else:  # pragma: no cover - ChatRuntimeMode is a closed enum
-        raise RuntimeError("unreachable chat runtime mode")
+            raise
+        except (BrokenPipeError, ConnectionResetError):
+            run_registry.cancel(
+                run_id, CancellationReason.CLIENT_DISCONNECTED
+            )
+        except Exception:
+            if not disconnected.is_set():
+                yield "[runtime-error] RUNTIME_EXECUTION_FAILED\n"
+        finally:
+            await _stop_disconnect_watcher(watcher, stopped)
+            await stream.aclose()
 
     return _RequestOwnedStreamingResponse(
         generate(),
@@ -2231,11 +2049,6 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Requ
     """同步执行一条严格校验的 Coordinated Runtime 请求。"""
 
     service = require_service()
-    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
-        raise HTTPException(
-            status_code=503,
-            detail="COORDINATED_RUNTIME_REQUIRED",
-        )
     admission_gate = getattr(service, "admission_gate", None)
     if (
         admission_gate is not None
@@ -2280,79 +2093,6 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Requ
     return JSONResponse(content=response.model_dump(mode="json"))
 
 
-@app.post("/api/runtime/evaluation-execute/v1")
-async def runtime_evaluation_execute_endpoint(
-    payload: RuntimeExecuteRequest, request: Request
-):
-    """通过同一 Coordinated Runtime 返回终态与请求级 RAG evaluation evidence。"""
-
-    service = require_service()
-    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
-        raise HTTPException(status_code=503, detail="COORDINATED_RUNTIME_REQUIRED")
-    admission_gate = getattr(service, "admission_gate", None)
-    if admission_gate is not None and not admission_gate.accepts_new_runs:
-        raise HTTPException(status_code=503, detail="RUNTIME_SHUTTING_DOWN")
-    try:
-        uuid.UUID(payload.run_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail="invalid run_id") from exc
-    await _bind_new_run_and_conversation(
-        request, run_id=payload.run_id, agent_id=payload.agent_id
-    )
-
-    collector = _retrieval_evaluation_collector(payload.run_id)
-    token = install_retrieval_evaluation_collector(collector)
-    try:
-        try:
-            _output, result = await service.run_coordinated_agent(
-                agent_id=payload.agent_id,
-                query=payload.query,
-                run_id=payload.run_id,
-                timeout_seconds=payload.timeout_seconds,
-            )
-        except ChatRuntimeTransportError as exc:
-            raise HTTPException(status_code=503, detail=exc.error_code) from None
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            raise HTTPException(
-                status_code=500, detail="RUNTIME_EXECUTION_FAILED"
-            ) from None
-    finally:
-        reset_retrieval_evaluation_collector(token)
-
-    capture_status, capture_error_code, snapshots = collector.envelope()
-    response = RuntimeEvaluationExecuteResponse(
-        protocol_version="localagent-rag-evaluation-execute.v1",
-        run_id=result.run_id,
-        status=result.status.value,
-        stop_reason=result.stop_reason.value,
-        error_code=result.error_code,
-        safe_message=result.safe_message,
-        capture_status=capture_status.value,
-        capture_error_code=capture_error_code,
-        rag_evaluation_artifacts=[item.to_wire_dict() for item in snapshots],
-    )
-    content = response.model_dump(mode="json")
-    encoded = json.dumps(
-        content, ensure_ascii=False, allow_nan=False, separators=(",", ":")
-    ).encode("utf-8")
-    if len(encoded) > MAX_RESPONSE_BYTES:
-        response = RuntimeEvaluationExecuteResponse(
-            protocol_version="localagent-rag-evaluation-execute.v1",
-            run_id=result.run_id,
-            status=result.status.value,
-            stop_reason=result.stop_reason.value,
-            error_code=result.error_code,
-            safe_message=result.safe_message,
-            capture_status=RetrievalEvaluationCaptureStatus.FAILED.value,
-            capture_error_code="RAG_EVALUATION_RESPONSE_SIZE_LIMIT_EXCEEDED",
-            rag_evaluation_artifacts=[],
-        )
-        content = response.model_dump(mode="json")
-    return JSONResponse(content=content)
-
-
 def _final_answer_capture(
     *,
     output: str | None,
@@ -2385,8 +2125,6 @@ async def runtime_evaluation_execute_v2_endpoint(
 ):
     """返回 v2 RAG 与独立 delivered final answer evaluation evidence。"""
     service = require_service()
-    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
-        raise HTTPException(status_code=503, detail="COORDINATED_RUNTIME_REQUIRED")
     admission_gate = getattr(service, "admission_gate", None)
     if admission_gate is not None and not admission_gate.accepts_new_runs:
         raise HTTPException(status_code=503, detail="RUNTIME_SHUTTING_DOWN")
@@ -2568,8 +2306,6 @@ async def runtime_evaluation_execute_v4_endpoint(
     caller plan, or a model identity.  It is deliberately separate from v3.
     """
     service = require_service()
-    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
-        raise HTTPException(status_code=503, detail="COORDINATED_RUNTIME_REQUIRED")
     try:
         uuid.UUID(payload.run_id)
         project, grants = payload.evaluation_control.project_access()
@@ -2719,8 +2455,6 @@ async def runtime_evaluation_execute_v3_endpoint(
     production API/event/ranking/context/persistence behavior is unchanged.
     """
     service = require_service()
-    if service.selected_runtime_mode() is not ChatRuntimeMode.COORDINATED:
-        raise HTTPException(status_code=503, detail="COORDINATED_RUNTIME_REQUIRED")
     admission_gate = getattr(service, "admission_gate", None)
     if admission_gate is not None and not admission_gate.accepts_new_runs:
         raise HTTPException(status_code=503, detail="RUNTIME_SHUTTING_DOWN")
@@ -2900,14 +2634,7 @@ async def cancel_run_endpoint(
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
     await _require_run_owner(request, run_id)
     service = require_service()
-    control = _run_control_for(service)
-    if control is None:
-        result = _run_registry_for(service).cancel(
-            run_id, CancellationReason.REQUEST_CANCELLED
-        )
-        if result is None:
-            return {"status": "inactive", "run_id": run_id}
-        return {"status": "cancelled" if result else "already_cancelled", "run_id": run_id}
+    control = _require_runtime_services().durable_run_control
     await control.request_cancel(run_id, CancellationReason.REQUEST_CANCELLED.value)
     # Local handle is only a wake-up acceleration; the durable intent above is
     # the cross-instance authority and remains effective after a cache miss.
@@ -2964,23 +2691,14 @@ async def _handle_tool_approval_decision(
     principal = request.state.principal
     service = require_service()
     try:
-        durable_approval = _durable_approval_for(service)
-        if durable_approval is not None:
-            result = await durable_approval.decide(
-                run_id=run_id,
-                approval_id=approval_id,
-                invocation_binding_digest=payload.invocation_binding_digest,
-                decision=decision,
-                actor_id=str(principal.user_id),
-            )
-        else:
-            result = await _run_registry_for(service).decide_tool_approval(
-                run_id,
-                approval_id,
-                payload.invocation_binding_digest,
-                decision,
-                actor_id=str(principal.user_id),
-            )
+        durable_approval = _require_runtime_services().durable_approval
+        result = await durable_approval.decide(
+            run_id=run_id,
+            approval_id=approval_id,
+            invocation_binding_digest=payload.invocation_binding_digest,
+            decision=decision,
+            actor_id=str(principal.user_id),
+        )
         error_code = result.safe_error_code
         status_code = (
             200

@@ -12,8 +12,6 @@ from core.chat_service import ChatService
 from core.request_payload import REQUEST_PAYLOAD_POLICY
 from core.runtime import (
     BudgetLedger,
-    ChatRuntimeMode,
-    ChatRuntimeSelector,
     CoordinatedRuntimeFactory,
     RunBudget,
     RunCoordinatorResult,
@@ -218,7 +216,7 @@ async def test_invalid_run_id_rejected_before_runtime(monkeypatch):
     service, factory, registry = _scripted_service(
         _result(RunStatus.SUCCEEDED, StopReason.COMPLETED)
     )
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     with pytest.raises(HTTPException) as exc_info:
         await _execute(
             server.RuntimeExecuteRequest(
@@ -300,7 +298,7 @@ async def test_coordinated_mode_routes_through_structured_helper(monkeypatch):
         safe_message="运行已成功完成",
     )
     service, factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
 
     response = await _execute(_payload(run_id=run_id))
 
@@ -313,39 +311,12 @@ async def test_coordinated_mode_routes_through_structured_helper(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_legacy_mode_rejected_without_fallback(monkeypatch):
-    router = FakeRouter()
-    registry = RunRegistry()
-    services = make_services(run_registry=registry, snapshot_enabled=False)
-    factory = _ExplodingFactory(router, services)
-    service = ChatService(
-        router,
-        runtime_selector=ChatRuntimeSelector(ChatRuntimeMode.LEGACY),
-        coordinated_runtime_factory=factory,
-        run_registry=registry,
-    )
-
-    def forbidden_legacy(**kwargs):
-        raise AssertionError("legacy must not run")
-
-    monkeypatch.setattr(service, "stream_chat", forbidden_legacy)
-    monkeypatch.setattr(server, "chat_service", service)
-
-    with pytest.raises(HTTPException) as exc_info:
-        await _execute(_payload())
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "COORDINATED_RUNTIME_REQUIRED"
-    assert factory.create_count == 0
-    assert registry.observability_snapshot()["active_runs"] == 0
-
-
-@pytest.mark.asyncio
 async def test_closed_admission_rejects_without_creating_run(monkeypatch):
     service, factory, registry = _scripted_service(
         _result(RunStatus.SUCCEEDED, StopReason.COMPLETED)
     )
     service.admission_gate.close_admission()
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
 
     with pytest.raises(HTTPException) as exc_info:
         await _execute(_payload())
@@ -370,7 +341,7 @@ async def test_succeeded_result_projected_verbatim(monkeypatch):
         safe_message="运行已成功完成",
     )
     service, _factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
 
     response = await _execute(_payload(run_id=run_id))
 
@@ -395,7 +366,7 @@ async def test_failed_result_is_http_200_projection(monkeypatch):
         safe_message="运行未能完成",
     )
     service, _factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
 
     response = await _execute(_payload(run_id=run_id))
 
@@ -423,7 +394,7 @@ async def test_cancelled_result_projected_without_route_reinterpretation(
         safe_message="运行已由用户取消",
     )
     service, _factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
 
     response = await _execute(_payload(run_id=run_id))
 
@@ -452,7 +423,7 @@ async def test_response_is_content_free_terminal_fact(monkeypatch):
         safe_message="运行已成功完成",
     )
     service, _factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
 
     response = await _execute(_payload(run_id=run_id))
     body = json.loads(response.body)
@@ -485,13 +456,12 @@ async def test_response_is_content_free_terminal_fact(monkeypatch):
 @pytest.mark.asyncio
 async def test_api_chat_still_text_stream_with_run_id_header(monkeypatch):
     class _ChatServiceSpy:
-        def selected_runtime_mode(self) -> ChatRuntimeMode:
-            return ChatRuntimeMode.COORDINATED
-
         async def stream_coordinated_agent_text(self, **kwargs):
             yield "coordinated"
 
-    monkeypatch.setattr(server, "chat_service", _ChatServiceSpy())
+    monkeypatch.setattr(
+        server.app.state, "chat_service", _ChatServiceSpy(), raising=False
+    )
     run_id = "49796282cdb643c7b8850942f7b66bd1"
     response = await server.chat_endpoint(
         server.ChatRequest(

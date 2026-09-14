@@ -1,6 +1,6 @@
-from dataclasses import dataclass
-import threading
+import json
 
+import httpx
 import pytest
 
 from core.agent_router import AgentRouter
@@ -9,89 +9,99 @@ from core.runtime import BudgetLedger, GeneratorModelAdapter, RunBudget, create_
 from core.runtime.model_invocation import ModelAdapterInvocationError
 
 
-@dataclass
-class FakeResponse:
-    payload: dict
-    status_code: int = 200
-    text: str = ""
-
-    def json(self) -> dict:
-        return self.payload
-
-
-def _capture_request(monkeypatch, payload: dict | None = None):
+def _capture_client(payload: dict | None = None, *, status_code: int = 200):
     captured = {}
 
-    class CapturingSession:
-        def __init__(self) -> None:
-            self.trust_env = True
-            self.adapters = {}
+    payload = payload or {"choices": [{"message": {"content": "ok"}}]}
+    choice = (payload.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    if "tool_calls" in message:
+        delta = {
+            "tool_calls": [
+                {**call, "index": index}
+                for index, call in enumerate(message["tool_calls"])
+            ]
+        }
+    else:
+        delta = {"content": message.get("content", "")}
+    stream_choice = {"delta": delta}
+    if "finish_reason" in choice:
+        stream_choice["finish_reason"] = choice["finish_reason"]
+    wire = (
+        f"data: {json.dumps({'choices': [stream_choice]}, separators=(',', ':'))}\n\n"
+        "data: [DONE]\n\n"
+    ).encode()
 
-        def mount(self, prefix, adapter) -> None:
-            self.adapters[prefix] = adapter
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(
+            status_code,
+            headers={"content-type": "text/event-stream"},
+            content=wire,
+            request=request,
+        )
 
-        def post(self, url, **kwargs):
-            captured["url"] = url
-            captured.update(kwargs)
-            return FakeResponse(
-                payload or {"choices": [{"message": {"content": "ok"}}]}
-            )
-
-        def close(self) -> None:
-            return None
-
-    captured["_session"] = CapturingSession()
-    return captured
+    return captured, httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
 
 
-def test_deepseek_thinking_enabled_is_explicit(monkeypatch) -> None:
-    captured = _capture_request(monkeypatch)
+def test_deepseek_thinking_enabled_is_explicit() -> None:
+    captured, client = _capture_client()
     engine = RemoteLLMEngine(
         "https://api.deepseek.com",
         "deepseek-v4-flash",
         enable_thinking=True,
         provider_kind="deepseek",
-        session=captured.pop("_session"),
+        client=client,
     )
 
-    assert list(engine.generate([{"role": "user", "content": "hi"}])) == ["ok"]
-    assert captured["json"]["thinking"] == {"type": "enabled"}
-    assert captured["json"]["reasoning_effort"] == "high"
+    try:
+        assert list(engine.generate([{"role": "user", "content": "hi"}])) == ["ok"]
+        assert captured["json"]["thinking"] == {"type": "enabled"}
+        assert captured["json"]["reasoning_effort"] == "high"
+    finally:
+        engine.close()
 
 
-def test_deepseek_thinking_disabled_is_explicit(monkeypatch) -> None:
-    captured = _capture_request(monkeypatch)
+def test_deepseek_thinking_disabled_is_explicit() -> None:
+    captured, client = _capture_client()
     engine = RemoteLLMEngine(
         "https://api.deepseek.com/v1",
         "deepseek-v4-flash",
         enable_thinking=False,
         provider_kind="deepseek",
-        session=captured.pop("_session"),
+        client=client,
     )
 
-    list(engine.generate([{"role": "user", "content": "hi"}]))
+    try:
+        list(engine.generate([{"role": "user", "content": "hi"}]))
+        assert captured["url"].endswith("/v1/chat/completions")
+        assert captured["json"]["thinking"] == {"type": "disabled"}
+        assert "reasoning_effort" not in captured["json"]
+    finally:
+        engine.close()
 
-    assert captured["url"].endswith("/v1/chat/completions")
-    assert captured["json"]["thinking"] == {"type": "disabled"}
-    assert "reasoning_effort" not in captured["json"]
 
+def test_deepseek_native_tool_call_sends_wire_and_normalizes() -> None:
+    captured, client = _capture_client({"choices": [{"message": {"content": None, "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "get_system_status", "arguments": "{}"}}]}}]})
+    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek", client=client)
 
-def test_deepseek_native_tool_call_sends_wire_and_normalizes(monkeypatch) -> None:
-    captured = _capture_request(monkeypatch, {"choices": [{"message": {"content": None, "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "get_system_status", "arguments": "{}"}}]}}]})
-    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek", session=captured.pop("_session"))
+    try:
+        assert engine.supports_native_tool_calling() is True
 
-    assert engine.supports_native_tool_calling() is True
+        result = engine.generate_native(
+            [{"role": "user", "content": "状态"}],
+            tools=[{"type": "function", "function": {"name": "get_system_status", "parameters": {"type": "object"}}}],
+        )
 
-    result = engine.generate_native(
-        [{"role": "user", "content": "状态"}],
-        tools=[{"type": "function", "function": {"name": "get_system_status", "parameters": {"type": "object"}}}],
-    )
-
-    assert captured["json"]["tool_choice"] == "auto"
-    assert captured["json"]["tools"][0]["function"]["name"] == "get_system_status"
-    assert result.native_tool_call.provider_tool_call_id == "call-1"
-    assert result.native_tool_call.arguments_json == "{}"
-    assert result.assistant_message["tool_calls"][0]["id"] == "call-1"
+        assert captured["json"]["tool_choice"] == "auto"
+        assert captured["json"]["tools"][0]["function"]["name"] == "get_system_status"
+        assert result.native_tool_call.provider_tool_call_id == "call-1"
+        assert result.native_tool_call.arguments_json == "{}"
+        assert result.assistant_message["tool_calls"][0]["id"] == "call-1"
+    finally:
+        engine.close()
 
 
 def test_non_native_local_adapter_preserves_plain_generation_without_tools() -> None:
@@ -128,51 +138,31 @@ def test_permissive_fake_without_native_capability_cannot_silently_ignore_tools(
     assert engine.calls == 0
 
 
-def test_deepseek_native_multiple_tool_calls_fail_closed(monkeypatch) -> None:
-    captured_request = _capture_request(monkeypatch, {"choices": [{"message": {"tool_calls": [{"id": "one", "function": {"name": "a", "arguments": "{}"}}, {"id": "two", "function": {"name": "b", "arguments": "{}"}}]}}]})
-    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek", session=captured_request.pop("_session"))
+def test_deepseek_native_multiple_tool_calls_fail_closed() -> None:
+    _captured, client = _capture_client({"choices": [{"message": {"tool_calls": [{"id": "one", "function": {"name": "a", "arguments": "{}"}}, {"id": "two", "function": {"name": "b", "arguments": "{}"}}]}}]})
+    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek", client=client)
 
-    with pytest.raises(RuntimeError) as captured:
-        engine.generate_native([{"role": "user", "content": "x"}], tools=[])
-    assert captured.value.safe_error_code == "REMOTE_NATIVE_TOOL_CALL_COUNT_INVALID"
+    try:
+        with pytest.raises(RuntimeError) as captured:
+            engine.generate_native([{"role": "user", "content": "x"}], tools=[])
+        assert captured.value.safe_error_code == "REMOTE_NATIVE_TOOL_CALL_COUNT_INVALID"
+    finally:
+        engine.close()
 
 
-def test_deepseek_parameters_are_not_sent_to_other_providers(monkeypatch) -> None:
-    captured = _capture_request(monkeypatch)
+def test_deepseek_parameters_are_not_sent_to_other_providers() -> None:
+    captured, client = _capture_client()
     engine = RemoteLLMEngine(
         "https://example.test/v1", "Qwen3.5-27B", enable_thinking=False,
-        session=captured.pop("_session"),
+        client=client,
     )
 
-    list(engine.generate([{"role": "user", "content": "hi"}]))
-
-    assert "thinking" not in captured["json"]
-    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False}
-
-
-def test_empty_content_at_length_has_clear_truncation_error(monkeypatch) -> None:
-    captured_request = _capture_request(
-        monkeypatch,
-        {
-            "choices": [
-                {
-                    "message": {"content": "", "reasoning_content": "thinking only"},
-                    "finish_reason": "length",
-                }
-            ]
-        },
-    )
-    engine = RemoteLLMEngine(
-        "https://api.deepseek.com",
-        "deepseek-v4-flash",
-        provider_kind="deepseek",
-        session=captured_request.pop("_session"),
-    )
-
-    with pytest.raises(RuntimeError, match="truncated before producing final content") as captured:
-        list(engine.generate([{"role": "user", "content": "hi"}], max_tokens=24))
-    assert captured.value.safe_error_code == "REMOTE_OUTPUT_TRUNCATED"
-    assert captured.value.model_failure_category == "CONTEXT_LIMIT_EXCEEDED"
+    try:
+        list(engine.generate([{"role": "user", "content": "hi"}]))
+        assert "thinking" not in captured["json"]
+        assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False}
+    finally:
+        engine.close()
 
 
 class RecordingLLM:
@@ -196,21 +186,10 @@ def test_knowledge_rewrite_uses_unified_model_contract_with_128_tokens() -> None
     assert context.budget_ledger.snapshot().committed_usage.model_calls == 1
 
 
-def test_remote_client_explicitly_disables_hidden_retries() -> None:
-    engine = RemoteLLMEngine("https://example.test", "model")
-
-    for adapter in engine._session.adapters.values():
-        assert adapter.max_retries.total == 0
-        assert adapter.max_retries.read is False
-
-
-class FakeSession:
+class FakeCloseable:
     def __init__(self, *, close_error: bool = False) -> None:
         self.close_calls = 0
         self.close_error = close_error
-
-    def mount(self, *_args) -> None:
-        pass
 
     def close(self) -> None:
         self.close_calls += 1
@@ -218,69 +197,11 @@ class FakeSession:
             raise RuntimeError("fake close failure")
 
 
-def test_remote_session_close_is_idempotent() -> None:
-    session = FakeSession()
-    engine = RemoteLLMEngine(
-        "https://example.test",
-        "model",
-        session=session,
-    )
-
-    engine.close()
-    engine.close()
-
-    assert session.close_calls == 1
-
-
-def test_remote_session_close_waits_for_active_call() -> None:
-    class BlockingSession(FakeSession):
-        def __init__(self) -> None:
-            super().__init__()
-            self.entered = threading.Event()
-            self.release = threading.Event()
-            self.closed = threading.Event()
-
-        def post(self, *_args, **_kwargs):
-            self.entered.set()
-            self.release.wait(2)
-            return FakeResponse(
-                {"choices": [{"message": {"content": "ok"}}]}
-            )
-
-        def close(self) -> None:
-            super().close()
-            self.closed.set()
-
-    session = BlockingSession()
-    engine = RemoteLLMEngine(
-        "https://example.test",
-        "model",
-        session=session,
-    )
-    call_thread = threading.Thread(
-        target=lambda: list(
-            engine.generate([{"role": "user", "content": "hi"}])
-        )
-    )
-    close_thread = threading.Thread(target=engine.close)
-
-    call_thread.start()
-    assert session.entered.wait(1)
-    close_thread.start()
-    assert not session.closed.wait(0.1)
-    session.release.set()
-    call_thread.join(2)
-    close_thread.join(2)
-
-    assert session.closed.is_set()
-    assert session.close_calls == 1
-
-
 def test_shutdown_close_errors_do_not_skip_other_engines() -> None:
     from server import _close_model_engines
 
-    failing = FakeSession(close_error=True)
-    healthy = FakeSession()
+    failing = FakeCloseable(close_error=True)
+    healthy = FakeCloseable()
 
     errors = _close_model_engines({"first": failing, "second": healthy})
 

@@ -689,7 +689,7 @@ class ComplexWorkflowSimulationTool:
                 request, state, WorkflowStage.COMMIT_SIDE_EFFECTS
             )
             if request.execution_mode != WorkflowExecutionMode.DRY_RUN:
-                # Runtime Adapter 在这里注入正式 before_side_effect；Legacy 路径为空操作。
+                # Runtime Adapter 在这里注入正式 before_side_effect；纯单元调用为空操作。
                 self._before_side_effect()
                 successful_ids = tuple(
                     result.item_id
@@ -1243,47 +1243,6 @@ def _require_integer(
         raise ValueError(f"{field_name} must be <= {maximum}")
 
 
-_LEGACY_STATE_STORE = InMemoryWorkflowStateStore()
-_LEGACY_TOOL = ComplexWorkflowSimulationTool(state_store=_LEGACY_STATE_STORE)
-
-
-def complex_workflow_simulator(argument_text: str) -> str:
-    """接受单个 JSON 对象的旧版 ``Callable[[str], str]`` 包装器。"""
-    operation_id = "invalid-request"
-    resource_key = "invalid-resource"
-    try:
-        payload = json.loads(argument_text)
-        if isinstance(payload, Mapping):
-            raw_operation_id = payload.get("operation_id")
-            raw_resource_key = payload.get("resource_key")
-            if isinstance(raw_operation_id, str) and _SAFE_IDENTIFIER.fullmatch(raw_operation_id):
-                operation_id = raw_operation_id
-            if isinstance(raw_resource_key, str) and _SAFE_IDENTIFIER.fullmatch(raw_resource_key):
-                resource_key = raw_resource_key
-        request = ComplexWorkflowRequest.from_dict(payload)
-        result = _LEGACY_TOOL.execute(request)
-        response = result.to_dict()
-    except (json.JSONDecodeError, ValueError, TypeError):
-        response = {
-            "operation_id": operation_id,
-            "resource_key": resource_key,
-            "idempotency_key": None,
-            "execution_mode": None,
-            "status": WorkflowResultStatus.FAILED.value,
-            "completed_stages": [],
-            "item_results": [],
-            "side_effect_committed": False,
-            "compensation_attempted": False,
-            "compensation_succeeded": False,
-            "idempotency_replayed": False,
-            "audit_digest": None,
-            "safe_error_code": "TOOL_VALIDATION_ERROR",
-            "safe_message": _SAFE_MESSAGES["TOOL_VALIDATION_ERROR"],
-            "duration_ms": 0,
-        }
-    return json.dumps(response, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-
-
 __all__ = [
     "ComplexWorkflowRequest",
     "ComplexWorkflowResult",
@@ -1304,5 +1263,4 @@ __all__ = [
     "WorkflowStageRecord",
     "WorkflowStageStatus",
     "WorkflowStateStore",
-    "complex_workflow_simulator",
 ]

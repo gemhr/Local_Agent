@@ -26,7 +26,6 @@ T = TypeVar("T")
 class BlockingTaskKind(str, Enum):
     RUNTIME_STEP = "RUNTIME_STEP"
     PLANNING_MODEL = "PLANNING_MODEL"
-    LEGACY_STREAM_STEP = "LEGACY_STREAM_STEP"
     QUERY_REWRITE = "QUERY_REWRITE"
     EMBEDDING = "EMBEDDING"
     VECTOR_QUERY = "VECTOR_QUERY"
@@ -361,11 +360,6 @@ process_blocking_executor = BoundedBlockingExecutor(
     max_workers=DEFAULT_BLOCKING_MAX_WORKERS,
     max_pending_tasks=DEFAULT_BLOCKING_MAX_PENDING_TASKS,
 )
-process_legacy_step_executor = BoundedBlockingExecutor(
-    max_workers=DEFAULT_BLOCKING_MAX_WORKERS,
-    max_pending_tasks=DEFAULT_BLOCKING_MAX_PENDING_TASKS,
-    thread_name_prefix="legacy-step",
-)
 
 
 __all__ = [
@@ -382,5 +376,4 @@ __all__ = [
     "DEFAULT_BLOCKING_MAX_PENDING_TASKS",
     "DEFAULT_BLOCKING_MAX_WORKERS",
     "process_blocking_executor",
-    "process_legacy_step_executor",
 ]

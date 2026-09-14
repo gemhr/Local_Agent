@@ -10,8 +10,6 @@ import pytest
 from core.chat_service import ChatService
 from core.runtime import (
     CancellationReason,
-    ChatRuntimeMode,
-    ChatRuntimeSelector,
     CoordinatedRuntimeFactory,
     InMemorySpanRecorder,
     RunRegistry,
@@ -31,7 +29,6 @@ def _baseline_service():
     )
     service = ChatService(
         router,
-        runtime_selector=ChatRuntimeSelector(ChatRuntimeMode.COORDINATED),
         coordinated_runtime_factory=CoordinatedRuntimeFactory(router, services),
         run_registry=registry,
     )
@@ -136,4 +133,3 @@ async def test_tracemalloc_warmup_and_repeated_batches_report_trend_without_sla(
     assert isinstance(first_trend, int)
     assert isinstance(second_trend, int)
     _assert_owner_counts_zero(services, registry, spans)
-

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import server
-from core.runtime import ChatRuntimeMode, RuntimeEventType
+from core.runtime import RuntimeEventType
 from core.runtime.tool_governance import (
     ToolGovernanceContext,
     ToolGovernanceOutcome,
@@ -170,7 +170,6 @@ class _AsgiHarness:
 def _isolated_settings(tmp_path: Path):
     return replace(
         server.settings,
-        chat_runtime_mode=ChatRuntimeMode.COORDINATED,
         llm_backend="local",
         model_path=str(tmp_path / "missing-local-model"),
         snapshot_store_enabled=False,
@@ -218,7 +217,6 @@ def _assert_common_terminal(control_events: list[dict]) -> None:
 
 @pytest.mark.asyncio
 async def test_default_coordinated_list_files_full_e2e(monkeypatch, tmp_path):
-    monkeypatch.delenv("CHAT_RUNTIME_MODE", raising=False)
     fixture = tmp_path / "tool-fixture"
     fixture.mkdir()
     (fixture / _MARKER).write_text("wp2-c marker", encoding="utf-8")
@@ -235,8 +233,6 @@ async def test_default_coordinated_list_files_full_e2e(monkeypatch, tmp_path):
     async with server.lifespan(server.app):
         service = server.app.state.chat_service
         services = server.app.state.runtime_services
-        assert service.selected_runtime_mode() is ChatRuntimeMode.COORDINATED
-
         registration = service.router.tool_registry.require("list_files")
         context = ToolGovernanceContext("core_router", run_id, "answer")
         static_decision = service.router.tool_governance_service.authorize_tool(
@@ -347,7 +343,6 @@ async def test_default_coordinated_list_files_full_e2e(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_default_coordinated_approval_required_full_e2e(monkeypatch, tmp_path):
-    monkeypatch.delenv("CHAT_RUNTIME_MODE", raising=False)
     tool_args = json.dumps(
         {
             "operation_id": "wp2c-op-1",
@@ -371,8 +366,6 @@ async def test_default_coordinated_approval_required_full_e2e(monkeypatch, tmp_p
     async with server.lifespan(server.app):
         service = server.app.state.chat_service
         services = server.app.state.runtime_services
-        assert service.selected_runtime_mode() is ChatRuntimeMode.COORDINATED
-
         registration = service.router.tool_registry.require(
             "complex_workflow_simulator"
         )

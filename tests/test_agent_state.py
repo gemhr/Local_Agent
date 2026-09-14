@@ -8,13 +8,10 @@ from datetime import UTC, datetime, timedelta
 import json
 import unittest
 
-from core.chat_service import LEGACY_AGENT_ROUTER_STEP_ID, ChatService
 from core.runtime import (
     AGENT_STATE_SCHEMA_VERSION,
     AgentState,
     AgentStateValidationError,
-    RunCancelledError,
-    RunDeadlineExceededError,
     RunStatus,
     StepState,
     StepStatus,
@@ -257,98 +254,6 @@ class AgentStateTests(unittest.TestCase):
         payload["stop_reason"] = "COMPLETED"
         with self.assertRaises(AgentStateValidationError):
             AgentState.from_dict(payload)
-
-
-class ChatServiceAgentStateTests(unittest.TestCase):
-    def run_service(self, router: object) -> tuple[list[str], list[AgentState]]:
-        states: list[AgentState] = []
-        service = ChatService(router, state_observer=states.append)  # type: ignore[arg-type]
-        output = list(service.stream_chat(agent_id="code_expert", query="hi"))
-        return output, states
-
-    def test_normal_completion_preserves_output_and_marks_state_success(self) -> None:
-        class FakeRouter:
-            def __init__(self) -> None:
-                self.context_run_id = ""
-
-            def chat_stream(self, user_query: str, agent_id: str = "core_router", run_context=None):
-                self.context_run_id = run_context.run_id
-                yield "hello"
-                yield " world"
-
-        router = FakeRouter()
-        output, states = self.run_service(router)
-        self.assertEqual(output, ["hello", " world"])
-        self.assertEqual(states[-1].run_id, router.context_run_id)
-        self.assertEqual(states[-1].status, RunStatus.SUCCEEDED)
-        self.assertEqual(states[-1].steps[LEGACY_AGENT_ROUTER_STEP_ID].status, StepStatus.SUCCEEDED)
-        self.assertFalse(hasattr(ChatService(router), "_last_state"))
-
-    def test_unhandled_exception_marks_failed_and_reraises(self) -> None:
-        secret = "boom secret /internal/path token=abc123"
-
-        class FakeRouter:
-            def chat_stream(self, user_query: str, agent_id: str = "core_router", run_context=None):
-                raise RuntimeError(secret)
-                yield "unreachable"
-
-        states: list[AgentState] = []
-        service = ChatService(FakeRouter(), state_observer=states.append)  # type: ignore[arg-type]
-        with self.assertLogs("core.runtime.agent_loop", level="ERROR"):
-            with self.assertRaises(RuntimeError):
-                list(service.stream_chat(agent_id="code_expert", query="hi"))
-        self.assertEqual(states[-1].status, RunStatus.FAILED)
-        self.assertEqual(states[-1].stop_reason, StopReason.UNHANDLED_ERROR)
-        self.assertEqual(states[-1].error_code, "UNHANDLED_ERROR")
-        self.assertEqual(states[-1].error_message, "Agent execution failed")
-        self.assertNotIn(secret, repr(states[-1].to_dict()))
-        self.assertEqual(states[-1].steps[LEGACY_AGENT_ROUTER_STEP_ID].status, StepStatus.FAILED)
-        self.assertEqual(
-            states[-1].steps[LEGACY_AGENT_ROUTER_STEP_ID].error_message,
-            "Agent execution failed",
-        )
-
-    def test_deadline_exception_mapping(self) -> None:
-        class FakeRouter:
-            def chat_stream(self, user_query: str, agent_id: str = "core_router", run_context=None):
-                raise RunDeadlineExceededError("deadline")
-                yield "unreachable"
-
-        states: list[AgentState] = []
-        service = ChatService(FakeRouter(), state_observer=states.append)  # type: ignore[arg-type]
-        with self.assertRaises(RunDeadlineExceededError):
-            list(service.stream_chat(agent_id="code_expert", query="hi"))
-        self.assertEqual(states[-1].status, RunStatus.FAILED)
-        self.assertEqual(states[-1].stop_reason, StopReason.DEADLINE_EXCEEDED)
-
-    def test_cancellation_exception_mapping(self) -> None:
-        class FakeRouter:
-            def chat_stream(self, user_query: str, agent_id: str = "core_router", run_context=None):
-                raise RunCancelledError("cancelled")
-                yield "unreachable"
-
-        states: list[AgentState] = []
-        service = ChatService(FakeRouter(), state_observer=states.append)  # type: ignore[arg-type]
-        with self.assertRaises(RunCancelledError):
-            list(service.stream_chat(agent_id="code_expert", query="hi"))
-        self.assertEqual(states[-1].status, RunStatus.CANCELLED)
-        self.assertEqual(states[-1].stop_reason, StopReason.USER_CANCELLED)
-        self.assertEqual(states[-1].steps[LEGACY_AGENT_ROUTER_STEP_ID].status, StepStatus.CANCELLED)
-
-    def test_generator_close_marks_state_cancelled(self) -> None:
-        class FakeRouter:
-            def chat_stream(self, user_query: str, agent_id: str = "core_router", run_context=None):
-                yield "partial"
-                yield "unreached"
-
-        states: list[AgentState] = []
-        service = ChatService(FakeRouter(), state_observer=states.append)  # type: ignore[arg-type]
-        stream = service.stream_chat(agent_id="code_expert", query="hi")
-        self.assertEqual(next(stream), "partial")
-        stream.close()
-        self.assertEqual(len(states), 2)
-        self.assertEqual(states[-1].status, RunStatus.CANCELLED)
-        self.assertEqual(states[-1].steps[LEGACY_AGENT_ROUTER_STEP_ID].status, StepStatus.CANCELLED)
 
 
 if __name__ == "__main__":

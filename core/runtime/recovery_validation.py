@@ -30,11 +30,7 @@ from core.runtime.recovery_contract import (
     ResumeDataAvailability,
     ToolRecoveryDecisionStatus,
 )
-from core.runtime.snapshot_contract import (
-    PLAN_SNAPSHOT_SCHEMA_VERSION,
-    SNAPSHOT_SCHEMA_VERSION,
-    RunSnapshot,
-)
+from core.runtime.snapshot_contract import SNAPSHOT_SCHEMA_VERSION, RunSnapshot
 from core.runtime.snapshot_serialization import sha256_digest
 from core.runtime.snapshot_serialization import text_digest
 from core.runtime.fault_injection import FaultInjectionController
@@ -300,11 +296,7 @@ class RecoveryValidator:
                 **identity,
             )
         try:
-            current_fingerprint = (
-                PlanFingerprinter.legacy_fingerprint(current_plan)
-                if snapshot.plan_snapshot.plan_schema_version < PLAN_SNAPSHOT_SCHEMA_VERSION
-                else PlanFingerprinter.fingerprint(current_plan)
-            )
+            current_fingerprint = PlanFingerprinter.fingerprint(current_plan)
         except (ValueError, TypeError):
             return _failure(
                 status=RecoveryStatus.PLAN_MISMATCH,
@@ -784,8 +776,6 @@ def _validate_checkpoint_before_tail(snapshot: RunSnapshot) -> CheckpointKind:
         raise _UnsupportedCheckpoint() from None
     statuses = tuple(StepStatus(item.status) for item in snapshot.step_states)
     run_status = RunStatus(snapshot.run_status)
-    if kind is CheckpointKind.OBSERVATION:
-        raise _UnsupportedCheckpoint()
     if kind is CheckpointKind.PRE_RUN:
         if (
             run_status is not RunStatus.CREATED
@@ -797,8 +787,7 @@ def _validate_checkpoint_before_tail(snapshot: RunSnapshot) -> CheckpointKind:
             raise ValueError("invalid PRE_RUN checkpoint")
     elif kind is CheckpointKind.POST_PLAN_PRE_EXECUTION:
         if (
-            snapshot.plan_snapshot.plan_schema_version < PLAN_SNAPSHOT_SCHEMA_VERSION
-            or run_status is not RunStatus.RUNNING
+            run_status is not RunStatus.RUNNING
             or any(item.execution_started for item in snapshot.step_states)
             or StepStatus.RUNNING in statuses
             or not snapshot.quiescent

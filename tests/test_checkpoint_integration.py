@@ -23,7 +23,7 @@ from core.runtime.planning import (
     TaskCapabilityRequirements,
 )
 from core.runtime.run_coordinator import RunCoordinator
-from core.runtime.run_registry import RunHandle, RunRegistry
+from core.runtime.run_registry import ActiveRunControlHandle, RunRegistry
 from core.runtime.scheduler import SerialScheduler
 from core.runtime.snapshot_store import (
     InMemorySnapshotStore,
@@ -83,7 +83,13 @@ def _coordinator(store=None, *, run_id="run", started=True):
         plan=_plan(),
         agent_state=state,
         budget_ledger=ledger,
-        run_handle=RunHandle(context.run_id, source, state, "checkpoint-test"),
+        run_handle=ActiveRunControlHandle(
+            run_id=context.run_id,
+            runtime_mode="COORDINATED",
+            cancellation_source=source,
+            owner="checkpoint-test",
+            active_step_count=lambda: len(state.active_step_ids),
+        ),
         scheduler=scheduler,
         executor=ParallelExecutor(machine, event_emitter=emitter),
         run_registry=RunRegistry(),

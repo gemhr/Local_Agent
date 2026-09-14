@@ -37,8 +37,6 @@ class CheckpointKind(str, Enum):
     STEP_BOUNDARY = "STEP_BOUNDARY"
     TERMINAL = "TERMINAL"
     NON_QUIESCENT_AUDIT = "NON_QUIESCENT_AUDIT"
-    # Fixed legacy kind used only by the unpublished day-22 foundation fixtures.
-    OBSERVATION = "OBSERVATION"
 
 
 class CheckpointStatus(str, Enum):

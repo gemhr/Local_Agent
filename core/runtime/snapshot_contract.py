@@ -286,7 +286,7 @@ class PlanStepSnapshot:
             },
         )
 
-    def to_contract_payload(self, *, include_output_policy: bool) -> dict[str, object]:
+    def to_contract_payload(self) -> dict[str, object]:
         payload = {
             "step_id": self.step_id,
             "agent": self.agent,
@@ -296,8 +296,7 @@ class PlanStepSnapshot:
             "completion_criteria": self.completion_criteria,
             "static_inputs": self.static_inputs,
         }
-        if include_output_policy:
-            payload["output_policy"] = self.output_policy
+        payload["output_policy"] = self.output_policy
         return payload
 
 
@@ -312,7 +311,7 @@ class PlanSnapshot:
 
     def __post_init__(self) -> None:
         require_int(self.plan_schema_version, "plan_schema_version", minimum=1)
-        if self.plan_schema_version not in {1, PLAN_SNAPSHOT_SCHEMA_VERSION}:
+        if self.plan_schema_version != PLAN_SNAPSHOT_SCHEMA_VERSION:
             raise ValueError("unsupported plan snapshot schema version")
         _require_safe_token(self.plan_id, "plan_id")
         require_int(self.plan_version, "plan_version", minimum=1)
@@ -358,7 +357,7 @@ class PlanSnapshot:
         if not isinstance(payload, Mapping) or not isinstance(payload.get("steps"), list):
             raise ValueError("plan snapshot must be an object with steps")
         version = payload.get("plan_schema_version")
-        if version == PLAN_SNAPSHOT_SCHEMA_VERSION and any(
+        if any(
             not isinstance(item, Mapping) or "output_policy" not in item
             for item in payload["steps"]
         ):
@@ -373,7 +372,6 @@ class PlanSnapshot:
         )
 
     def to_contract_payload(self) -> dict[str, object]:
-        include_output_policy = self.plan_schema_version >= 2
         return {
             "plan_schema_version": self.plan_schema_version,
             "plan_id": self.plan_id,
@@ -381,9 +379,7 @@ class PlanSnapshot:
             "source": self.source,
             "task_summary": self.task_summary,
             "steps": tuple(
-                step.to_contract_payload(
-                    include_output_policy=include_output_policy
-                )
+                step.to_contract_payload()
                 for step in self.steps
             ),
         }
@@ -807,10 +803,7 @@ class RunSnapshot:
             self.activity_snapshot, RuntimeActivitySnapshot
         ):
             raise ValueError("activity_snapshot must be RuntimeActivitySnapshot")
-        if (
-            checkpoint_kind is not CheckpointKind.OBSERVATION
-            and self.activity_snapshot is None
-        ):
+        if self.activity_snapshot is None:
             raise ValueError("checkpoint snapshot requires activity_snapshot")
         if self.quiescent and (
             self.activity_snapshot is None or not self.activity_snapshot.quiescent

@@ -16,10 +16,10 @@ def test_rc_matrix_has_exact_legal_test_levels_and_truthful_counts() -> None:
 
     assert len(rows) == 20
     assert set(levels) <= allowed
-    assert levels.count("API_E2E") == 4
-    assert levels.count("RUNTIME_E2E") == 3
+    assert levels.count("API_E2E") == 2
+    assert levels.count("RUNTIME_E2E") == 4
     assert levels.count("SUBSYSTEM_INTEGRATION") == 13
-    assert levels.count("CONTRACT") == 0
+    assert levels.count("CONTRACT") == 1
 
 
 def test_baseline_and_gate_scope_cannot_be_read_as_production_validation() -> None:
@@ -56,4 +56,3 @@ def test_runbook_uses_real_health_fields_and_safe_shutdown_truth() -> None:
     assert "Detached worker 不可清记录" in text
     assert "禁止操作：强杀线程、删除记录伪造 idle" in text
     assert len(re.findall(r"^- 症状：", text, re.MULTILINE)) == 10
-

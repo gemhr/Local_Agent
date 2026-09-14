@@ -576,7 +576,7 @@ def _planner_router(responses):
     router.tool_registry = registry
     router.agents_config = __import__(
         "core.runtime.agent_registry", fromlist=["DEFAULT_AGENT_REGISTRY"]
-    ).DEFAULT_AGENT_REGISTRY.legacy_display_config()
+    ).DEFAULT_AGENT_REGISTRY.display_config()
     router.tool_plan_max_tokens = 120
     iterator = iter(responses)
     router._collect_model_response = lambda *_args, **_kwargs: next(iterator)

@@ -5,7 +5,6 @@
 from core.runtime.cancellation import CancellationReason, CancellationSource, CancellationToken, RunCancelledError
 from core.runtime.run_registry import (
     ActiveRunControlHandle,
-    RunHandle,
     RunRegistry,
     process_run_registry,
 )
@@ -30,24 +29,13 @@ from core.runtime.state import (
 from core.runtime.context import (
     Clock,
     Deadline,
-    LEGACY_DEFAULT_SESSION_ID,
+    DEFAULT_SESSION_ID,
     RunContext,
     RunContextData,
     RunDeadlineExceededError,
     RunIdentifiers,
     SystemClock,
     create_run_context,
-)
-from core.runtime.agent_loop import (
-    ActionOutcome,
-    AgentAction,
-    AgentLoop,
-    AgentLoopDriver,
-    AgentLoopPolicy,
-    AgentObservation,
-    LEGACY_AGENT_ROUTER_STEP_ID,
-    LEGACY_AGENT_ROUTER_STEP_NAME,
-    LegacyAgentRouterDriver,
 )
 from core.runtime.model_context import (
     CANONICAL_SECURITY_INSTRUCTION, InjectionRiskCategory, InjectionRiskSignal,
@@ -204,30 +192,22 @@ from core.runtime.event_consumer import (
     IdempotentEventConsumer,
     InMemoryEventConsumptionCheckpointStore,
     PostgresEventConsumptionCheckpointStore,
-    SQLiteEventConsumptionCheckpointStore,
 )
 from core.runtime.stream_adapter import (
     ChatStreamChunk,
     ChatStreamChunkKind,
     ChatStreamCompatibilityAdapter,
     ChatStreamProtocolError,
-    RuntimeEventTextAdapter,
     safe_transport_error_chunk,
 )
 
 __all__ = [
     "AGENT_STATE_SCHEMA_VERSION",
-    "ActionOutcome",
-    "AgentAction",
-    "AgentLoop",
-    "AgentLoopDriver",
-    "AgentLoopPolicy",
-    "AgentObservation",
     "AgentState",
     "AgentStateMachine",
     "AgentStateValidationError",
     "CancellationSource",
-    "CancellationReason", "ActiveRunControlHandle", "RunHandle", "RunRegistry",
+    "CancellationReason", "ActiveRunControlHandle", "RunRegistry",
     "process_run_registry", "RuntimeAdmissionGate",
     "RuntimeAdmissionRejectedError", "RuntimeAdmissionState",
     "OperationTimeoutError", "OperationType", "effective_timeout_seconds",
@@ -259,10 +239,7 @@ __all__ = [
     "CancellationToken",
     "Clock",
     "Deadline",
-    "LEGACY_DEFAULT_SESSION_ID",
-    "LEGACY_AGENT_ROUTER_STEP_ID",
-    "LEGACY_AGENT_ROUTER_STEP_NAME",
-    "LegacyAgentRouterDriver",
+    "DEFAULT_SESSION_ID",
     "InvalidStateTransitionError",
     "RunCancelledError",
     "RunContext",
@@ -349,12 +326,10 @@ __all__ = [
     "ChatStreamChunkKind",
     "ChatStreamCompatibilityAdapter",
     "ChatStreamProtocolError",
-    "RuntimeEventTextAdapter",
     "safe_transport_error_chunk",
     "RuntimeEventType",
     "RunEventJournal",
     "PostgresEventConsumptionCheckpointStore",
-    "SQLiteEventConsumptionCheckpointStore",
     "PostgresRunEventJournal",
     "StepCompletedPayload",
     "StepEventEmitter",
@@ -495,7 +470,6 @@ from core.runtime.blocking_executor import (
     DEFAULT_BLOCKING_MAX_PENDING_TASKS,
     DEFAULT_BLOCKING_MAX_WORKERS,
     process_blocking_executor,
-    process_legacy_step_executor,
 )
 
 __all__ += [
@@ -522,7 +496,6 @@ __all__ += [
     "DEFAULT_BLOCKING_MAX_PENDING_TASKS",
     "DEFAULT_BLOCKING_MAX_WORKERS",
     "process_blocking_executor",
-    "process_legacy_step_executor",
 ]
 
 from core.runtime.circuit_breaker import (
@@ -908,7 +881,6 @@ from core.runtime.snapshot_serialization import (
 from core.runtime.snapshot_store import (
     InMemorySnapshotStore,
     PostgresSnapshotStore,
-    SQLiteSnapshotStore,
     SnapshotErrorCode,
     SnapshotSaveStatus,
     SnapshotStore,
@@ -929,7 +901,6 @@ __all__ += [
     "SNAPSHOT_SCHEMA_VERSION",
     "STATE_SNAPSHOT_SCHEMA_VERSION",
     "PostgresSnapshotStore",
-    "SQLiteSnapshotStore",
     "SafeBudgetSnapshot",
     "SnapshotErrorCode",
     "SnapshotSaveStatus",
@@ -1036,7 +1007,6 @@ __all__ += [
     "select_recovery_status",
 ]
 
-from core.runtime.runtime_mode import ChatRuntimeMode, ChatRuntimeSelector
 from core.runtime.application_services import (
     SAFE_RUNTIME_ASSEMBLY_VERSION,
     ApplicationRuntimeServices,
@@ -1073,8 +1043,6 @@ from core.runtime.resource_authorization import (
 
 __all__ += [
     "ApplicationRuntimeServices",
-    "ChatRuntimeMode",
-    "ChatRuntimeSelector",
     "CoordinatedRunScope",
     "CoordinatedRuntimeFactory",
     "CoordinatedSingleAgentDriver",

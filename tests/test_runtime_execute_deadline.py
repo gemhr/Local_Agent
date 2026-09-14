@@ -109,7 +109,7 @@ async def test_timeout_seconds_reaches_run_context_deadline():
 @pytest.mark.asyncio
 async def test_timeout_propagates_through_http_endpoint(monkeypatch):
     service, registry, _services, factory = _service()
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     run_id = uuid.uuid4().hex
 
     response = await server.runtime_execute_endpoint(
@@ -171,7 +171,7 @@ async def test_existing_cancel_route_finds_structured_endpoint_run(monkeypatch):
     release = threading.Event()
     router = _BlockingRouter(started, release)
     service, registry, _services, _factory = _service(router)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     run_id = uuid.uuid4().hex
 
     task = asyncio.create_task(

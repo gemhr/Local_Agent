@@ -4,20 +4,30 @@ import time
 
 import pytest
 
-from core.runtime import AgentState, CancellationReason, CancellationSource, RunHandle, RunRegistry
+from core.runtime import (
+    ActiveRunControlHandle,
+    CancellationReason,
+    CancellationSource,
+    RunRegistry,
+)
 
 
 def make_handle(run_id="a"):
-    return RunHandle(run_id, CancellationSource(), AgentState.for_run_context(run_id), "test")
+    return ActiveRunControlHandle(
+        run_id=run_id,
+        runtime_mode="COORDINATED",
+        cancellation_source=CancellationSource(),
+        owner="test",
+    )
 
 
 def test_registry_register_cancel_snapshot_and_unregister():
     registry = RunRegistry(); handle = make_handle()
     registry.register(handle)
     assert registry.get("a") is handle
-    assert registry.cancel("a", CancellationReason.USER_CANCELLED) is True
+    assert registry.cancel("a", CancellationReason.REQUEST_CANCELLED) is True
     assert registry.cancel("a", CancellationReason.CLIENT_DISCONNECTED) is False
-    assert registry.snapshot("a")["cancellation_reason"] == "USER_CANCELLED"
+    assert registry.snapshot("a")["cancellation_reason"] == "REQUEST_CANCELLED"
     assert registry.unregister("a") is True
     assert registry.unregister("a") is False
 
@@ -25,15 +35,15 @@ def test_registry_register_cancel_snapshot_and_unregister():
 def test_duplicate_and_cancel_all():
     registry = RunRegistry(); registry.register(make_handle("a")); registry.register(make_handle("b"))
     with pytest.raises(ValueError): registry.register(make_handle("a"))
-    assert set(registry.cancel_all(CancellationReason.SYSTEM_SHUTDOWN)) == {"a", "b"}
+    assert set(registry.cancel_all(CancellationReason.SERVER_SHUTDOWN)) == {"a", "b"}
 
 
 def test_cancellation_first_wins_across_threads():
     source = CancellationSource(); barrier = threading.Barrier(3)
     def cancel(reason): barrier.wait(); source.cancel(reason, datetime.now(UTC))
-    threads = [threading.Thread(target=cancel, args=(CancellationReason.USER_CANCELLED,)), threading.Thread(target=cancel, args=(CancellationReason.CLIENT_DISCONNECTED,))]
+    threads = [threading.Thread(target=cancel, args=(CancellationReason.REQUEST_CANCELLED,)), threading.Thread(target=cancel, args=(CancellationReason.CLIENT_DISCONNECTED,))]
     [thread.start() for thread in threads]; barrier.wait(); [thread.join() for thread in threads]
-    assert source.token.reason in {CancellationReason.USER_CANCELLED, CancellationReason.CLIENT_DISCONNECTED}
+    assert source.token.reason in {CancellationReason.REQUEST_CANCELLED, CancellationReason.CLIENT_DISCONNECTED}
     assert source.token.cancelled_at is not None
 
 

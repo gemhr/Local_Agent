@@ -18,7 +18,6 @@ def services_with_worker(worker, model, remaining):
     return replace(
         make_services(snapshot_enabled=False),
         blocking_executors=(worker,),
-        legacy_step_executor=worker,
         extra_closeables=(
             ("model_engine_0", model),
             ("remaining_store", remaining),

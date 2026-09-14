@@ -23,13 +23,6 @@ class CancellationReason(str, Enum):
     REQUEST_DEADLINE_EXCEEDED = "REQUEST_DEADLINE_EXCEEDED"
     STREAM_ENCODING_FAILED = "STREAM_ENCODING_FAILED"
 
-    # Compatibility-only values from the Day 12 contract. New production
-    # cancellation owners use the five canonical names above.
-    USER_CANCELLED = "USER_CANCELLED"
-    SYSTEM_SHUTDOWN = "SYSTEM_SHUTDOWN"
-    DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
-
-
 class RunCancelledError(RuntimeError):
     """运行在合作式安全点发现取消请求时引发。"""
 

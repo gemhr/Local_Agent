@@ -13,7 +13,6 @@ from datetime import UTC, datetime
 from typing import Awaitable, Callable
 
 from core.runtime.cancellation import CancellationReason, CancellationSource
-from core.runtime.state import AgentState
 
 
 ForceAbortCallback = Callable[[CancellationReason], Awaitable[None] | None]
@@ -223,33 +222,6 @@ class ActiveRunControlHandle:
         }
 
 
-class RunHandle(ActiveRunControlHandle):
-    """Compatibility constructor for pre-Day-23 coordinator tests.
-
-    Production assembly uses ``ActiveRunControlHandle``.  This adapter keeps
-    the old positional API and state identity check at the coordinator
-    boundary; the application services container never retains it.
-    """
-
-    __slots__ = ("agent_state",)
-
-    def __init__(
-        self,
-        run_id: str,
-        cancellation_source: CancellationSource,
-        agent_state: AgentState,
-        owner: str,
-    ) -> None:
-        self.agent_state = agent_state
-        super().__init__(
-            run_id=run_id,
-            runtime_mode="LEGACY_COMPAT",
-            cancellation_source=cancellation_source,
-            owner=owner,
-            active_step_count=lambda: len(agent_state.active_step_ids),
-        )
-
-
 class RunRegistry:
     """Thread-safe registry of safe active-run control handles."""
 
@@ -407,7 +379,6 @@ process_run_registry = RunRegistry()
 
 __all__ = [
     "ActiveRunControlHandle",
-    "RunHandle",
     "RunRegistry",
     "process_run_registry",
 ]

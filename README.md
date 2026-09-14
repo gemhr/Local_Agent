@@ -21,7 +21,7 @@ FastAPI application (server.py::lifespan)
 
 `server.py::lifespan()` 是唯一生产 Composition Root。应用级模型、Memory、Journal、可观测性、Trace、worker 与 shutdown 服务在进程生命周期内共享；每个请求创建独立的 Run scope、`AgentState`、Budget、事件 Channel 和取消源。
 
-默认 `CHAT_RUNTIME_MODE=COORDINATED`。`LEGACY` 只作为显式回滚路径，修改配置并重启后才影响新请求；失败或已经开始的 Run 不会跨 Runtime fallback。
+`COORDINATED` 是唯一聊天 Runtime，所有请求都经过统一的 Run/Approval/Tool 生命周期。
 
 ## 2. 当前能力
 
@@ -162,7 +162,6 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
-| `CHAT_RUNTIME_MODE` | `COORDINATED` | 可选 `COORDINATED` / `LEGACY`；非法值启动失败 |
 | `LOCAL_AGENT_ENVIRONMENT_PROFILE` | `LOCAL` | 可选 `LOCAL` / `TEST` / `PRODUCTION`；未知或空显式值启动失败 |
 | `LOCAL_AGENT_LLM_BACKEND` | `remote` | 可选 `local` / `remote` / `hybrid`；未知值启动失败 |
 | `LOCAL_AGENT_MODEL_PROFILE` | `balanced` | `fast` / `balanced` / `deep`；未知值启动失败 |
@@ -178,7 +177,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_REMOTE_ENABLE_THINKING` | `false` | DeepSeek thinking 默认关闭；Planning 始终显式关闭 |
 | `LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS` | `120` | 远端 HTTP 请求 timeout；严格正整数 |
 | `LOCAL_AGENT_REMOTE_VERIFY_TLS` | Profile 默认：`LOCAL=0`、`TEST=1`、`PRODUCTION=1` | 严格布尔（`1`/`0`/`true`/`false`）；PRODUCTION 不可显式关闭 |
-| `LOCAL_AGENT_REMOTE_TRUST_ENV` | Profile 默认：`LOCAL=1`、`TEST=0`、`PRODUCTION=0` | 严格布尔；是否让远程 model Session 继承系统 proxy |
+| `LOCAL_AGENT_REMOTE_TRUST_ENV` | Profile 默认：`LOCAL=1`、`TEST=0`、`PRODUCTION=0` | 严格布尔；是否让远程 model `httpx.AsyncClient` 继承系统 proxy |
 | `LOCAL_AGENT_CLIENT_TRUST_ENV` | `1`（所有 Profile 一致） | 严格布尔；是否让 Desktop Client → LocalAgent Server Session 继承系统 proxy；与 `LOCAL_AGENT_REMOTE_TRUST_ENV` 独立 |
 | `LOCAL_AGENT_SNAPSHOT_ENABLED` | `false` | 严格布尔值；启用 Snapshot 与 Recovery validation |
 | `LOCAL_AGENT_CHROMA_DIR` | `chroma_db` | Chroma 持久化目录（含 `localagent_retrieval/<collection_key>/` generation 布局） |
@@ -205,7 +204,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 
 Phase9-WP3 已用真实独立 stdio MCP demo server（`demo/mcp_demo_server.py`，零第三方依赖的标准 2025-06-18 JSON-RPC 实现，提供 read-only `get_demo_status` 与 side-effect `append_demo_record` 两个 demo tool）完成 REAL_MCP_E2E：自然语言 → DeepSeek native selection → 既有 Governance/HITL → `tools/call` → final answer。`tools/call` 结果支持 `TextContent` 及 `EmbeddedResource(TextResourceContents)` 文本，不会自动访问 resource URI；MCP Resources primitive（如 `resources/list` / `resources/read`）仍不支持。配置模板见 `demo/mcp_config.template.json`（生成后属于 operator 本地配置，不得提交进仓库）。
 
-远程 HTTP 的 `requests.Session` 由 `LOCAL_AGENT_REMOTE_TRUST_ENV` 显式控制是否继承进程系统 proxy：为 True 时使用 operator 批准的受控代理，Test/Production 默认 False 不继承宿主 proxy；项目不记录 proxy URL 或凭据。Desktop Client 的 `requests.Session` 由 `LOCAL_AGENT_CLIENT_TRUST_ENV` 独立控制（默认 `True` 继承系统 proxy，保持既有行为）；两个 transport scope 完全分离。`LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS` 已标记 DEPRECATED（无行为），replacement 为 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。
+远程 HTTP 的 application-scope `httpx.AsyncClient` 由 `LOCAL_AGENT_REMOTE_TRUST_ENV` 显式控制是否继承进程系统 proxy：为 True 时使用 operator 批准的受控代理，Test/Production 默认 False 不继承宿主 proxy；项目不记录 proxy URL 或凭据。Desktop Client 的 `requests.Session` 由 `LOCAL_AGENT_CLIENT_TRUST_ENV` 独立控制（默认 `True` 继承系统 proxy，保持既有行为）；两个 transport scope 完全分离。Observability flush/shutdown 与组件关闭统一使用 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。
 
 ## 6. API 速查
 

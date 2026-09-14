@@ -12,7 +12,7 @@ class RCScenario:
 
 
 RC_SCENARIOS = (
-    RCScenario("RC-01", "Coordinated normal", "tests/test_runtime_mode_e2e.py::test_api_to_factory_to_output_delta_to_terminal_happy_path"),
+    RCScenario("RC-01", "Coordinated normal", "tests/test_runtime_lifespan.py::test_chat_endpoint_routes_only_through_coordinated_runtime"),
     RCScenario("RC-02", "Model transient retry", "tests/test_retry_model_integration.py::ModelRetryIntegrationTests::test_zero_delay_retry_success_and_stable_indices"),
     RCScenario("RC-03", "Model candidate fallback", "tests/test_model_invocation.py::CoordinatedInvocationIntegrationTests::test_real_coordinated_path_uses_router_and_succeeds_after_fallback"),
     RCScenario("RC-04", "Retrieval rewrite degradation", "tests/test_retrieval_execution.py::test_query_rewrite_and_rerank_failures_are_controlled_degradation"),
@@ -30,8 +30,8 @@ RC_SCENARIOS = (
     RCScenario("RC-16", "Incomplete tool recovery evidence", "tests/test_recovery_tool_completion_gap.py::test_recovery_validation_invokes_no_model_tool_retrieval_or_compensation"),
     RCScenario("RC-17", "Clean shutdown", "tests/test_shutdown_report_truthfulness.py::test_shutdown_top_level_semantics_distinguish_orchestration_and_closure"),
     RCScenario("RC-18", "Detached-worker shutdown", "tests/test_shutdown_report_truthfulness.py::test_report_distinguishes_unexecuted_drain_and_deferred_model"),
-    RCScenario("RC-19", "Explicit Legacy", "tests/test_runtime_mode_e2e.py::test_explicit_legacy_api_does_not_create_coordinated_scope"),
-    RCScenario("RC-20", "Coordinated failure without Legacy fallback", "tests/test_runtime_mode_e2e.py::test_api_coordinated_failure_has_no_legacy_fallback"),
+    RCScenario("RC-19", "Runtime switch removed", "tests/test_runtime_lifespan.py::test_lifecycle_states_and_canonical_runtime_configuration_are_explicit"),
+    RCScenario("RC-20", "Canonical failure without alternate runtime", "tests/test_runtime_full_e2e.py::test_runtime_error_is_safe_single_terminal_and_never_falls_back"),
 )
 
 
@@ -44,4 +44,3 @@ def assert_real_test_mappings(*scenario_ids: str) -> None:
         assert source_path.is_file(), scenario.test_id
         source = source_path.read_text(encoding="utf-8")
         assert node_parts[-1] in source, scenario.test_id
-

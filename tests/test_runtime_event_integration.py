@@ -283,11 +283,11 @@ class RuntimeEventIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await anext(stream)
             handle = process_run_registry.get(run_id)
             self.assertIsNotNone(handle)
-            handle.cancellation_source.cancel(CancellationReason.USER_CANCELLED)
+            handle.cancellation_source.cancel(CancellationReason.REQUEST_CANCELLED)
             await stream.aclose()
             self.assertEqual(
                 handle.cancellation_source.token.reason,
-                CancellationReason.USER_CANCELLED,
+                CancellationReason.REQUEST_CANCELLED,
             )
 
     async def test_user_cancellation_emits_terminal_facts_when_consumer_remains(self):
@@ -298,7 +298,7 @@ class RuntimeEventIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "core_router", "question", run_id=run_id, persist=False
             )
             events = [await anext(stream)]
-            process_run_registry.cancel(run_id, CancellationReason.USER_CANCELLED)
+            process_run_registry.cancel(run_id, CancellationReason.REQUEST_CANCELLED)
             events.extend([event async for event in stream])
         types = [event.event_type for event in events]
         self.assertIn(RuntimeEventType.CANCELLATION, types)

@@ -6,7 +6,7 @@ import json
 import pytest
 
 import server
-from core.runtime import CancellationReason, ChatRuntimeMode
+from core.runtime import CancellationReason
 
 
 class AsgiChatHarness:
@@ -92,9 +92,6 @@ class _AsgiService:
         self.started = asyncio.Event()
         self.closed = False
 
-    def selected_runtime_mode(self):
-        return ChatRuntimeMode.COORDINATED
-
     async def stream_coordinated_agent_text(self, **kwargs):
         self.started.set()
         try:
@@ -110,7 +107,7 @@ class _AsgiService:
 @pytest.mark.asyncio
 async def test_real_asgi_normal_stream_completes_and_awaits_watcher(monkeypatch):
     service = _AsgiService()
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     harness = AsgiChatHarness()
     before = set(asyncio.all_tasks())
 
@@ -130,7 +127,7 @@ async def test_real_asgi_normal_stream_completes_and_awaits_watcher(monkeypatch)
 @pytest.mark.asyncio
 async def test_real_asgi_disconnect_during_stream_sends_no_late_body(monkeypatch):
     service = _AsgiService(chunks=("late",), block=True)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     harness = AsgiChatHarness()
     request_task = asyncio.create_task(harness.run())
     await asyncio.wait_for(service.started.wait(), 0.5)
@@ -151,7 +148,7 @@ async def test_real_asgi_send_failure_closes_stream_without_safe_error_body(
     monkeypatch, send_error
 ):
     service = _AsgiService(chunks=("must-fail-send",))
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     harness = AsgiChatHarness(send_error=send_error)
 
     with pytest.raises(Exception) as captured:
@@ -165,7 +162,7 @@ async def test_real_asgi_send_failure_closes_stream_without_safe_error_body(
 @pytest.mark.asyncio
 async def test_real_asgi_body_task_cancellation_is_not_swallowed(monkeypatch):
     service = _AsgiService(chunks=("late",), block=True)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     harness = AsgiChatHarness()
     request_task = asyncio.create_task(harness.run())
     await asyncio.wait_for(service.started.wait(), 0.5)

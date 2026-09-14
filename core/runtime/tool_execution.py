@@ -1001,7 +1001,7 @@ class ToolAttemptExecutor:
             except RunCancelledError:
                 attempt_source.cancel(
                     context.run_context.cancellation_token.reason
-                    or CancellationReason.USER_CANCELLED
+                    or CancellationReason.REQUEST_CANCELLED
                 )
                 await self._wait_sync_grace(wrapped)
                 if not future.done():
@@ -1012,7 +1012,7 @@ class ToolAttemptExecutor:
                     await asyncio.gather(wrapped, return_exceptions=True)
                 raise
             except RunDeadlineExceededError:
-                attempt_source.cancel(CancellationReason.DEADLINE_EXCEEDED)
+                attempt_source.cancel(CancellationReason.REQUEST_DEADLINE_EXCEEDED)
                 await self._wait_sync_grace(wrapped)
                 if future.done():
                     response = await _wrapped_result_or_none(wrapped)
@@ -1023,7 +1023,7 @@ class ToolAttemptExecutor:
                 raise _ToolTimedOut(None, lingering=True)
             remaining = context.remaining_seconds()
             if remaining <= 0:
-                attempt_source.cancel(CancellationReason.DEADLINE_EXCEEDED)
+                attempt_source.cancel(CancellationReason.REQUEST_DEADLINE_EXCEEDED)
                 await self._wait_sync_grace(wrapped)
                 if future.done():
                     response = await _wrapped_result_or_none(wrapped)

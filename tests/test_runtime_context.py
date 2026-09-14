@@ -10,7 +10,7 @@ import unittest
 
 from core.runtime import (
     CancellationSource,
-    LEGACY_DEFAULT_SESSION_ID,
+    DEFAULT_SESSION_ID,
     RunCancelledError,
     RunContext,
     RunDeadlineExceededError,
@@ -52,7 +52,7 @@ class RunContextTests(unittest.TestCase):
 
     def test_default_session_id_uses_legacy_strategy(self) -> None:
         context = RunContext.create(entry_agent_id="core_router", clock=FakeClock())
-        self.assertEqual(context.session_id, LEGACY_DEFAULT_SESSION_ID)
+        self.assertEqual(context.session_id, DEFAULT_SESSION_ID)
 
     def test_no_deadline_has_no_remaining_seconds(self) -> None:
         context = RunContext.create(entry_agent_id="core_router", clock=FakeClock())
@@ -134,42 +134,6 @@ class RunContextTests(unittest.TestCase):
         self.assertNotIn("token", serialized_text)
         self.assertNotIn("event", serialized_text)
         self.assertNotIn("lock", serialized_text)
-
-    def test_chat_service_passes_run_context_to_router_without_changing_output(self) -> None:
-        from core.chat_service import ChatService
-
-        class FakeRouter:
-            def __init__(self) -> None:
-                self.contexts = []
-                self.outputs = ["hello", " world"]
-
-            def chat_stream(self, user_query: str, agent_id: str = "core_router", run_context=None):
-                self.contexts.append(run_context)
-                yield self.outputs[0]
-                self.contexts.append(run_context)
-                yield self.outputs[1]
-
-        router = FakeRouter()
-        service = ChatService(router)
-        output = list(service.stream_chat(agent_id="code_expert", query="hi"))
-
-        self.assertEqual(output, ["hello", " world"])
-        self.assertEqual(len(router.contexts), 2)
-        self.assertIs(router.contexts[0], router.contexts[1])
-        context = router.contexts[0]
-        self.assertIsNotNone(context)
-        self.assertEqual(context.data.entry_agent_id, "code_expert")
-        self.assertEqual(context.session_id, LEGACY_DEFAULT_SESSION_ID)
-        self.assertTrue(context.run_id)
-        self.assertTrue(context.trace_id)
-
-    def test_chat_service_and_agent_router_are_importable(self) -> None:
-        from core.agent_router import AgentRouter
-        from core.chat_service import ChatService
-
-        self.assertTrue(hasattr(AgentRouter, "chat_stream"))
-        self.assertTrue(hasattr(ChatService, "stream_chat"))
-
 
 if __name__ == "__main__":
     unittest.main()

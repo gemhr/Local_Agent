@@ -7,7 +7,7 @@ from core.runtime import (
     RunStartedPayload,
     RuntimeEventChannel,
     RuntimeEventDraft,
-    RuntimeEventTextAdapter,
+    ChatStreamCompatibilityAdapter,
     RuntimeEventType,
 )
 
@@ -34,7 +34,7 @@ class RuntimeStreamAdapterTests(unittest.IsolatedAsyncioTestCase):
             step=True,
         )
         self.assertEqual(
-            RuntimeEventTextAdapter().encode(event),
+            ChatStreamCompatibilityAdapter().adapt(event).text,
             'answer\n"escaped" [[ORCH]] as user text',
         )
 
@@ -42,7 +42,7 @@ class RuntimeStreamAdapterTests(unittest.IsolatedAsyncioTestCase):
         event = await self.make_event(
             RuntimeEventType.RUN_STARTED, RunStartedPayload("RUNNING")
         )
-        encoded = RuntimeEventTextAdapter().encode(event)
+        encoded = ChatStreamCompatibilityAdapter().adapt(event).text
         self.assertTrue(encoded.startswith("[[ORCH]]"))
         payload = json.loads(encoded.removeprefix("[[ORCH]]"))
         self.assertEqual(payload["event_type"], "RUN_STARTED")
@@ -53,7 +53,7 @@ class RuntimeStreamAdapterTests(unittest.IsolatedAsyncioTestCase):
             RuntimeEventType.PLANNING_STARTED,
             PlanningStartedPayload(1, 15000),
         )
-        encoded = RuntimeEventTextAdapter().encode(event)
+        encoded = ChatStreamCompatibilityAdapter().adapt(event).text
         self.assertTrue(encoded.startswith("[[ORCH]]"))
         payload = json.loads(encoded.removeprefix("[[ORCH]]"))
         self.assertEqual(payload["event_type"], "PLANNING_STARTED")
@@ -64,7 +64,7 @@ class RuntimeStreamAdapterTests(unittest.IsolatedAsyncioTestCase):
             RuntimeEventType.RUN_STARTED,
             RunStartedPayload('RUNNING"\nvalue'),
         )
-        encoded = RuntimeEventTextAdapter().encode(event)
+        encoded = ChatStreamCompatibilityAdapter().adapt(event).text
         self.assertIn('\\"', encoded)
         self.assertNotIn("prompt", encoded.lower())
         self.assertNotIn("api_key", encoded.lower())
@@ -74,6 +74,6 @@ class RuntimeStreamAdapterTests(unittest.IsolatedAsyncioTestCase):
         event = await self.make_event(
             RuntimeEventType.RUN_STARTED, RunStartedPayload("RUNNING")
         )
-        encoded = RuntimeEventTextAdapter().encode(event)
+        encoded = ChatStreamCompatibilityAdapter().adapt(event).text
         self.assertFalse(encoded.startswith("data:"))
         self.assertNotIn("\nevent:", encoded)

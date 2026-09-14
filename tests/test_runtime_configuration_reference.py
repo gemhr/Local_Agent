@@ -17,7 +17,7 @@ def _documented_configuration_names() -> set[str]:
 
 def _settings_environment_names() -> set[str]:
     source = SETTINGS.read_text(encoding="utf-8")
-    prefixes = ("LOCAL_AGENT_", "CHAT_RUNTIME_MODE", "RUNTIME_")
+    prefixes = ("LOCAL_AGENT_", "RUNTIME_")
     return {
         token
         for token in re.findall(r'["\']([A-Z][A-Z0-9_]+)["\']', source)
@@ -32,7 +32,6 @@ def test_every_documented_configuration_name_comes_from_real_settings() -> None:
     assert documented
     assert documented <= real
     assert {
-        "CHAT_RUNTIME_MODE",
         "LOCAL_AGENT_DATABASE_URL",
         "LOCAL_AGENT_DB_POOL_SIZE",
         "LOCAL_AGENT_SNAPSHOT_ENABLED",
@@ -42,8 +41,8 @@ def test_every_documented_configuration_name_comes_from_real_settings() -> None:
 
 def test_configuration_reference_freezes_runtime_and_fault_boundaries() -> None:
     text = DOC.read_text(encoding="utf-8")
-    assert "默认 `COORDINATED`" in text
-    assert "不会跨 Runtime fallback" in text
+    assert "生产只存在 `COORDINATED` 路径" in text
+    assert "不再提供旧 Runtime 切换或跨 Runtime fallback" in text
     assert "Snapshot 默认关闭" in text
     assert "生产配置入口：无" in text
     assert "默认 `controller=None`" in text

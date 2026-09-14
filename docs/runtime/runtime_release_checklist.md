@@ -14,9 +14,9 @@ Checklist 是有证据引用的 code-level gate，不替代生产容量、外部
 
 ## Startup
 
-- [ ] Application services/lifespan：`tests/test_runtime_lifespan.py`、`tests/test_server_compatibility_handles.py`。
+- [ ] Application services/lifespan：`tests/test_runtime_lifespan.py`、`tests/test_application_runtime_services.py`。
 - [ ] Admission=`ACCEPTING`：`tests/test_application_runtime_services.py`。
-- [ ] Default Runtime=`COORDINATED`：RC-01、`tests/test_default_runtime_entry.py`。
+- [ ] 唯一 Runtime=`COORDINATED`：RC-01、`tests/test_runtime_lifespan.py`。
 - [ ] Journal/Observability/Trace health：`tests/test_stage6_wp1_postgres_runtime_stores.py`、`test_observability_integration.py`、`test_trace_integration.py`。
 - [ ] Offline safe smoke：RC-01；不访问生产外部服务。
 
@@ -25,7 +25,7 @@ Checklist 是有证据引用的 code-level gate，不替代生产容量、外部
 - [ ] Registry/Budget/Worker owner：`tests/test_runtime_invariants.py`、RC-06/11/12/18。
 - [ ] Event sequence/terminal：RC-01/09/10/20、`tests/test_stage6_wp1_postgres_runtime_stores.py`。
 - [ ] Disconnect watcher/producer/channel：RC-13、`tests/test_stream_cancellation.py`。
-- [ ] Sensitive output allowlists：`tests/test_runtime_security_boundary.py`、`tests/test_snapshot_security.py`、`tests/test_shutdown_report_truthfulness.py`。
+- [ ] Sensitive output allowlists：`tests/test_runtime_security_boundary.py`、`tests/test_snapshot_contract.py`、`tests/test_shutdown_report_truthfulness.py`。
 
 ## Shutdown
 
@@ -36,9 +36,8 @@ Checklist 是有证据引用的 code-level gate，不替代生产容量、外部
 
 ## Rollback
 
-- [ ] `CHAT_RUNTIME_MODE=LEGACY` 必须在 startup fail closed，不得作为 production rollback。
 - [ ] 仅部署仍使用 `COORDINATED` canonical path 的已知良好 artifact/configuration。
-- [ ] 禁止对已失败/已开始 Run 跨 Runtime 重跑：`tests/test_runtime_legacy_boundary.py`。
+- [ ] 不存在旧 Runtime 切换；禁止对已失败/已开始 Run 另起旁路重跑：`tests/test_runtime_lifespan.py`。
 - [ ] 回滚前后均执行新身份的安全 smoke，Application resource identity close once。
 
 ## CI Artifact Boundary

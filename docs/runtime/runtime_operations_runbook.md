@@ -21,7 +21,7 @@
 9. 确认默认 Runtime 为 `COORDINATED`，请求只读取一次 mode。
 10. 检索策略（`LOCAL_AGENT_RETRIEVAL_STRATEGY`）在 startup 捕获一次：`BASELINE` 保持既有 v1 collection 行为；`HYBRID_RRF` 在 Router 构造前执行完整 active-generation provenance 校验（active.json schema → locator containment → manifest/provenance digest → Dense v2 marker → embedding asset-tree digest → BM25 artifact digest/冻结契约 → 共享 provenance 精确相等），并保留该已加载 BM25 index 为 APPLICATION_SCOPE 依赖。Hybrid 已生产可达：Dense rewritten/original 结果先合并为单一 8 条 channel，BM25 是唯一 sparse channel（无 Chroma keyword），两者串行 RRF 融合（每 channel 8、union 16、fused 8），最终仅按 fused rank 取 `rag_top_k`，不对 RRF 分数应用 `rag_min_score`。任一必需通道/融合/物化失败均 fail closed 且不回退 baseline；optional KB 仅允许 startup degraded，Hybrid 请求仍以 `HYBRID_STRATEGY_UNAVAILABLE` 失败。启动绝不自动 rebuild、不重建 BM25 artifact、不修改 active.json。
 
-启动失败时禁止切换 Runtime 后重跑同一请求。配置异常保持 `SettingsValidationError` 固定安全码（`SETTINGS_PARSE_ERROR`/`SETTINGS_VALIDATION_ERROR`/`SETTINGS_SECURITY_POLICY_ERROR`/`STARTUP_CONFIGURATION_ERROR`），资源失败保持 `RUNTIME_INITIALIZATION_FAILED`；错误对象和日志不输出原始路径、密钥或 Provider URL。`CHAT_RUNTIME_MODE=LEGACY` 会在 Settings 阶段 fail closed，不是可用的 production rollback。
+启动失败时禁止切换 Runtime 后重跑同一请求。配置异常保持 `SettingsValidationError` 固定安全码（`SETTINGS_PARSE_ERROR`/`SETTINGS_VALIDATION_ERROR`/`SETTINGS_SECURITY_POLICY_ERROR`/`STARTUP_CONFIGURATION_ERROR`），资源失败保持 `RUNTIME_INITIALIZATION_FAILED`；错误对象和日志不输出原始路径、密钥或 Provider URL。生产聊天始终使用 Coordinated Runtime。
 
 ## Health / Metrics / Trace
 
@@ -66,7 +66,7 @@ GET /readyz    # 200 表示可以安全尝试接受新的 Run
 
 真实顺序：Lifecycle→`SHUTTING_DOWN`；Admission→`DRAINING`；等待 admission lease；请求取消 active Run；bounded run drain；force abort remaining；关闭 worker admission；worker drain；Observability flush；Trace flush；组件 close（含 Snapshot/Journal）；Model safety gate；remaining close；Admission/Lifecycle→`CLOSED`。
 
-判断字段必须同时查看：`orchestration_completed`、`fully_closed`、`has_failures`、`has_deferred_resources`、`active_worker_count`、`detached_worker_count`、`unknown_worker_count`。`completed` 只是 `orchestration_completed` 兼容别名。Detached worker 不可清记录；Model deferred 时不能强关共享 client；同步 close 为 UNKNOWN 时不能自动 double close。正常完成后的再次 shutdown 返回同一缓存报告；中途取消后的安全重入由 `test_shutdown_cancellation_reentry.py` 锁定，不能假定所有组件重新关闭。
+判断字段必须同时查看：`orchestration_completed`、`fully_closed`、`has_failures`、`has_deferred_resources`、`active_worker_count`、`detached_worker_count`、`unknown_worker_count`。Detached worker 不可清记录；Model deferred 时不能强关共享 client；同步 close 为 UNKNOWN 时不能自动 double close。正常完成后的再次 shutdown 返回同一缓存报告；中途取消后的安全重入由 `test_shutdown_cancellation_reentry.py` 锁定，不能假定所有组件重新关闭。
 
 ## Common Incident Runbooks
 
@@ -179,7 +179,7 @@ GET /readyz    # 200 表示可以安全尝试接受新的 Run
 - 症状：orchestration 已结束但 failure/deferred/remaining 非零。
 - 权威事实源：完整 ShutdownReport。
 - 可能原因：run/worker drain、flush、close 或 model safety gate 失败。
-- 禁止操作：只检查 `completed`；对 UNKNOWN 资源自动 double close。
+- 禁止操作：只检查 `orchestration_completed`；对 UNKNOWN 资源自动 double close。
 - 诊断步骤：查看 `orchestration_completed`、`fully_closed`、`has_failures`、`has_deferred_resources` 和 worker counts。
 - 安全处置：按 component result 定点处理；保留 deferred truth。
 - 恢复条件：所有 required close 操作完成且 remaining/worker 为零。
@@ -202,7 +202,7 @@ GET /readyz    # 200 表示可以安全尝试接受新的 Run
 
 ## Runtime Rollback Boundary
 
-Runtime rollback 只能部署已知良好的、仍使用 `COORDINATED` canonical path 的 artifact/configuration，并在新进程上执行安全 smoke test。禁止通过 `CHAT_RUNTIME_MODE=LEGACY` 绕过 Durable Run、Approval、Tool side-effect ledger 或 MCP lifecycle；该值会在 startup fail closed。不得对已开始或已失败的 Run 跨 Runtime 重跑。
+Runtime rollback 只能部署已知良好的、仍使用 `COORDINATED` canonical path 的 artifact/configuration，并在新进程上执行安全 smoke test。不得绕过 Durable Run、Approval、Tool side-effect ledger 或 MCP lifecycle，也不得对已开始或已失败的 Run 跨 Runtime 重跑。
 
 ## Persistence Preflight / Migration
 
@@ -214,7 +214,7 @@ Server 每次 startup 在任何持久 Store constructor 之前自动执行只读
 Settings Parse / Semantic Validation
 → SERVER_ROLE Validation
 → lifecycle STARTING
-→ automatic SQLite persistence preflight（PRAGMA quick_check + physical shape + 版本事实；不创建/不修改 DB）
+→ read-only PostgreSQL schema readiness（reachable + required tables + Alembic head；不执行 migration）
 → required Resource Construction → Chroma open + marker validation → 其余构造 → READY
 ```
 
@@ -223,30 +223,21 @@ Settings Parse / Semantic Validation
 - Chroma marker mismatch → required KB 阻止 READY；显式 optional KB → `READY_DEGRADED`。Startup 绝不自动 clear/rebuild/migrate。
 - `/health`、`/readyz` 保持只读投影，不触发 preflight/migration/repair/restore/rebuild。
 
-### Explicit migration（SCRIPT_ROLE，Server stopped）
+### Explicit PostgreSQL migration（Server stopped）
 
-```powershell
-uv run python scripts/manage_persistence.py preflight
-uv run python scripts/manage_persistence.py migrate --backup-confirmed
-```
-
-- `preflight`：只读全 Store 检测，输出 `NEW / CURRENT / MIGRATION_REQUIRED / REBUILD_REQUIRED / UNSUPPORTED / FAILED`；非全部 `NEW/CURRENT` 返回 non-zero。
-- `migrate`：先全 Store preflight；任何 UNSUPPORTED/FAILED 或已有数据需要 mutation 时缺少 `--backup-confirmed` → non-zero 且零 mutation。
-- 每 Store 独立单事务：Memory additive migration（v2→v3 新增 Episodic partial indexes；v1/legacy 升至 current）+ `user_version=3` 同事务原子提交；Journal 只加 nullable span 列绝不 rewrite 历史 row；Checkpoint 只 drop/recreate derived table（历史 offset 丢弃，不影响业务 Authority）。
-- 部分 Store commit 后后续失败 → overall FAIL、partial committed facts 如实报告；rerun 从实际 facts 继续（idempotent / safely re-runnable，不宣称 exactly-once）。
-- Migration 是 forward-only：提交后 old binary compatibility NOT ASSUMED；无 downgrade migration。
+- 使用 `uv run alembic upgrade head` 执行 forward-only schema migration；失败时停止并按 backup/restore runbook 处理。
 
 ### Upgrade Flow（Operator）
 
 ```text
 1. graceful stop Server（确认进程退出；force-kill 不算可信前置）
 2. 复制 MUST_BACKUP set 到同一 backup epoch（Memory/Journal/Snapshot if enabled 的 .db + 任何 -wal；KB source；known-good config reference）
-3. 对备份副本执行显式 full preflight（只有 PASS 才允许 migrate）
+3. 对备份副本执行 PostgreSQL schema/readiness 检查
 4. deploy code/artifacts/config
 5. 执行 preflight
-6. 如需要：migrate --backup-confirmed
+6. 如需要：`uv run alembic upgrade head`
 7. 如 Chroma marker mismatch：bootstrap_local_kb.py --rebuild（Server stopped、source 可用、embedding 可用）
-8. 再次 preflight
+8. 再次检查 PostgreSQL schema/readiness
 9. 启动 Server → /health + /readyz + 功能 smoke
 ```
 
@@ -255,10 +246,9 @@ uv run python scripts/manage_persistence.py migrate --backup-confirmed
 ```text
 计划升级 → graceful stop Server → 确认 process exited / shutdown truth 可接受
 → 复制 MUST_BACKUP set 到同一 backup epoch
-  （Memory DB、Journal DB、Snapshot DB if enabled/存在、KB source、known-good config reference；
-   每个 SQLite unit = 主 .db + 任何存在的 -wal；-shm 不要求）
+  （PostgreSQL database（Memory/Journal/Snapshot/Checkpoint）、KB source、known-good config reference）
 → 记录对应 known-good code/config/artifact identity（不记录 secret 明文）
-→ 对备份副本执行显式 full preflight → 只有 PASS 才允许 migrate
+→ 对备份副本执行 PostgreSQL schema/readiness 检查
 ```
 
 ```text
@@ -275,12 +265,12 @@ automatic/scheduled/cloud   = NOT_IMPLEMENTED
 3. restore target 为空或已完成整组替换（禁止 SQLite/Chroma 目录内混合覆盖）
 4. 从同一 backup epoch 恢复 Memory / Journal / Snapshot（if enabled）/ KB source
 5. Chroma：整体恢复并验证 marker，否则隔离现有 Chroma，用匹配 embedding artifact 从 source 显式 rebuild
-6. Checkpoint 默认 recreate；即使恢复旧 checkpoint 也必须通过 exact-shape preflight
-7. 显式 full preflight（Server 启动前；不兼容则不启动）
+6. Checkpoint 由 PostgreSQL schema readiness 校验
+7. 显式 PostgreSQL schema/readiness 检查（Server 启动前；不兼容则不启动）
 8. 启动 known-compatible code/config/artifact → /health + /readyz + Memory/Journal/KB 功能 smoke
 ```
 
-`files copied != restore validated`。任一步失败都停止；不对备份原件执行修复/迁移。Restore success 至少要求：显式 full preflight PASS、Server `READY`（或 allowlisted `READY_DEGRADED`）、required durable Stores 可读、health/readiness smoke PASS；若 KB 为 required，Chroma 不得以 degraded 代替 restore 成功。
+`files copied != restore validated`。任一步失败都停止；不对备份原件执行修复/迁移。Restore success 至少要求：PostgreSQL schema/readiness PASS、Server `READY`（或 allowlisted `READY_DEGRADED`）、required durable Stores 可读、health/readiness smoke PASS；若 KB 为 required，Chroma 不得以 degraded 代替 restore 成功。
 
 ## Rollback Runbook（manual）
 
@@ -292,7 +282,7 @@ Any schema migration committed：old binary compatibility NOT ASSUMED
   → 保留当前 migrated data
   → 恢复 matching pre-migration MUST_BACKUP set
   → 恢复 known-good code/config/artifacts
-  → preflight → start → health/readiness + functional smoke
+  → PostgreSQL schema/readiness → start → health/readiness + functional smoke
 ```
 
 ```text

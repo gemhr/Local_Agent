@@ -20,6 +20,7 @@ from core.runtime.snapshot_contract import (
     StepStateSnapshot,
     TextSummary,
 )
+from core.runtime.checkpoint_contract import RuntimeActivitySnapshot
 from core.runtime.snapshot_serialization import snapshot_from_json, snapshot_to_json
 from core.runtime.state import AgentState
 
@@ -42,6 +43,23 @@ def _plan(secret: str = "SECRET_PROMPT_TEXT") -> Plan:
         ),
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
         source=PlanSource.DETERMINISTIC,
+    )
+
+
+def _idle_activity() -> RuntimeActivitySnapshot:
+    return RuntimeActivitySnapshot(
+        claim_in_progress=0,
+        running_step_count=0,
+        budget_reservation_count=0,
+        model_attempts_active=0,
+        tool_attempts_active=0,
+        retrievals_active=0,
+        detached_tool_workers=0,
+        detached_retrieval_workers=0,
+        event_publications_in_flight=0,
+        step_workers_active=0,
+        activity_unknown=False,
+        captured_at=datetime(2026, 1, 2, tzinfo=UTC),
     )
 
 
@@ -81,8 +99,9 @@ def make_snapshot(
             event_schema_version="2",
             journal_schema_version="2",
         ),
-        checkpoint_kind="OBSERVATION",
-        quiescent=False,
+        checkpoint_kind="PRE_RUN",
+        quiescent=True,
+        activity_snapshot=_idle_activity(),
         created_at=datetime(2026, 1, 2, tzinfo=UTC),
     )
 
@@ -107,8 +126,9 @@ def test_run_snapshot_is_versioned_immutable_strict_and_round_trips():
             budget_snapshot=snapshot.budget_snapshot,
             last_journal_sequence=True,
             runtime_metadata=snapshot.runtime_metadata,
-            checkpoint_kind="OBSERVATION",
-            quiescent=False,
+            checkpoint_kind="PRE_RUN",
+            quiescent=True,
+            activity_snapshot=_idle_activity(),
         )
 
 
@@ -186,8 +206,9 @@ def test_plan_step_ids_and_fingerprint_must_match_state_projection():
             budget_snapshot=snapshot.budget_snapshot,
             last_journal_sequence=0,
             runtime_metadata=snapshot.runtime_metadata,
-            checkpoint_kind="OBSERVATION",
-            quiescent=False,
+            checkpoint_kind="PRE_RUN",
+            quiescent=True,
+            activity_snapshot=_idle_activity(),
         )
     with pytest.raises(ValueError, match="fingerprint"):
         replace(snapshot, plan_fingerprint="0" * 64)
@@ -206,8 +227,9 @@ def test_plan_step_ids_and_fingerprint_must_match_state_projection():
             budget_snapshot=snapshot.budget_snapshot,
             last_journal_sequence=0,
             runtime_metadata=snapshot.runtime_metadata,
-            checkpoint_kind="OBSERVATION",
-            quiescent=False,
+            checkpoint_kind="PRE_RUN",
+            quiescent=True,
+            activity_snapshot=_idle_activity(),
         )
 
 
@@ -221,29 +243,6 @@ def test_attempt_unknown_round_trips_as_null_and_started_contradiction_fails():
         replace(step, execution_started=True)
     with pytest.raises(ValueError, match="attempt_count"):
         replace(step, attempt_count=True)
-
-
-def test_v1_plan_snapshot_payload_remains_readable_without_v2_output_policy():
-    from core.runtime.snapshot_serialization import sha256_digest
-
-    snapshot = make_snapshot()
-    payload = snapshot.to_payload()
-    plan_payload = payload["plan_snapshot"]
-    plan_payload["plan_schema_version"] = 1
-    for step in plan_payload["steps"]:
-        step.pop("output_policy")
-    legacy_plan = PlanSnapshot.from_payload(plan_payload)
-    payload["plan_fingerprint"] = PlanFingerprinter.fingerprint_snapshot(
-        legacy_plan
-    )
-    payload["payload_digest"] = sha256_digest(
-        {key: value for key, value in payload.items() if key != "payload_digest"}
-    )
-
-    restored = RunSnapshot.from_payload(payload)
-
-    assert restored.plan_snapshot.plan_schema_version == 1
-    assert restored.plan_snapshot.steps[0].output_policy == "FINAL_PASSTHROUGH"
 
 
 def test_v2_plan_snapshot_rejects_missing_output_policy():

@@ -1,5 +1,4 @@
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 
@@ -657,116 +656,10 @@ class ModelInvocationTests(unittest.TestCase):
     def test_cancel_terminates_chain_without_adapter_call(self) -> None:
         adapter = RecordingAdapter(["unused"])
         fixture = InvocationFixture({ModelProfileId.LOCAL_FAST: adapter})
-        fixture.source.cancel(CancellationReason.USER_CANCELLED)
+        fixture.source.cancel(CancellationReason.REQUEST_CANCELLED)
         with self.assertRaises(RunCancelledError):
             fixture.invoke(routing(LOCAL))
         self.assertEqual(adapter.calls, 0)
-
-
-class RemoteSessionInvocationConcurrencyTests(unittest.TestCase):
-    def test_two_runs_share_remote_engine_without_concurrent_session_access(
-        self,
-    ) -> None:
-        class Response:
-            status_code = 200
-
-            @staticmethod
-            def json():
-                return {"choices": [{"message": {"content": "ok"}}]}
-
-        class ControlledSession:
-            def __init__(self) -> None:
-                self.lock = threading.Lock()
-                self.first_entered = threading.Event()
-                self.concurrent_access = threading.Event()
-                self.release = threading.Event()
-                self.active = 0
-                self.max_active = 0
-                self.calls = 0
-
-            def mount(self, *_args) -> None:
-                pass
-
-            def post(self, *_args, **_kwargs):
-                with self.lock:
-                    self.calls += 1
-                    self.active += 1
-                    self.max_active = max(self.max_active, self.active)
-                    if self.active > 1:
-                        self.concurrent_access.set()
-                    if self.calls == 1:
-                        self.first_entered.set()
-                self.release.wait(2)
-                with self.lock:
-                    self.active -= 1
-                return Response()
-
-            def close(self) -> None:
-                pass
-
-        session = ControlledSession()
-        engine = RemoteLLMEngine(
-            "https://example.test",
-            "model",
-            session=session,
-        )
-        resolver = ModelAdapterResolver(
-            {ModelProfileId.REMOTE_ADVANCED: GeneratorModelAdapter(engine)}
-        )
-        registry = ModelCircuitBreakerRegistry()
-        invocation_router = ModelInvocationRouter()
-        results = []
-        ledgers = []
-        errors = []
-        result_lock = threading.Lock()
-
-        def run_once() -> None:
-            context, _source = create_run_context(entry_agent_id="agent")
-            ledger = BudgetLedger(RunBudget())
-            context.attach_budget_ledger(ledger)
-            try:
-                result = invocation_router.invoke(
-                    run_context=context,
-                    budget_ledger=ledger,
-                    routing_decision=routing(REMOTE),
-                    messages=({"role": "user", "content": "redacted"},),
-                    adapter_resolver=resolver,
-                    circuit_breaker_registry=registry,
-                    token_estimate=10,
-                    max_tokens=20,
-                )
-            except Exception as exc:
-                with result_lock:
-                    errors.append(exc)
-                return
-            with result_lock:
-                results.append(result)
-                ledgers.append(ledger)
-
-        first = threading.Thread(target=run_once)
-        second = threading.Thread(target=run_once)
-        first.start()
-        self.assertTrue(session.first_entered.wait(1))
-        second.start()
-        self.assertFalse(session.concurrent_access.wait(0.1))
-        session.release.set()
-        first.join(2)
-        second.join(2)
-
-        self.assertFalse(errors)
-        self.assertEqual(len(results), 2)
-        self.assertEqual(session.calls, 2)
-        self.assertEqual(session.max_active, 1)
-        self.assertTrue(
-            all(
-                ledger.snapshot().committed_usage.model_calls == 1
-                for ledger in ledgers
-            )
-        )
-        self.assertEqual(
-            registry.get(REMOTE.effective_breaker_key).snapshot().state.value,
-            "CLOSED",
-        )
 
 
 class CoordinatedInvocationIntegrationTests(unittest.IsolatedAsyncioTestCase):

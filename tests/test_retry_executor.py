@@ -43,7 +43,7 @@ class RetrySleeperTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await sleeper.started.wait()
-        source.cancel(CancellationReason.USER_CANCELLED)
+        source.cancel(CancellationReason.REQUEST_CANCELLED)
         with self.assertRaisesRegex(Exception, "USER_CANCELLED"):
             await task
         self.assertEqual(sleeper.calls, [10])
@@ -108,7 +108,7 @@ class RetrySleeperTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await sleeper.started.wait()
-        source.cancel(CancellationReason.USER_CANCELLED)
+        source.cancel(CancellationReason.REQUEST_CANCELLED)
         with self.assertRaisesRegex(Exception, "USER_CANCELLED"):
             await task
 

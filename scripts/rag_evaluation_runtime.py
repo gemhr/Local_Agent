@@ -22,7 +22,6 @@ from core.knowledge_base.evaluation_environment import (  # noqa: E402
 )
 from core.runtime import (  # noqa: E402
     BudgetLedger,
-    ChatRuntimeMode,
     RetrievalExecutionService,
     RetrievalExecutionSpec,
     RetrievalInvocation,
@@ -95,9 +94,6 @@ class RetrievalBaselineService:
             minimum_score=0.55,
         )
 
-    def selected_runtime_mode(self):
-        return ChatRuntimeMode.COORDINATED
-
     async def run_coordinated_agent(self, *, query, run_id, **_kwargs):
         context, _source = create_run_context(
             entry_agent_id="knowledge_expert", run_id=run_id
@@ -146,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     import server
     import uvicorn
 
-    server.chat_service = RetrievalBaselineService(manager)
+    server.app.state.chat_service = RetrievalBaselineService(manager)
     print(json.dumps({"status": "READY", "collection": COLLECTION_NAME}), flush=True)
     uvicorn.run(
         server.app,

@@ -298,19 +298,10 @@ class ChatStreamCompatibilityAdapter:
         return None
 
 
-class RuntimeEventTextAdapter(ChatStreamCompatibilityAdapter):
-    """Backward-compatible spelling for callers that expect ``encode``."""
-
-    def encode(self, event: RuntimeEvent) -> str:
-        chunk = self.adapt(event)
-        return "" if chunk is None else chunk.text
-
-
 __all__ = [
     "ChatStreamChunk",
     "ChatStreamChunkKind",
     "ChatStreamCompatibilityAdapter",
     "ChatStreamProtocolError",
-    "RuntimeEventTextAdapter",
     "safe_transport_error_chunk",
 ]

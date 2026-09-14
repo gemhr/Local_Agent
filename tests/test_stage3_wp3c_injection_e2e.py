@@ -1,4 +1,4 @@
-"""WP3-C 真实 HTTP denial-integrity 与 explicit LEGACY 回归。"""
+"""WP3-C 真实 HTTP denial-integrity 回归。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from dataclasses import replace
 import pytest
 
 import server
-from core.runtime import ChatRuntimeMode, RuntimeEventType
+from core.runtime import RuntimeEventType
 
 
 FAKE_SUCCESS = "WP3C_FAKE_SUCCESS_A71F operation succeeded"
@@ -83,28 +83,6 @@ class _CoordinatedDenialModel:
         self.closed = True
 
 
-class _LegacyDenialModel:
-    def __init__(self) -> None:
-        self.stages: list[str] = []
-        self.closed = False
-
-    def generate(self, messages, **_kwargs):
-        system = "\n".join(m["content"] for m in messages if m["role"] == "system")
-        if "Delegate:" in system:
-            self.stages.append("LEGACY_PLANNING")
-            yield "Delegate: code_expert | 请使用复杂流程模拟工具执行非幂等操作"
-            return
-        if "CALL: tool_name(argument_text)" in system:
-            self.stages.append("TOOL_PLANNER")
-            yield _complex_tool_call()
-            return
-        self.stages.append("FORBIDDEN_POST_DENIAL_MODEL")
-        yield FAKE_SUCCESS
-
-    def close(self):
-        self.closed = True
-
-
 class _AsgiHarness:
     def __init__(self, agent_id: str, query: str, run_id: str) -> None:
         self.body = json.dumps(
@@ -164,10 +142,9 @@ class _AsgiHarness:
         return starts[0], controls, texts
 
 
-def _settings(tmp_path, mode: ChatRuntimeMode):
+def _settings(tmp_path):
     return replace(
         server.settings,
-        chat_runtime_mode=mode,
         llm_backend="local",
         model_path=str(tmp_path / "missing-model"),
         snapshot_store_enabled=False,
@@ -183,7 +160,7 @@ async def test_coordinated_delegated_actual_approval_denial_dominates_full_http(
     monkeypatch, tmp_path
 ) -> None:
     model = _CoordinatedDenialModel()
-    monkeypatch.setattr(server, "settings", _settings(tmp_path, ChatRuntimeMode.COORDINATED))
+    monkeypatch.setattr(server, "settings", _settings(tmp_path))
     monkeypatch.setattr(server, "LocalLLMEngine", lambda **_kwargs: model)
     monkeypatch.setattr(
         server,
@@ -227,44 +204,6 @@ async def test_coordinated_delegated_actual_approval_denial_dominates_full_http(
         assert state_store.committed_operations == []
         assert state_store.idempotency_records == {}
         assert [row["role"] for row in history] == ["user", "assistant"]
-        assert history[-1]["content"] == APPROVAL_TEXT
-        assert FAKE_SUCCESS not in history[-1]["content"]
-    assert model.closed is True
-
-
-@pytest.mark.asyncio
-async def test_explicit_legacy_actual_denial_stops_before_synthesis_and_persists_safe_final(
-    monkeypatch, tmp_path
-) -> None:
-    model = _LegacyDenialModel()
-    monkeypatch.setattr(server, "settings", _settings(tmp_path, ChatRuntimeMode.LEGACY))
-    monkeypatch.setattr(server, "LocalLLMEngine", lambda **_kwargs: model)
-    monkeypatch.setattr(
-        server,
-        "RemoteLLMEngine",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no remote model")),
-    )
-    run_id = uuid.uuid4().hex
-
-    async with server.lifespan(server.app):
-        service = server.app.state.chat_service
-        registration = service.router.tool_registry.require("complex_workflow_simulator")
-        state_store = registration.adapter._state_store
-        harness = _AsgiHarness("core_router", "请委派代码专家执行复杂操作", run_id)
-        await harness.run()
-        start, _controls, texts = harness.parsed()
-        history = await service.router.memory_manager.async_store.get_chat_history(
-            "core_router", limit=10, ascending=True, memory_scope="direct"
-        )
-
-        assert start["status"] == 200
-        assert texts == [APPROVAL_TEXT]
-        assert model.stages == ["LEGACY_PLANNING", "TOOL_PLANNER"]
-        assert "FORBIDDEN_POST_DENIAL_MODEL" not in model.stages
-        assert FAKE_SUCCESS not in "".join(texts)
-        assert state_store.resource_states == {}
-        assert state_store.committed_operations == []
-        assert history[-1]["role"] == "assistant"
         assert history[-1]["content"] == APPROVAL_TEXT
         assert FAKE_SUCCESS not in history[-1]["content"]
     assert model.closed is True

@@ -28,7 +28,6 @@ from tools.complex_workflow_simulator import (
     WorkflowResultStatus,
     WorkflowSimulationError,
     WorkflowStage,
-    complex_workflow_simulator,
 )
 from tools.registry import register_all_tools
 
@@ -444,22 +443,6 @@ class ComplexWorkflowSimulationToolTests(unittest.TestCase):
             replay = ComplexWorkflowSimulationTool(state_store=reloaded).execute(request)
             self.assertEqual(first.status, WorkflowResultStatus.SUCCEEDED)
             self.assertEqual(replay.status, WorkflowResultStatus.IDEMPOTENCY_REPLAY)
-
-    def test_legacy_wrapper_accepts_json_and_returns_safe_json(self) -> None:
-        payload = {
-            "operation_id": "legacy-operation",
-            "resource_key": "mock-resource:legacy",
-            "idempotency_key": None,
-            "execution_mode": "DRY_RUN",
-            "items": [{"item_id": "legacy-item", "action": "change", "quantity": 1}],
-            "failure_injection": "NONE",
-            "processing_options": {"max_parallel_items": 1},
-            "metadata": {},
-        }
-        response = json.loads(complex_workflow_simulator(json.dumps(payload)))
-        self.assertEqual(response["status"], "SUCCEEDED")
-        invalid = json.loads(complex_workflow_simulator("not-json"))
-        self.assertEqual(invalid["safe_error_code"], "TOOL_VALIDATION_ERROR")
 
     def test_registry_exposes_legacy_tool_name(self) -> None:
         registry = ToolRegistry()

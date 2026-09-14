@@ -252,11 +252,14 @@ async def test_cancel_endpoint_writes_durable_intent_before_registry_miss(
 ):
     control = DurableRunControlService(clean_database)
     registry = RunRegistry()
-    service = SimpleNamespace(
-        durable_run_control=control,
-        run_registry=registry,
+    service = SimpleNamespace(run_registry=registry)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    monkeypatch.setattr(
+        server.app.state,
+        "runtime_services",
+        replace(make_services(), durable_run_control=control, run_registry=registry),
+        raising=False,
     )
-    monkeypatch.setattr(server, "chat_service", service)
 
     async def allow(_request, _run_id):
         return None
@@ -286,9 +289,20 @@ async def test_cancel_endpoint_does_not_fallback_to_registry_on_db_failure(monke
 
     registry = RecordingRegistry()
     monkeypatch.setattr(
-        server,
+        server.app.state,
         "chat_service",
-        SimpleNamespace(durable_run_control=BrokenControl(), run_registry=registry),
+        SimpleNamespace(run_registry=registry),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "runtime_services",
+        replace(
+            make_services(),
+            durable_run_control=BrokenControl(),
+            run_registry=registry,
+        ),
+        raising=False,
     )
 
     async def allow(_request, _run_id):

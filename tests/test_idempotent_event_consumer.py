@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -17,7 +16,6 @@ from core.runtime import (
     RunStartedPayload,
     RuntimeEvent,
     RuntimeEventType,
-    SQLiteEventConsumptionCheckpointStore,
 )
 
 
@@ -40,13 +38,9 @@ def records(*sequences: int, run_id: str = "run-a"):
     )
 
 
-@pytest.fixture(params=["memory", "sqlite"])
-def store(request, tmp_path: Path):
-    value = (
-        InMemoryEventConsumptionCheckpointStore()
-        if request.param == "memory"
-        else SQLiteEventConsumptionCheckpointStore(str(tmp_path / "checkpoint.db"))
-    )
+@pytest.fixture
+def store():
+    value = InMemoryEventConsumptionCheckpointStore()
     yield value
     value.close()
     value.close()

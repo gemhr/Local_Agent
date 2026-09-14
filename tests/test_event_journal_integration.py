@@ -24,7 +24,7 @@ from core.runtime import (
     RunCoordinator,
     RunCompletedPayload,
     RunEventEmitter,
-    RunHandle,
+    ActiveRunControlHandle,
     RunRegistry,
     RunStatus,
     RunStartedPayload,
@@ -269,8 +269,12 @@ async def test_real_coordinator_commits_state_before_journal():
         plan=plan,
         agent_state=state,
         budget_ledger=ledger,
-        run_handle=RunHandle(
-            context.run_id, source, state, "run_coordinator"
+        run_handle=ActiveRunControlHandle(
+            run_id=context.run_id,
+            runtime_mode="COORDINATED",
+            cancellation_source=source,
+            owner="run_coordinator",
+            active_step_count=lambda: len(state.active_step_ids),
         ),
         scheduler=SerialScheduler(machine),
         executor=ParallelExecutor(

@@ -462,27 +462,6 @@ async def test_streaming_tool_call_invalid_index_is_protocol_error(index):
         server.close()
 
 
-@pytest.mark.asyncio
-async def test_legacy_session_seam_does_not_allocate_async_client():
-    class LegacySession:
-        def __init__(self):
-            self.close_calls = 0
-
-        def mount(self, *_args):
-            return None
-
-        def close(self):
-            self.close_calls += 1
-
-    session = LegacySession()
-    engine = RemoteLLMEngine("https://example.test", "test-model", session=session)
-    assert engine._client is None
-
-    await engine.aclose()
-
-    assert session.close_calls == 1
-
-
 def _profile(profile_id, remote=False):
     return ModelProfile(
         profile_id,

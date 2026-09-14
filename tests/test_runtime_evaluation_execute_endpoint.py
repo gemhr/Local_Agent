@@ -11,11 +11,8 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 import server
-from core.chat_service import ChatService
 from core.runtime import (
     BudgetLedger,
-    ChatRuntimeMode,
-    ChatRuntimeSelector,
     RetrievalCandidate,
     RetrievalExecutionService,
     RetrievalExecutionSpec,
@@ -59,9 +56,6 @@ class _EvalService:
         self.result = result
         self.output = output
         self.seen_collector = None
-
-    def selected_runtime_mode(self):
-        return ChatRuntimeMode.COORDINATED
 
     async def run_coordinated_agent(self, **kwargs):
         self.seen_collector = current_retrieval_evaluation_collector()
@@ -132,9 +126,6 @@ class _LargeEvalService:
         self.run_id = run_id
         self.count = count
 
-    def selected_runtime_mode(self):
-        return ChatRuntimeMode.COORDINATED
-
     async def run_coordinated_agent(self, **kwargs):
         run_id = kwargs["run_id"]
         service = RetrievalExecutionService(
@@ -163,9 +154,6 @@ class _LargeEvalService:
 class _RagAndAnswerEvalService:
     admission_gate = SimpleNamespace(accepts_new_runs=True)
 
-    def selected_runtime_mode(self):
-        return ChatRuntimeMode.COORDINATED
-
     async def run_coordinated_agent(self, **kwargs):
         run_id = kwargs["run_id"]
         invocation = RetrievalInvocation.create(
@@ -189,7 +177,7 @@ class _RagAndAnswerEvalService:
 
 
 async def _execute(payload: server.RuntimeExecuteRequest):
-    return await server.runtime_evaluation_execute_endpoint(payload, _test_request())
+    return await server.runtime_evaluation_execute_v2_endpoint(payload, _test_request())
 
 
 async def _execute_v2(payload: server.RuntimeExecuteRequest):
@@ -239,33 +227,6 @@ def test_evaluation_request_extra_field_rejected() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_evaluation_endpoint_rejects_legacy_mode_without_fallback(monkeypatch):
-    router = FakeRouter()
-    registry = RunRegistry()
-    services = make_services(run_registry=registry, snapshot_enabled=False)
-    factory = _ExplodingFactory(router, services)
-    service = ChatService(
-        router,
-        runtime_selector=ChatRuntimeSelector(ChatRuntimeMode.LEGACY),
-        coordinated_runtime_factory=factory,
-        run_registry=registry,
-    )
-
-    def forbidden_legacy(**kwargs):
-        raise AssertionError("legacy must not run")
-
-    monkeypatch.setattr(service, "stream_chat", forbidden_legacy)
-    monkeypatch.setattr(server, "chat_service", service)
-
-    with pytest.raises(HTTPException) as exc_info:
-        await _execute(_payload())
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail == "COORDINATED_RUNTIME_REQUIRED"
-    assert factory.create_count == 0
-    assert registry.observability_snapshot()["active_runs"] == 0
-
-
 # ---------------------------------------------------------------------------
 # Response contract + runtime / capture orthogonality
 # ---------------------------------------------------------------------------
@@ -276,7 +237,7 @@ async def test_evaluation_response_exact_keys_protocol_and_run_id(monkeypatch):
     run_id = uuid.uuid4().hex
     result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
     service = _EvalService(result)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     response = await _execute(_payload(run_id=run_id))
     body = json.loads(response.body)
     assert set(body) == {
@@ -287,10 +248,13 @@ async def test_evaluation_response_exact_keys_protocol_and_run_id(monkeypatch):
         "error_code",
         "safe_message",
         "capture_status",
-        "capture_error_code",
-        "rag_evaluation_artifacts",
-    }
-    assert body["protocol_version"] == "localagent-rag-evaluation-execute.v1"
+            "capture_error_code",
+            "rag_evaluation_artifacts",
+            "final_answer_capture_status",
+            "final_answer_capture_error_code",
+            "final_answer_evidence",
+        }
+    assert body["protocol_version"] == "localagent-evaluation-execute.v2"
     assert body["run_id"] == run_id
     assert body["status"] == "SUCCEEDED"
     assert body["capture_status"] == "COMPLETE"
@@ -302,7 +266,7 @@ async def test_evaluation_response_exact_keys_protocol_and_run_id(monkeypatch):
 async def test_runtime_succeeded_capture_complete_orthogonal(monkeypatch):
     run_id = uuid.uuid4().hex
     result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
-    monkeypatch.setattr(server, "chat_service", _EvalService(result))
+    monkeypatch.setattr(server.app.state, "chat_service", _EvalService(result), raising=False)
     body = json.loads((await _execute(_payload(run_id=run_id))).body)
     assert body["status"] == "SUCCEEDED"
     assert body["capture_status"] == "COMPLETE"
@@ -318,7 +282,7 @@ async def test_runtime_failed_capture_complete_keeps_failed_terminal(monkeypatch
         run_id=run_id,
         error_code="RUNTIME_AGENT_FAILURE",
     )
-    monkeypatch.setattr(server, "chat_service", _EvalService(result))
+    monkeypatch.setattr(server.app.state, "chat_service", _EvalService(result), raising=False)
     body = json.loads((await _execute(_payload(run_id=run_id))).body)
     assert body["status"] == "FAILED"
     assert body["stop_reason"] == "UNHANDLED_ERROR"
@@ -337,7 +301,7 @@ async def test_v2_captures_exact_delivered_final_answer(monkeypatch):
     run_id = uuid.uuid4().hex
     answer = "answer-v2\n原样保留"
     result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
-    monkeypatch.setattr(server, "chat_service", _EvalService(result, answer))
+    monkeypatch.setattr(server.app.state, "chat_service", _EvalService(result, answer), raising=False)
 
     body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
 
@@ -371,7 +335,7 @@ async def test_v2_failed_runtime_never_captures_incidental_output(monkeypatch):
         error_code="RUNTIME_AGENT_FAILURE",
     )
     monkeypatch.setattr(
-        server, "chat_service", _EvalService(result, "must-not-be-captured")
+        server.app.state, "chat_service", _EvalService(result, "must-not-be-captured"), raising=False
     )
 
     body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
@@ -387,7 +351,7 @@ async def test_v2_final_answer_over_utf8_bound_fails_without_partial_content(mon
     run_id = uuid.uuid4().hex
     answer = "中" * 21_846  # 65,538 UTF-8 bytes, not 21,846 bytes.
     result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
-    monkeypatch.setattr(server, "chat_service", _EvalService(result, answer))
+    monkeypatch.setattr(server.app.state, "chat_service", _EvalService(result, answer), raising=False)
 
     body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
 
@@ -401,7 +365,7 @@ async def test_v2_final_answer_over_utf8_bound_fails_without_partial_content(mon
 @pytest.mark.asyncio
 async def test_v2_keeps_rag_and_final_answer_evidence_independent(monkeypatch):
     run_id = uuid.uuid4().hex
-    monkeypatch.setattr(server, "chat_service", _RagAndAnswerEvalService())
+    monkeypatch.setattr(server.app.state, "chat_service", _RagAndAnswerEvalService(), raising=False)
 
     body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
 
@@ -420,7 +384,7 @@ async def test_v2_keeps_rag_and_final_answer_evidence_independent(monkeypatch):
 async def test_evaluation_response_over_1mib_fails_closed_keeps_terminal(monkeypatch):
     run_id = uuid.uuid4().hex
     service = _LargeEvalService(run_id, count=16)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     response = await _execute(_payload(run_id=run_id))
     body = json.loads(response.body)
     assert body["status"] == "SUCCEEDED"

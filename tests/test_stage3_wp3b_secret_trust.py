@@ -3,9 +3,10 @@ from __future__ import annotations
 import io
 from dataclasses import replace
 from datetime import UTC, datetime
+import json
 
+import httpx
 import pytest
-import requests
 
 from core.llm_engine import RemoteLLMEngine
 from core.runtime import (
@@ -28,36 +29,30 @@ from core.settings import EnvironmentProfile, Settings, SettingsValidationError
 MARKER = "WP3B_TEST_SECRET_A91F"
 
 
-class _Response:
-    def __init__(self, status_code: int, payload=None, *, json_error: Exception | None = None):
+class _Failure:
+    def __init__(self, status_code: int, *, body: bytes = b"", error: BaseException | None = None):
         self.status_code = status_code
-        self._payload = payload
-        self._json_error = json_error
-        self.text = MARKER
-
-    def json(self):
-        if self._json_error is not None:
-            raise self._json_error
-        return self._payload
+        self.body = body
+        self.error = error
 
 
-class _Session:
-    def __init__(self, outcome):
-        self.outcome = outcome
-        self.trust_env = None
-        self.authorization_constructed = False
+def _failure_client(outcome: _Failure):
+    captured = {"authorization_constructed": False}
 
-    def mount(self, *args, **kwargs):
-        return None
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization_constructed"] = (
+            request.headers.get("Authorization") == f"Bearer {MARKER}"
+        )
+        if outcome.error is not None:
+            raise outcome.error
+        return httpx.Response(
+            outcome.status_code,
+            headers={"content-type": "text/event-stream"},
+            content=outcome.body,
+            request=request,
+        )
 
-    def post(self, *args, **kwargs):
-        self.authorization_constructed = kwargs["headers"].get("Authorization") == f"Bearer {MARKER}"
-        if isinstance(self.outcome, BaseException):
-            raise self.outcome
-        return self.outcome
-
-    def close(self):
-        return None
+    return captured, httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False)
 
 
 def _safe_projections(error: ModelAdapterInvocationError) -> tuple[str, ...]:
@@ -113,30 +108,33 @@ def _safe_projections(error: ModelAdapterInvocationError) -> tuple[str, ...]:
 @pytest.mark.parametrize(
     "outcome",
     [
-        _Response(401, {"error": MARKER}),
-        _Response(403, {"error": MARKER}),
-        requests.Timeout("timeout " + MARKER),
-        _Response(500, {"error": MARKER}),
-        _Response(200, json_error=ValueError("malformed " + MARKER)),
+        _Failure(401, body=json.dumps({"error": MARKER}).encode()),
+        _Failure(403, body=json.dumps({"error": MARKER}).encode()),
+        _Failure(0, error=httpx.ReadTimeout("timeout " + MARKER)),
+        _Failure(500, body=json.dumps({"error": MARKER}).encode()),
+        _Failure(200, body=b"data: malformed " + MARKER.encode() + b"\n\n"),
     ],
     ids=("401", "403", "timeout", "500", "malformed"),
 )
 def test_provider_failures_keep_secret_out_of_all_safe_projections(outcome) -> None:
-    session = _Session(outcome)
+    session, client = _failure_client(outcome)
     engine = RemoteLLMEngine(
         "https://provider.invalid",
         "example-model",
         api_key=MARKER,
-        session=session,
+        client=client,
         trust_env=False,
     )
-    with pytest.raises(ModelAdapterInvocationError) as captured:
-        GeneratorModelAdapter(engine).invoke(
-            [{"role": "user", "content": "safe"}],
-            max_tokens=8,
-        )
-    assert session.authorization_constructed
-    assert all(MARKER not in projection for projection in _safe_projections(captured.value))
+    try:
+        with pytest.raises(ModelAdapterInvocationError) as captured:
+            GeneratorModelAdapter(engine).invoke(
+                [{"role": "user", "content": "safe"}],
+                max_tokens=8,
+            )
+        assert session["authorization_constructed"]
+        assert all(MARKER not in projection for projection in _safe_projections(captured.value))
+    finally:
+        engine.close()
 
 
 def test_settings_credentials_remain_repr_safe() -> None:

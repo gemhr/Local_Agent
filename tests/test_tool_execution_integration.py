@@ -865,7 +865,7 @@ def test_planner_prompt_derives_description_from_descriptor():
     registry.freeze()
     router = AgentRouter.__new__(AgentRouter)
     router.tool_registry = registry
-    router.agents_config = DEFAULT_AGENT_REGISTRY.legacy_display_config()
+    router.agents_config = DEFAULT_AGENT_REGISTRY.display_config()
     prompt = router._build_tool_planner_prompt("core_router")
     assert "- list_files: List files in a local directory." in prompt
     assert "- complex_workflow_simulator: Run a deterministic" in prompt
@@ -920,7 +920,7 @@ def _planner_router(responses):
     registry.freeze()
     router = AgentRouter.__new__(AgentRouter)
     router.tool_registry = registry
-    router.agents_config = DEFAULT_AGENT_REGISTRY.legacy_display_config()
+    router.agents_config = DEFAULT_AGENT_REGISTRY.display_config()
     router.tool_plan_max_tokens = 120
     iterator = iter(responses)
     router._collect_model_response = lambda *_args, **_kwargs: next(iterator)

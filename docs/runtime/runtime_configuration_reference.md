@@ -12,6 +12,8 @@ PRODUCTION 的 `LOCAL_AGENT_API_HOST` 必须是 numeric loopback（IPv4 `127.0.0
 
 唯一项目级来源是 `core.settings.Settings.load()`。仓库根目录提供 `.env.example` 作为配置名称/模板文档，**Application 不自动加载该文件**（不存在 dotenv loader）；operator 可将其内容复制为 PowerShell 环境变量模板。环境变量在 `server.py`/`main.py` import/进程启动时读取，运行中的请求不动态重载，因此下表均为 `restart_required=yes`。
 
+Runtime mode 配置已经删除：生产只存在 `COORDINATED` 路径，不再提供旧 Runtime 切换或跨 Runtime fallback。
+
 配置解析统一严格：显式 bool 只接受大小写无关的 `1/0/true/false`；显式 int/float 严格词法解析并要求有限值；显式 enum/profile/backend 未知或空值直接失败。数值字段在 Settings Semantic Validation 中按真实 consumer contract 校验 range（timeout/capacity/窗口/计数类 ≥1，cost 类 ≥0，GPU layers ≥-1（`-1`=全部层 offload、`0`=CPU、正整数=指定 offload 层数），port 1..65535）。非法显式值不再静默变 False、clamp 或回落到默认，全部 fail closed；只有缺失 env 才应用默认值。`SettingsValidationError` 是唯一 Settings 级异常类型（`ValueError` 子类），只保存安全码、env 名与 reason code。
 
 配置 precedence（只由 `Settings.load()` 执行一次）：
@@ -31,7 +33,6 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_API_HOST` | Settings/server | string | `127.0.0.1` | valid bind host | no | APPLICATION_SCOPE | yes | internal config | bind/start failure | `127.0.0.1` |
 | `LOCAL_AGENT_API_PORT` | Settings/server | int | `8000` | integer port 1..65535 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed；OS bind 失败 | `8000` |
 | `LOCAL_AGENT_API_BASE_URL` | Settings/client config | string | derived host/port | valid client base URL | no | APPLICATION_SCOPE | yes | internal endpoint | client connection failure | `http://127.0.0.1:8000` |
-| `CHAT_RUNTIME_MODE` | ChatRuntimeSelector | enum | `COORDINATED` | `COORDINATED` | no | APPLICATION_SCOPE/request snapshot | yes | public-safe enum | `LEGACY`/unsupported value fails load | `COORDINATED` |
 | `LOCAL_AGENT_MODEL_PROFILE` | Settings presets | enum | `balanced` | `fast`,`balanced`,`deep` | no | APPLICATION_SCOPE | yes | public-safe enum | unknown/blank 显式值 fail closed | `balanced` |
 | `LOCAL_AGENT_LLM_BACKEND` | lifespan model assembly | enum | `remote` | `local`,`remote`,`hybrid` | yes | APPLICATION_SCOPE | yes | internal config | invalid/empty backend fails load；SERVER role 缺 endpoint 时 startup fail | `local` |
 | `LOCAL_AGENT_MODEL_PATH` | LocalLLMEngine | path | project-relative GGUF | readable GGUF path | local/hybrid | APPLICATION_SCOPE | yes | sensitive path | model load fails startup | `data/models/model.gguf` |
@@ -45,7 +46,7 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_REMOTE_API_KEY` | RemoteLLMEngine | string | empty | provider credential | provider-dependent | APPLICATION_SCOPE | yes | secret | authentication/provider failure | `<secret-store-reference>` |
 | `LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS` | HTTP transport | int seconds | `120` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值在 Settings 期 fail closed（不进入 requests） | `120` |
 | `LOCAL_AGENT_REMOTE_VERIFY_TLS` | HTTP transport | strict bool | profile-derived：LOCAL=`0`、TEST=`1`、PRODUCTION=`1` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；PRODUCTION 显式关闭为 security policy failure | `1` |
-| `LOCAL_AGENT_REMOTE_TRUST_ENV` | HTTP transport | strict bool | profile-derived：LOCAL=`1`、TEST=`0`、PRODUCTION=`0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；决定 Server → Remote LLM Session 是否继承系统 proxy | `0` |
+| `LOCAL_AGENT_REMOTE_TRUST_ENV` | HTTP transport | strict bool | profile-derived：LOCAL=`1`、TEST=`0`、PRODUCTION=`0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；决定 Server → Remote LLM `httpx.AsyncClient` 是否继承系统 proxy | `0` |
 | `LOCAL_AGENT_CLIENT_TRUST_ENV` | HTTP transport | strict bool | `1`（所有 Profile 一致） | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；决定 Desktop Client → LocalAgent Server Session 是否继承系统 proxy；与 `LOCAL_AGENT_REMOTE_TRUST_ENV` 完全独立 | `1` |
 | `LOCAL_AGENT_REMOTE_ENABLE_THINKING` | HTTP payload | strict bool | `0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | internal config | 非法显式值 fail closed | `0` |
 | `LOCAL_AGENT_REMOTE_CONTEXT_WINDOW` | model profile | int | `1000000` | positive practical window；应与真实 Provider capacity 一致 | no | APPLICATION_SCOPE | yes | internal config | routing/capacity mismatch | `1000000` |
@@ -76,7 +77,6 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_DB_LOCK_TIMEOUT_MS` | Database（per-connection） | int | `5000` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 超时映射为 typed `DATABASE_LOCK_TIMEOUT` | `5000` |
 | `LOCAL_AGENT_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS` | Database（per-connection） | int | `10000` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 空闲事务被终止并映射为 typed timeout | `10000` |
 | `LOCAL_AGENT_OBSERVABILITY_QUEUE_CAPACITY` | dispatcher | int | `256` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed；overflow drops/rejects diagnostically | `256` |
-| `LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS` | ObservabilityService / legacy dispatcher | int | `5` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | OTel flush/shutdown 与 exporter timeout 的有界预算；legacy deprecation warning 暂保留 | `5` |
 | `LOCAL_AGENT_OBSERVABILITY_ENABLED` | ObservabilityService | strict bool | `1` | `1`,`0`,`true`,`false` | no | PROCESS_SCOPE | yes | public-safe flag | false 时 Metrics/Tracing 都不观察，业务语义不变 | `1` |
 | `LOCAL_AGENT_METRICS_ENABLED` | ObservabilityService | strict bool | `1` | `1`,`0`,`true`,`false` | no | PROCESS_SCOPE | yes | public-safe flag | false 或总开关关闭时 metrics endpoint 返回 404 | `1` |
 | `LOCAL_AGENT_METRICS_PATH` | FastAPI route | static absolute path | `/metrics` | 以 `/` 开头；不允许 root、query、fragment、path parameter、`/api/*` 或 health/docs route 冲突 | no | APPLICATION_SCOPE | yes | infrastructure endpoint path | 非法值 fail closed；不经过 `/api/*` JWT/limiter | `/metrics` |
@@ -140,7 +140,7 @@ Production 安全不变量（SERVER role）：backend 为 remote/hybrid 时 endp
 
 ## Runtime Selection
 
-默认 `COORDINATED`，且它是唯一 production runtime。`CHAT_RUNTIME_MODE=LEGACY` 在 `Settings.load()` 阶段 fail closed，不能启动 application；Legacy 类型与执行单元仅保留为非 production 测试 seam。endpoint 对每个请求只捕获一次 mode，任何已选路径失败都不会跨 Runtime fallback。
+`COORDINATED` 是唯一 production runtime；聊天 endpoint 固定通过 `CoordinatedRuntimeFactory` 创建 Run scope。
 
 ## Role Boundary
 
@@ -154,7 +154,7 @@ Server 不因缺少 client cookie 失败；Client 不因缺少 remote model endp
 
 ## Model Configuration
 
-Model routing/retry/fallback 属于 Runtime policy；HTTP transport、本地模型加载和共享 Session 并发属于 adapter/application resource。Remote 引擎将 requests/urllib3 自动 retry 显式设为 0，由 RetryExecutor 统一拥有重试。`LOCAL_AGENT_REMOTE_TRUST_ENV` 显式控制 `requests.Session.trust_env`：为 True 时继承进程系统 proxy（operator 显式选择，不记录 proxy URL/credential）；Test/Production 默认 False 不继承宿主 proxy。
+Model routing/retry/fallback 属于 Runtime policy；HTTP transport、本地模型加载和共享 Client 并发属于 adapter/application resource。Remote 引擎使用 application-scope `httpx.AsyncClient`，Provider retry 仍由 RetryExecutor 统一拥有。`LOCAL_AGENT_REMOTE_TRUST_ENV` 显式传给 `httpx.AsyncClient(trust_env=...)`：为 True 时继承进程系统 proxy（operator 显式选择，不记录 proxy URL/credential）；Test/Production 默认 False 不继承宿主 proxy。
 
 ### Client HTTP Proxy Governance
 
@@ -172,12 +172,10 @@ Observability 使用有界进程内队列、两个 PostgreSQL consumer checkpoin
 
 ## Shutdown
 
-Run drain 使用 `RUNTIME_SHUTDOWN_GRACE_SECONDS`，单组件关闭/worker drain 使用 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。存在 active/detached/unknown worker 时 Model close deferred，报告必须查看 `fully_closed`；`completed` 仅为 orchestration completion 兼容别名。Shutdown 同一 coordinator 成功完成后重入返回缓存报告；取消中的重入语义由专项测试覆盖，未知同步 close 状态不自动 double close。
+Run drain 使用 `RUNTIME_SHUTDOWN_GRACE_SECONDS`，单组件关闭/worker drain 使用 `RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。存在 active/detached/unknown worker 时 Model close deferred，报告必须查看 `fully_closed` 与 `orchestration_completed`。Shutdown 同一 coordinator 成功完成后重入返回缓存报告；取消中的重入语义由专项测试覆盖，未知同步 close 状态不自动 double close。
 
 ## Deprecated Configuration
 
-- `LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS`：DEPRECATED。保留字段与 env 一个 Stage 3 兼容周期，仍严格解析；显式配置产生一次安全 deprecation warning（只含 env 名），不改变行为。Replacement：`RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS`。
-- `ChatService.event_channel_capacity`：DEPRECATED ignored constructor shim。真实 per-run channel capacity 的 Owner 是 `LOCAL_AGENT_EVENT_CHANNEL_CAPACITY` → `CoordinatedRuntimeFactory` → `RuntimeEventChannel`；该参数保留以兼容调用方，但不消费、不得接线成第二 Owner。
 
 ## Fault Injection
 

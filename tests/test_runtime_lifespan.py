@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import server
-from core.runtime import ChatRuntimeMode, RuntimeLifecycleState
+from core.runtime import RunRegistry, RuntimeLifecycleState
 
 
 class ConnectedRequest:
@@ -21,19 +21,9 @@ class ConnectedRequest:
 
 
 class RoutingService:
-    def __init__(self, mode: ChatRuntimeMode) -> None:
-        self.mode = mode
-        self.mode_reads = 0
-        self.legacy_calls = 0
+    def __init__(self) -> None:
         self.coordinated_calls = 0
-
-    def selected_runtime_mode(self) -> ChatRuntimeMode:
-        self.mode_reads += 1
-        return self.mode
-
-    def stream_chat(self, **kwargs):
-        self.legacy_calls += 1
-        yield "legacy"
+        self.run_registry = RunRegistry()
 
     async def stream_coordinated_agent_text(self, **kwargs):
         self.coordinated_calls += 1
@@ -41,11 +31,11 @@ class RoutingService:
 
 
 @pytest.mark.asyncio
-async def test_default_chat_endpoint_captures_mode_once_and_routes_coordinated(
+async def test_chat_endpoint_routes_only_through_coordinated_runtime(
     monkeypatch,
 ) -> None:
-    service = RoutingService(ChatRuntimeMode.COORDINATED)
-    monkeypatch.setattr(server, "chat_service", service)
+    service = RoutingService()
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
 
     async def bind_for_routing_test(_request, *, run_id: str, agent_id: str) -> None:
         return None
@@ -65,9 +55,7 @@ async def test_default_chat_endpoint_captures_mode_once_and_routes_coordinated(
     chunks = [chunk async for chunk in response.body_iterator]
 
     assert chunks == ["coordinated"]
-    assert service.mode_reads == 1
     assert service.coordinated_calls == 1
-    assert service.legacy_calls == 0
 
 
 def test_lifecycle_states_and_canonical_runtime_configuration_are_explicit(
@@ -79,9 +67,9 @@ def test_lifecycle_states_and_canonical_runtime_configuration_are_explicit(
         "SHUTTING_DOWN",
         "CLOSED",
     }
-    monkeypatch.setenv("CHAT_RUNTIME_MODE", "LEGACY")
-    with pytest.raises(ValueError, match="CHAT_RUNTIME_MODE"):
-        server.Settings.load()
+    loaded = server.Settings.load()
+    assert not hasattr(loaded, "chat_runtime_mode")
+    assert "CHAT_RUNTIME_MODE" not in inspect.getsource(server.Settings.load)
 
 
 def test_snapshot_production_assembly_is_fail_fast_and_independently_configured(

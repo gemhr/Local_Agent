@@ -134,7 +134,7 @@ async def test_shutdown_top_level_semantics_distinguish_orchestration_and_closur
         shutdown_grace_seconds=0,
         component_timeout_seconds=0.1,
     ).shutdown()
-    assert success.completed is success.orchestration_completed is True
+    assert success.orchestration_completed is True
     assert success.fully_closed is True
     assert success.has_failures is False
     assert success.has_deferred_resources is False

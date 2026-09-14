@@ -8,6 +8,7 @@ import asyncio
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
+import inspect
 import threading
 from typing import AsyncIterator, Awaitable, Callable, Protocol
 
@@ -694,7 +695,12 @@ class RuntimeEventChannel:
         token = self._cancellation_token
         if token is None:
             return await resolve(append_value)
-        token.raise_if_cancelled()
+        try:
+            token.raise_if_cancelled()
+        except BaseException:
+            if inspect.iscoroutine(append_value):
+                append_value.close()
+            raise
         append_task = asyncio.create_task(resolve(append_value))
         cancel_task = asyncio.create_task(token.wait_cancelled())
         try:

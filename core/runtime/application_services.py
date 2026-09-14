@@ -226,17 +226,16 @@ class ApplicationRuntimeServices:
     blocking_executors: tuple[object, ...]
     worker_trackers: tuple[object, ...]
     run_registry: object
-    durable_run_control: object | None = None
-    durable_approval: object | None = None
-    durable_tool_invocation: object | None = None
-    run_control_owner_id: str | None = None
+    durable_run_control: object
+    durable_approval: object
+    durable_tool_invocation: object
+    run_control_owner_id: str
     hybrid_validated_generation: object | None = None
     admission_gate: RuntimeAdmissionGate = field(
         default_factory=RuntimeAdmissionGate
     )
     trace_export_dispatcher: object | None = None
     coordinated_step_executor: object | None = None
-    legacy_step_executor: object | None = None
     snapshot_enabled: bool = False
     recovery_enabled: bool = False
     activity_tracker_factory: Callable[[str], RuntimeActivityTracker] = (
@@ -254,6 +253,14 @@ class ApplicationRuntimeServices:
     )
 
     def __post_init__(self) -> None:
+        if self.durable_run_control is None:
+            raise ValueError("durable_run_control is required")
+        if self.durable_approval is None:
+            raise ValueError("durable_approval is required")
+        if self.durable_tool_invocation is None:
+            raise ValueError("durable_tool_invocation is required")
+        if not isinstance(self.run_control_owner_id, str) or not self.run_control_owner_id.strip():
+            raise ValueError("run_control_owner_id is required")
         if self.snapshot_enabled != (self.snapshot_store is not None):
             raise ValueError("snapshot_enabled must match snapshot_store availability")
         if self.recovery_enabled != (self.recovery_validator is not None):
@@ -288,7 +295,6 @@ class ApplicationRuntimeServices:
             self.durable_run_control,
             self.run_control_owner_id,
             self.coordinated_step_executor,
-            self.legacy_step_executor,
             *self.blocking_executors,
             *self.worker_trackers,
         ):

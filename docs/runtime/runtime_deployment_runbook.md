@@ -192,20 +192,10 @@ Settings Parse / Semantic Validation → SERVER_ROLE Validation → lifecycle ST
   Startup 绝不自动 clear / rebuild Chroma，绝不自动迁移已有数据。
 - `/health`、`/readyz` 不执行 preflight / migration / repair / restore / rebuild（保持只读投影）。
 
-### Explicit migration（SCRIPT_ROLE only，Server stopped）
+### Explicit PostgreSQL migration（Server stopped）
 
-```powershell
-uv run python scripts/manage_persistence.py preflight
-uv run python scripts/manage_persistence.py migrate --backup-confirmed
-```
-
-- `preflight`：只读；输出每 Store `NEW / CURRENT / MIGRATION_REQUIRED / REBUILD_REQUIRED / UNSUPPORTED / FAILED`。
-- `migrate`：先全 Store preflight；任何 UNSUPPORTED/FAILED 或缺少 `--backup-confirmed`（已有数据需要 mutation 时）
-  都 non-zero 且零 mutation。每 Store 独立单事务（Memory `user_version=2` 与 schema change 同事务原子提交；
-  Journal 只加 nullable span 列绝不 rewrite 历史 row；Checkpoint 只 drop/recreate derived table）。
-- `--backup-confirmed` 只是 Operator acknowledgement，不证明备份内容正确；备份正确性由副本 preflight 验证。
-- Migration 是 forward-only：迁移提交后 `old binary compatibility NOT ASSUMED`。无 downgrade migration。
-- Client 进程绝不打开 / preflight / migrate Server persistence。
+需要变更 schema 时由 operator 执行 `uv run alembic upgrade head`；迁移提交后为 forward-only，旧 binary compatibility 不作保证。
+Client 进程绝不打开或修改 Server persistence。
 
 持久化目录存在**不等于** Runtime Recovery 或 automatic resume。
 
@@ -214,7 +204,7 @@ uv run python scripts/manage_persistence.py migrate --backup-confirmed
 两个 transport scope，完全独立：
 
 ```text
-LOCAL_AGENT_REMOTE_TRUST_ENV  = Server → Remote LLM Session
+LOCAL_AGENT_REMOTE_TRUST_ENV  = Server → Remote LLM httpx.AsyncClient
 LOCAL_AGENT_CLIENT_TRUST_ENV  = Desktop Client → LocalAgent Server Session
 ```
 
@@ -256,7 +246,7 @@ taskkill /F
 ### Shutdown Truth
 
 ```text
-ShutdownReport.completed     # 只是 orchestration_completed 兼容别名
+ShutdownReport.orchestration_completed
 ShutdownReport.fully_closed  # 运维判断完整安全关闭应看这个
 ```
 
@@ -303,8 +293,7 @@ stop Server（确认进程退出；force-kill 不算可信前置）
 → restore target 为空或已完成整组替换（禁止目录内混合覆盖）
 → 从同一 backup epoch 恢复 Memory / Journal / Snapshot（if enabled）/ KB source
 → 恢复兼容 Chroma（整体恢复并验证 marker）或使用匹配 embedding artifact 从 source 显式 rebuild
-→ checkpoint 默认 recreate（即使恢复旧 checkpoint 也必须通过 exact-shape preflight）
-→ 显式 full preflight（Server 启动前；不兼容则不启动）
+→ PostgreSQL schema/readiness 检查（Server 启动前；不兼容则不启动）
 → 启动 known-compatible code/config/artifact
 → /health + /readyz + Memory/Journal/KB safe functional smoke
 ```
@@ -333,7 +322,7 @@ schema-changing migration committed
 
 - 任何 schema migration 提交前必须已取并验证 backup；migration 失败（在任何 commit 前）可只回滚 code/artifact/config。
 - 不实现 downgrade migration / reverse SQL；需要回滚旧 binary 时恢复 pre-migration backup set。
-- `CHAT_RUNTIME_MODE=legacy` 会在 Settings 阶段 fail closed，不是 Runtime rollback。代码回滚仍必须部署 matching known-good coordinated artifact/config；它不能替代 data rollback。
+- Runtime mode 配置入口已删除。代码回滚必须部署 matching known-good coordinated artifact/config；不能通过切换旧 Runtime 替代 data rollback。
 
 **不实现 automatic deployment rollback。**
 

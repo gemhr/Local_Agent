@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from scripts.rag_evaluation_runtime import RetrievalBaselineService
 
-    server.chat_service = RetrievalBaselineService(
+    server.app.state.chat_service = RetrievalBaselineService(
         manager, collection_name=BEIR_SCIFACT_COLLECTION_NAME
     )
     print(

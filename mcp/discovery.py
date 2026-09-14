@@ -33,7 +33,7 @@ _DISCOVERY_FAILURE_CLOSE_TIMEOUT_SECONDS = 2.0
 
 @dataclass(frozen=True)
 class McpServerDiscoveryOutcome:
-    """单 server discovery 输出：快照事实 + AVAILABLE 时保留的 session。"""
+    """单 server discovery 输出：快照事实 + AVAILABLE 时保留的 client。"""
 
     result: McpServerDiscoveryResult
     client: StdioMcpClient | None
@@ -48,7 +48,7 @@ async def discover_server(
 ) -> McpServerDiscoveryOutcome:
     """对一个 configured server 执行 initialize + tools/list。
 
-    AVAILABLE 时返回仍打开的 client/session（由调用方组件持有并在
+    AVAILABLE 时返回仍打开的 client（由调用方组件持有并在
     application shutdown 时关闭）；失败时先 bounded 关闭子进程再返回
     ``DISCOVERY_FAILED`` 结果。
     """

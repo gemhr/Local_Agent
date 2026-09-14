@@ -24,7 +24,7 @@ from core.runtime import (
     ParallelFailureMode,
     RunBudget,
     RunCoordinator,
-    RunHandle,
+    ActiveRunControlHandle,
     RunRegistry,
     SerialScheduler,
     create_run_context,
@@ -86,7 +86,13 @@ def make_dynamic_coordinator(service) -> RunCoordinator:
     context.attach_budget_ledger(ledger)
     state = AgentState.for_run_context(context.run_id)
     machine = AgentStateMachine()
-    handle = RunHandle(context.run_id, source, state, "run_coordinator")
+    handle = ActiveRunControlHandle(
+        run_id=context.run_id,
+        runtime_mode="COORDINATED",
+        cancellation_source=source,
+        owner="run_coordinator",
+        active_step_count=lambda: len(state.active_step_ids),
+    )
     return RunCoordinator.for_dynamic_resolver(
         run_context=context,
         plan_resolver=PlanResolver(

@@ -70,6 +70,5 @@ def test_shutdown_completed_alias_does_not_mean_fully_closed() -> None:
         components=(),
     )
 
-    assert report.completed is True
     assert report.orchestration_completed is True
     assert report.fully_closed is False

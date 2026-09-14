@@ -413,7 +413,7 @@ async def _start_pending_run(
         coordinated_runtime_factory=factory,
         run_registry=run_registry,
     )
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     run_id = uuid.uuid4().hex
     call = _StreamingASGICall(
         server.app,
@@ -818,7 +818,7 @@ async def test_run_deadline_then_late_approve_410_zero_execution(monkeypatch):
         coordinated_runtime_factory=factory,
         run_registry=run_registry,
     )
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     scope = await factory.create_run_scope(
         "core_router", "question", timeout_seconds=0.5
     )
@@ -934,7 +934,7 @@ def test_validation_matrix_422_and_registry_not_called(
 ):
     counting = _CountingRunRegistry()
     monkeypatch.setattr(
-        server, "chat_service", SimpleNamespace(run_registry=counting)
+        server.app.state, "chat_service", SimpleNamespace(run_registry=counting), raising=False
     )
     client = TestClient(server.app)
     approve = client.post(
@@ -956,7 +956,7 @@ def test_validation_matrix_422_and_registry_not_called(
 def test_missing_run_via_testclient_returns_410_inactive(monkeypatch):
     counting = _CountingRunRegistry()
     monkeypatch.setattr(
-        server, "chat_service", SimpleNamespace(run_registry=counting)
+        server.app.state, "chat_service", SimpleNamespace(run_registry=counting), raising=False
     )
     client = TestClient(server.app)
     response = client.post(
@@ -974,7 +974,7 @@ def test_missing_run_via_testclient_returns_410_inactive(monkeypatch):
 def test_approval_routes_do_not_accept_get(monkeypatch):
     counting = _CountingRunRegistry()
     monkeypatch.setattr(
-        server, "chat_service", SimpleNamespace(run_registry=counting)
+        server.app.state, "chat_service", SimpleNamespace(run_registry=counting), raising=False
     )
     client = TestClient(server.app)
     response = client.get(

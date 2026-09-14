@@ -5,25 +5,15 @@
 import asyncio
 from collections.abc import AsyncIterator, Callable
 import math
-import threading
-import warnings
-from typing import Any, Generator, Optional
+from typing import Any, Optional
 
 from core.agent_router import AgentRouter
 from core.runtime.metrics import ApplicationRuntimeGaugeProvider
 from core.runtime.observability_dispatcher import RuntimeObservabilityDispatcher
 from core.runtime import (
-    AgentLoop,
     AgentState,
-    LEGACY_DEFAULT_SESSION_ID,
-    LEGACY_AGENT_ROUTER_STEP_ID,
-    LegacyAgentRouterDriver,
-    create_run_context,
-    BudgetLedger,
     RunBudget,
     CancellationReason,
-    ActiveRunControlHandle,
-    RunHandle,
     process_run_registry,
     RunCoordinatorResult,
     OutputDeltaPayload,
@@ -32,15 +22,9 @@ from core.runtime import (
     ChatStreamCompatibilityAdapter,
     ChatStreamProtocolError,
     safe_transport_error_chunk,
-    ChatRuntimeMode,
-    ChatRuntimeSelector,
     CoordinatedRuntimeFactory,
     RuntimeAdmissionGate,
     RuntimeAdmissionRejectedError,
-    BlockingTaskHandle,
-    BlockingTaskKind,
-    BoundedBlockingExecutor,
-    process_legacy_step_executor,
     FaultInjectionController,
     ProjectIdentity,
     ProjectMemoryGrant,
@@ -62,15 +46,12 @@ class ChatService:
         self,
         router: AgentRouter,
         state_observer: Callable[[AgentState], None] | None = None,
-        event_channel_capacity: int = 32,
         event_journal: RunEventJournal | None = None,
         observability_dispatcher: RuntimeObservabilityDispatcher | None = None,
         gauge_provider: ApplicationRuntimeGaugeProvider | None = None,
-        runtime_selector: ChatRuntimeSelector | None = None,
         coordinated_runtime_factory: CoordinatedRuntimeFactory | None = None,
         run_registry=None,
         admission_gate: RuntimeAdmissionGate | None = None,
-        legacy_step_executor: BoundedBlockingExecutor | None = None,
         disconnect_grace_seconds: float = 1.0,
     ) -> None:
         """初始化应用服务。
@@ -81,32 +62,9 @@ class ChatService:
         """
         self.router = router
         self._state_observer = state_observer
-        # DEPRECATED ignored constructor shim（Stage 3 WP1-A）：真实 per-run
-        # channel capacity 的 Owner 是 Settings -> CoordinatedRuntimeFactory ->
-        # RuntimeEventChannel。本参数只为 source 兼容而保留，明确不消费、不得
-        # 接线成第二 capacity Owner。
-        if (
-            isinstance(event_channel_capacity, bool)
-            or not isinstance(event_channel_capacity, int)
-            or event_channel_capacity <= 0
-        ):
-            raise ValueError("event_channel_capacity 必须是正整数")
-        if event_channel_capacity != 32:
-            warnings.warn(
-                "ChatService event_channel_capacity is deprecated and ignored; "
-                "configure capacity via LOCAL_AGENT_EVENT_CHANNEL_CAPACITY",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        self._event_channel_capacity = event_channel_capacity
         self._event_journal = event_journal
         self._observability_dispatcher = observability_dispatcher
         self._gauge_provider = gauge_provider
-        self._runtime_selector = runtime_selector or ChatRuntimeSelector(
-            ChatRuntimeMode.COORDINATED
-        )
-        if not isinstance(self._runtime_selector, ChatRuntimeSelector):
-            raise TypeError("runtime_selector must be ChatRuntimeSelector")
         if coordinated_runtime_factory is not None and not isinstance(
             coordinated_runtime_factory, CoordinatedRuntimeFactory
         ):
@@ -122,9 +80,6 @@ class ChatService:
         )
         self._admission_gate = (
             admission_gate or factory_gate or RuntimeAdmissionGate()
-        )
-        self._legacy_step_executor = (
-            legacy_step_executor or process_legacy_step_executor
         )
         if (
             isinstance(disconnect_grace_seconds, bool)
@@ -145,111 +100,6 @@ class ChatService:
     def admission_gate(self) -> RuntimeAdmissionGate:
         return self._admission_gate
 
-    def selected_runtime_mode(self) -> ChatRuntimeMode:
-        """Capture the configured enum once at the request boundary."""
-        return self._runtime_selector.selected_runtime_mode()
-
-    def submit_legacy_stream_step(
-        self,
-        operation: Callable[[], str | None],
-        *,
-        run_id: str,
-    ) -> BlockingTaskHandle[str | None]:
-        """Submit one generator advance to the dedicated Legacy worker owner."""
-        executor = self._legacy_step_executor
-        if executor is None:
-            raise ChatRuntimeTransportError(
-                "LEGACY_WORKER_NOT_CONFIGURED"
-            )
-
-        def cancellation_check() -> None:
-            handle = self._run_registry.get(run_id)
-            if handle is not None:
-                handle.cancellation_source.token.raise_if_cancelled()
-
-        return executor.submit_nowait(
-            operation,
-            kind=BlockingTaskKind.LEGACY_STREAM_STEP,
-            run_id=run_id,
-            operation_id="legacy_stream_next",
-            cancellation_check=cancellation_check,
-        )
-
-    def stream_chat(
-        self,
-        agent_id: str,
-        query: str,
-        file_path: str = "",
-        run_id: str | None = None,
-        *,
-        retrieval_cache_authz_domain: str | None = None,
-    ) -> Generator[str, None, None]:
-        """流式执行一次对话。
-
-        Args:
-            agent_id: 智能体标识。
-            query: 用户输入文本。
-            file_path: 可选附件路径。
-
-        Yields:
-            str: 助手增量输出。
-        """
-        self._admission_gate.acquire()
-        final_query = query
-        if file_path:
-            final_query += f"\n\nPlease analyze this file path: '{file_path}'"
-        run_context, cancellation_source = create_run_context(
-            entry_agent_id=agent_id,
-            session_id=LEGACY_DEFAULT_SESSION_ID,
-            run_id=run_id,
-        )
-        run_context.attach_retrieval_cache_access(retrieval_cache_authz_domain)
-        # 在此生成器栈帧中保留取消源，避免丢失取消控制权。
-        _cancellation_source = cancellation_source
-        # ChatService 是当前 Legacy 主链路的 Parent Runtime，单 Run 创建并持有账本。
-        run_context.attach_budget_ledger(BudgetLedger(RunBudget(), deadline_remaining=run_context.remaining_seconds))
-        agent_state = AgentState.for_run_context(run_context.run_id)
-        try:
-            self._run_registry.register(
-                ActiveRunControlHandle(
-                    run_id=run_context.run_id,
-                    runtime_mode="LEGACY",
-                    cancellation_source=cancellation_source,
-                    owner="chat_service",
-                    active_step_count=lambda: len(
-                        agent_state.active_step_ids
-                    ),
-                )
-            )
-        except BaseException:
-            self._admission_gate.release()
-            raise
-        driver = LegacyAgentRouterDriver(self.router, user_query=final_query, agent_id=agent_id)
-        loop = AgentLoop()
-        deadline_timer: threading.Timer | None = None
-        remaining = run_context.remaining_seconds()
-        if remaining is not None:
-            # Timer 只属于本 Run，finally 一定取消；不创建永久后台任务。
-            deadline_timer = threading.Timer(remaining, cancellation_source.cancel, args=(CancellationReason.REQUEST_DEADLINE_EXCEEDED,))
-            deadline_timer.daemon = True
-            deadline_timer.start()
-        try:
-            yield from loop.run_stream(
-                run_context=run_context,
-                agent_state=agent_state,
-                driver=driver,
-                state_observer=self._observe_state,
-            )
-        except GeneratorExit:
-            cancellation_source.cancel(CancellationReason.CLIENT_DISCONNECTED)
-            raise
-        finally:
-            if deadline_timer is not None:
-                deadline_timer.cancel()
-            self._run_registry.unregister(run_context.run_id)
-            self._admission_gate.release()
-            _ = _cancellation_source
-
     def _observe_state(self, agent_state: AgentState) -> None:
         """通知可选观察者，但不在服务对象上存储 AgentState。"""
         if self._state_observer is not None:
@@ -268,8 +118,7 @@ class ChatService:
     ) -> tuple[str | None, RunCoordinatorResult]:
         """通过 RunCoordinator 执行一条真实的非流式单 Agent 路径。
 
-        默认 ``stream_chat`` 继续由 Legacy AgentLoop 持有生命周期；调用方必须
-        二选一，不能让同一个 run_id 同时进入 Legacy 与 Coordinated 路径。
+        所有聊天请求均通过 Coordinated Runtime；调用方不得绕过其生命周期。
         """
         events: list[RuntimeEvent] = []
         results: list[RunCoordinatorResult] = []

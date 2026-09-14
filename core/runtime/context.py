@@ -15,7 +15,7 @@ import uuid
 from core.runtime.cancellation import CancellationSource, CancellationToken
 from core.runtime.project_memory import ProjectIdentity, ProjectMemoryGrant
 
-LEGACY_DEFAULT_SESSION_ID = "legacy-default"
+DEFAULT_SESSION_ID = "default"
 
 
 class RunDeadlineExceededError(TimeoutError):
@@ -237,7 +237,7 @@ class RunContext:
         cls,
         *,
         entry_agent_id: str,
-        session_id: str = LEGACY_DEFAULT_SESSION_ID,
+        session_id: str = DEFAULT_SESSION_ID,
         trace_id: str | None = None,
         run_id: str | None = None,
         timeout_seconds: float | None = None,
@@ -263,7 +263,7 @@ class RunContext:
 
     @property
     def session_id(self) -> str:
-        """返回兼容性会话标识符。"""
+        """返回当前会话标识符。"""
         return self.data.identifiers.session_id
 
     @property
@@ -299,7 +299,7 @@ def _ensure_utc_datetime(value: datetime, field_name: str) -> None:
 def create_run_context(
     *,
     entry_agent_id: str,
-    session_id: str = LEGACY_DEFAULT_SESSION_ID,
+    session_id: str = DEFAULT_SESSION_ID,
     trace_id: str | None = None,
     run_id: str | None = None,
     timeout_seconds: float | None = None,

@@ -6,8 +6,6 @@ import pytest
 
 from core.chat_service import ChatService
 from core.runtime import (
-    ChatRuntimeMode,
-    ChatRuntimeSelector,
     CoordinatedRuntimeFactory,
     InMemoryRunEventJournal,
     InMemorySnapshotStore,
@@ -42,9 +40,6 @@ def _assembled_service(router):
     factory = CoordinatedRuntimeFactory(router, services)
     service = ChatService(
         router,
-        runtime_selector=ChatRuntimeSelector(
-            ChatRuntimeMode.COORDINATED
-        ),
         coordinated_runtime_factory=factory,
         run_registry=registry,
     )
@@ -64,7 +59,6 @@ async def test_default_composition_root_model_output_and_terminal_matrix():
     ]
 
     event_types = [event.event_type for event in events]
-    assert service.selected_runtime_mode() is ChatRuntimeMode.COORDINATED
     assert router.calls == 1
     assert event_types.count(RuntimeEventType.OUTPUT_DELTA) == 1
     assert event_types.count(RuntimeEventType.RUN_COMPLETED) == 1

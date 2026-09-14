@@ -17,7 +17,6 @@ from core.runtime import (
     BoundedBlockingExecutor,
     BudgetLedger,
     CancellationReason,
-    ChatRuntimeMode,
     CitationBinding,
     ContextTrustLevel,
     RetrievalCandidate,
@@ -304,9 +303,6 @@ class _EvaluationService:
         self.fail_capture = fail_capture
         self.seen_collector = None
 
-    def selected_runtime_mode(self):
-        return ChatRuntimeMode.COORDINATED
-
     async def run_coordinated_agent(self, **kwargs):
         collector = current_retrieval_evaluation_collector()
         self.seen_collector = collector
@@ -327,9 +323,9 @@ async def test_evaluation_endpoint_keeps_runtime_terminal_independent_and_resets
         run_id=run_id,
     )
     monkeypatch.setattr(
-        server, "chat_service", _EvaluationService(result, fail_capture=True)
+        server.app.state, "chat_service", _EvaluationService(result, fail_capture=True), raising=False
     )
-    response = await server.runtime_evaluation_execute_endpoint(
+    response = await server.runtime_evaluation_execute_v2_endpoint(
         server.RuntimeExecuteRequest(
             agent_id="core_router",
             query="test",
@@ -350,8 +346,8 @@ async def test_evaluation_endpoint_without_retrieval_is_complete(monkeypatch) ->
     run_id = uuid.uuid4().hex
     result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
     service = _EvaluationService(result, fail_capture=False)
-    monkeypatch.setattr(server, "chat_service", service)
-    response = await server.runtime_evaluation_execute_endpoint(
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    response = await server.runtime_evaluation_execute_v2_endpoint(
         server.RuntimeExecuteRequest(
             agent_id="core_router",
             query="test",
@@ -378,7 +374,7 @@ async def test_wp1_endpoint_remains_exact_five_fields_and_has_no_collector(
         error_code="TEST_FAILURE",
     )
     service = _EvaluationService(result, fail_capture=False)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     response = await server.runtime_execute_endpoint(
         server.RuntimeExecuteRequest(
             agent_id="core_router",
@@ -595,7 +591,7 @@ def test_timed_out_retrieval_produces_truthful_artifact() -> None:
 def test_cancelled_retrieval_produces_truthful_artifact() -> None:
     adapter = FakeRetrievalAdapter()
     context, source = make_context()
-    source.cancel(CancellationReason.USER_CANCELLED)
+    source.cancel(CancellationReason.REQUEST_CANCELLED)
     collector = RetrievalEvaluationCollector(context.run_id)
     token = install_retrieval_evaluation_collector(collector)
     try:

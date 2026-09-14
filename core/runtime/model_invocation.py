@@ -253,14 +253,17 @@ class GeneratorModelAdapter:
                 )
             native_stream = getattr(self._engine, "agenerate", None)
             if not callable(native_stream):
-                return await asyncio.to_thread(
+                response = await asyncio.to_thread(
                     self.invoke,
                     messages,
                     max_tokens=max_tokens,
                     generation_options=options,
                     run_context=run_context,
-                    on_delta=on_delta,
                 )
+                if response.output and on_delta is not None:
+                    await on_delta(response.output)
+                    accepted_output = True
+                return response
             chunks: list[str] = []
             actual_usage = None
             from core.llm_engine import TextDelta, UsageDelta
@@ -463,15 +466,6 @@ def classify_model_failure(exc: BaseException) -> ModelFailureCategory:
         return ModelFailureCategory.INVALID_REQUEST
     if isinstance(status_code, int) and status_code >= 500:
         return ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE
-    try:
-        import requests
-
-        if isinstance(exc, requests.Timeout):
-            return ModelFailureCategory.PROVIDER_TIMEOUT
-        if isinstance(exc, requests.ConnectionError):
-            return ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE
-    except ImportError:  # pragma: no cover - requests 是当前项目依赖
-        pass
     if isinstance(exc, TimeoutError):
         return ModelFailureCategory.PROVIDER_TIMEOUT
     if isinstance(exc, ConnectionError):

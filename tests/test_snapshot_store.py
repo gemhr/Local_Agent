@@ -4,7 +4,6 @@ import pytest
 
 from core.runtime.snapshot_store import (
     InMemorySnapshotStore,
-    SQLiteSnapshotStore,
     SnapshotErrorCode,
     SnapshotSaveStatus,
     SnapshotStoreError,
@@ -12,9 +11,8 @@ from core.runtime.snapshot_store import (
 from test_snapshot_contract import make_snapshot
 
 
-@pytest.mark.parametrize("factory", [InMemorySnapshotStore, lambda: SQLiteSnapshotStore(":memory:")])
-def test_save_get_latest_list_duplicate_conflict_and_close(factory):
-    store = factory()
+def test_save_get_latest_list_duplicate_conflict_and_close():
+    store = InMemorySnapshotStore()
     first = make_snapshot()
     second = make_snapshot(snapshot_id="snapshot-2")
     assert store.save(first) is SnapshotSaveStatus.SAVED
@@ -42,15 +40,3 @@ def test_same_id_different_valid_content_is_conflict():
     with pytest.raises(SnapshotStoreError) as caught:
         store.save(other)
     assert caught.value.error_code is SnapshotErrorCode.SNAPSHOT_ID_CONFLICT
-
-
-def test_sqlite_survives_restart_and_duplicate(tmp_path):
-    path = tmp_path / "snapshots.sqlite3"
-    snapshot = make_snapshot()
-    store = SQLiteSnapshotStore(str(path))
-    assert store.save(snapshot) is SnapshotSaveStatus.SAVED
-    store.close()
-    reopened = SQLiteSnapshotStore(str(path))
-    assert reopened.get(snapshot.snapshot_id) == snapshot
-    assert reopened.save(snapshot) is SnapshotSaveStatus.DUPLICATE
-    reopened.close()

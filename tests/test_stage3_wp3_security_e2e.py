@@ -11,7 +11,6 @@ import pytest
 
 import server
 from core.runtime import (
-    ChatRuntimeMode,
     RESOURCE_DENIAL_MESSAGE,
     ResourceAuthorizationOutcome,
     RuntimeEventType,
@@ -137,7 +136,6 @@ class _AsgiHarness:
 def _settings(tmp_path: Path):
     return replace(
         server.settings,
-        chat_runtime_mode=ChatRuntimeMode.COORDINATED,
         llm_backend="local",
         model_path=str(tmp_path / "missing-model"),
         snapshot_store_enabled=False,

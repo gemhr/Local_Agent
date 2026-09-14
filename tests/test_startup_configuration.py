@@ -528,20 +528,6 @@ def test_lifespan_publishes_application_metadata() -> None:
 
 # ---- deprecated surfaces ----
 
-def test_deprecated_observability_timeout_warns_without_value(monkeypatch) -> None:
-    monkeypatch.setenv("LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS", "7")
-    with pytest.warns(DeprecationWarning) as record:
-        settings = Settings.load()
-    # 仍保留字段并严格解析，但无行为接线。
-    assert settings.observability_shutdown_timeout_seconds == 7
-    messages = [str(item.message) for item in record]
-    assert any(
-        "LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS" in message
-        for message in messages
-    )
-    assert all("= 7" not in message for message in messages)
-
-
 def test_chat_service_capacity_shim_warns_when_explicit() -> None:
     with pytest.warns(DeprecationWarning):
         ChatService(object(), event_channel_capacity=1)  # type: ignore[arg-type]

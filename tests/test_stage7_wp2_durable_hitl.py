@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import threading
@@ -44,6 +45,7 @@ from core.runtime import (
 from core.runtime.event_journal_store import InMemoryRunEventJournal
 from core.runtime.tool_contract import ToolInvocation, safe_key_digest
 import server
+from tests._runtime_assembly_fixtures import make_services
 from tests.test_stage6_wp2_ownership import _create_user, _token
 from tests.test_tool_approval_router_integration import _make_router, _tool_args
 from tests.test_tool_governance import production_registry, production_service
@@ -163,7 +165,13 @@ async def _authenticated_http_setup(database, monkeypatch, run_id: str):
     # HTTP 命令使用不同 service 实例，模拟命中另一 backend。
     remote_service = DurableApprovalService(database)
     monkeypatch.setattr(
-        server,
+        server.app.state,
+        "runtime_services",
+        replace(make_services(), durable_approval=remote_service),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state,
         "chat_service",
         SimpleNamespace(
             run_registry=SimpleNamespace(),
@@ -171,6 +179,7 @@ async def _authenticated_http_setup(database, monkeypatch, run_id: str):
                 services=SimpleNamespace(durable_approval=remote_service)
             ),
         ),
+        raising=False,
     )
     monkeypatch.setattr(
         server.app.state,
@@ -348,12 +357,15 @@ async def test_authenticated_http_approve_reaches_durable_service(clean_database
     approval = DurableApprovalService(clean_database)
     request = _request(run_id)
     await approval.create(request)
-    monkeypatch.setattr(server, "chat_service", SimpleNamespace(
+    monkeypatch.setattr(server.app.state, "chat_service", SimpleNamespace(
         run_registry=SimpleNamespace(),
-        _coordinated_runtime_factory=SimpleNamespace(
-            services=SimpleNamespace(durable_approval=approval)
-        ),
-    ))
+    ), raising=False)
+    monkeypatch.setattr(
+        server.app.state,
+        "runtime_services",
+        replace(make_services(), durable_approval=approval),
+        raising=False,
+    )
     monkeypatch.setattr(server.app.state, "auth_service", AuthService(clean_database, settings), raising=False)
     monkeypatch.setattr(server.app.state, "authorization_service", AuthorizationService(clean_database), raising=False)
     monkeypatch.setattr(server.app.state, "rate_limiter", RedisTokenBucketRateLimiter(SimpleNamespace(), SimpleNamespace(rate_limit_enabled=False, rate_limit_capacity=1, rate_limit_refill_rate=1.0)), raising=False)

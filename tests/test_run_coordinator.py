@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from core.agent_router import AgentRouter
-from core.chat_service import ChatService
 from core.runtime.runtime_factory import CoordinatedSingleAgentDriver
 from tests._runtime_assembly_fixtures import make_coordinated_chat_service
 from core.memory_manager import MemoryManager
@@ -37,7 +36,7 @@ from core.runtime import (
     RunCoordinatorError,
     RunDeadlineExceededError,
     RunFinalizationDecision,
-    RunHandle,
+    ActiveRunControlHandle,
     RunRegistry,
     RunStateEvent,
     RunEventType,
@@ -161,11 +160,12 @@ class CoordinatorFixture:
             self.machine, max_concurrency=4
         )
         self.registry = RunRegistry()
-        self.handle = RunHandle(
-            self.context.run_id,
-            self.source,
-            self.state,
-            "run_coordinator",
+        self.handle = ActiveRunControlHandle(
+            run_id=self.context.run_id,
+            runtime_mode="COORDINATED",
+            cancellation_source=self.source,
+            owner="run_coordinator",
+            active_step_count=lambda: len(self.state.active_step_ids),
         )
         self.policy = policy or ParallelExecutionPolicy(
             2, ParallelFailureMode.BEST_EFFORT
@@ -326,7 +326,7 @@ class RunCoordinatorDecisionTests(unittest.IsolatedAsyncioTestCase):
     async def test_trace_active_span_invariant_after_cancel_and_timeout(self) -> None:
         cancelled_recorder = InMemorySpanRecorder()
         cancelled = CoordinatorFixture(span_recorder=cancelled_recorder)
-        cancelled.source.cancel(CancellationReason.USER_CANCELLED)
+        cancelled.source.cancel(CancellationReason.REQUEST_CANCELLED)
         await cancelled.coordinator.execute(driver=AsyncDriver())
         self.assertEqual(cancelled_recorder.health_snapshot().active_span_count, 0)
 
@@ -342,7 +342,7 @@ class RunCoordinatorDecisionTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_level_cancellation_mapping(self) -> None:
         cases = (
             (
-                CancellationReason.USER_CANCELLED,
+                CancellationReason.REQUEST_CANCELLED,
                 RunStatus.CANCELLED,
                 StopReason.USER_CANCELLED,
             ),
@@ -352,12 +352,12 @@ class RunCoordinatorDecisionTests(unittest.IsolatedAsyncioTestCase):
                 StopReason.CLIENT_DISCONNECTED,
             ),
             (
-                CancellationReason.SYSTEM_SHUTDOWN,
+                CancellationReason.SERVER_SHUTDOWN,
                 RunStatus.CANCELLED,
                 StopReason.SYSTEM_SHUTDOWN,
             ),
             (
-                CancellationReason.DEADLINE_EXCEEDED,
+                CancellationReason.REQUEST_DEADLINE_EXCEEDED,
                 RunStatus.FAILED,
                 StopReason.DEADLINE_EXCEEDED,
             ),
@@ -614,7 +614,7 @@ class RunCoordinatorRealEntryTests(unittest.IsolatedAsyncioTestCase):
 
             def generate(self, messages, **kwargs):
                 self.calls += 1
-                if "LocalAgent Planner" in messages[0]["content"]:
+                if self.calls == 1:
                     yield json.dumps(
                         {
                             "schema_version": 1,
@@ -651,10 +651,13 @@ class RunCoordinatorRealEntryTests(unittest.IsolatedAsyncioTestCase):
             output, result = await service.run_coordinated_agent(
                 "core_router", "检查运行时所有权", persist=False
             )
-        self.assertEqual(output, "coordinated answer")
-        self.assertEqual(result.status, RunStatus.SUCCEEDED)
-        self.assertEqual(plan_count, 0)
+        self.assertEqual(
+            (result.status, result.error_code),
+            (RunStatus.SUCCEEDED, None),
+        )
         self.assertEqual(model.calls, 2)
+        self.assertEqual(output, "coordinated answer")
+        self.assertEqual(plan_count, 0)
         self.assertEqual(states[-1].status, RunStatus.SUCCEEDED)
 
     def test_new_driver_has_no_lifecycle_or_registry_writes(self) -> None:
@@ -667,11 +670,6 @@ class RunCoordinatorRealEntryTests(unittest.IsolatedAsyncioTestCase):
             "unregister(",
         ):
             self.assertNotIn(forbidden, source)
-
-    def test_legacy_stream_entry_remains_available(self) -> None:
-        self.assertTrue(hasattr(ChatService, "stream_chat"))
-        self.assertTrue(hasattr(ChatService, "run_coordinated_agent"))
-
 
 if __name__ == "__main__":
     unittest.main()

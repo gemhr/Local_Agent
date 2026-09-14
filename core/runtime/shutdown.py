@@ -62,11 +62,6 @@ class ShutdownReport:
         )
 
     @property
-    def completed(self) -> bool:
-        """Compatibility alias for orchestration completion, not full closure."""
-        return self.orchestration_completed
-
-    @property
     def has_failures(self) -> bool:
         return any(
             item.error_code is not None
@@ -474,7 +469,7 @@ class GracefulShutdownCoordinator:
 def _safe_runtime_mode(value: object) -> str:
     return (
         value
-        if value in {"COORDINATED", "LEGACY", "LEGACY_COMPAT"}
+        if value == "COORDINATED"
         else "UNKNOWN"
     )
 

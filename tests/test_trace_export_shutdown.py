@@ -186,7 +186,7 @@ async def test_disabled_by_absence_flush_close_component_results() -> None:
         component.component == "trace_export_dispatcher"
         for component in close_report.components
     )
-    assert close_report.completed is True
+    assert close_report.orchestration_completed is True
 
 
 # --- target 顺序 -----------------------------------------------------------
@@ -197,7 +197,7 @@ async def test_flush_target_order_deterministic() -> None:
     calls: list[tuple[str, str]] = []
     services = ordered_services(calls)
     report = await services.flush(1)
-    assert report.completed is True
+    assert report.orchestration_completed is True
     flush_order = [name for kind, name in calls if kind == "flush"]
     assert flush_order == [
         "observability_dispatcher",
@@ -213,7 +213,7 @@ async def test_close_target_order_deterministic() -> None:
     calls: list[tuple[str, str]] = []
     services = ordered_services(calls)
     report = await services.close(1)
-    assert report.completed is True
+    assert report.orchestration_completed is True
     close_order = [name for kind, name in calls if kind == "close"]
     assert close_order == [
         "observability_dispatcher",
@@ -233,7 +233,7 @@ async def test_real_close_final_export_before_adapter_close() -> None:
     services, recorder, dispatcher = real_services(exporter=exporter)
     active = [start_active_span(recorder, index) for index in range(3)]
     report = await services.close(5.0)
-    assert report.completed is True
+    assert report.orchestration_completed is True
     # adapter send（RECORDER_CLOSED final envelopes）先于 adapter close
     assert exporter.events[-1] == ("close",)
     sends = [event for event in exporter.events if event[0] == "send"]
@@ -275,7 +275,7 @@ async def test_dispatcher_flush_failure_component_truth() -> None:
     assert exporter.block_started.wait(5.0)
     report = await services.flush(1.0)
     components = {item.component: item for item in report.components}
-    assert report.completed is False
+    assert report.orchestration_completed is False
     exporter_comp = components["trace_export_dispatcher"]
     assert exporter_comp.status == "FAILED"
     assert exporter_comp.operation == "FLUSH"
@@ -295,7 +295,7 @@ async def test_adapter_close_false_component_truth() -> None:
     services, recorder, dispatcher = real_services(exporter=exporter)
     report = await services.close(5.0)
     components = {item.component: item for item in report.components}
-    assert report.completed is False
+    assert report.orchestration_completed is False
     exporter_comp = components["trace_export_dispatcher"]
     assert exporter_comp.status == "FAILED"
     assert exporter_comp.operation == "CLOSE"
@@ -389,7 +389,7 @@ async def test_span_recorder_failure_and_dispatcher_result_coexist() -> None:
     assert components["trace_export_dispatcher"].status == "COMPLETED"
     assert components["trace_export_dispatcher"].error_code is None
     assert exporter.close_calls == 1
-    assert report.completed is False
+    assert report.orchestration_completed is False
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ def test_default_registry_has_unique_expected_agents_and_shared_legacy_metadata(
         "synthesis_agent",
     )
     assert len(DEFAULT_AGENT_REGISTRY.agent_ids) == len(set(DEFAULT_AGENT_REGISTRY.agent_ids))
-    assert tuple(DEFAULT_AGENT_REGISTRY.legacy_display_config()) == DEFAULT_AGENT_REGISTRY.agent_ids[:-1]
+    assert tuple(DEFAULT_AGENT_REGISTRY.display_config()) == DEFAULT_AGENT_REGISTRY.agent_ids[:-1]
     assert DEFAULT_AGENT_REGISTRY.delegated_specialist_ids() == (
         "data_analyst",
         "code_expert",

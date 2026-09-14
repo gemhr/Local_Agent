@@ -428,7 +428,7 @@ def test_budget_cancellation_and_timeout_have_distinct_statuses() -> None:
 
     cancel_adapter = FakeRetrievalAdapter()
     context, source = make_context()
-    source.cancel(CancellationReason.USER_CANCELLED)
+    source.cancel(CancellationReason.REQUEST_CANCELLED)
     cancelled = RetrievalExecutionService(cancel_adapter).execute(
         make_invocation(), run_context=context
     )
@@ -498,7 +498,7 @@ def test_bounded_executor_admission_queue_cancellation_and_idle_tracking() -> No
         )
         time.sleep(0.05)
         assert third.done() is False
-        source.cancel(CancellationReason.USER_CANCELLED)
+        source.cancel(CancellationReason.REQUEST_CANCELLED)
         with pytest.raises(RunCancelledError):
             third.result(timeout=1.0)
 
@@ -603,7 +603,7 @@ def test_queued_provider_call_cancel_releases_budget_and_never_executes() -> Non
         while executor.snapshot().pending_count != 1:
             assert time.monotonic() < deadline
             time.sleep(0.01)
-        source.cancel(CancellationReason.USER_CANCELLED)
+        source.cancel(CancellationReason.REQUEST_CANCELLED)
         result = pending_result.result(timeout=1.0)
     release_blocker.set()
     blocker.result(timeout=1.0)

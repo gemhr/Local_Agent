@@ -5,9 +5,9 @@ from core.runtime import CancellationReason, CancellationSource, OperationType, 
 
 def test_token_reason_timestamp_and_raise():
     source = CancellationSource()
-    assert source.cancel(CancellationReason.DEADLINE_EXCEEDED) is True
-    assert source.cancel(CancellationReason.USER_CANCELLED) is False
-    assert source.token.reason is CancellationReason.DEADLINE_EXCEEDED
+    assert source.cancel(CancellationReason.REQUEST_DEADLINE_EXCEEDED) is True
+    assert source.cancel(CancellationReason.REQUEST_CANCELLED) is False
+    assert source.token.reason is CancellationReason.REQUEST_DEADLINE_EXCEEDED
     with pytest.raises(RunCancelledError): source.token.raise_if_cancelled()
 
 

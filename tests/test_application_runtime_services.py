@@ -44,6 +44,10 @@ async def test_close_is_idempotent_and_continues_after_component_failure() -> No
         blocking_executors=(),
         worker_trackers=(),
         run_registry=base.run_registry,
+        durable_run_control=base.durable_run_control,
+        durable_approval=base.durable_approval,
+        durable_tool_invocation=base.durable_tool_invocation,
+        run_control_owner_id=base.run_control_owner_id,
         snapshot_enabled=True,
         recovery_enabled=True,
         extra_closeables=(("first_resource", first), ("second_resource", second)),
@@ -83,6 +87,10 @@ def test_repr_is_safe_and_container_rejects_per_run_state() -> None:
             "blocking_executors",
             "worker_trackers",
             "run_registry",
+            "durable_run_control",
+            "durable_approval",
+            "durable_tool_invocation",
+            "run_control_owner_id",
         )
     }
     values["snapshot_enabled"] = services.snapshot_enabled
@@ -127,6 +135,10 @@ def test_recovery_cannot_appear_enabled_without_snapshot() -> None:
             "blocking_executors",
             "worker_trackers",
             "run_registry",
+            "durable_run_control",
+            "durable_approval",
+            "durable_tool_invocation",
+            "run_control_owner_id",
         )
     }
     values["recovery_validator"] = object()

@@ -14,7 +14,6 @@ from core.request_payload import (
     REQUEST_PAYLOAD_POLICY,
     RequestBodyLimitMiddleware,
 )
-from core.runtime import ChatRuntimeMode
 
 
 POLICY = REQUEST_PAYLOAD_POLICY
@@ -185,10 +184,7 @@ class _ServiceSpy:
     def __post_init__(self):
         self.run_registry = _Registry(self)
 
-    def selected_runtime_mode(self):
-        return ChatRuntimeMode.LEGACY
-
-    def stream_chat(self, *, agent_id, query, file_path, run_id):
+    async def stream_coordinated_agent_text(self, *, agent_id, query, file_path=None, run_id):
         self.chat_calls += 1
         self.seen.append({"agent_id": agent_id, "query": query, "file_path": file_path, "run_id": run_id})
         yield "ok"
@@ -215,7 +211,7 @@ class _ServiceSpy:
 @pytest.fixture
 def service_spy(monkeypatch):
     spy = _ServiceSpy()
-    monkeypatch.setattr(server, "chat_service", spy)
+    monkeypatch.setattr(server.app.state, "chat_service", spy, raising=False)
     return spy
 
 

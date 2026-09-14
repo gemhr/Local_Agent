@@ -80,7 +80,7 @@ def _schema_names(path: str) -> frozenset[str]:
 
 
 def _http_client(service: object, monkeypatch: pytest.MonkeyPatch) -> httpx.AsyncClient:
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=server.app, raise_app_exceptions=False),
         base_url="http://test",

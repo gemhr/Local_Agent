@@ -195,7 +195,7 @@ class AgentRegistry:
             and not self._registrations[agent_id].synthesis_only
         )
 
-    def legacy_display_config(self) -> dict[str, dict[str, str]]:
+    def display_config(self) -> dict[str, dict[str, str]]:
         """为尚未迁移的 AgentRouter 提供同源展示配置副本。"""
         return {
             agent_id: {

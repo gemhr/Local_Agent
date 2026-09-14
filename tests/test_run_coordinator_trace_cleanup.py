@@ -19,7 +19,7 @@ from core.runtime import (
     InMemorySpanRecorder,
     RunCoordinatorError,
     RunDeadlineExceededError,
-    RunHandle,
+    ActiveRunControlHandle,
     RunStatus,
     SpanStatus,
 )
@@ -37,11 +37,12 @@ from tests.test_run_coordinator import AsyncDriver, CoordinatorFixture
 
 def registration_conflict(fixture: CoordinatorFixture) -> None:
     """预注册一个不同的 active handle，使 execute() 触发 COORDINATOR_REGISTRATION_FAILED。"""
-    other = RunHandle(
-        fixture.context.run_id,
-        fixture.source,
-        fixture.state,
-        "other_owner",
+    other = ActiveRunControlHandle(
+        run_id=fixture.context.run_id,
+        runtime_mode="COORDINATED",
+        cancellation_source=fixture.source,
+        owner="other_owner",
+        active_step_count=lambda: len(fixture.state.active_step_ids),
     )
     fixture.registry.register(other)
 
@@ -71,7 +72,7 @@ async def test_registration_failure_restores_empty_outer_context() -> None:
     # 原异常类型/error_code/safe_message 语义保持不变。
     assert isinstance(exc_info.value, RunCoordinatorError)
     assert exc_info.value.error_code == "COORDINATOR_REGISTRATION_FAILED"
-    assert exc_info.value.safe_message == "RunHandle 注册失败"
+    assert exc_info.value.safe_message == "ActiveRunControlHandle 注册失败"
     # root Span 以既有 safe error code 收口且不残留 active span。
     assert recorder.health_snapshot().active_span_count == 0
     root = root_run_span(recorder)
@@ -165,7 +166,7 @@ async def test_cancellation_and_timeout_restore_context() -> None:
     """§21：取消与超时路径通过同一收口点恢复上下文。"""
     cancelled_recorder = InMemorySpanRecorder()
     cancelled = CoordinatorFixture(span_recorder=cancelled_recorder)
-    cancelled.source.cancel(CancellationReason.USER_CANCELLED)
+    cancelled.source.cancel(CancellationReason.REQUEST_CANCELLED)
     cancelled_result = await cancelled.coordinator.execute(driver=AsyncDriver())
     assert cancelled_result.status is RunStatus.CANCELLED
     assert cancelled_recorder.health_snapshot().active_span_count == 0

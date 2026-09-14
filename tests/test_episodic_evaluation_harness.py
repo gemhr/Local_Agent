@@ -31,8 +31,6 @@ from core.advanced_memory import (
 from core.chat_service import ChatService
 from core.memory_manager import MemoryManager
 from core.runtime import (
-    ChatRuntimeMode,
-    ChatRuntimeSelector,
     CoordinatedRuntimeFactory,
     RunStatus,
     StopReason,
@@ -505,7 +503,7 @@ async def test_replay_run_id_mismatch_rejected_by_endpoint(tmp_path, monkeypatch
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     run_id = uuid.uuid4().hex
     payload = server.RuntimeEvaluationExecuteV3Request(
         agent_id="core_router",
@@ -553,7 +551,7 @@ async def test_v3_failed_run_forms_failed_episode_and_returns_receipts(tmp_path,
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     run_id = uuid.uuid4().hex
     response = await server.runtime_evaluation_execute_v3_endpoint(
         _v3_payload(
@@ -593,7 +591,7 @@ async def test_v3_replay_returns_created_then_reused(tmp_path, monkeypatch) -> N
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     run_id = uuid.uuid4().hex
     response = await server.runtime_evaluation_execute_v3_endpoint(
         _v3_payload(
@@ -627,7 +625,7 @@ async def test_v3_fixture_install_receipt(tmp_path, monkeypatch) -> None:
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     run_id = uuid.uuid4().hex
     response = await server.runtime_evaluation_execute_v3_endpoint(
         _v3_payload(
@@ -684,7 +682,7 @@ async def test_v3_capture_integration_run_b(tmp_path, monkeypatch) -> None:
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     run_b = uuid.uuid4().hex
     response = await server.runtime_evaluation_execute_v3_endpoint(
         _v3_payload(
@@ -730,7 +728,7 @@ async def test_e08_profile_forms_then_captures_actual_zero_score(tmp_path, monke
     memory, store = _memory(tmp_path)
     router = make_real_router(memory, model=EpisodicEvalFakeModel(direct_json()))
     service = ChatService(router, coordinated_runtime_factory=_harness_factory(router, services), run_registry=services.run_registry)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
     run_a = uuid.uuid4().hex
     response_a = await server.runtime_evaluation_execute_v3_endpoint(_v3_payload(
         run_id=run_a,

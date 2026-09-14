@@ -16,13 +16,11 @@ import ntpath
 import os
 import re
 import tomllib
-import warnings
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from core.runtime.runtime_mode import ChatRuntimeMode
 
 
 SETTINGS_PARSE_ERROR = "SETTINGS_PARSE_ERROR"
@@ -254,27 +252,6 @@ def _env_database_url() -> str:
             "requires_postgresql_asyncpg_driver",
         )
     return value
-
-
-def _env_runtime_mode() -> ChatRuntimeMode:
-    raw = os.getenv("CHAT_RUNTIME_MODE")
-    if raw is None:
-        return ChatRuntimeMode.COORDINATED
-    try:
-        mode = ChatRuntimeMode.parse(raw)
-    except (TypeError, ValueError):
-        raise SettingsValidationError(
-            SETTINGS_VALIDATION_ERROR,
-            "CHAT_RUNTIME_MODE",
-            "unsupported",
-        ) from None
-    if mode is not ChatRuntimeMode.COORDINATED:
-        raise SettingsValidationError(
-            SETTINGS_VALIDATION_ERROR,
-            "CHAT_RUNTIME_MODE",
-            "legacy_runtime_disabled",
-        )
-    return mode
 
 
 def _env_model_profile() -> str:
@@ -603,18 +580,6 @@ def _resolve_service_version() -> str:
     return resolved
 
 
-def _warn_deprecated_observability_timeout() -> None:
-    """DEPRECATED：只输出 env 名与 replacement，不输出配置值。"""
-    if os.getenv("LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS") is None:
-        return
-    warnings.warn(
-        "LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS is deprecated and "
-        "unused; replacement is RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-
 def validate_role_configuration(settings: "Settings", *, role: str) -> None:
     """校验当前进程 role 的必填配置边界。
 
@@ -688,7 +653,6 @@ class Settings:
     api_host: str
     api_port: int
     api_base_url: str
-    chat_runtime_mode: ChatRuntimeMode
     model_profile: str
     llm_backend: str
     model_path: str
@@ -728,7 +692,6 @@ class Settings:
     embedding_batch_size: int
     snapshot_store_enabled: bool
     observability_queue_capacity: int
-    observability_shutdown_timeout_seconds: int
     runtime_disconnect_grace_seconds: float
     runtime_shutdown_grace_seconds: float
     runtime_component_close_timeout_seconds: float
@@ -850,7 +813,6 @@ class Settings:
         tool_allowed_read_roots = _tool_allowed_read_roots(
             environment_profile, project_root
         )
-        chat_runtime_mode = _env_runtime_mode()
 
         # 预设参数已从 7B 本地 CPU 推理调优为更适配 27B 远端模型：
         # - 允许更长回复（model_max_tokens）
@@ -1031,9 +993,6 @@ class Settings:
                 "LOCAL_AGENT_RAG_TOP_K",
                 "hybrid_rrf_top_k_above_budget",
             )
-
-        # DEPRECATED env 只产生一次安全 warning，不改变行为。
-        _warn_deprecated_observability_timeout()
 
         runtime_component_close_timeout_seconds = _env_strict_float(
             "RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS", 5.0, minimum=0.0
@@ -1240,7 +1199,6 @@ class Settings:
             api_host=api_host,
             api_port=api_port,
             api_base_url=api_base_url,
-            chat_runtime_mode=chat_runtime_mode,
             model_profile=profile_name,
             llm_backend=llm_backend,
             model_path=os.getenv(
@@ -1361,9 +1319,6 @@ class Settings:
             ),
             observability_queue_capacity=_env_strict_int(
                 "LOCAL_AGENT_OBSERVABILITY_QUEUE_CAPACITY", 256, minimum=1
-            ),
-            observability_shutdown_timeout_seconds=_env_strict_int(
-                "LOCAL_AGENT_OBSERVABILITY_SHUTDOWN_TIMEOUT_SECONDS", 5, minimum=1
             ),
             runtime_disconnect_grace_seconds=_env_strict_float(
                 "RUNTIME_DISCONNECT_GRACE_SECONDS", 0.75, minimum=0.0

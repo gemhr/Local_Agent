@@ -81,7 +81,7 @@ from core.runtime.model_context import ContextSourceType, MemoryContextRecord, M
 from core.runtime.project_memory import ProjectSemanticMemoryService, ProjectSemanticMemoryStore
 from core.runtime.agent_registry import AgentRegistryError
 from core.runtime.plan_compiler import PlanCompileError
-from core.runtime.run_registry import ActiveRunControlHandle, RunHandle, RunRegistry
+from core.runtime.run_registry import ActiveRunControlHandle, RunRegistry
 from core.runtime.scheduler import SchedulerError, SchedulerSnapshot, SerialScheduler, StepClaim
 from core.runtime.state import AgentState, RunStatus, StepStatus, StopReason
 from core.runtime.state_machine import (
@@ -1399,7 +1399,7 @@ class RunCoordinator:
                 except Exception as exc:
                     raise RunCoordinatorError(
                         "COORDINATOR_REGISTRATION_FAILED",
-                        "RunHandle 注册失败",
+                        "ActiveRunControlHandle 注册失败",
                     ) from exc
                 registered = True
 
@@ -1816,19 +1816,13 @@ class RunCoordinator:
                 "COORDINATOR_RUN_ID_MISMATCH",
                 "Context、State 与 Handle 的 run_id 必须一致",
             )
-        handle_state = getattr(self.run_handle, "agent_state", self.agent_state)
-        if handle_state is not self.agent_state:
-            raise RunCoordinatorError(
-                "COORDINATOR_STATE_OWNERSHIP_MISMATCH",
-                "RunHandle 必须引用 Coordinator 持有的 AgentState",
-            )
         if (
             self.run_handle.cancellation_source.token
             is not self.run_context.cancellation_token
         ):
             raise RunCoordinatorError(
                 "COORDINATOR_CANCELLATION_OWNERSHIP_MISMATCH",
-                "RunHandle 与 RunContext 必须共享同一取消源",
+                "ActiveRunControlHandle 与 RunContext 必须共享同一取消源",
             )
         if self.run_context.budget_ledger is not self.budget_ledger:
             raise RunCoordinatorError(
@@ -1854,7 +1848,6 @@ class RunCoordinator:
         except ValueError:
             return self._infrastructure_decision("UNKNOWN_CANCELLATION_REASON")
         if parsed in {
-            CancellationReason.DEADLINE_EXCEEDED,
             CancellationReason.REQUEST_DEADLINE_EXCEEDED,
         }:
             return RunFinalizationDecision(

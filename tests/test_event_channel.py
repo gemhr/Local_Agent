@@ -179,7 +179,7 @@ class RuntimeEventChannelTests(unittest.IsolatedAsyncioTestCase):
         await channel.publish(draft(1))
         blocked = asyncio.create_task(channel.publish(draft(2)))
         await asyncio.sleep(0)
-        source.cancel(CancellationReason.USER_CANCELLED)
+        source.cancel(CancellationReason.REQUEST_CANCELLED)
         with self.assertRaises(RunCancelledError):
             await asyncio.wait_for(blocked, 0.3)
         self.assertEqual(channel.buffered_count, 1)

@@ -197,17 +197,6 @@ class McpIntegrationComponent:
             provider_identity=binding.provider_identity,
         )
 
-    async def wait_for_available(self, server_id: str, timeout: float) -> McpSessionHandle | None:
-        """仅提供 caller-bounded 等待 seam，绝不拥有 Run deadline。"""
-        deadline = asyncio.get_running_loop().time() + max(float(timeout), 0.0)
-        while True:
-            handle = self.acquire_session(server_id)
-            if handle is not None:
-                return handle
-            if self._closed or asyncio.get_running_loop().time() >= deadline:
-                return None
-            await asyncio.sleep(min(0.01, max(0.0, deadline - asyncio.get_running_loop().time())))
-
     def session_generation_for(self, server_id: str) -> int | None:
         binding = self._sessions.get(server_id)
         return binding.generation if binding is not None else None

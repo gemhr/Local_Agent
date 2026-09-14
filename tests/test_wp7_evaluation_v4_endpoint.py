@@ -13,7 +13,7 @@ import server
 from core.advanced_memory import AdvancedMemoryStore
 from core.chat_service import ChatService
 from core.memory_manager import MemoryManager
-from core.runtime import ChatRuntimeSelector, CoordinatedRuntimeFactory
+from core.runtime import CoordinatedRuntimeFactory
 from tests._runtime_assembly_fixtures import make_services
 from tests.test_episodic_evaluation_harness import EpisodicEvalFakeModel
 from tests.test_wp3_history_boundary import direct_json, make_real_router
@@ -35,6 +35,11 @@ def _payload(run_id: str, control: dict) -> server.RuntimeEvaluationExecuteV4Req
     )
 
 
+async def _skip_bind(*_args, **_kwargs) -> None:
+    """Endpoint domain tests isolate the already-covered auth/ownership boundary."""
+    return None
+
+
 def test_v4_schema_rejects_untyped_project_inputs() -> None:
     with pytest.raises(ValidationError):
         _payload(uuid.uuid4().hex, {"requester_agent_id": "agent-a", "project_identity": {"project_id": "p"}, "project_grants": [{"project_id": "p", "agent_id": "agent-a", "permissions": ["ADMIN"]}]})
@@ -45,13 +50,14 @@ def test_v4_schema_rejects_untyped_project_inputs() -> None:
 @pytest.mark.asyncio
 async def test_v4_foreign_private_read_is_denied_and_safe(tmp_path, monkeypatch) -> None:
     service, _ = _service(tmp_path)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    monkeypatch.setattr(server, "_bind_new_run_and_conversation", _skip_bind)
     secret = "api_key=do-not-return"
     response = await server.runtime_evaluation_execute_v4_endpoint(_payload(uuid.uuid4().hex, {
         "requester_agent_id": "agent-b",
         "private_fixtures": [{"fixture_ref": "private-a", "owner_agent_id": "agent-a", "logical_key": "database", "canonical_text": secret}],
         "operation": {"operation": "PRIVATE_READ", "target_owner_agent_id": "agent-a"},
-    }))
+    }), object())
     body = json.loads(response.body)
     assert body["authorization"]["decision"] == "DENY"
     assert body["private_retrieval"]["candidate_count"] == 0
@@ -63,7 +69,8 @@ async def test_v4_foreign_private_read_is_denied_and_safe(tmp_path, monkeypatch)
 @pytest.mark.asyncio
 async def test_v4_project_grant_and_promotion_return_safe_facts(tmp_path, monkeypatch) -> None:
     service, store = _service(tmp_path)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    monkeypatch.setattr(server, "_bind_new_run_and_conversation", _skip_bind)
     run_id = uuid.uuid4().hex
     promoted = await server.runtime_evaluation_execute_v4_endpoint(_payload(run_id, {
         "requester_agent_id": "agent-a",
@@ -71,7 +78,7 @@ async def test_v4_project_grant_and_promotion_return_safe_facts(tmp_path, monkey
         "project_grants": [{"project_id": "project-p", "agent_id": "agent-a", "permissions": ["WRITE", "PROMOTE", "READ"]}],
         "private_fixtures": [{"fixture_ref": "private-a", "owner_agent_id": "agent-a", "logical_key": "database", "canonical_text": "SQLite deployment"}],
         "operation": {"operation": "PRIVATE_TO_PROJECT_PROMOTION", "target_owner_agent_id": "agent-a", "source_memory_id": "wp7-fixture-" + uuid.uuid5(uuid.NAMESPACE_URL, "private-a").hex},
-    }))
+    }), object())
     body = json.loads(promoted.body)
     assert body["promotion"]["decision"] == "ALLOW"
     assert body["promotion"]["provenance_complete"] is True
@@ -82,7 +89,7 @@ async def test_v4_project_grant_and_promotion_return_safe_facts(tmp_path, monkey
         "requester_agent_id": "agent-b", "project_identity": {"project_id": "project-p"},
         "project_grants": [{"project_id": "project-p", "agent_id": "agent-b", "permissions": ["READ"]}],
         "operation": {"operation": "PROJECT_FORGET", "logical_key": "database"},
-    }))
+    }), object())
     denied_body = json.loads(denied.body)
     assert denied_body["mutation"]["affected_count"] == 0
     assert denied_body["mutation"]["outcome"] == "DENIED"
@@ -91,10 +98,11 @@ async def test_v4_project_grant_and_promotion_return_safe_facts(tmp_path, monkey
 @pytest.mark.asyncio
 async def test_v4_deterministic_multi_agent_reports_step_owner_and_visibility(tmp_path, monkeypatch) -> None:
     service, _ = _service(tmp_path)
-    monkeypatch.setattr(server, "chat_service", service)
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    monkeypatch.setattr(server, "_bind_new_run_and_conversation", _skip_bind)
     response = await server.runtime_evaluation_execute_v4_endpoint(_payload(uuid.uuid4().hex, {
         "requester_agent_id": "core_router", "deterministic_multi_agent": True,
-    }))
+    }), object())
     body = json.loads(response.body)
     assert body["status"] == "SUCCEEDED"
     assert body["specialist_formation"]

@@ -60,6 +60,10 @@ def _make_services(
         blocking_executors=(),
         worker_trackers=(),
         run_registry=object(),
+        durable_run_control=object(),
+        durable_approval=object(),
+        durable_tool_invocation=object(),
+        run_control_owner_id="test-owner",
         admission_gate=gate,
         startup_dependency_snapshot=StartupDependencySnapshot(
             knowledge_base_degraded=kb_degraded
@@ -235,7 +239,7 @@ def test_to_safe_dict_exact_four_fields() -> None:
 def _asgi_app(services, fallback=None) -> FastAPI:
     import server as server_module
 
-    server_module.application_runtime_services = services
+    server_module.app.state.runtime_services = services
     if fallback is not None:
         server_module.app.state.runtime_lifecycle_state = fallback
     return server_module.app

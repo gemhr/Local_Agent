@@ -15,8 +15,8 @@ Settings.load()
    -> ToolGovernanceService：唯一 invocation-time Authority -> 注入 AgentRouter
 -> ApplicationRuntimeServices 收拢依赖与 close ownership
 -> CoordinatedRuntimeFactory 创建每请求 CoordinatedRunScope
--> ChatService 持有不可变 Runtime selector 与两条显式入口
--> /api/chat 在请求入口捕获一次 mode
+-> ChatService 只暴露 Coordinated Runtime 生产入口
+-> /api/chat 直接进入唯一 Coordinated 路径
 -> GracefulShutdownCoordinator 在 lifespan 退出时编排唯一 shutdown
 ```
 
@@ -39,15 +39,15 @@ HTTP server、不创建第二个数据库池。Kafka offset 仅在 PostgreSQL co
 
 | 问题 | 冻结结论 |
 |---|---|
-| Runtime mode 在哪里选择 | `Settings.load()` 解析 `CHAT_RUNTIME_MODE`；`chat_endpoint()` 调用 `ChatService.selected_runtime_mode()` 捕获请求快照 |
-| 一次请求选择次数 | 一次；流开始后不重读环境变量或 Settings |
-| 默认 Runtime | `COORDINATED` |
-| Legacy 启用 | production 禁止；`CHAT_RUNTIME_MODE=LEGACY` 在 Settings 阶段 fail closed |
+| Runtime 路径 | `/api/chat` 固定使用 `ChatService` 的 Coordinated Runtime 入口，不存在运行时选择器 |
+| Runtime 配置 | 不存在 Runtime mode 环境变量或请求级切换 |
+| Production Runtime | `COORDINATED` |
+| Legacy 启用 | 已删除；生产与测试入口均使用 Coordinated Runtime |
 | 跨 Runtime fallback | 不存在；所选路径失败后只输出安全错误并收口 |
 | Application services 装配 | 每个 FastAPI lifespan 一次 |
-| Run 对象 | `CoordinatedRuntimeFactory.create_run_scope()` 每请求新建；Legacy 也每请求新建 Context/State/Ledger |
+| Run 对象 | `CoordinatedRuntimeFactory.create_run_scope()` 每请求新建 Context/State/Ledger |
 | Operation controller 缓存 | Application services 不缓存；Fault controller 仅由显式测试调用参数传入 |
-| 模块级 current service | `server.py` 保留 `chat_service` 与 `application_runtime_services` 两个 lifespan 兼容句柄；不保存 Run/Controller，生命周期真值同时发布到 `app.state` |
+| Application service 可见性 | `server.py::lifespan()` 仅发布到 `app.state.chat_service` 与 `app.state.runtime_services`；无模块级兼容句柄 |
 | 测试 Fixture 进入生产装配 | 否；`ToolCompletionGapFixture` 已移到 `tests/_tool_completion_gap_fixtures.py` |
 | 生产 FaultPlan 入口 | 无 Settings、环境变量、HTTP header/body、Prompt、Tool arguments 入口 |
 | Tool 身份/描述/枚举/绑定来源 | `ToolRegistry`（APPLICATION_SCOPE；lifespan 内 populate + freeze 后注入 AgentRouter，运行期只读） |
@@ -92,8 +92,8 @@ Observability、Trace、Report、RecoveryValidator 不反向修改 AgentState、
 | SpanRecorder | APPLICATION_SCOPE / COMPONENT_SCOPE | lifespan | ApplicationRuntimeServices | 由 Run facade 关闭 |
 | RunRegistry | APPLICATION_SCOPE | lifespan | ApplicationRuntimeServices / Shutdown | 成为 run state owner |
 | GracefulShutdownCoordinator | APPLICATION_SCOPE | lifespan | lifespan | 被 Run scope 缓存或关闭 |
-| RunContext | RUN_SCOPE | Coordinated factory / Legacy ChatService | 对应 Run owner | 关闭 application 资源 |
-| AgentState | RUN_SCOPE | 对应 Parent Runtime | RunCoordinator 或 Legacy AgentLoop 写入 | Plan/Report 双写状态 |
+| RunContext | RUN_SCOPE | Coordinated factory | 对应 Run owner | 关闭 application 资源 |
+| AgentState | RUN_SCOPE | Coordinated factory | RunCoordinator 写入 | Plan/Report 双写状态 |
 | RuntimeEventChannel | RUN_SCOPE | Coordinated factory | CoordinatedRunScope | 创建第二 terminal |
 | BudgetLedger | RUN_SCOPE | 对应 Parent Runtime | 对应 Run owner | 泄漏 reservation 到 Plan |
 | Run Event Emitter | RUN_SCOPE | Coordinated factory | 随 Scope 释放 | 自行分配全局 sequence |
@@ -139,7 +139,7 @@ construct -> register（6 个 ToolRegistration，含受限 Demo Workspace read/w
 `ToolGovernanceService` 是唯一 invocation-time Authority，只解释 frozen Catalog 与已解析 `ToolExecutionSpec`，不保存 execution spec 字段（不复制 side-effect / idempotency / timeout / concurrency）。
 
 - **Principal**：`actual executing agent_id`（AgentRouter 执行参数）；`RunContext.entry_agent_id` 不被重解释为 execution principal；无 user/tenant IAM。
-- **两级 Gate**（`AgentRouter._prepare_answer_messages`，唯一 production Tool execution seam，覆盖 LEGACY 与 COORDINATED）：
+- **两级 Gate**（`AgentRouter._prepare_answer_messages`，唯一 production Tool execution seam）：
   ```text
   ToolRegistry.require(tool_name)
   -> ToolGovernanceService.authorize_tool(context, registration)   # 静态 Permission：ALLOW / DENY
@@ -207,7 +207,7 @@ actual ToolGovernanceError / ResourceAuthorizationError
 -> Synthesis DENIAL_DOMINATES
 ```
 
-该链不按正文做string matching、regex或keyword判断。Synthesis在context build、model selection与model invocation前检查typed denial；任一required dependency被拒绝即返回固定safe denial，成功partial result不进入用户可见合成。COORDINATED与explicit LEGACY均不允许denial被后续模型改写成success；OutputGate、RuntimeEvent、Journal与Snapshot合同未修改。
+该链不按正文做string matching、regex或keyword判断。Synthesis在context build、model selection与model invocation前检查typed denial；任一required dependency被拒绝即返回固定safe denial，成功partial result不进入用户可见合成；OutputGate、RuntimeEvent、Journal与Snapshot合同未修改。
 
 能力状态为`PARTIALLY_SUPPORTED`：模型仍可能受恶意自然语言影响，System Prompt可能被复述/改写，RAG/Memory/Tool/Step data仍可能影响自然语言回答。无generic injection classifier、WAF、generic DLP、Human IAM、full Sandbox或HITL；无dedicated security-denial RuntimeEvent/Journal/Snapshot fact，Recovery不能重建runtime-internal typed denial。Command Injection与SSRF在当前Tool inventory中为`NOT_APPLICABLE_CURRENT_INVENTORY`。
 
@@ -409,7 +409,7 @@ project/thread Memory、Episodic/Shared Memory（Scope Guard）。
 | Plan / PlanStep | PUBLIC_STABLE | 不可变静态定义；不得含 runtime status |
 | RuntimeEvent | PUBLIC_VERSIONED | Event v1/v2 reader，v2 writer |
 | RuntimeEventDraft | INTERNAL_EVOLVING | Channel 分配 identity/sequence 前的内部事实；不得直接进入 Wire |
-| JournalRecord | PUBLIC_VERSIONED | Journal v1/v2 reader，v2 writer，append-only 安全事实 |
+| JournalRecord | PUBLIC_VERSIONED | Journal v2 reader/writer，append-only 安全事实 |
 | RunSnapshot | PUBLIC_VERSIONED | Snapshot v1，严格字段和 digest |
 | BudgetSnapshot（运行账本） | INTERNAL_STABLE | 进程内派生读视图 |
 | SafeBudgetSnapshot（Snapshot 子结构） | PUBLIC_VERSIONED | Snapshot v1 内的 budget schema v1 |
@@ -452,12 +452,12 @@ project/thread Memory、Episodic/Shared Memory（Scope Guard）。
 |---|---:|---|---|---|---:|---|---|---|
 | AgentState | 1 | 无 | `AgentState.to_dict()` | 1 | 1 | `AgentState.from_dict()` fail closed | `schema_version` 缺失 fail closed；其他字段按当前 v1 校验/默认处理 | 不写回 |
 | RuntimeEvent | 2 | 无独立 event digest | RuntimeEvent 安全投影；Journal 负责持久 digest | 1, 2 | 2 | 构造/Recovery consumer fail closed | v1/v2 可选字段使用既有默认或 Unknown | 不写回 |
-| JournalRecord | 2 | 随 journal schema 的 canonical JSON SHA-256 | `event_journal.canonical_json/_digest` | 1, 2 | 2 | journal schema fail closed；未知 event schema 在 Recovery fail closed | v1 无 span 字段按 v1 digest 规则读取 | 不写回 |
+| JournalRecord | 2 | 随 journal schema 的 canonical JSON SHA-256 | `event_journal.canonical_json/_digest` | 2 | 2 | journal schema fail closed；未知 event schema 在 Recovery fail closed | 关键字段缺失 fail closed | 不写回 |
 | RunSnapshot | 1 | Snapshot v1 canonical JSON SHA-256 | `snapshot_serialization` + `RunSnapshot.digest_source()` | 1 | 1 | fail closed | 严格 v1 字段集合；不存在 Snapshot v0 | 不写回 |
 | ToolCompletedPayload | Event 内 `tool_evidence_schema_version=1` | `result_digest` 使用 canonical JSON SHA-256，无单独版本号 | tool contract canonicalizer / Event allowlist | evidence 缺失（legacy Unknown）, 1 | 1 | 非 1 evidence fail closed | `result_present/result_digest` 缺失为 Unknown | 不写回 |
 | Recovery evidence | 无独立 schema | 复用 Journal/Snapshot digest | Journal tail reducer / RecoveryValidator | Event 1/2 + Snapshot 1 | 不独立写入 | 上游未知版本 fail closed | 缺失历史工具证据保持 Unknown/需协调 | 不写回、不从 Registry 回填 |
 | FaultPlan | 1 | semantic plan canonical JSON SHA-256（随 schema 1） | `FaultPlan.digest_source()` | 1 | 1 | fail closed | 规则字段由 dataclass 默认和严格校验处理 | 测试对象，不写回生产存储 |
-| ShutdownReport | 未版本化 | 无 | 不适用 | 进程内当前类型 | 不持久化 | 不适用 | `completed` 兼容别名，不能解释为 fully closed | 不写回 |
+| ShutdownReport | 未版本化 | 无 | 不适用 | 进程内当前类型 | 不持久化 | 不适用 | 使用 `orchestration_completed` 与 `fully_closed` 的明确语义 | 不写回 |
 | Trace export contract | 1 | Trace Contract Fingerprint（canonical JSON SHA-256，lowercase 64-hex） | export semantic descriptor（`trace_export_contract.py`）→ canonicalize/digest（`trace_contract_fingerprint.py` + `snapshot_serialization`） | 1 | 1 | fail closed | 未知/缺失 identity/version/fingerprint 按合同 fail closed | 不写回 |
 
 冻结原则：不得使用 Python `repr` 计算持久 digest；不得虚构历史版本；不得在读取旧版本时升级写回；不得使用当前 Registry 或 live adapter 回填历史 evidence。
@@ -500,7 +500,6 @@ Fault seam 通过显式参数存在于 Runtime 组件，只有测试使用 `Faul
 
 | item | current_behavior | replacement | compatibility_period | removal_precondition | tests |
 |---|---|---|---|---|---|
-| `ShutdownReport.completed` | `orchestration_completed` 的兼容别名，不表示资源 fully closed | `orchestration_completed` 或 `fully_closed` | 当前阶段保留 | 所有调用者按真实语义迁移 | `test_shutdown_report_truthfulness.py`, `test_runtime_report_authority.py` |
 | 旧 Event evidence 缺失 `result_*` | 读取为 Unknown，不从当前对象回填 | v1 tool evidence 字段 | Event v1/v2 reader 期间 | 历史数据退役且迁移策略明确 | `test_event_schema_compatibility.py` |
 | Legacy Runtime mode | 显式回滚路径继续支持，不作为默认或 fallback | Coordinated 默认入口 | 阶段二保留 | 产品确认 Legacy 调用方全部迁移 | `test_runtime_legacy_boundary.py`, `test_default_runtime_entry.py` |
 | 旧 Tool Adapter method signature | adapter 边界保留兼容调用方式；不改变 Tool 业务语义 | 当前强类型 Tool adapter/context | 现有 adapter 调用方存在期间 | 调用方与测试全部迁移 | tool adapter/execution tests |
@@ -618,22 +617,18 @@ KB degraded 语义：`knowledge_base_required=false` 且 KB 初始化/import 失
 ### 11.3 Migration Boundary（frozen）
 
 ```text
-Migration Runner = Minimal Persistence Migration Coordinator（core/persistence_migration.py）
+Schema Migration Runner = Alembic（PostgreSQL canonical schema）
 Server startup   = automatic READ-ONLY PostgreSQL schema readiness（reachable + required tables + Alembic head）
 Existing-data migration = explicit SCRIPT_ROLE command only（uv run alembic upgrade head）
 Backup           = manual stopped-server operational contract，PostgreSQL backup strategy 由 operator 管理
-Restore          = manual stopped-server set replacement + explicit full preflight
+Restore          = manual stopped-server set replacement + PostgreSQL readiness check
 Downgrade        = NOT_IMPLEMENTED（forward-only）
 Rollback after schema mutation = restore matching pre-migration backup（binary-only rollback NOT ASSUMED）
 ```
 
-- Coordinator 只做 preflight orchestration、migration ordering、safe result aggregation、safe error/result model；
-  不得成为 Memory/Journal/Checkpoint/Chroma schema owner。Store-specific SQL/transaction 保留在对应 Store module。
-- 每个支持 mutation 的 PostgreSQL Store 使用独立 AsyncSession / transaction（revalidate from-state → change → COMMIT；失败 ROLLBACK）。
-- 无 cross-store atomic transaction / distributed transaction / two-phase commit。多个 Store 部分 commit 后失败：overall FAIL + partial committed facts；rerun 从实际 facts 继续（idempotent / safely re-runnable，不宣称 exactly-once）。
-- Migration 是 forward-only：schema-changing migration 提交后 old binary compatibility NOT ASSUMED。无 reverse SQL / downgrade。
-- Server startup 绝不自动迁移已有数据；preflight 发现 MIGRATION_REQUIRED / UNSUPPORTED / FAILED → `never READY`。
-- 三个新增 safe error code：`PERSISTENCE_SCHEMA_UNSUPPORTED`、`PERSISTENCE_PREFLIGHT_FAILED`、`PERSISTENCE_MIGRATION_FAILED`。
+- Store-specific SQL/transaction 与 schema truth 保留在对应 PostgreSQL Store/Alembic migration。
+- Server startup 绝不自动迁移已有数据；schema readiness 发现 UNSUPPORTED / FAILED → `never READY`。
+- Persistence safe error code：`PERSISTENCE_SCHEMA_UNSUPPORTED`、`PERSISTENCE_PREFLIGHT_FAILED`、`PERSISTENCE_MIGRATION_FAILED`。
 
 ### 11.4 Chroma Third-Party Boundary
 
@@ -653,7 +648,7 @@ Stage5-Phase6-WP1/WP2（检索 provenance 与 Hybrid runtime）：Chroma marker 
 - OPTIONAL_BACKUP：Chroma directory（可加速 restore，correctness 依赖 source + matching embedding artifact rebuild）。
 - BACKUP_OPTIONAL / RECREATE：Observability checkpoint（derived，startup 仍 required）。
 - Restore success 至少要求：显式 full preflight PASS、Server `READY`（或 allowlisted `READY_DEGRADED`）、required durable Stores 可读、health/readiness smoke PASS。
-- 代码回滚与数据回滚是两件事；`CHAT_RUNTIME_MODE=legacy` 会启动失败，不能替代任何 rollback。
+- 代码回滚与数据回滚是两件事；回滚只能部署已知良好的 Coordinated artifact/configuration。
 
 ### 11.6 Migration vs Recovery
 

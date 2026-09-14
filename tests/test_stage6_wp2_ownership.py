@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from core.auth import AuthError, AuthService, AuthorizationService, Principal
 from core.persistence.models import ObjectOwnershipRow, RoleRow, UserRoleRow, UserRow
 from core.redis_service import RedisTokenBucketRateLimiter
 import server
+from tests._runtime_assembly_fixtures import make_services
 
 pytest_plugins = ("tests._pg_fixtures",)
 
@@ -178,9 +180,9 @@ async def test_real_http_bearer_chain_hides_other_users_conversation(clean_datab
         jwt_issuer="test-issuer", jwt_audience="test-api",
         jwt_allowed_algorithm="EdDSA", jwt_clock_skew_seconds=0,
     )
-    monkeypatch.setattr(server, "chat_service", SimpleNamespace(
+    monkeypatch.setattr(server.app.state, "chat_service", SimpleNamespace(
         get_history=lambda **_: [{"role": "user", "content": "safe"}]
-    ))
+    ), raising=False)
     monkeypatch.setattr(
         server.app.state, "auth_service", AuthService(clean_database, settings), raising=False
     )
@@ -214,10 +216,10 @@ async def test_real_http_approval_uses_run_owner_and_server_actor(clean_database
         jwt_allowed_algorithm="EdDSA", jwt_clock_skew_seconds=0,
     )
 
-    class _RunRegistry:
+    class _DurableApproval:
         actor_ids: list[str] = []
 
-        async def decide_tool_approval(self, *args, actor_id: str):
+        async def decide(self, *args, actor_id: str, **kwargs):
             self.actor_ids.append(actor_id)
             return SimpleNamespace(
                 safe_error_code=None,
@@ -226,8 +228,14 @@ async def test_real_http_approval_uses_run_owner_and_server_actor(clean_database
                 decided_at=None,
             )
 
-    registry = _RunRegistry()
-    monkeypatch.setattr(server, "chat_service", SimpleNamespace(run_registry=registry))
+    durable_approval = _DurableApproval()
+    monkeypatch.setattr(server.app.state, "chat_service", SimpleNamespace(run_registry=SimpleNamespace()), raising=False)
+    monkeypatch.setattr(
+        server.app.state,
+        "runtime_services",
+        replace(make_services(), durable_approval=durable_approval),
+        raising=False,
+    )
     monkeypatch.setattr(
         server.app.state, "auth_service", AuthService(clean_database, settings), raising=False
     )
@@ -254,12 +262,18 @@ async def test_real_http_approval_uses_run_owner_and_server_actor(clean_database
 
     assert other.status_code == 404 and other.json()["error"]["request_id"]
     assert own.status_code == 200
-    assert registry.actor_ids == [str(user_a)]
+    assert durable_approval.actor_ids == [str(user_a)]
 
 
 @pytest.mark.asyncio
 async def test_real_http_evaluation_controls_are_admin_only(clean_database, monkeypatch):
     user_id = await _create_user(clean_database, ("USER",))
+    service_id = await _create_user(
+        clean_database,
+        ("SERVICE",),
+        principal_kind="SERVICE",
+        service_scopes=["localagent:evaluation:execute"],
+    )
     private = Ed25519PrivateKey.generate()
     settings = SimpleNamespace(
         jwt_public_key=private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
@@ -282,65 +296,16 @@ async def test_real_http_evaluation_controls_are_admin_only(clean_database, monk
         assert response.status_code == 403
         assert response.json()["error"]["request_id"]
         assert response.headers["X-Request-ID"]
-
-
-@pytest.mark.asyncio
-async def test_real_http_evaluation_requires_service_principal_and_scope(clean_database, monkeypatch):
-    human_id = await _create_user(clean_database, ("USER",))
-    admin_id = await _create_user(clean_database, ("ADMIN",))
-    service_id = await _create_user(
-        clean_database,
-        ("SERVICE",),
-        principal_kind="SERVICE",
-        service_scopes=["localagent:evaluation:execute"],
-    )
-    private = Ed25519PrivateKey.generate()
-    settings = SimpleNamespace(
-        jwt_public_key=private.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo),
-        jwt_issuer="test-issuer", jwt_audience="test-api",
-        jwt_allowed_algorithm="EdDSA", jwt_clock_skew_seconds=0,
-    )
-    monkeypatch.setattr(
-        server.app.state, "auth_service", AuthService(clean_database, settings), raising=False
-    )
-    monkeypatch.setattr(
-        server.app.state, "rate_limiter", _disabled_rate_limiter(), raising=False
-    )
-    client = TestClient(server.app)
-    payload = {"agent_id": "core_router", "query": "test", "run_id": str(uuid.uuid4()), "timeout_seconds": 1}
-
-    missing = client.post("/api/runtime/evaluation-execute/v1", json=payload)
-    human = client.post(
-        "/api/runtime/evaluation-execute/v1", json=payload,
-        headers={"Authorization": f"Bearer {_token(private, human_id, ['USER'])}"},
-    )
-    admin = client.post(
-        "/api/runtime/evaluation-execute/v1", json=payload,
-        headers={"Authorization": f"Bearer {_token(private, admin_id, ['ADMIN'])}"},
-    )
-    missing_scope = client.post(
-        "/api/runtime/evaluation-execute/v1", json=payload,
-        headers={
-            "Authorization": f"Bearer {_token(private, service_id, ['SERVICE'], scopes=[])}"
-        },
-    )
-
-    async with clean_database.transaction() as session:
-        service_row = await session.get(UserRow, service_id)
-        assert service_row is not None
-        service_row.disabled_at = datetime.now(UTC)
-    disabled = client.post(
-        "/api/runtime/evaluation-execute/v1", json=payload,
-        headers={
-            "Authorization": f"Bearer {_token(private, service_id, ['SERVICE'], scopes=['localagent:evaluation:execute'])}"
-        },
-    )
-
-    assert missing.status_code == 401
-    assert human.status_code == 403
-    assert admin.status_code == 403
-    assert missing_scope.status_code == 403
-    assert disabled.status_code == 401
+        service_response = client.post(
+            path,
+            json={},
+            headers={
+                "Authorization": (
+                    f"Bearer {_token(private, service_id, ['SERVICE'], scopes=['localagent:evaluation:execute'])}"
+                )
+            },
+        )
+        assert service_response.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -413,10 +378,27 @@ async def test_real_http_service_cancel_is_limited_to_owned_run(clean_database, 
     monkeypatch.setattr(
         server.app.state, "rate_limiter", _disabled_rate_limiter(), raising=False
     )
+    local_registry = SimpleNamespace(cancel=lambda *_: True)
+
+    class _DurableControl:
+        async def request_cancel(self, *_args, **_kwargs):
+            return None
+
     monkeypatch.setattr(
-        server,
+        server.app.state,
         "chat_service",
-        SimpleNamespace(run_registry=SimpleNamespace(cancel=lambda *_: True)),
+        SimpleNamespace(run_registry=local_registry),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "runtime_services",
+        replace(
+            make_services(),
+            durable_run_control=_DurableControl(),
+            run_registry=local_registry,
+        ),
+        raising=False,
     )
     path = f"/api/runtime/runs/{run_id}/cancel"
     owner = TestClient(server.app).post(

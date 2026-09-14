@@ -119,7 +119,7 @@ class ObservabilityService:
         self.metrics_enabled = self.enabled and settings.metrics_enabled
         self.tracing_enabled = self.enabled and settings.tracing_enabled
         self.metrics_path = settings.metrics_path
-        self._shutdown_timeout_seconds = settings.observability_shutdown_timeout_seconds
+        self._shutdown_timeout_seconds = settings.runtime_component_close_timeout_seconds
         self._closed = False
         self._metrics_http_server = None
         service_name = settings.otel_service_name
@@ -278,7 +278,7 @@ class ObservabilityService:
             trace_endpoint += "/v1/traces"
         return OTLPSpanExporter(
             endpoint=trace_endpoint,
-            timeout=float(settings.observability_shutdown_timeout_seconds),
+            timeout=float(settings.runtime_component_close_timeout_seconds),
         )
 
     @staticmethod

@@ -11,8 +11,8 @@ from enum import Enum
 
 class PlanSource(str, Enum):
     DETERMINISTIC = "deterministic"
-    LEGACY_ADAPTER = "legacy_adapter"
     MODEL_GENERATED = "model_generated"
+    LEGACY_ADAPTER = "legacy_adapter"
 
 
 class RiskLevel(str, Enum):

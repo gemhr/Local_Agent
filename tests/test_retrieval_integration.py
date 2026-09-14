@@ -858,7 +858,7 @@ def test_query_rewrite_cancel_timeout_and_safety_do_not_degrade_continue() -> No
     )
     context, source = create_run_context(entry_agent_id="knowledge_expert")
     context.attach_budget_ledger(BudgetLedger(RunBudget()))
-    source.cancel(CancellationReason.USER_CANCELLED)
+    source.cancel(CancellationReason.REQUEST_CANCELLED)
     cancelled = cancelled_router._execute_knowledge_retrieval(
         "original query", run_context=context
     )
