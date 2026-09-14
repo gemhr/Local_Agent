@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+from typing import Callable
 
 from mcp.config import McpServerConfig
 from mcp.errors import (
@@ -89,6 +90,7 @@ class StdioMcpClient:
         request_timeout_seconds: float,
         client_name: str = CLIENT_NAME,
         client_version: str = CLIENT_VERSION,
+        on_broken: Callable[["StdioMcpClient", McpBoundaryError], None] | None = None,
     ) -> None:
         self._server_config = server_config
         self._connect_timeout_seconds = float(connect_timeout_seconds)
@@ -105,6 +107,10 @@ class StdioMcpClient:
         self._closed = False
         self._initialized = False
         self._initialize_info: McpInitializeInfo | None = None
+        self._on_broken = on_broken
+        self._process_wait_task: asyncio.Task | None = None
+        self._session_generation = 0
+        self._broken_error: McpBoundaryError | None = None
 
     # ---- lifecycle ----
 
@@ -313,10 +319,34 @@ class StdioMcpClient:
         return self._broken
 
     @property
+    def broken_error(self) -> McpBoundaryError | None:
+        return self._broken_error
+
+    @property
     def exit_code(self) -> int | None:
         if self._process is None:
             return None
         return self._process.returncode
+
+    @property
+    def session_generation(self) -> int:
+        return self._session_generation
+
+    def set_broken_callback(
+        self,
+        callback: Callable[["StdioMcpClient", McpBoundaryError], None] | None,
+    ) -> None:
+        """绑定 application lifecycle 的 broken 通知，不改变传输 owner。"""
+        self._on_broken = callback
+
+    @property
+    def reconnect_managed(self) -> bool:
+        return self._on_broken is not None
+
+    def set_session_generation(self, generation: int) -> None:
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+            raise ValueError("session_generation 必须是正整数")
+        self._session_generation = generation
 
     @property
     def initialize_info(self) -> McpInitializeInfo | None:
@@ -349,6 +379,20 @@ class StdioMcpClient:
             raise McpServerUnavailableError("spawn_failed") from None
         self._reader_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
+        self._process_wait_task = asyncio.create_task(self._watch_process())
+
+    async def _watch_process(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        try:
+            returncode = await process.wait()
+        except asyncio.CancelledError:
+            raise
+        except (OSError, ValueError):
+            return
+        if not self._closed and not self._broken:
+            self._break(McpTransportClosedError("process_exited"))
 
     async def _read_loop(self) -> None:
         process = self._process
@@ -356,6 +400,8 @@ class StdioMcpClient:
             while True:
                 line = await process.stdout.readline()
                 if not line:
+                    if not self._closed:
+                        self._break(McpTransportClosedError("stdout_closed"))
                     break
                 self._handle_line(line)
         except asyncio.CancelledError:
@@ -485,8 +531,9 @@ class StdioMcpClient:
             process.stdin.write(data + b"\n")
             await process.stdin.drain()
         except (BrokenPipeError, ConnectionResetError, OSError):
-            self._broken = True
-            raise McpTransportClosedError("stdin_write_failed") from None
+            error = McpTransportClosedError("stdin_write_failed")
+            self._break(error)
+            raise error from None
 
     def _next_request_id(self) -> int:
         self._next_id += 1
@@ -544,8 +591,18 @@ class StdioMcpClient:
         return value.replace("\x00", "")[:SERVER_INFO_TEXT_MAX_CHARS]
 
     def _break(self, error: McpBoundaryError) -> None:
+        if self._broken:
+            return
         self._broken = True
+        self._broken_error = error
         self._fail_pending(error)
+        callback = self._on_broken
+        if callback is not None and not self._closed:
+            try:
+                callback(self, error)
+            except Exception:
+                # lifecycle callback 不能反向破坏 transport error handling。
+                pass
 
     def _fail_pending(self, error: McpBoundaryError) -> None:
         while self._pending:
@@ -557,6 +614,7 @@ class StdioMcpClient:
         for task in (
             self._reader_task,
             self._stderr_task,
+            self._process_wait_task,
             *self._background_tasks,
         ):
             if task is not None and not task.done():
@@ -566,6 +624,7 @@ class StdioMcpClient:
             for task in (
                 self._reader_task,
                 self._stderr_task,
+                self._process_wait_task,
                 *self._background_tasks,
             )
             if task is not None
@@ -574,6 +633,7 @@ class StdioMcpClient:
             await asyncio.gather(*pending, return_exceptions=True)
         self._reader_task = None
         self._stderr_task = None
+        self._process_wait_task = None
         self._background_tasks.clear()
 
 

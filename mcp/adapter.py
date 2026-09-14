@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Callable, Mapping
 
 from core.runtime.tool_adapters import (
@@ -41,7 +42,11 @@ from core.runtime.tool_contract import (
     thaw_json,
 )
 from mcp.client import StdioMcpClient
-from mcp.errors import McpBoundaryError, McpTransportTimeoutError
+from mcp.errors import (
+    McpBoundaryError,
+    McpTransportError,
+    McpTransportTimeoutError,
+)
 from mcp.models import MAX_JSON_STRUCTURE_DEPTH, McpToolCallResult
 
 _ARGUMENTS_MAX_JSON_CHARS = 1_048_576
@@ -83,6 +88,8 @@ class McpBackedToolAdapter(ToolAdapter):
         self._input_schema: dict[str, object] = dict(input_schema)
         self._session_resolver = session_resolver
         self._request_timeout_seconds = float(request_timeout_seconds)
+        self._replay_counts: dict[str, int] = {}
+        self._replay_events: list[dict[str, object]] = []
 
     # ---- read-only provenance facts（不进入 Runtime 公共合同）----
 
@@ -97,6 +104,16 @@ class McpBackedToolAdapter(ToolAdapter):
     def llm_input_schema(self) -> dict[str, object]:
         """model-facing 参数 schema：untrusted provider metadata 的 bounded 快照。"""
         return dict(self._input_schema)
+
+    @property
+    def replay_events(self) -> tuple[dict[str, object], ...]:
+        """只暴露不含参数/输出的 read-only replay 证据。"""
+        return tuple(dict(event) for event in self._replay_events)
+
+    @property
+    def lifecycle_events(self) -> tuple[dict[str, object], ...]:
+        """兼容 lifecycle 观测命名；内容仍是 bounded safe evidence。"""
+        return self.replay_events
 
     # ---- ToolAdapter Contract ----
 
@@ -170,6 +187,8 @@ class McpBackedToolAdapter(ToolAdapter):
                 safe_message="MCP Tool session 不可用。",
                 phase=ToolExecutionPhase.INVOCATION,
             )
+        if self._replay_counts.get(invocation.invocation_id, 0) >= 1:
+            raise self._replay_exhausted()
         is_side_effecting = self.spec.side_effect_kind is not ToolSideEffectKind.NONE
         if is_side_effecting:
             # side-effect checkpoint：提交副作用前重新检查取消/Deadline。
@@ -194,9 +213,92 @@ class McpBackedToolAdapter(ToolAdapter):
             # notifications/cancelled；late response 不会产生第二次完成。
             raise
         except McpBoundaryError as exc:
-            raise self._map_boundary_error(exc) from None
+            if is_side_effecting and isinstance(exc, McpTransportError):
+                # side-effect transport loss is explicitly non-replayable;
+                # record only safe lifecycle facts, never args/output/secrets.
+                self._replay_events.append({
+                    "event": "side_effect_replay_rejected",
+                    "server_id": self._server_id,
+                    "generation": getattr(
+                        client,
+                        "session_generation",
+                        getattr(client, "generation", 0),
+                    ),
+                    "replay_count": 0,
+                    "reason": "side_effect_replay_forbidden",
+                })
+            if (
+                not self._can_replay_read_only()
+                or not isinstance(exc, McpTransportError)
+                or not getattr(client, "reconnect_managed", False)
+            ):
+                raise self._map_boundary_error(exc) from None
+            if self._replay_counts.get(invocation.invocation_id, 0) >= 1:
+                raise self._replay_exhausted() from None
+            replacement = await self._wait_for_new_generation(
+                client, client.session_generation, context
+            )
+            if replacement is None:
+                raise self._replay_exhausted() from None
+            self._replay_counts[invocation.invocation_id] = 1
+            self._replay_events.append({
+                "event": "read_only_replay",
+                "original_generation": client.session_generation,
+                "new_generation": replacement.session_generation,
+                "replay_count": 1,
+            })
+            try:
+                call_tool = replacement.call_tool
+                result = await call_tool(
+                    self._remote_name,
+                    arguments,
+                    timeout=min(context.remaining_seconds(), self._request_timeout_seconds),
+                )
+            except asyncio.CancelledError:
+                raise
+            except McpBoundaryError:
+                raise self._replay_exhausted() from None
         context.raise_if_cancelled()
         return self._normalize_result(result, is_side_effecting)
+
+    def _can_replay_read_only(self) -> bool:
+        """本地 canonical spec 是 replay classification authority。"""
+        from core.runtime.retry import OperationIdempotency
+
+        return (
+            self.spec.side_effect_kind is ToolSideEffectKind.NONE
+            and self.spec.idempotency is OperationIdempotency.READ_ONLY
+        )
+
+    async def _wait_for_new_generation(
+        self,
+        original: StdioMcpClient,
+        generation: int,
+        context: ToolAdapterContext,
+    ) -> StdioMcpClient | None:
+        deadline = time.monotonic() + max(context.remaining_seconds(), 0.0)
+        while time.monotonic() < deadline:
+            context.raise_if_cancelled()
+            candidate = self._session_resolver()
+            if (
+                candidate is not None
+                and candidate is not original
+                and not candidate.closed
+                and not candidate.broken
+                and candidate.session_generation > generation
+            ):
+                return candidate
+            await asyncio.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        return None
+
+    @staticmethod
+    def _replay_exhausted() -> ToolAdapterInvocationError:
+        return ToolAdapterInvocationError(
+            category=ToolErrorCategory.INTERNAL,
+            safe_error_code="MCP_READ_ONLY_REPLAY_EXHAUSTED",
+            safe_message="MCP read-only Tool 在重连后仍未完成。",
+            phase=ToolExecutionPhase.INVOCATION,
+        )
 
     # ---- internals ----
 

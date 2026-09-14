@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
 import json
 import re
 
@@ -133,6 +134,16 @@ class McpToolDescriptor:
             input_schema_json=schema_json,
             provider_metadata_json=metadata_json,
         )
+
+    @property
+    def input_schema_digest(self) -> str:
+        """冻结的 canonical input schema digest（不包含不可信 metadata）。"""
+        return hashlib.sha256(self.input_schema_json.encode("utf-8")).hexdigest()
+
+    @property
+    def schema_digest(self) -> str:
+        """兼容性别名：重连校验使用 canonical input schema digest。"""
+        return self.input_schema_digest
 
 
 @dataclass(frozen=True)

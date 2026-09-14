@@ -8,12 +8,12 @@ MCP 是外部 Tool Provider Boundary，不进入 Runtime Core。当前提供：
   ``tools/call`` / close）
 - startup discovery snapshot（MCP Tool Descriptor，untrusted provider metadata）
 - application-scope 集成组件（由 ``server.py::lifespan()`` 的
-  ``RuntimeInitializationStack`` 构造与关闭）
+  ``RuntimeInitializationStack`` 构造与关闭），具备 stdio reconnect lifecycle
 - MCP-backed ToolAdapter + freeze 前 Registration（WP2：MCP Tool 成为既有
   Tool Runtime 中的一个 Tool）
 
 不实现 Streamable HTTP / SSE、第二套 Tool Runtime、provider dispatcher、
-MCP-specific approval/retry、Resources / Prompts / listChanged / hot reload；
+MCP-specific approval、Resources / Prompts / listChanged / hot reload；
 Runtime timeout/cancellation authority 仍归既有 RunContext /
 ToolExecutionService / RunCoordinator。
 """
@@ -32,7 +32,11 @@ from mcp.errors import (
     McpTransportError,
     McpTransportTimeoutError,
 )
-from mcp.lifecycle import McpIntegrationComponent
+from mcp.lifecycle import (
+    McpIntegrationComponent,
+    McpSessionHandle,
+    McpSessionLifecycleState,
+)
 from mcp.models import (
     MCP_PROTOCOL_VERSION,
     McpDiscoverySnapshot,
@@ -58,6 +62,8 @@ __all__ = [
     "McpDiscoverySnapshot",
     "McpInitializeInfo",
     "McpIntegrationComponent",
+    "McpSessionHandle",
+    "McpSessionLifecycleState",
     "McpProtocolError",
     "McpProtocolVersionError",
     "McpServerConfig",

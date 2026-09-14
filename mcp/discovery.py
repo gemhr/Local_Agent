@@ -14,7 +14,9 @@ runtime、不放宽本地策略；非 MCP boundary 的意外异常向上抛出�
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from typing import Callable
 
 from mcp.client import StdioMcpClient
 from mcp.config import McpServerConfig
@@ -42,6 +44,7 @@ async def discover_server(
     *,
     connect_timeout_seconds: float,
     request_timeout_seconds: float,
+    on_broken: Callable[[StdioMcpClient, McpBoundaryError], None] | None = None,
 ) -> McpServerDiscoveryOutcome:
     """对一个 configured server 执行 initialize + tools/list。
 
@@ -53,10 +56,17 @@ async def discover_server(
         server_config=server_config,
         connect_timeout_seconds=connect_timeout_seconds,
         request_timeout_seconds=request_timeout_seconds,
+        on_broken=on_broken,
     )
     try:
         initialize_info = await client.initialize()
         tools = await client.list_tools()
+    except asyncio.CancelledError:
+        # discovery 可能已经 spawn 了候选子进程；取消不能遗留未 reap 的 child。
+        try:
+            await client.close(timeout=_DISCOVERY_FAILURE_CLOSE_TIMEOUT_SECONDS)
+        finally:
+            raise
     except McpBoundaryError as exc:
         try:
             await client.close(
@@ -70,6 +80,22 @@ async def discover_server(
                 server_id=server_config.server_id,
                 status=McpServerDiscoveryStatus.DISCOVERY_FAILED,
                 safe_error_code=exc.safe_error_code,
+            ),
+            client=None,
+        )
+    # initialize/list 完成后仍需确认候选没有在发布窗口内失效；组件会在
+    # publish 前再次检查，discovery 自身也不向调用方交付 dead session。
+    if client.closed or client.broken:
+        error = client.broken_error or McpBoundaryError("candidate_not_healthy")
+        try:
+            await client.close(timeout=_DISCOVERY_FAILURE_CLOSE_TIMEOUT_SECONDS)
+        except Exception:
+            pass
+        return McpServerDiscoveryOutcome(
+            result=McpServerDiscoveryResult(
+                server_id=server_config.server_id,
+                status=McpServerDiscoveryStatus.DISCOVERY_FAILED,
+                safe_error_code=error.safe_error_code,
             ),
             client=None,
         )
