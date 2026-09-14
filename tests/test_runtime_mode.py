@@ -29,6 +29,9 @@ def test_runtime_mode_rejects_unknown_value() -> None:
 def test_settings_uses_exact_mode_key_and_fails_closed(monkeypatch) -> None:
     monkeypatch.setenv("CHAT_RUNTIME_MODE", "coordinated")
     assert Settings.load().chat_runtime_mode is ChatRuntimeMode.COORDINATED
+    monkeypatch.setenv("CHAT_RUNTIME_MODE", "legacy")
+    with pytest.raises(ValueError, match="CHAT_RUNTIME_MODE"):
+        Settings.load()
     monkeypatch.setenv("CHAT_RUNTIME_MODE", "legacy-if-coordinated-fails")
     with pytest.raises(ValueError, match="CHAT_RUNTIME_MODE"):
         Settings.load()

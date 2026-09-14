@@ -8,6 +8,10 @@ import threading
 import asyncio
 from datetime import UTC, datetime
 from enum import Enum
+from typing import Callable, TypeVar
+
+
+_T = TypeVar("_T")
 
 
 class CancellationReason(str, Enum):
@@ -64,6 +68,15 @@ class CancellationToken:
         reason = self.reason
         if reason is not None:
             raise RunCancelledError(reason)
+
+    def execute_if_active(self, operation: Callable[[], _T]) -> _T:
+        """与 ``cancel()`` 线性化地执行一个不阻塞的本地提交动作。"""
+        if not callable(operation):
+            raise TypeError("operation 必须可调用")
+        with self._source._lock:
+            if self._source._reason is not None:
+                raise RunCancelledError(self._source._reason)
+            return operation()
 
     async def wait_cancelled(self) -> None:
         """异步等待取消，不占用事件循环；短超时确保取消 Task 可回收。"""

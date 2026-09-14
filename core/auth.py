@@ -145,7 +145,8 @@ def require_scope(principal: Principal, scope: str) -> None:
 
 
 def require_owned(principal: Principal, owner_id: str | uuid.UUID | None) -> None:
-    if "ADMIN" not in principal.roles and (owner_id is None or str(owner_id) != str(principal.user_id)):
+    admin_override = principal.principal_kind != "SERVICE" and "ADMIN" in principal.roles
+    if not admin_override and (owner_id is None or str(owner_id) != str(principal.user_id)):
         raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
 
 

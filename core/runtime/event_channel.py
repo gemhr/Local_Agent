@@ -161,6 +161,7 @@ class _RuntimeEventTransportConsumer(AsyncIterator[RuntimeEvent]):
         try:
             await self._channel._before_receive()
             item = await self._channel._queue.get()
+            self._channel._space_available.set()
         except BaseException:
             self._release(completed=False)
             raise
@@ -219,6 +220,8 @@ class RuntimeEventChannel:
         self._queue: asyncio.Queue[RuntimeEvent | object] = asyncio.Queue(
             maxsize=capacity
         )
+        self._space_available = asyncio.Event()
+        self._space_available.set()
         self._state = EventChannelState.OPEN
         self._publish_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
@@ -339,7 +342,16 @@ class RuntimeEventChannel:
                     ):
                         append_status = await self._terminal_append(event)
                     else:
-                        append_status = await resolve(self._journal.append(event))
+                        append_value = self._journal.append(event)
+                        if (
+                            event.event_type.value == "OUTPUT_DELTA"
+                            and not ignore_run_cancellation
+                        ):
+                            append_status = await self._await_output_append_interruptibly(
+                                append_value
+                            )
+                        else:
+                            append_status = await resolve(append_value)
                     self._sequence = sequence
                     await self._execute_publication_fault(
                         FaultPoint.EVENT_AFTER_JOURNAL_APPEND,
@@ -412,6 +424,7 @@ class RuntimeEventChannel:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        self._space_available.set()
         # Wake a transport or drain consumer that is blocked on an empty queue.
         self._queue.put_nowait(_END)
         self._end_enqueued = True
@@ -474,6 +487,7 @@ class RuntimeEventChannel:
             while True:
                 await self._before_receive()
                 item = await self._queue.get()
+                self._space_available.set()
                 if item is _END or self._state == EventChannelState.ABORTED:
                     completed = True
                     return
@@ -632,40 +646,72 @@ class RuntimeEventChannel:
         *,
         ignore_run_cancellation: bool,
     ) -> None:
-        put_task = asyncio.create_task(self._queue.put(event))
+        while self._queue.full():
+            self._space_available.clear()
+            if not self._queue.full():
+                continue
+            await self._wait_for_space_interruptibly(
+                ignore_run_cancellation=ignore_run_cancellation
+            )
+        if self._state == EventChannelState.ABORTED:
+            raise EventChannelClosedError("Event Channel 已 abort")
+        token = self._cancellation_token
+        if token is not None and not ignore_run_cancellation:
+            token.execute_if_active(lambda: self._queue.put_nowait(event))
+        else:
+            self._queue.put_nowait(event)
+        if self._queue.full():
+            self._space_available.clear()
+
+    async def _wait_for_space_interruptibly(
+        self, *, ignore_run_cancellation: bool
+    ) -> None:
+        space_task = asyncio.create_task(self._space_available.wait())
         abort_task = asyncio.create_task(self._abort_event.wait())
         cancel_task: asyncio.Task[None] | None = None
         if self._cancellation_token is not None and not ignore_run_cancellation:
             cancel_task = asyncio.create_task(
                 self._cancellation_token.wait_cancelled()
             )
-        waiters = {put_task, abort_task}
+        waiters = {space_task, abort_task}
         if cancel_task is not None:
             waiters.add(cancel_task)
         try:
-            done, _ = await asyncio.wait(
-                waiters, return_when=asyncio.FIRST_COMPLETED
-            )
-            if put_task in done and self._state != EventChannelState.ABORTED:
-                return
-            if self._state == EventChannelState.ABORTED:
-                while True:
-                    try:
-                        self._queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            if self._state == EventChannelState.ABORTED or abort_task in done:
                 raise EventChannelClosedError("Event Channel 已 abort")
-            put_task.cancel()
-            await asyncio.gather(put_task, return_exceptions=True)
-            if abort_task in done:
-                raise EventChannelClosedError("Event Channel 已 abort")
-            assert self._cancellation_token is not None
-            self._cancellation_token.raise_if_cancelled()
+            if cancel_task is not None and (
+                cancel_task in done or self._cancellation_token.is_cancelled()
+            ):
+                self._cancellation_token.raise_if_cancelled()
         finally:
             for task in waiters:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*waiters, return_exceptions=True)
+
+    async def _await_output_append_interruptibly(self, append_value):
+        token = self._cancellation_token
+        if token is None:
+            return await resolve(append_value)
+        token.raise_if_cancelled()
+        append_task = asyncio.create_task(resolve(append_value))
+        cancel_task = asyncio.create_task(token.wait_cancelled())
+        try:
+            done, _ = await asyncio.wait(
+                {append_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if append_task in done:
+                return await append_task
+            append_task.cancel()
+            await asyncio.gather(append_task, return_exceptions=True)
+            token.raise_if_cancelled()
+            raise AssertionError("cancellation waiter completed without cancellation")
+        finally:
+            for task in (append_task, cancel_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(append_task, cancel_task, return_exceptions=True)
 
     async def _put_end_interruptibly(self) -> None:
         put_task = asyncio.create_task(self._queue.put(_END))

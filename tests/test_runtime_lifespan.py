@@ -70,16 +70,18 @@ async def test_default_chat_endpoint_captures_mode_once_and_routes_coordinated(
     assert service.legacy_calls == 0
 
 
-def test_lifecycle_states_and_legacy_source_boundary_are_explicit() -> None:
+def test_lifecycle_states_and_canonical_runtime_configuration_are_explicit(
+    monkeypatch,
+) -> None:
     assert {item.value for item in RuntimeLifecycleState} == {
         "STARTING",
         "READY",
         "SHUTTING_DOWN",
         "CLOSED",
     }
-    source = inspect.getsource(server.chat_endpoint)
-    assert "service.stream_chat(" in source
-    assert "service.stream_coordinated_agent_text(" in source
+    monkeypatch.setenv("CHAT_RUNTIME_MODE", "LEGACY")
+    with pytest.raises(ValueError, match="CHAT_RUNTIME_MODE"):
+        server.Settings.load()
 
 
 def test_snapshot_production_assembly_is_fail_fast_and_independently_configured(

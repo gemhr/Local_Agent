@@ -31,7 +31,7 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_API_HOST` | Settings/server | string | `127.0.0.1` | valid bind host | no | APPLICATION_SCOPE | yes | internal config | bind/start failure | `127.0.0.1` |
 | `LOCAL_AGENT_API_PORT` | Settings/server | int | `8000` | integer port 1..65535 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed；OS bind 失败 | `8000` |
 | `LOCAL_AGENT_API_BASE_URL` | Settings/client config | string | derived host/port | valid client base URL | no | APPLICATION_SCOPE | yes | internal endpoint | client connection failure | `http://127.0.0.1:8000` |
-| `CHAT_RUNTIME_MODE` | ChatRuntimeSelector | enum | `COORDINATED` | `COORDINATED`,`LEGACY` | no | APPLICATION_SCOPE/request snapshot | yes | public-safe enum | unsupported value fails load | `COORDINATED` |
+| `CHAT_RUNTIME_MODE` | ChatRuntimeSelector | enum | `COORDINATED` | `COORDINATED` | no | APPLICATION_SCOPE/request snapshot | yes | public-safe enum | `LEGACY`/unsupported value fails load | `COORDINATED` |
 | `LOCAL_AGENT_MODEL_PROFILE` | Settings presets | enum | `balanced` | `fast`,`balanced`,`deep` | no | APPLICATION_SCOPE | yes | public-safe enum | unknown/blank 显式值 fail closed | `balanced` |
 | `LOCAL_AGENT_LLM_BACKEND` | lifespan model assembly | enum | `remote` | `local`,`remote`,`hybrid` | yes | APPLICATION_SCOPE | yes | internal config | invalid/empty backend fails load；SERVER role 缺 endpoint 时 startup fail | `local` |
 | `LOCAL_AGENT_MODEL_PATH` | LocalLLMEngine | path | project-relative GGUF | readable GGUF path | local/hybrid | APPLICATION_SCOPE | yes | sensitive path | model load fails startup | `data/models/model.gguf` |
@@ -140,7 +140,7 @@ Production 安全不变量（SERVER role）：backend 为 remote/hybrid 时 endp
 
 ## Runtime Selection
 
-默认 `COORDINATED`。`LEGACY` 只能在新请求开始前通过 `CHAT_RUNTIME_MODE` 显式选择并重启；endpoint 对每个请求只捕获一次 mode。运行中不动态切换，任何已选路径失败都不会跨 Runtime fallback。
+默认 `COORDINATED`，且它是唯一 production runtime。`CHAT_RUNTIME_MODE=LEGACY` 在 `Settings.load()` 阶段 fail closed，不能启动 application；Legacy 类型与执行单元仅保留为非 production 测试 seam。endpoint 对每个请求只捕获一次 mode，任何已选路径失败都不会跨 Runtime fallback。
 
 ## Role Boundary
 

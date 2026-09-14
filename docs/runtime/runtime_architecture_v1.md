@@ -42,7 +42,7 @@ HTTP server、不创建第二个数据库池。Kafka offset 仅在 PostgreSQL co
 | Runtime mode 在哪里选择 | `Settings.load()` 解析 `CHAT_RUNTIME_MODE`；`chat_endpoint()` 调用 `ChatService.selected_runtime_mode()` 捕获请求快照 |
 | 一次请求选择次数 | 一次；流开始后不重读环境变量或 Settings |
 | 默认 Runtime | `COORDINATED` |
-| Legacy 启用 | 只能显式设置 `CHAT_RUNTIME_MODE=LEGACY` |
+| Legacy 启用 | production 禁止；`CHAT_RUNTIME_MODE=LEGACY` 在 Settings 阶段 fail closed |
 | 跨 Runtime fallback | 不存在；所选路径失败后只输出安全错误并收口 |
 | Application services 装配 | 每个 FastAPI lifespan 一次 |
 | Run 对象 | `CoordinatedRuntimeFactory.create_run_scope()` 每请求新建；Legacy 也每请求新建 Context/State/Ledger |
@@ -467,7 +467,7 @@ project/thread Memory、Episodic/Shared Memory（Scope Guard）。
 | 能力 | Coordinated | Legacy |
 |---|---|---|
 | 默认入口 | 是 | 否 |
-| 显式配置 | `COORDINATED` | `LEGACY` |
+| 显式配置 | `COORDINATED` | production 不可用（仅测试 seam） |
 | RunContext | 是 | 是 |
 | AgentState | 是，RunCoordinator 写 | 是，AgentLoop 写 |
 | Event Journal | 是 | 未接入完整 Runtime journal |
@@ -653,7 +653,7 @@ Stage5-Phase6-WP1/WP2（检索 provenance 与 Hybrid runtime）：Chroma marker 
 - OPTIONAL_BACKUP：Chroma directory（可加速 restore，correctness 依赖 source + matching embedding artifact rebuild）。
 - BACKUP_OPTIONAL / RECREATE：Observability checkpoint（derived，startup 仍 required）。
 - Restore success 至少要求：显式 full preflight PASS、Server `READY`（或 allowlisted `READY_DEGRADED`）、required durable Stores 可读、health/readiness smoke PASS。
-- 代码回滚与数据回滚是两件事；`CHAT_RUNTIME_MODE=legacy` 不能替代 data rollback。
+- 代码回滚与数据回滚是两件事；`CHAT_RUNTIME_MODE=legacy` 会启动失败，不能替代任何 rollback。
 
 ### 11.6 Migration vs Recovery
 

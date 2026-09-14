@@ -53,6 +53,26 @@ def test_principal_is_immutable_and_ownership_is_server_side() -> None:
         principal.roles = frozenset({"ADMIN"})  # type: ignore[misc]
 
 
+def test_service_principal_cannot_use_admin_override_for_foreign_ownership() -> None:
+    service_id = uuid.uuid4()
+    principal = Principal(
+        service_id,
+        str(service_id),
+        frozenset({"SERVICE", "ADMIN"}),
+        "jti",
+        datetime.now(UTC),
+        datetime.now(UTC) + timedelta(minutes=1),
+        "SERVICE",
+        frozenset({"localagent:evaluation:execute"}),
+    )
+
+    require_owned(principal, service_id)
+    with pytest.raises(AuthError) as denied:
+        require_owned(principal, uuid.uuid4())
+    assert denied.value.code == "AUTHORIZATION_OBJECT_NOT_OWNED"
+    assert denied.value.status_code == 404
+
+
 def test_evaluation_scope_requires_service_principal() -> None:
     user = Principal(
         uuid.uuid4(), "human", frozenset({"ADMIN"}), "jti", datetime.now(UTC),

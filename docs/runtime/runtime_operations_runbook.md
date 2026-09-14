@@ -21,7 +21,7 @@
 9. 确认默认 Runtime 为 `COORDINATED`，请求只读取一次 mode。
 10. 检索策略（`LOCAL_AGENT_RETRIEVAL_STRATEGY`）在 startup 捕获一次：`BASELINE` 保持既有 v1 collection 行为；`HYBRID_RRF` 在 Router 构造前执行完整 active-generation provenance 校验（active.json schema → locator containment → manifest/provenance digest → Dense v2 marker → embedding asset-tree digest → BM25 artifact digest/冻结契约 → 共享 provenance 精确相等），并保留该已加载 BM25 index 为 APPLICATION_SCOPE 依赖。Hybrid 已生产可达：Dense rewritten/original 结果先合并为单一 8 条 channel，BM25 是唯一 sparse channel（无 Chroma keyword），两者串行 RRF 融合（每 channel 8、union 16、fused 8），最终仅按 fused rank 取 `rag_top_k`，不对 RRF 分数应用 `rag_min_score`。任一必需通道/融合/物化失败均 fail closed 且不回退 baseline；optional KB 仅允许 startup degraded，Hybrid 请求仍以 `HYBRID_STRATEGY_UNAVAILABLE` 失败。启动绝不自动 rebuild、不重建 BM25 artifact、不修改 active.json。
 
-启动失败时禁止切换 Runtime 后重跑同一请求。配置异常保持 `SettingsValidationError` 固定安全码（`SETTINGS_PARSE_ERROR`/`SETTINGS_VALIDATION_ERROR`/`SETTINGS_SECURITY_POLICY_ERROR`/`STARTUP_CONFIGURATION_ERROR`），资源失败保持 `RUNTIME_INITIALIZATION_FAILED`；错误对象和日志不输出原始路径、密钥或 Provider URL。Legacy rollback 是修改 `CHAT_RUNTIME_MODE` 后重启并只影响新请求，不是某次失败后的动态动作。
+启动失败时禁止切换 Runtime 后重跑同一请求。配置异常保持 `SettingsValidationError` 固定安全码（`SETTINGS_PARSE_ERROR`/`SETTINGS_VALIDATION_ERROR`/`SETTINGS_SECURITY_POLICY_ERROR`/`STARTUP_CONFIGURATION_ERROR`），资源失败保持 `RUNTIME_INITIALIZATION_FAILED`；错误对象和日志不输出原始路径、密钥或 Provider URL。`CHAT_RUNTIME_MODE=LEGACY` 会在 Settings 阶段 fail closed，不是可用的 production rollback。
 
 ## Health / Metrics / Trace
 
@@ -200,11 +200,9 @@ GET /readyz    # 200 表示可以安全尝试接受新的 Run
 - 相关错误码：`SETTINGS_PARSE_ERROR`、`SETTINGS_VALIDATION_ERROR`、`SETTINGS_SECURITY_POLICY_ERROR`、`STARTUP_CONFIGURATION_ERROR`、`RUNTIME_INITIALIZATION_FAILED`；`RUNTIME_CONFIGURATION_ERROR` 只覆盖 ChatService/Coordinated factory 缺失的局部配置失败，不得扩大解释。
 - 相关测试：`test_settings_validation.py`、`test_environment_profile.py`、`test_startup_configuration.py`、`test_runtime_lifespan.py`。
 
-## Legacy Rollback Runbook
+## Runtime Rollback Boundary
 
-适合：Coordinated 默认入口存在启动/兼容问题、目标请求尚未开始、且已确认 Legacy 覆盖基础场景。不适合：非幂等副作用后重跑、需要 Snapshot/Recovery evidence、修复 Journal 损坏、绕过 Budget/Cancellation/安全策略。
-
-流程：停止接收新请求→等待/处置现有 Run→修改真实 `CHAT_RUNTIME_MODE` 为 `LEGACY`→重启→请求前确认 mode→执行安全 smoke test。回滚后使用新 RunContext/AgentState；不能对已开始或失败的 Coordinated 请求动态切换，不能宣称 Legacy 拥有完整 Journal/Snapshot/Recovery。共享 Application resource 仍按 identity close once。恢复 Coordinated 时执行同样的请求前配置、重启与 smoke test。
+Runtime rollback 只能部署已知良好的、仍使用 `COORDINATED` canonical path 的 artifact/configuration，并在新进程上执行安全 smoke test。禁止通过 `CHAT_RUNTIME_MODE=LEGACY` 绕过 Durable Run、Approval、Tool side-effect ledger 或 MCP lifecycle；该值会在 startup fail closed。不得对已开始或已失败的 Run 跨 Runtime 重跑。
 
 ## Persistence Preflight / Migration
 

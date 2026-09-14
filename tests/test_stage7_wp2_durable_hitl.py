@@ -248,9 +248,19 @@ async def test_decision_race_and_binding_mismatch_fail_closed(clean_database):
                          invocation_binding_digest=request.invocation_binding_digest,
                          decision=ApprovalDecisionValue.REJECT),
     )
-    assert sum(item.effective_status is ApprovalStatus.APPROVED and item.safe_error_code is None for item in results) == 1, repr(results)
-    assert sum(item.safe_error_code in {"APPROVAL_DECISION_CONFLICT", None} for item in results) == 2
-    assert (await service_a.status(request.approval_id)) is ApprovalStatus.APPROVED
+    winners = [item for item in results if item.safe_error_code is None]
+    losers = [
+        item
+        for item in results
+        if item.safe_error_code == "APPROVAL_DECISION_CONFLICT"
+    ]
+    assert len(winners) == len(losers) == 1, repr(results)
+    assert winners[0].effective_status in {
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.REJECTED,
+    }
+    assert losers[0].effective_status is winners[0].effective_status
+    assert (await service_a.status(request.approval_id)) is winners[0].effective_status
 
     mismatch = await service_b.decide(
         run_id=request.run_id, approval_id=request.approval_id,

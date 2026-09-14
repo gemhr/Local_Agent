@@ -261,13 +261,20 @@ def _env_runtime_mode() -> ChatRuntimeMode:
     if raw is None:
         return ChatRuntimeMode.COORDINATED
     try:
-        return ChatRuntimeMode.parse(raw)
+        mode = ChatRuntimeMode.parse(raw)
     except (TypeError, ValueError):
         raise SettingsValidationError(
             SETTINGS_VALIDATION_ERROR,
             "CHAT_RUNTIME_MODE",
             "unsupported",
         ) from None
+    if mode is not ChatRuntimeMode.COORDINATED:
+        raise SettingsValidationError(
+            SETTINGS_VALIDATION_ERROR,
+            "CHAT_RUNTIME_MODE",
+            "legacy_runtime_disabled",
+        )
+    return mode
 
 
 def _env_model_profile() -> str:

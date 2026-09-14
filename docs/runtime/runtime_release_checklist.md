@@ -36,9 +36,9 @@ Checklist 是有证据引用的 code-level gate，不替代生产容量、外部
 
 ## Rollback
 
-- [ ] 请求前将真实 `CHAT_RUNTIME_MODE` 设为 `LEGACY` 并重启：RC-19。
-- [ ] 先确认 Legacy capability boundary：`runtime_architecture_v1.md::Legacy / Coordinated Boundary`。
-- [ ] 禁止对已失败/已开始 Run 跨 Runtime 重跑：RC-20、`tests/test_runtime_legacy_boundary.py`。
+- [ ] `CHAT_RUNTIME_MODE=LEGACY` 必须在 startup fail closed，不得作为 production rollback。
+- [ ] 仅部署仍使用 `COORDINATED` canonical path 的已知良好 artifact/configuration。
+- [ ] 禁止对已失败/已开始 Run 跨 Runtime 重跑：`tests/test_runtime_legacy_boundary.py`。
 - [ ] 回滚前后均执行新身份的安全 smoke，Application resource identity close once。
 
 ## CI Artifact Boundary

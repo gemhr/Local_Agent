@@ -333,7 +333,7 @@ schema-changing migration committed
 
 - 任何 schema migration 提交前必须已取并验证 backup；migration 失败（在任何 commit 前）可只回滚 code/artifact/config。
 - 不实现 downgrade migration / reverse SQL；需要回滚旧 binary 时恢复 pre-migration backup set。
-- 与 `CHAT_RUNTIME_MODE=legacy` 的 **Runtime Legacy Rollback** 严格区分：后者是 emergency control，只影响新请求，需要修改 runtime mode 后重启；它不能替代 data rollback。两者不得混为一谈。
+- `CHAT_RUNTIME_MODE=legacy` 会在 Settings 阶段 fail closed，不是 Runtime rollback。代码回滚仍必须部署 matching known-good coordinated artifact/config；它不能替代 data rollback。
 
 **不实现 automatic deployment rollback。**
 

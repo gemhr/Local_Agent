@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import uuid
 
 import pytest
 
 from core.persistence.errors import DatabaseErrorCode, PersistenceError
 from core.runtime.budget import BudgetLedger, RunBudget
+from core.runtime.approval import (
+    ApprovalDecisionValue,
+    ApprovalRequest,
+    ApprovalStatus,
+    compute_invocation_binding_digest,
+)
 from core.runtime.context import RunContext
+from core.runtime.durable_approval import DurableApprovalService
 from core.runtime.run_control import DurableRunControlService, OwnershipLost
 from core.runtime.tool_adapters import ComplexWorkflowToolAdapter, ToolAdapterInvocationError
 from core.runtime.tool_contract import (
@@ -19,6 +27,7 @@ from core.runtime.tool_contract import (
     ToolExecutionError,
     ToolInvocation,
     ToolSideEffectState,
+    safe_key_digest,
 )
 from core.runtime.tool_execution import ToolExecutionService
 from core.runtime.tool_idempotency import (
@@ -113,6 +122,108 @@ async def test_durable_invocation_state_machine_and_stable_identity(clean_databa
     )
     assert committed.state is ToolInvocationState.COMMITTED
     assert committed.provider_operation_id == "provider-operation-1"
+
+
+@pytest.mark.asyncio
+async def test_real_approval_claim_flows_into_durable_tool_invocation(clean_database):
+    run = DurableRunControlService(clean_database)
+    lease = await run.claim(uuid.uuid4().hex, "wp5-cross-wp-owner")
+    invocation = _invocation()
+    risk_facts = ("RESOURCE_WRITE",)
+    binding = compute_invocation_binding_digest(
+        invocation_identity_digest=safe_key_digest(invocation.invocation_id),
+        tool_name=invocation.tool_name,
+        arguments_digest=invocation.arguments_digest,
+        idempotency_key_digest=safe_key_digest(invocation.idempotency_key),
+        resource_key_digest=safe_key_digest(invocation.resource_key),
+        risk_level="HIGH",
+        risk_facts=risk_facts,
+    )
+    request = ApprovalRequest(
+        approval_id=uuid.uuid4().hex,
+        run_id=lease.run_id,
+        step_id="answer",
+        invocation_id=invocation.invocation_id,
+        tool_name=invocation.tool_name,
+        invocation_identity_digest=safe_key_digest(invocation.invocation_id),
+        arguments_digest=invocation.arguments_digest,
+        idempotency_key_digest=safe_key_digest(invocation.idempotency_key),
+        resource_key_digest=safe_key_digest(invocation.resource_key),
+        risk_level="HIGH",
+        risk_facts=risk_facts,
+        invocation_binding_digest=binding,
+        requested_at=datetime.now(UTC),
+    )
+    approval = DurableApprovalService(clean_database)
+    await approval.create(request)
+    decision = await approval.decide(
+        run_id=lease.run_id,
+        approval_id=request.approval_id,
+        invocation_binding_digest=binding,
+        decision=ApprovalDecisionValue.APPROVE,
+    )
+    assert decision.effective_status is ApprovalStatus.APPROVED
+
+    service = DurableToolInvocationService(clean_database)
+    assert await service.get(invocation.invocation_id) is None
+    claim = await approval.claim_execution(
+        lease=lease,
+        approval_id=request.approval_id,
+        invocation_binding_digest=binding,
+    )
+    assert await service.get(invocation.invocation_id) is None
+
+    observed_states = []
+    original_start = service.start
+    original_committed = service.committed
+
+    async def observe_start(**kwargs):
+        prepared = await service.get(invocation.invocation_id)
+        assert prepared is not None
+        assert prepared.state is ToolInvocationState.PREPARED
+        assert prepared.approval_id == request.approval_id
+        assert prepared.execution_claim_id == claim.claim_id
+        assert prepared.invocation_binding_digest == binding
+        observed_states.append(prepared.state)
+        started = await original_start(**kwargs)
+        observed_states.append(started.state)
+        return started
+
+    async def observe_committed(**kwargs):
+        committed = await original_committed(**kwargs)
+        observed_states.append(committed.state)
+        return committed
+
+    service.start = observe_start  # type: ignore[method-assign]
+    service.committed = observe_committed  # type: ignore[method-assign]
+    context = RunContext.create(entry_agent_id="core_router", run_id=lease.run_id)
+    context.attach_durable_lease(lease)
+    context.attach_budget_ledger(BudgetLedger(RunBudget()))
+    adapter = _CountingAdapter()
+
+    outcome = await ToolExecutionService(durable_invocation_service=service).execute(
+        invocation=invocation,
+        adapter=adapter,
+        run_context=context,
+        step_id="answer",
+        durable_approval_id=request.approval_id,
+        durable_execution_claim_id=claim.claim_id,
+        durable_binding_digest=binding,
+    )
+
+    assert not isinstance(outcome, ToolExecutionError)
+    assert adapter.calls == 1
+    assert observed_states == [
+        ToolInvocationState.PREPARED,
+        ToolInvocationState.STARTED,
+        ToolInvocationState.COMMITTED,
+    ]
+    record = await service.get(invocation.invocation_id)
+    assert record is not None
+    assert record.state is ToolInvocationState.COMMITTED
+    assert record.approval_id == request.approval_id
+    assert record.execution_claim_id == claim.claim_id
+    assert record.invocation_binding_digest == binding
 
 
 @pytest.mark.asyncio

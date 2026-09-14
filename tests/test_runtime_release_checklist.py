@@ -21,7 +21,7 @@ def test_checklist_requires_fully_closed_and_forbids_cross_runtime_rerun() -> No
     text = DOC.read_text(encoding="utf-8")
     assert "`fully_closed`" in text
     assert "deferred/unknown" in text
-    assert "请求前将真实 `CHAT_RUNTIME_MODE`" in text
+    assert "`CHAT_RUNTIME_MODE=LEGACY` 必须在 startup fail closed" in text
     assert "禁止对已失败/已开始 Run 跨 Runtime 重跑" in text
     assert "毫秒值不是硬 Gate" in text
 

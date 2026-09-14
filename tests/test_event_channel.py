@@ -7,6 +7,8 @@ from core.runtime import (
     EventChannelClosedError,
     EventChannelConsumerOwner,
     EventChannelState,
+    JournalAppendStatus,
+    OutputDeltaPayload,
     RunCompletedPayload,
     RunStartedPayload,
     RuntimeEventChannel,
@@ -27,6 +29,52 @@ def draft(index: int = 0) -> RuntimeEventDraft:
 
 
 class RuntimeEventChannelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_output_delta_cancelled_during_journal_append_is_not_visible(self):
+        class BlockingJournal:
+            def __init__(self):
+                self.append_started = asyncio.Event()
+                self.release_append = asyncio.Event()
+                self.records = []
+
+            def last_sequence(self, run_id):
+                del run_id
+                return None
+
+            async def append(self, event):
+                self.append_started.set()
+                await self.release_append.wait()
+                self.records.append(event)
+                return JournalAppendStatus.APPENDED
+
+        source = CancellationSource()
+        journal = BlockingJournal()
+        channel = RuntimeEventChannel(
+            1,
+            run_id="run-a",
+            cancellation_token=source.token,
+            journal=journal,
+        )
+        publication = asyncio.create_task(
+            channel.publish(
+                RuntimeEventDraft(
+                    "run-a",
+                    "trace-a",
+                    RuntimeEventType.OUTPUT_DELTA,
+                    "output_gate",
+                    OutputDeltaPayload("late"),
+                )
+            )
+        )
+        await journal.append_started.wait()
+
+        source.cancel(CancellationReason.REQUEST_CANCELLED)
+
+        with self.assertRaises(RunCancelledError):
+            await asyncio.wait_for(publication, 0.3)
+        journal.release_append.set()
+        self.assertEqual(journal.records, [])
+        self.assertEqual(channel.buffered_count, 0)
+
     async def test_capacity_is_positive_bounded_and_rejects_bool(self):
         for value in (0, -1, True):
             with self.assertRaises(ValueError):
