@@ -43,6 +43,46 @@ class PersistenceBase(DeclarativeBase):
     """所有持久化模型的公共 Base；不提供通用 CRUD。"""
 
 
+class FeatureTestMissionRow(PersistenceBase):
+    """Stage8 业务 Mission；不承载 Runtime Run 状态。"""
+    __tablename__ = "stage8_feature_test_missions"
+    mission_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    feature_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"), onupdate=text("now()"))
+    __table_args__ = (CheckConstraint("version > 0", name="ck_stage8_mission_version"),)
+
+
+class MissionRunReferenceRow(PersistenceBase):
+    """Mission 到 AgentCore Run 的引用，不改变 Run 生命周期。"""
+    __tablename__ = "stage8_mission_run_refs"
+    reference_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(ForeignKey("stage8_feature_test_missions.mission_id", ondelete="CASCADE"), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    run_purpose: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    __table_args__ = (UniqueConstraint("mission_id", "run_id", "run_purpose", name="uq_stage8_mission_run_ref"),)
+
+
+class BusinessReviewRow(PersistenceBase):
+    """Stage8 业务 Review；独立于 Runtime Tool Approval。"""
+    __tablename__ = "stage8_business_reviews"
+    review_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(ForeignKey("stage8_feature_test_missions.mission_id", ondelete="CASCADE"), nullable=False)
+    review_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_version: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    subject_digest: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    decided_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decision_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class UserRow(PersistenceBase):
     __tablename__ = "users"
     id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
@@ -775,6 +815,9 @@ class ProjectSemanticMemoryRow(PersistenceBase):
 
 # Alembic 与 readiness 共用的 Canonical 表清单（不含 alembic_version）。
 CANONICAL_TABLES = (
+    "stage8_feature_test_missions",
+    "stage8_mission_run_refs",
+    "stage8_business_reviews",
     "users",
     "roles",
     "user_roles",
@@ -826,4 +869,7 @@ __all__ = [
     "DurableToolExecutionClaimRow",
     "DurableToolInvocationRow",
     "RuntimeSnapshotRow",
+    "FeatureTestMissionRow",
+    "MissionRunReferenceRow",
+    "BusinessReviewRow",
 ]

@@ -191,6 +191,13 @@ from mcp.registration import (
     build_mcp_registrations,
 )
 from tools.registry import build_builtin_tool_registrations, register_all_tools
+from core.stage8 import (
+    BusinessReviewService,
+    MissionService,
+    Stage8ConflictError,
+    Stage8NotFoundError,
+    Stage8ValidationError,
+)
 
 # WP4-C：AgentEvalOps trace export dispatcher 的 code-owned bounded queue 容量
 # （最小配置约束：不新增 Settings；默认与 observability queue 一致）。
@@ -516,6 +523,8 @@ async def lifespan(app: FastAPI):
     app.state.evaluation_job_service = EvaluationJobService(
         persistence_database, observability=observability_service
     )
+    app.state.stage8_mission_service = MissionService(persistence_database)
+    app.state.stage8_review_service = BusinessReviewService(persistence_database)
     # Redis owns only cache/admission state.  Connection establishment is lazy so
     # cache outage never prevents the PostgreSQL/RAG authority from starting.
     redis_service = await initialization_stack.create(
@@ -1267,11 +1276,131 @@ async def lifespan(app: FastAPI):
                 },
             )
         app.state.chat_service = None
+        app.state.stage8_mission_service = None
+        app.state.stage8_review_service = None
         app.state.runtime_services = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
 
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
+
+
+class Stage8MissionCreateRequest(BaseModel):
+    feature_id: StrictStr = Field(min_length=1, max_length=255)
+    title: StrictStr | None = Field(default=None, max_length=255)
+    summary: StrictStr | None = None
+
+
+class Stage8TransitionRequest(BaseModel):
+    status: StrictStr
+    expected_version: int = Field(ge=1)
+
+
+class Stage8RunReferenceRequest(BaseModel):
+    run_id: StrictStr = Field(min_length=1, max_length=255)
+    run_purpose: StrictStr = Field(min_length=1, max_length=255)
+
+
+class Stage8ReviewCreateRequest(BaseModel):
+    review_type: StrictStr
+    subject_version: int | None = Field(default=None, ge=1)
+    subject_digest: StrictStr | None = Field(default=None, min_length=64, max_length=64)
+
+
+class Stage8ReviewDecisionRequest(BaseModel):
+    mission_id: StrictStr = Field(min_length=1, max_length=255)
+    decided_by: StrictStr | None = Field(default=None, max_length=255)
+    decision_comment: StrictStr | None = None
+    subject_version: int | None = Field(default=None, ge=1)
+    subject_digest: StrictStr | None = Field(default=None, min_length=64, max_length=64)
+
+
+def _stage8_projection(value):
+    if isinstance(value, list): return [_stage8_projection(item) for item in value]
+    result = {key: val for key, val in value.__dict__.items()} if hasattr(value, "__dict__") else {}
+    if not result and hasattr(value, "__dataclass_fields__"):
+        from dataclasses import asdict
+        result = asdict(value)
+    for key, val in list(result.items()):
+        if hasattr(val, "value"): result[key] = val.value
+    return result
+
+
+@app.exception_handler(Stage8NotFoundError)
+async def stage8_not_found_handler(request: Request, exc: Stage8NotFoundError):
+    return JSONResponse(status_code=404, content={"error": {"code": "STAGE8_NOT_FOUND", "message": str(exc)}})
+
+
+@app.exception_handler(Stage8ConflictError)
+async def stage8_conflict_handler(request: Request, exc: Stage8ConflictError):
+    return JSONResponse(status_code=409, content={"error": {"code": "STAGE8_CONFLICT", "message": str(exc)}})
+
+
+@app.exception_handler(Stage8ValidationError)
+async def stage8_validation_handler(request: Request, exc: Stage8ValidationError):
+    return JSONResponse(status_code=422, content={"error": {"code": "STAGE8_VALIDATION_ERROR", "message": str(exc)}})
+
+
+def _stage8_services(request: Request):
+    mission = getattr(request.app.state, "stage8_mission_service", None)
+    review = getattr(request.app.state, "stage8_review_service", None)
+    if mission is None or review is None:
+        raise HTTPException(status_code=503, detail="STAGE8_NOT_READY")
+    return mission, review
+
+
+@app.post("/api/stage8/missions", status_code=201)
+async def stage8_create_mission(body: Stage8MissionCreateRequest, request: Request):
+    mission, _ = _stage8_services(request)
+    return _stage8_projection(await mission.create_mission(body.feature_id, title=body.title, summary=body.summary))
+
+
+@app.get("/api/stage8/missions/{mission_id}")
+async def stage8_get_mission(mission_id: str, request: Request):
+    mission, _ = _stage8_services(request)
+    return _stage8_projection(await mission.get_mission(mission_id))
+
+
+@app.post("/api/stage8/missions/{mission_id}/transition")
+async def stage8_transition_mission(mission_id: str, body: Stage8TransitionRequest, request: Request):
+    mission, _ = _stage8_services(request)
+    return _stage8_projection(await mission.transition_mission(mission_id, body.status, body.expected_version))
+
+
+@app.post("/api/stage8/missions/{mission_id}/run-references", status_code=201)
+async def stage8_attach_run(mission_id: str, body: Stage8RunReferenceRequest, request: Request):
+    mission, _ = _stage8_services(request)
+    return _stage8_projection(await mission.attach_run_reference(mission_id, body.run_id, body.run_purpose))
+
+
+@app.get("/api/stage8/missions/{mission_id}/run-references")
+async def stage8_list_runs(mission_id: str, request: Request):
+    mission, _ = _stage8_services(request)
+    return _stage8_projection(await mission.list_run_references(mission_id))
+
+
+@app.post("/api/stage8/missions/{mission_id}/reviews", status_code=201)
+async def stage8_create_review(mission_id: str, body: Stage8ReviewCreateRequest, request: Request):
+    _, review = _stage8_services(request)
+    return _stage8_projection(await review.create_review(mission_id, body.review_type, subject_version=body.subject_version, subject_digest=body.subject_digest))
+
+
+@app.get("/api/stage8/reviews/{review_id}")
+async def stage8_get_review(review_id: str, request: Request):
+    _, review = _stage8_services(request)
+    return _stage8_projection(await review.get_review(review_id))
+
+
+@app.post("/api/stage8/reviews/{review_id}/approve")
+async def stage8_approve_review(review_id: str, body: Stage8ReviewDecisionRequest, request: Request):
+    _, review = _stage8_services(request)
+    return _stage8_projection(await review.approve_review(review_id, body.mission_id, decided_by=body.decided_by, comment=body.decision_comment, subject_version=body.subject_version, subject_digest=body.subject_digest))
+
+
+@app.post("/api/stage8/reviews/{review_id}/reject")
+async def stage8_reject_review(review_id: str, body: Stage8ReviewDecisionRequest, request: Request):
+    _, review = _stage8_services(request)
+    return _stage8_projection(await review.reject_review(review_id, body.mission_id, decided_by=body.decided_by, comment=body.decision_comment, subject_version=body.subject_version, subject_digest=body.subject_digest))
 
 _ADMIN_ONLY_API_PATHS = frozenset({
     "/api/runtime/evaluation-execute/v3",
