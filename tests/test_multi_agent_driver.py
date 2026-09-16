@@ -96,6 +96,9 @@ def _default_factory(adapters=None):
             ("data_analyst_adapter", _RecordingAdapter("data")),
             ("code_expert_adapter", _RecordingAdapter("code")),
             ("knowledge_expert_adapter", _RecordingAdapter("knowledge")),
+            ("feature_understanding_adapter", _RecordingAdapter("feature")),
+            ("risk_analysis_adapter", _RecordingAdapter("risk")),
+            ("test_planning_adapter", _RecordingAdapter("planning")),
             ("synthesis_agent_adapter", _RecordingAdapter("synthesis")),
         )
     return AgentAdapterFactory(DEFAULT_AGENT_REGISTRY, adapters)
@@ -127,6 +130,9 @@ def test_claim_resolves_plan_binding_registry_adapter() -> None:
             ("data_analyst_adapter", _RecordingAdapter("data")),
             ("knowledge_expert_adapter", _RecordingAdapter("knowledge")),
             ("code_expert_adapter", code_adapter),
+            ("feature_understanding_adapter", _RecordingAdapter("feature")),
+            ("risk_analysis_adapter", _RecordingAdapter("risk")),
+            ("test_planning_adapter", _RecordingAdapter("planning")),
             ("synthesis_agent_adapter", synthesis_adapter),
         ),
     )
@@ -168,6 +174,9 @@ def test_synthesis_attaches_dependency_view() -> None:
             ("data_analyst_adapter", _RecordingAdapter("data")),
             ("knowledge_expert_adapter", _RecordingAdapter("knowledge")),
             ("code_expert_adapter", _RecordingAdapter("code")),
+            ("feature_understanding_adapter", _RecordingAdapter("feature")),
+            ("risk_analysis_adapter", _RecordingAdapter("risk")),
+            ("test_planning_adapter", _RecordingAdapter("planning")),
             ("synthesis_agent_adapter", adapter),
         ),
     )
@@ -286,6 +295,9 @@ def test_specialist_call_uses_persist_false() -> None:
             ("data_analyst_adapter", AgentRouterSingleAgentAdapter(PersistRouter())),
             ("knowledge_expert_adapter", AgentRouterSingleAgentAdapter(PersistRouter())),
             ("code_expert_adapter", AgentRouterSingleAgentAdapter(PersistRouter())),
+            ("feature_understanding_adapter", AgentRouterSingleAgentAdapter(PersistRouter())),
+            ("risk_analysis_adapter", AgentRouterSingleAgentAdapter(PersistRouter())),
+            ("test_planning_adapter", AgentRouterSingleAgentAdapter(PersistRouter())),
             ("synthesis_agent_adapter", AgentRouterSingleAgentAdapter(PersistRouter())),
         ),
     )
@@ -340,6 +352,9 @@ def test_cancellation_propagates_to_specialist_call() -> None:
             ("data_analyst_adapter", AgentRouterSingleAgentAdapter(CancellationAwareRouter())),
             ("knowledge_expert_adapter", AgentRouterSingleAgentAdapter(CancellationAwareRouter())),
             ("code_expert_adapter", AgentRouterSingleAgentAdapter(CancellationAwareRouter())),
+            ("feature_understanding_adapter", AgentRouterSingleAgentAdapter(CancellationAwareRouter())),
+            ("risk_analysis_adapter", AgentRouterSingleAgentAdapter(CancellationAwareRouter())),
+            ("test_planning_adapter", AgentRouterSingleAgentAdapter(CancellationAwareRouter())),
             ("synthesis_agent_adapter", AgentRouterSingleAgentAdapter(CancellationAwareRouter())),
         ),
     )
@@ -379,6 +394,9 @@ def test_result_conversion_preserves_claim_identity() -> None:
             ("data_analyst_adapter", _RecordingAdapter("data")),
             ("knowledge_expert_adapter", _RecordingAdapter("knowledge")),
             ("code_expert_adapter", adapter),
+            ("feature_understanding_adapter", _RecordingAdapter("feature")),
+            ("risk_analysis_adapter", _RecordingAdapter("risk")),
+            ("test_planning_adapter", _RecordingAdapter("planning")),
             ("synthesis_agent_adapter", _RecordingAdapter("synthesis")),
         ),
     )

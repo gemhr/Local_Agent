@@ -39,6 +39,7 @@ from core.persistence.models import (
     FeatureTestMissionRow,
     MissionRunReferenceRow,
     BusinessReviewRow,
+    Stage8TestPlanRow,
 )
 from core.persistence.readiness import (
     SchemaReadiness,
@@ -74,6 +75,7 @@ __all__ = [
     "FeatureTestMissionRow",
     "MissionRunReferenceRow",
     "BusinessReviewRow",
+    "Stage8TestPlanRow",
     "PersistenceError",
     "SchemaReadiness",
     "SyncPersistenceBridge",

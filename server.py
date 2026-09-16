@@ -197,6 +197,11 @@ from core.stage8 import (
     Stage8ConflictError,
     Stage8NotFoundError,
     Stage8ValidationError,
+    TestPlanRepository,
+    SpecialistAgentApplicationService,
+    FeatureUnderstandingRequest,
+    RiskAnalysisRequest,
+    TestPlanningRequest,
 )
 
 # WP4-C：AgentEvalOps trace export dispatcher 的 code-owned bounded queue 容量
@@ -1239,6 +1244,12 @@ async def lifespan(app: FastAPI):
     app.state.chat_service = chat_service
     app.state.runtime_services = runtime_services
     app.state.coordinated_runtime_factory = coordinated_runtime_factory
+    app.state.stage8_specialist_service = SpecialistAgentApplicationService(
+        coordinated_runtime_factory,
+        mission_service=app.state.stage8_mission_service,
+        review_service=app.state.stage8_review_service,
+        test_plan_repository=TestPlanRepository(persistence_database),
+    )
     app.state.runtime_metrics = runtime_metrics
     app.state.runtime_metrics_collector = RuntimeMetricsCollector(
         runtime_metrics, gauge_provider
@@ -1278,6 +1289,7 @@ async def lifespan(app: FastAPI):
         app.state.chat_service = None
         app.state.stage8_mission_service = None
         app.state.stage8_review_service = None
+        app.state.stage8_specialist_service = None
         app.state.runtime_services = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
@@ -1316,7 +1328,12 @@ class Stage8ReviewDecisionRequest(BaseModel):
 
 
 def _stage8_projection(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     if isinstance(value, list): return [_stage8_projection(item) for item in value]
+    if isinstance(value, dict): return {key: _stage8_projection(val) for key, val in value.items()}
+    if hasattr(value, "model_dump"):
+        return _stage8_projection(value.model_dump(mode="json"))
     result = {key: val for key, val in value.__dict__.items()} if hasattr(value, "__dict__") else {}
     if not result and hasattr(value, "__dataclass_fields__"):
         from dataclasses import asdict
@@ -1347,6 +1364,37 @@ def _stage8_services(request: Request):
     if mission is None or review is None:
         raise HTTPException(status_code=503, detail="STAGE8_NOT_READY")
     return mission, review
+
+
+def _stage8_specialists(request: Request):
+    service = getattr(request.app.state, "stage8_specialist_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="STAGE8_NOT_READY")
+    return service
+
+
+@app.post("/api/stage8/agents/feature-understanding/run")
+async def stage8_feature_understanding(body: FeatureUnderstandingRequest, request: Request):
+    return _stage8_projection(await _stage8_specialists(request).feature_understanding(body))
+
+
+@app.post("/api/stage8/agents/risk-analysis/run")
+async def stage8_risk_analysis(body: RiskAnalysisRequest, request: Request):
+    return _stage8_projection(await _stage8_specialists(request).risk_analysis(body))
+
+
+@app.post("/api/stage8/agents/test-planning/run")
+async def stage8_test_planning(body: TestPlanningRequest, request: Request):
+    return _stage8_projection(await _stage8_specialists(request).test_planning(body))
+
+
+@app.post("/api/stage8/missions/{mission_id}/planning")
+async def stage8_planning_workflow(mission_id: str, body: FeatureUnderstandingRequest, request: Request):
+    if body.mission_id not in (None, mission_id):
+        raise Stage8ValidationError("mission_id mismatch")
+    return _stage8_projection(await _stage8_specialists(request).planning_workflow(
+        body.model_copy(update={"mission_id": mission_id})
+    ))
 
 
 @app.post("/api/stage8/missions", status_code=201)

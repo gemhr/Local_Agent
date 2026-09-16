@@ -17,6 +17,7 @@ from core.stage8 import (
     BusinessReviewService,
     MissionService,
     MissionStatus,
+    SpecialistAgentApplicationService,
     Stage8ConflictError,
     Stage8ValidationError,
 )
@@ -95,6 +96,8 @@ async def test_business_review_binding_and_idempotent_decision(clean_database):
         await reviews.approve_review(review.review_id, mission.mission_id)
     with pytest.raises(Stage8ConflictError):
         await reviews.approve_review(review.review_id, mission.mission_id, subject_version=4, subject_digest="a" * 64)
+    with pytest.raises(Stage8ConflictError):
+        await reviews.approve_review(review.review_id, mission.mission_id, subject_version=3, subject_digest="b" * 64)
     approved = await reviews.approve_review(review.review_id, mission.mission_id, subject_version=3, subject_digest="a" * 64)
     assert approved.status.value == "APPROVED"
     assert (await reviews.approve_review(review.review_id, mission.mission_id)).status.value == "APPROVED"
@@ -138,6 +141,10 @@ async def test_business_review_concurrent_decisions_have_one_winner(clean_databa
 
 @pytest.mark.asyncio
 async def test_stage8_minimal_asgi_mission_lifecycle(clean_database, monkeypatch):
+    async def specialist_runner(agent_id, prompt):
+        assert agent_id == "feature_understanding"
+        return '{"feature_id":"feature-http","summary":"typed API","change_points":[],"affected_components":[],"clarifications":[],"known_constraints":[],"evidence":[]}'
+
     user_id = await _create_http_user(clean_database)
     private_key = Ed25519PrivateKey.generate()
     settings = SimpleNamespace(
@@ -159,6 +166,12 @@ async def test_stage8_minimal_asgi_mission_lifecycle(clean_database, monkeypatch
         server.app.state,
         "stage8_review_service",
         BusinessReviewService(clean_database),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "stage8_specialist_service",
+        SpecialistAgentApplicationService(runner=specialist_runner),
         raising=False,
     )
     monkeypatch.setattr(
@@ -200,6 +213,14 @@ async def test_stage8_minimal_asgi_mission_lifecycle(clean_database, monkeypatch
         fetched = await client.get(f"/api/stage8/missions/{mission_id}", headers=headers)
         assert fetched.status_code == 200
         assert fetched.json()["status"] == "CREATED"
+
+        specialist = await client.post(
+            "/api/stage8/agents/feature-understanding/run",
+            json={"context": {"feature_id": "feature-http"}},
+            headers=headers,
+        )
+        assert specialist.status_code == 200
+        assert specialist.json()["feature_id"] == "feature-http"
 
         transitioned = await client.post(
             f"/api/stage8/missions/{mission_id}/transition",

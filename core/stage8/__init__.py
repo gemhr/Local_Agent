@@ -14,6 +14,12 @@ from core.stage8.service import (
     Stage8ConflictError,
     Stage8NotFoundError,
     Stage8ValidationError,
+    TestPlanRepository,
+)
+from core.stage8.specialists import (
+    EvidenceSourceType, EvidenceRef, FeatureContext, FeatureUnderstandingRequest,
+    FeatureUnderstandingResult, RiskAnalysisRequest, RiskAnalysisResult, RiskItem,
+    TestPlanningRequest, TestPlanResult, TestScenario, SpecialistAgentApplicationService,
 )
 
 __all__ = [
@@ -21,4 +27,8 @@ __all__ = [
     "MissionRunReference", "MissionStatus", "BusinessReviewService",
     "MissionService", "Stage8ConflictError", "Stage8NotFoundError",
     "Stage8ValidationError",
+    "TestPlanRepository",
+    "EvidenceSourceType", "EvidenceRef", "FeatureContext", "FeatureUnderstandingRequest",
+    "FeatureUnderstandingResult", "RiskAnalysisRequest", "RiskAnalysisResult", "RiskItem",
+    "TestPlanningRequest", "TestPlanResult", "TestScenario", "SpecialistAgentApplicationService",
 ]

@@ -83,6 +83,18 @@ class BusinessReviewRow(PersistenceBase):
     decision_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class Stage8TestPlanRow(PersistenceBase):
+    """已校验的 TestPlan subject；payload 保存业务结果快照。"""
+    __tablename__ = "stage8_test_plans"
+    subject_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(ForeignKey("stage8_feature_test_missions.mission_id", ondelete="CASCADE"), nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    subject_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    __table_args__ = (UniqueConstraint("mission_id", "subject_id", "version", name="uq_stage8_test_plan_version"),)
+
+
 class UserRow(PersistenceBase):
     __tablename__ = "users"
     id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
@@ -818,6 +830,7 @@ CANONICAL_TABLES = (
     "stage8_feature_test_missions",
     "stage8_mission_run_refs",
     "stage8_business_reviews",
+    "stage8_test_plans",
     "users",
     "roles",
     "user_roles",
@@ -872,4 +885,5 @@ __all__ = [
     "FeatureTestMissionRow",
     "MissionRunReferenceRow",
     "BusinessReviewRow",
+    "Stage8TestPlanRow",
 ]

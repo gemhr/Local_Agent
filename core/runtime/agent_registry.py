@@ -282,6 +282,27 @@ DEFAULT_AGENT_REGISTRY = AgentRegistry(
             single_passthrough=True,
         ),
         _registration(
+            "feature_understanding", "feature_understanding_adapter", "Feature Understanding", "基于受信证据标识理解功能变更。", "avatar_router.png",
+            entry_allowed=True, delegation_allowed=False,
+            delegated_output_policy=OutputPolicy.INTERNAL,
+            capabilities=frozenset({"feature_understanding"}),
+            aliases=("feature_understanding",),
+        ),
+        _registration(
+            "risk_analysis", "risk_analysis_adapter", "Risk Analysis", "识别功能风险并绑定已有证据。", "avatar_router.png",
+            entry_allowed=True, delegation_allowed=False,
+            delegated_output_policy=OutputPolicy.INTERNAL,
+            capabilities=frozenset({"risk_analysis"}),
+            aliases=("risk_analysis",),
+        ),
+        _registration(
+            "test_planning", "test_planning_adapter", "Test Planning", "根据已识别风险生成测试计划。", "avatar_router.png",
+            entry_allowed=True, delegation_allowed=False,
+            delegated_output_policy=OutputPolicy.INTERNAL,
+            capabilities=frozenset({"test_planning"}),
+            aliases=("test_planning",),
+        ),
+        _registration(
             "synthesis_agent", "synthesis_agent_adapter", "Synthesis Agent", "汇总已授权的专业结果。", "avatar_router.png",
             entry_allowed=False, delegation_allowed=True,
             delegated_output_policy=OutputPolicy.FINAL_SYNTHESIS,

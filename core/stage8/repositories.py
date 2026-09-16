@@ -3,7 +3,7 @@
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow
+from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow
 
 
 async def add_mission(session: AsyncSession, values: dict) -> FeatureTestMissionRow:
@@ -34,6 +34,9 @@ async def get_review(session: AsyncSession, review_id: str, *, for_update: bool 
     query = select(BusinessReviewRow).where(BusinessReviewRow.review_id == review_id)
     if for_update: query = query.with_for_update()
     return await session.scalar(query)
+
+async def add_test_plan(session: AsyncSession, values: dict) -> Stage8TestPlanRow:
+    row = Stage8TestPlanRow(**values); session.add(row); await session.flush(); return row
 
 async def decide_review(session: AsyncSession, review_id: str, expected_status: str, status: str, *, decided_by: str | None, comment: str | None):
     return await session.scalar(update(BusinessReviewRow).where(

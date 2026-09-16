@@ -87,3 +87,18 @@ class BusinessReviewService:
             return _review(decided)
     async def approve_review(self, review_id, mission_id, **kwargs): return await self._decide(review_id, mission_id, ReviewStatus.APPROVED.value, **kwargs)
     async def reject_review(self, review_id, mission_id, **kwargs): return await self._decide(review_id, mission_id, ReviewStatus.REJECTED.value, **kwargs)
+
+
+class TestPlanRepository:
+    """TestPlan subject 的最小 PostgreSQL 持久化入口。"""
+    def __init__(self, database): self.database = database
+
+    async def save(self, mission_id, subject_id, version, digest, payload):
+        try:
+            async with self.database.transaction() as session:
+                return await repo.add_test_plan(session, dict(
+                    subject_id=subject_id, mission_id=mission_id, version=version,
+                    subject_digest=digest, payload=payload,
+                ))
+        except IntegrityError as exc:
+            raise Stage8ConflictError("test plan subject already exists or mission binding is invalid") from exc

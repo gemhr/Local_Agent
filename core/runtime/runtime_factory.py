@@ -463,6 +463,12 @@ class CoordinatedRuntimeFactory:
                     "knowledge_expert_adapter",
                     AgentRouterSingleAgentAdapter(router),
                 ),
+                (
+                    "feature_understanding_adapter",
+                    AgentRouterSingleAgentAdapter(router),
+                ),
+                ("risk_analysis_adapter", AgentRouterSingleAgentAdapter(router)),
+                ("test_planning_adapter", AgentRouterSingleAgentAdapter(router)),
                 ("synthesis_agent_adapter", SynthesisAgentAdapter(router)),
             ),
         )
