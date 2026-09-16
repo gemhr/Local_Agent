@@ -203,6 +203,7 @@ from core.stage8 import (
     RiskAnalysisRequest,
     TestPlanningRequest,
 )
+from core.stage8.platforms import DeterministicMockPlatform, FeatureContextBuilder
 
 # WP4-C：AgentEvalOps trace export dispatcher 的 code-owned bounded queue 容量
 # （最小配置约束：不新增 Settings；默认与 observability queue 一致）。
@@ -296,6 +297,8 @@ def _close_model_engines(engines: dict) -> tuple[str, ...]:
 
 def _populate_tool_registry(
     mcp_registrations: tuple = (),
+    *,
+    stage8_platform: DeterministicMockPlatform | None = None,
 ) -> ToolRegistry:
     """构造并冻结生产 ToolRegistry；非法/重复注册在此 fail closed。
 
@@ -304,7 +307,7 @@ def _populate_tool_registry(
     本函数只接收成功映射的 registration。
     """
     registry = ToolRegistry()
-    register_all_tools(registry)
+    register_all_tools(registry, stage8_platform=stage8_platform)
     for registration in mcp_registrations:
         registry.register(registration)
     registry.freeze()
@@ -530,6 +533,9 @@ async def lifespan(app: FastAPI):
     )
     app.state.stage8_mission_service = MissionService(persistence_database)
     app.state.stage8_review_service = BusinessReviewService(persistence_database)
+    stage8_platform = DeterministicMockPlatform.seeded()
+    app.state.stage8_mock_platform = stage8_platform
+    app.state.stage8_feature_context_builder = FeatureContextBuilder(stage8_platform)
     # Redis owns only cache/admission state.  Connection establishment is lazy so
     # cache outage never prevents the PostgreSQL/RAG authority from starting.
     redis_service = await initialization_stack.create(
@@ -993,7 +999,9 @@ async def lifespan(app: FastAPI):
                 ),
                 existing_tool_names=frozenset(
                     registration.descriptor.name
-                    for registration in build_builtin_tool_registrations()
+                    for registration in build_builtin_tool_registrations(
+                        stage8_platform=stage8_platform
+                    )
                 ),
                 request_timeout_seconds=settings.mcp_request_timeout_seconds,
             ),
@@ -1016,7 +1024,10 @@ async def lifespan(app: FastAPI):
                     },
                 )
     tool_registry = await initialization_stack.run(
-        lambda: _populate_tool_registry(mcp_registrations),
+        lambda: _populate_tool_registry(
+            mcp_registrations,
+            stage8_platform=stage8_platform,
+        ),
         component="tool_registry",
     )
     # WP2-B Tool Governance：Registry freeze 后构造/校验/冻结 ToolPolicyCatalog

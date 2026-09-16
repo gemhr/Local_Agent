@@ -45,7 +45,16 @@ PRODUCTION_AGENT_IDS = frozenset(
         "code_expert",
         "knowledge_expert",
         "synthesis_agent",
+        "feature_understanding",
+        "risk_analysis",
+        "test_planning",
     }
+)
+
+# Stage8 平台能力只暴露给协调入口与当前 Stage8 specialists；其它通用
+# specialists / synthesis agent 不因 catalog coverage 获得外部业务系统权限。
+_STAGE8_TOOL_AGENT_IDS = frozenset(
+    {"core_router", "feature_understanding", "risk_analysis", "test_planning"}
 )
 
 
@@ -363,6 +372,16 @@ _FULL_RISK_COMBINATIONS: dict[
         ToolSideEffectKind.LOCAL_STATE_MUTATION,
         OperationIdempotency.NON_IDEMPOTENT,
     ): ToolRiskLevel.HIGH,
+    (
+        frozenset(),
+        ToolSideEffectKind.EXTERNAL_STATE_MUTATION,
+        OperationIdempotency.IDEMPOTENT_WITH_KEY,
+    ): ToolRiskLevel.MEDIUM,
+    (
+        frozenset(),
+        ToolSideEffectKind.EXTERNAL_STATE_MUTATION,
+        OperationIdempotency.NON_IDEMPOTENT,
+    ): ToolRiskLevel.HIGH,
 }
 
 # 网络能力必须由 operator 显式分类；DATA_EGRESS 固定为 HIGH，不能由
@@ -595,14 +614,33 @@ def register_default_tool_policies(catalog: ToolPolicyCatalog) -> None:
             "complex_workflow_simulator",
             (),
         ),
+        ("stage8_get_feature_document", ()),
+        ("stage8_get_code_diff", ()),
+        ("stage8_get_meeting_summary", ()),
+        ("stage8_get_case", ()),
+        ("stage8_get_environment", ()),
+        ("stage8_get_executor", ()),
+        ("stage8_get_logs", ()),
+        ("stage8_search_tickets", ()),
+        ("stage8_start_execution", ()),
+        ("stage8_create_ticket", ()),
     )
     for tool_name, risk_facts in policies:
+        allowed_agent_ids = (
+            _STAGE8_TOOL_AGENT_IDS
+            if tool_name.startswith("stage8_")
+            else PRODUCTION_AGENT_IDS
+        )
         catalog.register(
             ToolPolicy(
                 tool_name=tool_name,
-                allowed_agent_ids=PRODUCTION_AGENT_IDS,
+                allowed_agent_ids=allowed_agent_ids,
                 risk_facts=risk_facts,
-                approval_required_threshold=ToolRiskLevel.HIGH,
+                approval_required_threshold=(
+                    ToolRiskLevel.MEDIUM
+                    if tool_name == "stage8_create_ticket"
+                    else ToolRiskLevel.HIGH
+                ),
             )
         )
 

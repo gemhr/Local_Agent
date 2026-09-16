@@ -18,11 +18,14 @@ from tools.local_tools import (
     list_files_in_dir,
     parse_filesystem_argument,
 )
+from core.stage8.platforms import DeterministicMockPlatform, build_stage8_tool_adapters
 
 
-def build_builtin_tool_registrations() -> tuple[ToolRegistration, ...]:
+def build_builtin_tool_registrations(
+    stage8_platform: DeterministicMockPlatform | None = None,
+) -> tuple[ToolRegistration, ...]:
     """构造全部内置 Tool Registration（builtin name 的唯一事实源）。"""
-    return (
+    registrations = [
         ToolRegistration(
             descriptor=ToolDescriptor(
                 name="sandbox_execution_demo",
@@ -130,14 +133,24 @@ def build_builtin_tool_registrations() -> tuple[ToolRegistration, ...]:
             ),
             adapter=ComplexWorkflowToolAdapter(),
         ),
-    )
+    ]
+    mock_platform = stage8_platform if stage8_platform is not None else DeterministicMockPlatform.seeded()
+    for name, description, adapter in build_stage8_tool_adapters(mock_platform):
+        registrations.append(ToolRegistration(
+            descriptor=ToolDescriptor(name=name, description=description),
+            adapter=adapter,
+        ))
+    return tuple(registrations)
 
 
-def register_all_tools(tool_registry) -> None:
+def register_all_tools(
+    tool_registry,
+    stage8_platform: DeterministicMockPlatform | None = None,
+) -> None:
     """将全部内置 Tool 注册到 ToolRegistry。
 
     Args:
         tool_registry: startup builder 状态的 ToolRegistry；注册完成后由调用方 freeze。
     """
-    for registration in build_builtin_tool_registrations():
+    for registration in build_builtin_tool_registrations(stage8_platform=stage8_platform):
         tool_registry.register(registration)

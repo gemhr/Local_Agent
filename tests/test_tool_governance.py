@@ -519,7 +519,7 @@ def test_catalog_disabled_agent_reference_fails_freeze():
 # ---------------------------------------------------------------------------
 
 
-def test_production_catalog_covers_exactly_seven_tools():
+def test_production_catalog_covers_all_builtin_tools():
     registry = production_registry()
     catalog = ToolPolicyCatalog(
         tool_registry=registry,
@@ -539,11 +539,21 @@ def test_production_catalog_covers_exactly_seven_tools():
         "analyze_excel",
         "get_system_status",
         "complex_workflow_simulator",
+        "stage8_get_feature_document",
+        "stage8_get_code_diff",
+        "stage8_get_meeting_summary",
+        "stage8_get_case",
+        "stage8_get_environment",
+        "stage8_get_executor",
+        "stage8_get_logs",
+        "stage8_search_tickets",
+        "stage8_start_execution",
+        "stage8_create_ticket",
     }
-    assert len(catalog_names) == 7
+    assert len(catalog_names) == 17
 
 
-def test_production_policies_allow_exactly_five_explicit_agents():
+def test_production_policies_use_explicit_agent_permissions():
     registry = production_registry()
     catalog = ToolPolicyCatalog(
         tool_registry=registry,
@@ -551,24 +561,41 @@ def test_production_policies_allow_exactly_five_explicit_agents():
     )
     register_default_tool_policies(catalog)
     catalog.freeze()
+    stage8_agents = frozenset(
+        {"core_router", "feature_understanding", "risk_analysis", "test_planning"}
+    )
     for policy in catalog.policies():
-        assert policy.allowed_agent_ids == PRODUCTION_AGENT_IDS
-        assert policy.allowed_agent_ids == frozenset(DEFAULT_AGENT_REGISTRY.agent_ids)
+        if policy.tool_name.startswith("stage8_"):
+            assert policy.allowed_agent_ids == stage8_agents
+        else:
+            assert policy.allowed_agent_ids == PRODUCTION_AGENT_IDS
+            assert policy.allowed_agent_ids == frozenset(DEFAULT_AGENT_REGISTRY.agent_ids)
 
 
-def test_all_five_agents_allowed_for_all_six_tools():
+def test_production_agents_follow_each_tool_policy_allowlist():
     service = production_service()
     registry = production_registry()
+    stage8_agents = frozenset(
+        {"core_router", "feature_understanding", "risk_analysis", "test_planning"}
+    )
     for registration in registry.registrations():
+        allowed_agents = (
+            stage8_agents
+            if registration.descriptor.name.startswith("stage8_")
+            else PRODUCTION_AGENT_IDS
+        )
         for agent_id in PRODUCTION_AGENT_IDS:
             decision = service.authorize_tool(
                 ToolGovernanceContext(agent_id, "run", "step"),
                 registration,
             )
-            assert decision.outcome is ToolGovernanceOutcome.ALLOW, (
-                registration.descriptor.name,
-                agent_id,
-                decision,
+            expected = (
+                ToolGovernanceOutcome.ALLOW
+                if agent_id in allowed_agents
+                else ToolGovernanceOutcome.DENY
+            )
+            assert decision.outcome is expected, (
+                registration.descriptor.name, agent_id, decision
             )
 
 
