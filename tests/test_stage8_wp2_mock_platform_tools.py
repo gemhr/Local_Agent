@@ -22,7 +22,13 @@ from core.runtime.tool_contract import safe_key_digest
 from core.runtime.tool_governance import ToolGovernanceContext, ToolGovernanceOutcome, ToolGovernanceService, ToolPolicyCatalog, register_default_tool_policies
 from core.runtime.tool_idempotency import DurableToolInvocationService, ToolInvocationState
 from core.runtime.tool_registry import ToolRegistry
-from core.stage8.platforms import DeterministicMockPlatform, FeatureContextBuilder, build_stage8_tool_adapters
+from core.stage8.platforms import (
+    DeterministicMockPlatform,
+    ExecutionRecord,
+    FeatureContextBuilder,
+    LogRecord,
+    build_stage8_tool_adapters,
+)
 from tools.registry import build_builtin_tool_registrations
 
 
@@ -67,6 +73,48 @@ async def test_query_tool_uses_typed_invocation_and_execution_service():
     result = await ToolExecutionService().execute(invocation=invocation, adapter=adapter, run_context=_context(), step_id="query")
     assert result.status is ToolExecutionStatus.SUCCEEDED
     assert '"environment_id": "ENV-001"' in result.output.content
+
+
+@pytest.mark.asyncio
+async def test_execution_observation_queries_use_governed_tool_runtime():
+    platform = DeterministicMockPlatform.seeded()
+    platform.executions["EXEC-OBS"] = ExecutionRecord(
+        execution_id="EXEC-OBS", case_id="CASE-001", environment_id="ENV-001",
+        executor_id="EXECUTOR-001", status="COMPLETED", parameters={},
+    )
+    platform.logs["EXEC-OBS"] = LogRecord(
+        execution_id="EXEC-OBS", lines=["STATUS=SUCCESS"],
+        result_location="provider://result/EXEC-OBS",
+    )
+    registry = ToolRegistry()
+    for registration in build_builtin_tool_registrations(platform):
+        registry.register(registration)
+    registry.freeze()
+    governance = _governance(registry)
+
+    for name, arguments in (
+        ("stage8_get_execution_status", '{"execution_id":"EXEC-OBS"}'),
+        (
+            "stage8_get_execution_result",
+            '{"execution_id":"EXEC-OBS","max_lines":1000}',
+        ),
+    ):
+        registration = registry.require(name)
+        invocation = registration.adapter.build_invocation(arguments)
+        decision = governance.evaluate_invocation(
+            ToolGovernanceContext("execution_observer", "run", name),
+            registration,
+            invocation,
+            registration.adapter.spec_for(invocation),
+        )
+        assert decision.outcome is ToolGovernanceOutcome.ALLOW
+        result = await ToolExecutionService().execute(
+            invocation=invocation,
+            adapter=registration.adapter,
+            run_context=_context(),
+            step_id=name,
+        )
+        assert result.status is ToolExecutionStatus.SUCCEEDED
 
 
 def test_query_allow_and_side_effect_requires_approval():

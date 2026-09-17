@@ -13,10 +13,10 @@ from pathlib import Path as FilePath
 from typing import Annotated, Literal, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Path, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from core.agent_router import AgentRouter
 from core.auth import (
@@ -217,6 +217,7 @@ from core.stage8.platforms import DeterministicMockPlatform, FeatureContextBuild
 # WP4-C：AgentEvalOps trace export dispatcher 的 code-owned bounded queue 容量
 # （最小配置约束：不新增 Settings；默认与 observability queue 一致）。
 AGENTEVALOPS_TRACE_EXPORT_QUEUE_CAPACITY = 256
+STAGE8_RESULT_CALLBACK_SCOPE = "localagent:stage8:result-callback"
 
 
 class _RequestOwnedStreamingResponse(StreamingResponse):
@@ -1397,13 +1398,29 @@ class Stage8CaseGenerationRequest(BaseModel):
 
 
 class Stage8ExecutionResultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     execution_id: StrictStr = Field(min_length=1, max_length=255)
     status: StrictStr
-    actual_result: StrictStr
-    expected_result: StrictStr | None = None
-    failure_signature: StrictStr | None = None
-    logs: list[StrictStr] = Field(default_factory=list)
+    actual_result: StrictStr = Field(max_length=2048)
+    expected_result: StrictStr | None = Field(default=None, max_length=2048)
+    failure_signature: StrictStr | None = Field(default=None, max_length=512)
+    logs: list[Annotated[StrictStr, Field(max_length=2048)]] = Field(
+        default_factory=list, max_length=64
+    )
     completed_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_bounded_logs(self):
+        if len("\n".join(self.logs).encode("utf-8")) > 16 * 1024:
+            raise ValueError("logs exceed 16 KiB")
+        return self
+
+
+class Stage8ObserveRequest(BaseModel):
+    """Canonical observe 只接受 URL 中的 AgentCore job identity。"""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class Stage8FailureTriageRunRequest(BaseModel):
@@ -1508,6 +1525,9 @@ async def stage8_start_execution(mission_id: str, body: Stage8ExecutionStartRequ
 
 @app.post("/api/stage8/executions/{execution_id}/result")
 async def stage8_ingest_execution_result(execution_id: str, body: Stage8ExecutionResultRequest, request: Request):
+    # WP3 callback 仅保留给持有窄 scope 的 provider/test service principal；
+    # 普通业务 caller 不得用它声明 canonical SUCCESS/FAILED。
+    require_scope(request.state.principal, STAGE8_RESULT_CALLBACK_SCOPE)
     if body.execution_id != execution_id:
         raise Stage8ValidationError("execution_id mismatch")
     service = _stage8_execution(request)
@@ -1517,6 +1537,17 @@ async def stage8_ingest_execution_result(execution_id: str, body: Stage8Executio
         raise Stage8ValidationError("invalid external execution status") from exc
     result = ExecutionResult(execution_id=execution_id, status=status, actual_result=body.actual_result, expected_result=body.expected_result, failure_signature=body.failure_signature, logs=body.logs, completed_at=body.completed_at)
     return _stage8_projection(await service.ingest_result(result))
+
+
+@app.post("/api/stage8/execution-jobs/{job_id}/observe")
+async def stage8_observe_execution(
+    job_id: str,
+    request: Request,
+    body: Annotated[Stage8ObserveRequest, Body()] | None = None,
+):
+    """观察 provider-owned result；请求方只能指定 AgentCore job identity。"""
+    del body
+    return _stage8_projection(await _stage8_execution(request).observe_once(job_id))
 
 
 @app.post("/api/stage8/agents/failure-triage/run")
@@ -1658,6 +1689,16 @@ async def job_error_handler(request: Request, exc: JobError) -> JSONResponse:
     )
 
 
+def _is_stage8_result_callback_path(path: str) -> bool:
+    parts = path.strip("/").split("/")
+    return (
+        len(parts) == 5
+        and parts[:3] == ["api", "stage8", "executions"]
+        and bool(parts[3])
+        and parts[4] == "result"
+    )
+
+
 @app.middleware("http")
 async def request_id_and_auth_middleware(request: Request, call_next):
     """Request ID 与唯一 HTTP Auth 边界；Authorization 不进入日志或错误正文。"""
@@ -1675,6 +1716,10 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                 require_role(request.state.principal, "ADMIN")
             elif request.url.path.startswith("/api/runtime/evaluation-execute/"):
                 require_scope(request.state.principal, EVALUATION_EXECUTE_SCOPE)
+            elif _is_stage8_result_callback_path(request.url.path):
+                require_scope(
+                    request.state.principal, STAGE8_RESULT_CALLBACK_SCOPE
+                )
             elif request.state.principal.principal_kind == "SERVICE" and not (
                 request.url.path.startswith("/api/runtime/runs/")
                 and request.url.path.endswith("/cancel")

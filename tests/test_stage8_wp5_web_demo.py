@@ -30,9 +30,21 @@ async def test_stage8_web_route_and_static_assets(monkeypatch, tmp_path):
     assert "CONTEXT_READY" in script.text
     assert "agents/failure-triage/run" not in script.text
     assert "Tool Approval Pending" in script.text
-    assert "PRODUCT-Like Failure" in page.text
-    assert "Test-Data-Like Failure" in page.text
+    assert "Observe Once" in page.text
+    assert "Submit SUCCESS" not in page.text
+    assert "PRODUCT-Like Failure" not in page.text
+    assert "Test-Data-Like Failure" not in page.text
+    assert "submit-success" not in page.text
+    assert "submit-product" not in page.text
+    assert "submit-test-data" not in page.text
+    assert (
+        "`/api/stage8/execution-jobs/${state.job.job_id}/observe`, "
+        "{ method: 'POST', body: JSON.stringify({}) }"
+    ) in script.text
+    assert "/api/stage8/executions/${state.job.execution_id}/result" not in script.text
+    assert "submitResult" not in script.text
     assert stylesheet.status_code == 200
     route_paths = {route.path for route in server.app.routes if hasattr(route, "path")}
     assert "/api/stage8/agents/ci-guardian/run" not in route_paths
     assert "/api/stage8/ci/runs/{ci_run_id}/analyze" in route_paths
+    assert "/api/stage8/execution-jobs/{job_id}/observe" in route_paths

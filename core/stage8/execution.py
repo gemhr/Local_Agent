@@ -42,6 +42,7 @@ from core.stage8.domain import (
     ResourceUnavailable,
 )
 from core.stage8.platforms import SearchEnvironmentsRequest, TicketDraft
+from core.stage8.observation import ExecutionResultParser
 from core.stage8.execution_list import ExecutionListBuilder
 from core.stage8.service import (
     MissionService,
@@ -739,6 +740,11 @@ class Stage8ExecutionService:
                 "expected_result": result.expected_result,
                 "failure_signature": result.failure_signature,
                 "logs": result.logs,
+                "error_code": result.error_code,
+                "error_message": result.error_message,
+                "failed_step": result.failed_step,
+                "result_location": result.result_location,
+                "log_excerpt": result.log_excerpt,
                 "completed_at": completed_at.isoformat(),
             }
             row = await repo.update_execution_job(session, result.execution_id, {
@@ -768,6 +774,57 @@ class Stage8ExecutionService:
                 raise Stage8ConflictError("execution job disappeared after triage")
             return _job(refreshed)
         return job
+
+    async def observe_once(self, job_id: str) -> ExternalExecutionJob:
+        """从 provider 取得一次真实观察；终态交给 canonical ingest_result。"""
+        async with self.database.session() as session:
+            row = await repo.get_execution_job_by_id(session, job_id)
+            if row is None:
+                raise Stage8NotFoundError("execution job not found")
+            job = _job(row)
+        if job.status in {
+            ExternalExecutionStatus.SUCCEEDED,
+            ExternalExecutionStatus.FAILED,
+            ExternalExecutionStatus.UNKNOWN,
+            ExternalExecutionStatus.CANCELLED,
+        }:
+            return job
+        if job.execution_id is None:
+            return job
+        if self.tool_invoker is None:
+            raise Stage8ValidationError("execution observation is not configured")
+
+        status_payload = await self._invoke_tool(
+            "stage8_get_execution_status",
+            {"execution_id": job.execution_id},
+            principal_agent_id="execution_observer",
+        )
+        if status_payload.get("execution_id") != job.execution_id:
+            raise Stage8ValidationError("execution status identity mismatch")
+        provider_status = str(status_payload.get("status", "")).upper()
+        if provider_status in {"PENDING", "RUNNING"}:
+            return job
+        if provider_status not in {"COMPLETED", "SUCCEEDED", "FAILED"}:
+            return job
+
+        result_payload = await self._invoke_tool(
+            "stage8_get_execution_result",
+            {"execution_id": job.execution_id, "max_lines": 1000},
+            principal_agent_id="execution_observer",
+        )
+        if result_payload.get("execution_id") != job.execution_id:
+            raise Stage8ValidationError("execution result identity mismatch")
+        if not result_payload.get("ready", False) or not result_payload.get("result_location"):
+            return job
+        normalized = ExecutionResultParser().parse(
+            job.execution_id,
+            list(result_payload.get("lines") or []),
+            result_location=result_payload["result_location"],
+            log_excerpt=result_payload.get("log_excerpt"),
+        )
+        if normalized is None:
+            return job
+        return await self.ingest_result(normalized.to_execution_result(job.execution_id))
 
     async def triage_execution(self, execution_id: str) -> FailureTriageResult:
         async with self.database.session() as session:
@@ -800,6 +857,8 @@ class Stage8ExecutionService:
             result = job.result or {}
             expected_result = result.get("expected_result")
             logs = list(result.get("logs") or [])
+            if not logs and result.get("log_excerpt"):
+                logs = str(result["log_excerpt"]).splitlines()
             evidence = {
                 "EXEC_RESULT": result,
                 "CASE_EXPECTED": {

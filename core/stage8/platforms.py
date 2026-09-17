@@ -18,6 +18,15 @@ from core.runtime.tool_contract import (
     ToolExecutionSpec, ToolExecutionStatus, ToolInvocation, ToolSideEffectKind,
     ToolSideEffectState, thaw_json,
 )
+from core.stage8.observation import (
+    MAX_OBSERVATION_BYTES,
+    MAX_RESULT_LOCATION_CHARS,
+    bounded_log_excerpt,
+    decisive_result_lines,
+)
+
+
+MAX_STAGE8_TOOL_OUTPUT_BYTES = 16 * 1024
 
 
 class _DTO(BaseModel):
@@ -88,6 +97,23 @@ class ExecutorSnapshot(_DTO):
 class LogRecord(_DTO):
     execution_id: str
     lines: list[str]
+    result_location: str | None = None
+    ready: bool = True
+
+
+class ExecutionStatusRecord(_DTO):
+    execution_id: str
+    status: str
+
+
+class ExecutionResultLogRecord(_DTO):
+    execution_id: str = Field(min_length=1, max_length=255)
+    result_location: str | None = Field(
+        default=None, max_length=MAX_RESULT_LOCATION_CHARS
+    )
+    lines: list[str] = Field(default_factory=list)
+    log_excerpt: str = ""
+    ready: bool = True
 
 
 class TicketRecord(_DTO):
@@ -210,6 +236,10 @@ class _ExecutorPort(Protocol):
     def start_execution(self, request: StartExecutionRequest) -> ExecutionRecord: ...
     def get_execution(self, execution_id: str) -> ExecutionRecord: ...
 
+    def get_execution_status(self, execution_id: str) -> ExecutionStatusRecord: ...
+
+    def get_execution_result(self, execution_id: str, max_lines: int) -> ExecutionResultLogRecord: ...
+
 
 class _LogPort(Protocol):
     def get_logs(self, execution_id: str, max_lines: int) -> LogRecord: ...
@@ -282,8 +312,56 @@ class DeterministicMockPlatform:
         return sorted((item for item in self.environments.values() if matches(item)), key=lambda item: item.environment_id)
     def get_executor(self, executor_id): return self.executors[executor_id]
     def get_execution(self, execution_id): return self.executions[execution_id]
+    def get_execution_status(self, execution_id):
+        record = self.get_execution(execution_id)
+        return ExecutionStatusRecord(execution_id=execution_id, status=record.status)
+    def get_execution_result(self, execution_id, max_lines):
+        record = self.logs.get(execution_id)
+        if record is None:
+            return ExecutionResultLogRecord(execution_id=execution_id, ready=False)
+        result_location = record.result_location or f"mock://execution-results/{execution_id}"
+        fixed_lines = decisive_result_lines(record.lines)
+        if len(record.lines) <= max_lines:
+            excerpt_source = "\n".join(record.lines)
+        else:
+            head_count = max_lines // 2
+            tail_count = max_lines - head_count
+            excerpt_source = "\n".join(
+                record.lines[:head_count]
+                + ["...[lines truncated]..."]
+                + record.lines[-tail_count:]
+            )
+
+        def build(excerpt_bytes: int) -> ExecutionResultLogRecord:
+            return ExecutionResultLogRecord(
+                execution_id=execution_id,
+                result_location=result_location,
+                lines=fixed_lines,
+                log_excerpt=bounded_log_excerpt(excerpt_source, excerpt_bytes),
+                ready=record.ready,
+            )
+
+        # Tool Runtime 对完整 JSON output 施加 16 KiB 上限；根据真实 JSON
+        # 编码选择可容纳的最大 excerpt，而不是依赖字符数近似。
+        low, high = 0, MAX_OBSERVATION_BYTES
+        result = build(0)
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = build(middle)
+            encoded = json.dumps(
+                candidate.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+            if len(encoded) <= MAX_STAGE8_TOOL_OUTPUT_BYTES:
+                result = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        return result
     def get_logs(self, execution_id, max_lines):
-        return LogRecord(execution_id=execution_id, lines=self.logs.get(execution_id, LogRecord(execution_id=execution_id, lines=[])).lines[:max_lines])
+        record = self.logs.get(execution_id, LogRecord(execution_id=execution_id, lines=[]))
+        return LogRecord(execution_id=execution_id, lines=record.lines[:max_lines], result_location=record.result_location, ready=record.ready)
     @staticmethod
     def execution_idempotency_key(request: StartExecutionRequest) -> str:
         """由完整执行输入构造稳定且可解释的 provider 幂等键。"""
@@ -400,6 +478,8 @@ def build_stage8_tool_adapters(platform: DeterministicMockPlatform | None = None
         item("stage8_get_environment", "Query a typed test environment snapshot.", GetEnvironmentRequest, EnvironmentSnapshot, lambda r: p.get_environment(r.environment_id)),
         item("stage8_search_environments", "Search typed test environments by requirements.", SearchEnvironmentsRequest, list[EnvironmentSnapshot], p.search_environments),
         item("stage8_get_executor", "Query a typed executor snapshot.", GetExecutorRequest, ExecutorSnapshot, lambda r: p.get_executor(r.executor_id)),
+        item("stage8_get_execution_status", "Query the current status of an external test execution.", GetLogsRequest, ExecutionStatusRecord, lambda r: p.get_execution_status(r.execution_id)),
+        item("stage8_get_execution_result", "Query the provider-owned bounded result log for an external execution.", GetLogsRequest, ExecutionResultLogRecord, lambda r: p.get_execution_result(r.execution_id, r.max_lines)),
         item("stage8_get_logs", "Query bounded logs for an external execution.", GetLogsRequest, LogRecord, lambda r: p.get_logs(r.execution_id, r.max_lines)),
         item("stage8_search_tickets", "Search external tickets without creating a ticket.", SearchTicketsRequest, list[TicketRecord], lambda r: p.search_tickets(r.query)),
         item("stage8_start_execution", "Start one external test execution through governed runtime.", StartExecutionRequest, ExecutionRecord, p.start_execution, True, keyed_call=p.start_execution_with_key),

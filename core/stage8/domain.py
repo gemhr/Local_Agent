@@ -195,6 +195,11 @@ class ExecutionResult:
     failure_signature: str | None = None
     logs: list[str] = field(default_factory=list)
     completed_at: datetime | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    failed_step: str | None = None
+    result_location: str | None = None
+    log_excerpt: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
