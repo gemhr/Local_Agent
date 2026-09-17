@@ -28,6 +28,11 @@ async def test_stage8_web_route_and_static_assets(monkeypatch, tmp_path):
     assert "/api/stage8/missions/${state.missionId}/transition" in script.text
     assert "READY_FOR_EXECUTION" in script.text
     assert "CONTEXT_READY" in script.text
+    assert "/api/stage8/missions/${state.missionId}/cases/generate" in script.text
+    assert "generated_case_artifact_id: artifact.artifact_id" in script.text
+    assert "case_id: $('case-id').value" not in script.text
+    assert "environment_id: $('environment-id').value" not in script.text
+    assert "executor_id: $('executor-id').value" not in script.text
     assert "agents/failure-triage/run" not in script.text
     assert "Tool Approval Pending" in script.text
     assert "Observe Once" in page.text
@@ -48,3 +53,5 @@ async def test_stage8_web_route_and_static_assets(monkeypatch, tmp_path):
     assert "/api/stage8/agents/ci-guardian/run" not in route_paths
     assert "/api/stage8/ci/runs/{ci_run_id}/analyze" in route_paths
     assert "/api/stage8/execution-jobs/{job_id}/observe" in route_paths
+    assert "/api/stage8/ticket-continuations/{continuation_id}/approve" in route_paths
+    assert "/api/stage8/ticket-continuations/{continuation_id}/reject" in route_paths

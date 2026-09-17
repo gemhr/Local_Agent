@@ -172,6 +172,75 @@ async def test_approve_is_durable_then_worker_creates_one_ticket_and_writes_back
 
 
 @pytest.mark.asyncio
+async def test_stage8_approval_boundary_only_advances_continuation(clean_database):
+    platform, _, approvals, service, pending, continuation = await _pending_continuation(
+        clean_database, "approval-boundary"
+    )
+
+    ready = await service.decide(
+        continuation.continuation_id,
+        ApprovalDecisionValue.APPROVE,
+        actor_id="stage8-reviewer",
+    )
+
+    assert ready.state == "READY"
+    assert platform.tickets == {}
+    assert await approvals.status(pending["approval_id"]) is ApprovalStatus.APPROVED
+    assert await _approval_count(clean_database) == 1
+
+    duplicate = await service.decide(
+        continuation.continuation_id,
+        ApprovalDecisionValue.APPROVE,
+        actor_id="stage8-reviewer",
+    )
+    assert duplicate.state == "READY"
+    assert platform.tickets == {}
+    assert await _approval_count(clean_database) == 1
+
+
+@pytest.mark.asyncio
+async def test_product_ticket_approval_identity_is_stable_across_triage_replay(
+    clean_database,
+):
+    platform = DeterministicMockPlatform.seeded()
+    invoker, _ = _runtime(clean_database, platform)
+    draft = {
+        "title": "Stable PRODUCT failure",
+        "severity": "HIGH",
+        "description": "same durable execution replay",
+    }
+
+    first = await invoker(
+        "stage8_create_ticket",
+        draft,
+        principal_agent_id="failure_triage",
+        operation_identity="stage8-ticket:EXEC-STABLE",
+    )
+    replay = await invoker(
+        "stage8_create_ticket",
+        draft,
+        principal_agent_id="failure_triage",
+        operation_identity="stage8-ticket:EXEC-STABLE",
+    )
+
+    assert replay["run_id"] == first["run_id"]
+    assert replay["approval_id"] == first["approval_id"]
+    assert replay["invocation_id"] == first["invocation_id"]
+    assert replay["invocation_binding_digest"] == first["invocation_binding_digest"]
+    assert await _approval_count(clean_database) == 1
+    assert platform.tickets == {}
+
+    with pytest.raises(ValueError, match="approval binding"):
+        await invoker(
+            "stage8_create_ticket",
+            {**draft, "title": "Different draft B"},
+            principal_agent_id="failure_triage",
+            operation_identity="stage8-ticket:EXEC-STABLE",
+        )
+    assert await _approval_count(clean_database) == 1
+
+
+@pytest.mark.asyncio
 async def test_product_triage_creates_durable_pending_continuation(clean_database):
     platform = DeterministicMockPlatform.seeded()
     invoker, approvals = _runtime(clean_database, platform)
@@ -256,7 +325,11 @@ async def test_reject_is_durable_and_executes_zero_tools(clean_database):
     platform, _, approvals, service, pending, continuation = await _pending_continuation(
         clean_database, "reject"
     )
-    await _approve(approvals, service, pending, ApprovalDecisionValue.REJECT)
+    await service.decide(
+        continuation.continuation_id,
+        ApprovalDecisionValue.REJECT,
+        actor_id="stage8-reviewer",
+    )
 
     rejected = await service.get(continuation.continuation_id)
     assert rejected.state == "REJECTED"

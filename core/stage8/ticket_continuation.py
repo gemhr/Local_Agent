@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from core.runtime.approval import ApprovalDecisionValue, ApprovalStatus
 from core.stage8 import repositories as repo
+from core.stage8.service import Stage8ConflictError, Stage8NotFoundError
 
 
 def _digest(payload: dict) -> str:
@@ -80,6 +81,33 @@ class TicketContinuationService:
             row.state = "READY" if decision is ApprovalDecisionValue.APPROVE else "REJECTED"
             row.version += 1
             return _record(row)
+
+    async def decide(self, continuation_id: str, decision: ApprovalDecisionValue, *, actor_id: str | None = None):
+        """对 continuation 绑定的同一 Tool Approval 做 CAS 决策，不执行 Tool。"""
+        continuation = await self.get(continuation_id)
+        if continuation is None:
+            raise Stage8NotFoundError("ticket continuation not found")
+        approval = await self.durable_approval.get(continuation.approval_id)
+        if approval is None:
+            raise Stage8ConflictError("ticket approval not found")
+        if (
+            approval.invocation_id != continuation.tool_invocation_id
+            or approval.invocation_binding_digest != continuation.invocation_binding_digest
+        ):
+            raise Stage8ConflictError("ticket approval binding mismatch")
+        result = await self.durable_approval.decide(
+            run_id=approval.run_id,
+            approval_id=approval.approval_id,
+            invocation_binding_digest=continuation.invocation_binding_digest,
+            decision=decision,
+            actor_id=actor_id,
+        )
+        if result.safe_error_code is not None:
+            raise Stage8ConflictError(result.safe_error_code)
+        updated = await self.on_approval_decision(continuation.approval_id, decision)
+        if updated is None:
+            raise Stage8ConflictError("ticket continuation disappeared")
+        return updated
 
     async def get(self, continuation_id: str):
         async with self.database.session() as session:

@@ -146,10 +146,24 @@ class GovernedToolInvoker:
         self.owner_id = owner_id
 
     async def __call__(
-        self, tool_name: str, payload: dict, *, principal_agent_id: str
+        self,
+        tool_name: str,
+        payload: dict,
+        *,
+        principal_agent_id: str,
+        operation_identity: str | None = None,
     ) -> dict:
         registration = self.registry.require(tool_name)
-        run_id = uuid.uuid4().hex
+        stable_identity = (
+            uuid.uuid5(uuid.NAMESPACE_URL, operation_identity)
+            if operation_identity is not None
+            else None
+        )
+        run_id = (
+            uuid.uuid5(stable_identity, "run").hex
+            if stable_identity is not None
+            else uuid.uuid4().hex
+        )
         step_id = f"stage8-{tool_name}"
         governance_context = ToolGovernanceContext(
             principal_agent_id, run_id, step_id
@@ -167,6 +181,11 @@ class GovernedToolInvoker:
         invocation = registration.adapter.build_invocation(
             json.dumps(payload, ensure_ascii=False)
         )
+        if stable_identity is not None:
+            invocation = replace(
+                invocation,
+                invocation_id=uuid.uuid5(stable_identity, "invocation").hex,
+            )
         spec = registration.adapter.spec_for(invocation)
         decision = self.governance.evaluate_invocation(
             governance_context, registration, invocation, spec
@@ -191,7 +210,11 @@ class GovernedToolInvoker:
                     ),
                     risk_facts=risk_facts,
                 )
-                approval_id = uuid.uuid4().hex
+                approval_id = (
+                    uuid.uuid5(stable_identity, "approval").hex
+                    if stable_identity is not None
+                    else uuid.uuid4().hex
+                )
                 request = await self.durable_approval.create(ApprovalRequest(
                     approval_id=approval_id,
                     run_id=run_id,
@@ -544,12 +567,20 @@ class Stage8ExecutionService:
             )
 
     async def _invoke_tool(
-        self, tool_name: str, payload: dict, *, principal_agent_id: str
+        self,
+        tool_name: str,
+        payload: dict,
+        *,
+        principal_agent_id: str,
+        operation_identity: str | None = None,
     ) -> object:
         assert self.tool_invoker is not None
         try:
             return await self.tool_invoker(
-                tool_name, payload, principal_agent_id=principal_agent_id
+                tool_name,
+                payload,
+                principal_agent_id=principal_agent_id,
+                operation_identity=operation_identity,
             )
         except TypeError:
             # 测试 seam 兼容旧二参数 callable；生产 GovernedToolInvoker 不降级。
@@ -999,6 +1030,7 @@ class Stage8ExecutionService:
                     "stage8_create_ticket",
                     triage.ticket_draft.model_dump(mode="json"),
                     principal_agent_id="failure_triage",
+                    operation_identity=f"stage8-ticket:{job.execution_id}",
                 )
                 triage_payload["ticket_request"] = ticket_request
                 if self.ticket_continuation_service is not None and ticket_request.get("status") == "APPROVAL_REQUIRED":

@@ -1438,6 +1438,10 @@ class Stage8FailureTriageRunRequest(BaseModel):
     execution_id: StrictStr = Field(min_length=1, max_length=255)
 
 
+class Stage8TicketApprovalDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class Stage8CIRunRequest(CIRun):
     pass
 
@@ -1577,6 +1581,46 @@ async def stage8_get_ticket_continuation(continuation_id: str, request: Request)
     if result is None:
         raise Stage8NotFoundError("ticket continuation not found")
     return _stage8_projection(result)
+
+
+async def _stage8_decide_ticket_continuation(
+    continuation_id: str,
+    decision: ApprovalDecisionValue,
+    request: Request,
+):
+    service = getattr(request.app.state, "stage8_ticket_continuation_service", None)
+    if service is None:
+        raise Stage8ValidationError("ticket continuation service is not configured")
+    principal = request.state.principal
+    return _stage8_projection(await service.decide(
+        continuation_id,
+        decision,
+        actor_id=str(principal.user_id),
+    ))
+
+
+@app.post("/api/stage8/ticket-continuations/{continuation_id}/approve")
+async def stage8_approve_ticket_continuation(
+    continuation_id: str,
+    request: Request,
+    body: Annotated[Stage8TicketApprovalDecisionRequest, Body()] | None = None,
+):
+    del body
+    return await _stage8_decide_ticket_continuation(
+        continuation_id, ApprovalDecisionValue.APPROVE, request
+    )
+
+
+@app.post("/api/stage8/ticket-continuations/{continuation_id}/reject")
+async def stage8_reject_ticket_continuation(
+    continuation_id: str,
+    request: Request,
+    body: Annotated[Stage8TicketApprovalDecisionRequest, Body()] | None = None,
+):
+    del body
+    return await _stage8_decide_ticket_continuation(
+        continuation_id, ApprovalDecisionValue.REJECT, request
+    )
 
 
 @app.post("/api/stage8/ticket-continuations/process-ready")
