@@ -27,6 +27,12 @@ from core.stage8.execution import (
     FailureClassification, FailureTriageRequest, FailureTriageResult,
     FailureTriageService, Stage8ExecutionService, GovernedToolInvoker,
 )
+from core.stage8.ci_guardian import (
+    CIRunStatus, ChangeType, CIExecutionResult, CIRun, ChangeEvent,
+    FailureCluster, HistoricalComparison, ChangeCorrelationCandidate,
+    CIGuardianRequest, CIGuardianFinding, CIGuardianResult,
+    CIGuardianApplicationService, cluster_failures, compare_history, correlate_changes,
+)
 
 __all__ = [
     "BusinessReview", "ReviewStatus", "ReviewType", "FeatureTestMission",
@@ -40,4 +46,8 @@ __all__ = [
     "TestPlanningRequest", "TestPlanResult", "TestScenario", "SpecialistAgentApplicationService",
     "FailureClassification", "FailureTriageRequest", "FailureTriageResult",
     "FailureTriageService", "Stage8ExecutionService", "GovernedToolInvoker",
+    "CIRunStatus", "ChangeType", "CIExecutionResult", "CIRun", "ChangeEvent",
+    "FailureCluster", "HistoricalComparison", "ChangeCorrelationCandidate",
+    "CIGuardianRequest", "CIGuardianFinding", "CIGuardianResult",
+    "CIGuardianApplicationService", "cluster_failures", "compare_history", "correlate_changes",
 ]

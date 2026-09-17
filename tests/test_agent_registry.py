@@ -21,6 +21,7 @@ def test_default_registry_has_unique_expected_agents_and_shared_legacy_metadata(
         "risk_analysis",
         "test_planning",
         "failure_triage",
+        "ci_guardian",
         "synthesis_agent",
     )
     assert len(DEFAULT_AGENT_REGISTRY.agent_ids) == len(set(DEFAULT_AGENT_REGISTRY.agent_ids))
@@ -43,6 +44,7 @@ def test_default_registry_has_unique_expected_agents_and_shared_legacy_metadata(
         "risk_analysis_adapter",
         "test_planning_adapter",
         "failure_triage_adapter",
+        "ci_guardian_adapter",
         "synthesis_agent_adapter",
     )
     assert len(adapter_ids) == len(set(adapter_ids))

@@ -52,6 +52,7 @@ def default_adapter_map():
         ("risk_analysis_adapter", AgentRouterSingleAgentAdapter(router)),
         ("test_planning_adapter", AgentRouterSingleAgentAdapter(router)),
         ("failure_triage_adapter", AgentRouterSingleAgentAdapter(router)),
+        ("ci_guardian_adapter", AgentRouterSingleAgentAdapter(router)),
         ("synthesis_agent_adapter", SynthesisAgentAdapter(router)),
     )
 
@@ -156,6 +157,7 @@ def test_multiple_adapter_ids_may_share_one_adapter_class() -> None:
             ("risk_analysis_adapter", AgentRouterSingleAgentAdapter(router)),
             ("test_planning_adapter", AgentRouterSingleAgentAdapter(router)),
             ("failure_triage_adapter", AgentRouterSingleAgentAdapter(router)),
+            ("ci_guardian_adapter", AgentRouterSingleAgentAdapter(router)),
             ("synthesis_agent_adapter", SynthesisAgentAdapter(router)),
         ),
     )

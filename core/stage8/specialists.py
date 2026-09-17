@@ -182,6 +182,7 @@ class SpecialistAgentApplicationService:
         "risk_analysis": (RiskAnalysisRequest, RiskAnalysisResult),
         "test_planning": (TestPlanningRequest, TestPlanResult),
         "failure_triage": (None, None),
+        "ci_guardian": (None, None),
     }
 
     def __init__(self, runtime_factory=None, *, runner: Callable[[str, str], Awaitable[str]] | None = None,
@@ -330,6 +331,28 @@ class SpecialistAgentApplicationService:
             return result
 
         return await self._invoke("failure_triage", request, FailureTriageResult, validate, None)
+
+    async def ci_guardian(self, request):
+        """CI Guardian 复用同一 strict JSON + 一次 repair runner。"""
+        from core.stage8.ci_guardian import CIGuardianResult
+
+        available = set(request.evidence_ids)
+        candidate_ids = {item.change_id for item in request.change_candidates}
+        cluster_ids = {item.cluster_id for item in request.clusters}
+
+        def validate(result: BaseModel):
+            if not isinstance(result, CIGuardianResult):
+                raise Stage8ValidationError("invalid ci guardian result")
+            for finding in result.findings:
+                if finding.cluster_id not in cluster_ids:
+                    raise Stage8ValidationError("unknown cluster_id in ci guardian result")
+                if set(finding.evidence_ids) - available:
+                    raise Stage8ValidationError("unknown evidence_id in ci guardian result")
+                if set(finding.suspected_change_ids) - candidate_ids:
+                    raise Stage8ValidationError("unknown change_id in ci guardian result")
+            return result
+
+        return await self._invoke("ci_guardian", request, CIGuardianResult, validate, None)
 
     async def planning_workflow(self, request: FeatureUnderstandingRequest) -> dict[str, Any]:
         mission = None

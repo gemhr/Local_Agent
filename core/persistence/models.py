@@ -119,6 +119,27 @@ class Stage8ExternalExecutionJobRow(PersistenceBase):
     completed_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class Stage8CIRunRow(PersistenceBase):
+    __tablename__ = "stage8_ci_runs"
+    ci_run_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    suite_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    started_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
+class Stage8CIAnalysisRow(PersistenceBase):
+    __tablename__ = "stage8_ci_analysis"
+    analysis_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    ci_run_id: Mapped[str] = mapped_column(ForeignKey("stage8_ci_runs.ci_run_id", ondelete="CASCADE"), nullable=False, unique=True)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class UserRow(PersistenceBase):
     __tablename__ = "users"
     id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
@@ -856,6 +877,8 @@ CANONICAL_TABLES = (
     "stage8_business_reviews",
     "stage8_test_plans",
     "stage8_external_execution_jobs",
+    "stage8_ci_runs",
+    "stage8_ci_analysis",
     "users",
     "roles",
     "user_roles",
@@ -912,4 +935,6 @@ __all__ = [
     "BusinessReviewRow",
     "Stage8TestPlanRow",
     "Stage8ExternalExecutionJobRow",
+    "Stage8CIRunRow",
+    "Stage8CIAnalysisRow",
 ]

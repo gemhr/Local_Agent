@@ -3,7 +3,7 @@
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow, Stage8ExternalExecutionJobRow
+from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow, Stage8ExternalExecutionJobRow, Stage8CIRunRow, Stage8CIAnalysisRow
 
 
 async def add_mission(session: AsyncSession, values: dict) -> FeatureTestMissionRow:
@@ -116,3 +116,24 @@ async def claim_execution_triage(session, execution_id: str):
         version=Stage8ExternalExecutionJobRow.version + 1,
         updated_at=func.now(),
     ).returning(Stage8ExternalExecutionJobRow))
+
+async def get_ci_run(session, ci_run_id: str, *, for_update: bool = False):
+    query = select(Stage8CIRunRow).where(Stage8CIRunRow.ci_run_id == ci_run_id)
+    if for_update:
+        query = query.with_for_update()
+    return await session.scalar(query)
+
+async def list_ci_runs(session, suite_id: str | None = None):
+    query = select(Stage8CIRunRow).order_by(Stage8CIRunRow.completed_at)
+    if suite_id is not None:
+        query = query.where(Stage8CIRunRow.suite_id == suite_id)
+    return list((await session.scalars(query)).all())
+
+async def add_ci_run(session, values: dict):
+    row = Stage8CIRunRow(**values); session.add(row); await session.flush(); return row
+
+async def get_ci_analysis(session, ci_run_id: str):
+    return await session.scalar(select(Stage8CIAnalysisRow).where(Stage8CIAnalysisRow.ci_run_id == ci_run_id))
+
+async def add_ci_analysis(session, values: dict):
+    row = Stage8CIAnalysisRow(**values); session.add(row); await session.flush(); return row

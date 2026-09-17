@@ -310,6 +310,13 @@ DEFAULT_AGENT_REGISTRY = AgentRegistry(
             aliases=("failure_triage",),
         ),
         _registration(
+            "ci_guardian", "ci_guardian_adapter", "CI Guardian", "基于批量 CI 证据分析失败聚类与近期变更关联。", "avatar_router.png",
+            entry_allowed=True, delegation_allowed=False,
+            delegated_output_policy=OutputPolicy.INTERNAL,
+            capabilities=frozenset({"ci_guardian"}),
+            aliases=("ci_guardian",),
+        ),
+        _registration(
             "synthesis_agent", "synthesis_agent_adapter", "Synthesis Agent", "汇总已授权的专业结果。", "avatar_router.png",
             entry_allowed=False, delegation_allowed=True,
             delegated_output_policy=OutputPolicy.FINAL_SYNTHESIS,

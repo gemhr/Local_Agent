@@ -207,6 +207,7 @@ from core.stage8 import (
     Stage8ExecutionService,
     FailureTriageService,
     GovernedToolInvoker,
+    CIRun, CIGuardianApplicationService,
 )
 from core.stage8.platforms import DeterministicMockPlatform, FeatureContextBuilder
 
@@ -542,6 +543,7 @@ async def lifespan(app: FastAPI):
     app.state.stage8_mock_platform = stage8_platform
     app.state.stage8_feature_context_builder = FeatureContextBuilder(stage8_platform)
     app.state.stage8_execution_service = None
+    app.state.stage8_ci_guardian_service = None
     # Redis owns only cache/admission state.  Connection establishment is lazy so
     # cache outage never prevents the PostgreSQL/RAG authority from starting.
     redis_service = await initialization_stack.create(
@@ -1280,6 +1282,9 @@ async def lifespan(app: FastAPI):
         ),
         triage_service=FailureTriageService(app.state.stage8_specialist_service),
     )
+    app.state.stage8_ci_guardian_service = CIGuardianApplicationService(
+        persistence_database, app.state.stage8_specialist_service
+    )
     app.state.runtime_metrics = runtime_metrics
     app.state.runtime_metrics_collector = RuntimeMetricsCollector(
         runtime_metrics, gauge_provider
@@ -1321,6 +1326,7 @@ async def lifespan(app: FastAPI):
         app.state.stage8_review_service = None
         app.state.stage8_specialist_service = None
         app.state.stage8_execution_service = None
+        app.state.stage8_ci_guardian_service = None
         app.state.runtime_services = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
@@ -1381,6 +1387,10 @@ class Stage8FailureTriageRunRequest(BaseModel):
     execution_id: StrictStr = Field(min_length=1, max_length=255)
 
 
+class Stage8CIRunRequest(CIRun):
+    pass
+
+
 def _stage8_projection(value):
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -1434,6 +1444,13 @@ def _stage8_execution(request: Request):
     return service
 
 
+def _stage8_ci_guardian(request: Request):
+    service = getattr(request.app.state, "stage8_ci_guardian_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="STAGE8_CI_GUARDIAN_NOT_READY")
+    return service
+
+
 @app.post("/api/stage8/agents/feature-understanding/run")
 async def stage8_feature_understanding(body: FeatureUnderstandingRequest, request: Request):
     return _stage8_projection(await _stage8_specialists(request).feature_understanding(body))
@@ -1483,6 +1500,21 @@ async def stage8_failure_triage(body: Stage8FailureTriageRunRequest, request: Re
     return _stage8_projection(
         await _stage8_execution(request).triage_execution(body.execution_id)
     )
+
+
+@app.post("/api/stage8/ci/runs", status_code=201)
+async def stage8_ingest_ci_run(body: Stage8CIRunRequest, request: Request):
+    return _stage8_projection(await _stage8_ci_guardian(request).ingest_ci_run(body))
+
+
+@app.post("/api/stage8/ci/runs/{ci_run_id}/analyze")
+async def stage8_analyze_ci_run(ci_run_id: str, request: Request):
+    return _stage8_projection(await _stage8_ci_guardian(request).analyze(ci_run_id))
+
+
+@app.get("/api/stage8/ci/runs/{ci_run_id}/analysis")
+async def stage8_get_ci_analysis(ci_run_id: str, request: Request):
+    return _stage8_projection(await _stage8_ci_guardian(request).get_analysis(ci_run_id))
 
 
 @app.post("/api/stage8/missions", status_code=201)
