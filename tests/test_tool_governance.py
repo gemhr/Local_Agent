@@ -561,12 +561,22 @@ def test_production_policies_use_explicit_agent_permissions():
     )
     register_default_tool_policies(catalog)
     catalog.freeze()
-    stage8_agents = frozenset(
-        {"core_router", "feature_understanding", "risk_analysis", "test_planning"}
+    stage8_query_agents = frozenset(
+        {
+            "core_router",
+            "feature_understanding",
+            "risk_analysis",
+            "test_planning",
+            "failure_triage",
+        }
     )
     for policy in catalog.policies():
-        if policy.tool_name.startswith("stage8_"):
-            assert policy.allowed_agent_ids == stage8_agents
+        if policy.tool_name == "stage8_start_execution":
+            assert policy.allowed_agent_ids == frozenset({"core_router", "test_planning"})
+        elif policy.tool_name == "stage8_create_ticket":
+            assert policy.allowed_agent_ids == frozenset({"core_router", "failure_triage"})
+        elif policy.tool_name.startswith("stage8_"):
+            assert policy.allowed_agent_ids == stage8_query_agents
         else:
             assert policy.allowed_agent_ids == PRODUCTION_AGENT_IDS
             assert policy.allowed_agent_ids == frozenset(DEFAULT_AGENT_REGISTRY.agent_ids)
@@ -575,15 +585,24 @@ def test_production_policies_use_explicit_agent_permissions():
 def test_production_agents_follow_each_tool_policy_allowlist():
     service = production_service()
     registry = production_registry()
-    stage8_agents = frozenset(
-        {"core_router", "feature_understanding", "risk_analysis", "test_planning"}
+    stage8_query_agents = frozenset(
+        {
+            "core_router",
+            "feature_understanding",
+            "risk_analysis",
+            "test_planning",
+            "failure_triage",
+        }
     )
     for registration in registry.registrations():
-        allowed_agents = (
-            stage8_agents
-            if registration.descriptor.name.startswith("stage8_")
-            else PRODUCTION_AGENT_IDS
-        )
+        if registration.descriptor.name == "stage8_start_execution":
+            allowed_agents = frozenset({"core_router", "test_planning"})
+        elif registration.descriptor.name == "stage8_create_ticket":
+            allowed_agents = frozenset({"core_router", "failure_triage"})
+        elif registration.descriptor.name.startswith("stage8_"):
+            allowed_agents = stage8_query_agents
+        else:
+            allowed_agents = PRODUCTION_AGENT_IDS
         for agent_id in PRODUCTION_AGENT_IDS:
             decision = service.authorize_tool(
                 ToolGovernanceContext(agent_id, "run", "step"),

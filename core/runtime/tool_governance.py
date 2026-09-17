@@ -48,14 +48,23 @@ PRODUCTION_AGENT_IDS = frozenset(
         "feature_understanding",
         "risk_analysis",
         "test_planning",
+        "failure_triage",
     }
 )
 
 # Stage8 平台能力只暴露给协调入口与当前 Stage8 specialists；其它通用
 # specialists / synthesis agent 不因 catalog coverage 获得外部业务系统权限。
-_STAGE8_TOOL_AGENT_IDS = frozenset(
-    {"core_router", "feature_understanding", "risk_analysis", "test_planning"}
+_STAGE8_QUERY_AGENT_IDS = frozenset(
+    {
+        "core_router",
+        "feature_understanding",
+        "risk_analysis",
+        "test_planning",
+        "failure_triage",
+    }
 )
+_STAGE8_START_AGENT_IDS = frozenset({"core_router", "test_planning"})
+_STAGE8_TICKET_AGENT_IDS = frozenset({"core_router", "failure_triage"})
 
 
 class ToolRiskFact(str, Enum):
@@ -626,11 +635,14 @@ def register_default_tool_policies(catalog: ToolPolicyCatalog) -> None:
         ("stage8_create_ticket", ()),
     )
     for tool_name, risk_facts in policies:
-        allowed_agent_ids = (
-            _STAGE8_TOOL_AGENT_IDS
-            if tool_name.startswith("stage8_")
-            else PRODUCTION_AGENT_IDS
-        )
+        if tool_name == "stage8_start_execution":
+            allowed_agent_ids = _STAGE8_START_AGENT_IDS
+        elif tool_name == "stage8_create_ticket":
+            allowed_agent_ids = _STAGE8_TICKET_AGENT_IDS
+        elif tool_name.startswith("stage8_"):
+            allowed_agent_ids = _STAGE8_QUERY_AGENT_IDS
+        else:
+            allowed_agent_ids = PRODUCTION_AGENT_IDS
         catalog.register(
             ToolPolicy(
                 tool_name=tool_name,

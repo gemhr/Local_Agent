@@ -202,6 +202,11 @@ from core.stage8 import (
     FeatureUnderstandingRequest,
     RiskAnalysisRequest,
     TestPlanningRequest,
+    ExecutionResult,
+    ExternalExecutionStatus,
+    Stage8ExecutionService,
+    FailureTriageService,
+    GovernedToolInvoker,
 )
 from core.stage8.platforms import DeterministicMockPlatform, FeatureContextBuilder
 
@@ -536,6 +541,7 @@ async def lifespan(app: FastAPI):
     stage8_platform = DeterministicMockPlatform.seeded()
     app.state.stage8_mock_platform = stage8_platform
     app.state.stage8_feature_context_builder = FeatureContextBuilder(stage8_platform)
+    app.state.stage8_execution_service = None
     # Redis owns only cache/admission state.  Connection establishment is lazy so
     # cache outage never prevents the PostgreSQL/RAG authority from starting.
     redis_service = await initialization_stack.create(
@@ -1261,6 +1267,19 @@ async def lifespan(app: FastAPI):
         review_service=app.state.stage8_review_service,
         test_plan_repository=TestPlanRepository(persistence_database),
     )
+    app.state.stage8_execution_service = Stage8ExecutionService(
+        persistence_database,
+        tool_invoker=GovernedToolInvoker(
+            tool_registry,
+            tool_governance_service,
+            router.tool_execution_service,
+            resource_authorization=resource_authorization_service,
+            durable_run_control=runtime_services.durable_run_control,
+            durable_approval=runtime_services.durable_approval,
+            owner_id=runtime_services.run_control_owner_id,
+        ),
+        triage_service=FailureTriageService(app.state.stage8_specialist_service),
+    )
     app.state.runtime_metrics = runtime_metrics
     app.state.runtime_metrics_collector = RuntimeMetricsCollector(
         runtime_metrics, gauge_provider
@@ -1301,6 +1320,7 @@ async def lifespan(app: FastAPI):
         app.state.stage8_mission_service = None
         app.state.stage8_review_service = None
         app.state.stage8_specialist_service = None
+        app.state.stage8_execution_service = None
         app.state.runtime_services = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
@@ -1326,6 +1346,7 @@ class Stage8RunReferenceRequest(BaseModel):
 
 class Stage8ReviewCreateRequest(BaseModel):
     review_type: StrictStr
+    subject_id: StrictStr | None = Field(default=None, min_length=1, max_length=255)
     subject_version: int | None = Field(default=None, ge=1)
     subject_digest: StrictStr | None = Field(default=None, min_length=64, max_length=64)
 
@@ -1334,8 +1355,30 @@ class Stage8ReviewDecisionRequest(BaseModel):
     mission_id: StrictStr = Field(min_length=1, max_length=255)
     decided_by: StrictStr | None = Field(default=None, max_length=255)
     decision_comment: StrictStr | None = None
+    subject_id: StrictStr | None = Field(default=None, min_length=1, max_length=255)
     subject_version: int | None = Field(default=None, ge=1)
     subject_digest: StrictStr | None = Field(default=None, min_length=64, max_length=64)
+
+
+class Stage8ExecutionStartRequest(BaseModel):
+    case_id: StrictStr = Field(min_length=1, max_length=255)
+    environment_id: StrictStr = Field(min_length=1, max_length=255)
+    executor_id: StrictStr = Field(min_length=1, max_length=255)
+    parameters: dict[str, StrictStr] = Field(default_factory=dict)
+
+
+class Stage8ExecutionResultRequest(BaseModel):
+    execution_id: StrictStr = Field(min_length=1, max_length=255)
+    status: StrictStr
+    actual_result: StrictStr
+    expected_result: StrictStr | None = None
+    failure_signature: StrictStr | None = None
+    logs: list[StrictStr] = Field(default_factory=list)
+    completed_at: datetime | None = None
+
+
+class Stage8FailureTriageRunRequest(BaseModel):
+    execution_id: StrictStr = Field(min_length=1, max_length=255)
 
 
 def _stage8_projection(value):
@@ -1384,6 +1427,13 @@ def _stage8_specialists(request: Request):
     return service
 
 
+def _stage8_execution(request: Request):
+    service = getattr(request.app.state, "stage8_execution_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="STAGE8_EXECUTION_NOT_READY")
+    return service
+
+
 @app.post("/api/stage8/agents/feature-understanding/run")
 async def stage8_feature_understanding(body: FeatureUnderstandingRequest, request: Request):
     return _stage8_projection(await _stage8_specialists(request).feature_understanding(body))
@@ -1406,6 +1456,33 @@ async def stage8_planning_workflow(mission_id: str, body: FeatureUnderstandingRe
     return _stage8_projection(await _stage8_specialists(request).planning_workflow(
         body.model_copy(update={"mission_id": mission_id})
     ))
+
+
+@app.post("/api/stage8/missions/{mission_id}/execution")
+async def stage8_start_execution(mission_id: str, body: Stage8ExecutionStartRequest, request: Request):
+    service = _stage8_execution(request)
+    plan = await service.build_plan(mission_id, case_id=body.case_id, environment_id=body.environment_id, executor_id=body.executor_id, parameters=body.parameters)
+    return _stage8_projection(await service.start_execution(plan))
+
+
+@app.post("/api/stage8/executions/{execution_id}/result")
+async def stage8_ingest_execution_result(execution_id: str, body: Stage8ExecutionResultRequest, request: Request):
+    if body.execution_id != execution_id:
+        raise Stage8ValidationError("execution_id mismatch")
+    service = _stage8_execution(request)
+    try:
+        status = ExternalExecutionStatus(body.status)
+    except ValueError as exc:
+        raise Stage8ValidationError("invalid external execution status") from exc
+    result = ExecutionResult(execution_id=execution_id, status=status, actual_result=body.actual_result, expected_result=body.expected_result, failure_signature=body.failure_signature, logs=body.logs, completed_at=body.completed_at)
+    return _stage8_projection(await service.ingest_result(result))
+
+
+@app.post("/api/stage8/agents/failure-triage/run")
+async def stage8_failure_triage(body: Stage8FailureTriageRunRequest, request: Request):
+    return _stage8_projection(
+        await _stage8_execution(request).triage_execution(body.execution_id)
+    )
 
 
 @app.post("/api/stage8/missions", status_code=201)
@@ -1441,7 +1518,7 @@ async def stage8_list_runs(mission_id: str, request: Request):
 @app.post("/api/stage8/missions/{mission_id}/reviews", status_code=201)
 async def stage8_create_review(mission_id: str, body: Stage8ReviewCreateRequest, request: Request):
     _, review = _stage8_services(request)
-    return _stage8_projection(await review.create_review(mission_id, body.review_type, subject_version=body.subject_version, subject_digest=body.subject_digest))
+    return _stage8_projection(await review.create_review(mission_id, body.review_type, subject_id=body.subject_id, subject_version=body.subject_version, subject_digest=body.subject_digest))
 
 
 @app.get("/api/stage8/reviews/{review_id}")
@@ -1453,13 +1530,13 @@ async def stage8_get_review(review_id: str, request: Request):
 @app.post("/api/stage8/reviews/{review_id}/approve")
 async def stage8_approve_review(review_id: str, body: Stage8ReviewDecisionRequest, request: Request):
     _, review = _stage8_services(request)
-    return _stage8_projection(await review.approve_review(review_id, body.mission_id, decided_by=body.decided_by, comment=body.decision_comment, subject_version=body.subject_version, subject_digest=body.subject_digest))
+    return _stage8_projection(await review.approve_review(review_id, body.mission_id, decided_by=body.decided_by, comment=body.decision_comment, subject_id=body.subject_id, subject_version=body.subject_version, subject_digest=body.subject_digest))
 
 
 @app.post("/api/stage8/reviews/{review_id}/reject")
 async def stage8_reject_review(review_id: str, body: Stage8ReviewDecisionRequest, request: Request):
     _, review = _stage8_services(request)
-    return _stage8_projection(await review.reject_review(review_id, body.mission_id, decided_by=body.decided_by, comment=body.decision_comment, subject_version=body.subject_version, subject_digest=body.subject_digest))
+    return _stage8_projection(await review.reject_review(review_id, body.mission_id, decided_by=body.decided_by, comment=body.decision_comment, subject_id=body.subject_id, subject_version=body.subject_version, subject_digest=body.subject_digest))
 
 _ADMIN_ONLY_API_PATHS = frozenset({
     "/api/runtime/evaluation-execute/v3",

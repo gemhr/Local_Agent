@@ -1,6 +1,6 @@
 """Stage8 业务对象；不承载 AgentCore Runtime 状态。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
@@ -41,6 +41,15 @@ class ReviewType(StrEnum):
     REQUIREMENT_MAPPING = "REQUIREMENT_MAPPING"
 
 
+class ExternalExecutionStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+    CANCELLED = "CANCELLED"
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureTestMission:
     mission_id: str
@@ -66,6 +75,7 @@ class BusinessReview:
     review_id: str
     mission_id: str
     review_type: ReviewType
+    subject_id: str | None
     subject_version: int | None
     subject_digest: str | None
     status: ReviewStatus
@@ -73,3 +83,67 @@ class BusinessReview:
     decided_at: datetime | None = None
     decided_by: str | None = None
     decision_comment: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPlan:
+    plan_id: str
+    mission_id: str
+    mission_version: int
+    test_plan_subject_id: str
+    test_plan_version: int
+    test_plan_digest: str
+    case_id: str
+    environment_id: str
+    executor_id: str
+    parameters: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalExecutionJob:
+    job_id: str
+    mission_id: str
+    execution_id: str | None
+    status: ExternalExecutionStatus
+    version: int
+    case_id: str
+    environment_id: str
+    executor_id: str
+    plan_id: str
+    attempt_no: int
+    auto_repair_count: int
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    result: dict | None = None
+    triage: dict | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionResult:
+    execution_id: str
+    status: ExternalExecutionStatus
+    actual_result: str
+    expected_result: str | None = None
+    failure_signature: str | None = None
+    logs: list[str] = field(default_factory=list)
+    completed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FailureEvidencePackage:
+    mission_id: str
+    execution_id: str
+    feature_id: str
+    test_plan_subject_id: str
+    test_plan_version: int
+    test_plan_digest: str
+    case_id: str
+    environment_id: str
+    executor_id: str
+    expected_result: str | None
+    actual_result: str
+    logs: list[str]
+    failure_signature: str | None
+    evidence: dict[str, dict]

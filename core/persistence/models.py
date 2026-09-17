@@ -74,6 +74,7 @@ class BusinessReviewRow(PersistenceBase):
     review_id: Mapped[str] = mapped_column(String(255), primary_key=True)
     mission_id: Mapped[str] = mapped_column(ForeignKey("stage8_feature_test_missions.mission_id", ondelete="CASCADE"), nullable=False)
     review_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     subject_version: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     subject_digest: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -93,6 +94,29 @@ class Stage8TestPlanRow(PersistenceBase):
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     __table_args__ = (UniqueConstraint("mission_id", "subject_id", "version", name="uq_stage8_test_plan_version"),)
+
+
+class Stage8ExternalExecutionJobRow(PersistenceBase):
+    """Stage8 外部执行 Job；是外部测试生命周期的业务 Authority。"""
+    __tablename__ = "stage8_external_execution_jobs"
+    job_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(ForeignKey("stage8_feature_test_missions.mission_id", ondelete="CASCADE"), nullable=False)
+    execution_id: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
+    plan_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    case_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    environment_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    executor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    attempt_no: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    auto_repair_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    plan_payload: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    result_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    triage_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    started_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class UserRow(PersistenceBase):
@@ -831,6 +855,7 @@ CANONICAL_TABLES = (
     "stage8_mission_run_refs",
     "stage8_business_reviews",
     "stage8_test_plans",
+    "stage8_external_execution_jobs",
     "users",
     "roles",
     "user_roles",
@@ -886,4 +911,5 @@ __all__ = [
     "MissionRunReferenceRow",
     "BusinessReviewRow",
     "Stage8TestPlanRow",
+    "Stage8ExternalExecutionJobRow",
 ]

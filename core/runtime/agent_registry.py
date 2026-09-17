@@ -303,6 +303,13 @@ DEFAULT_AGENT_REGISTRY = AgentRegistry(
             aliases=("test_planning",),
         ),
         _registration(
+            "failure_triage", "failure_triage_adapter", "Failure Triage", "基于执行证据分类失败原因并提出后续动作。", "avatar_router.png",
+            entry_allowed=True, delegation_allowed=False,
+            delegated_output_policy=OutputPolicy.INTERNAL,
+            capabilities=frozenset({"failure_triage"}),
+            aliases=("failure_triage",),
+        ),
+        _registration(
             "synthesis_agent", "synthesis_agent_adapter", "Synthesis Agent", "汇总已授权的专业结果。", "avatar_router.png",
             entry_allowed=False, delegation_allowed=True,
             delegated_output_policy=OutputPolicy.FINAL_SYNTHESIS,

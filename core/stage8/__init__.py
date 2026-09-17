@@ -7,6 +7,8 @@ from core.stage8.domain import (
     FeatureTestMission,
     MissionRunReference,
     MissionStatus,
+    ExternalExecutionStatus, ExecutionPlan, ExternalExecutionJob, ExecutionResult,
+    FailureEvidencePackage,
 )
 from core.stage8.service import (
     BusinessReviewService,
@@ -21,14 +23,21 @@ from core.stage8.specialists import (
     FeatureUnderstandingResult, RiskAnalysisRequest, RiskAnalysisResult, RiskItem,
     TestPlanningRequest, TestPlanResult, TestScenario, SpecialistAgentApplicationService,
 )
+from core.stage8.execution import (
+    FailureClassification, FailureTriageRequest, FailureTriageResult,
+    FailureTriageService, Stage8ExecutionService, GovernedToolInvoker,
+)
 
 __all__ = [
     "BusinessReview", "ReviewStatus", "ReviewType", "FeatureTestMission",
     "MissionRunReference", "MissionStatus", "BusinessReviewService",
+    "ExternalExecutionStatus", "ExecutionPlan", "ExternalExecutionJob", "ExecutionResult", "FailureEvidencePackage",
     "MissionService", "Stage8ConflictError", "Stage8NotFoundError",
     "Stage8ValidationError",
     "TestPlanRepository",
     "EvidenceSourceType", "EvidenceRef", "FeatureContext", "FeatureUnderstandingRequest",
     "FeatureUnderstandingResult", "RiskAnalysisRequest", "RiskAnalysisResult", "RiskItem",
     "TestPlanningRequest", "TestPlanResult", "TestScenario", "SpecialistAgentApplicationService",
+    "FailureClassification", "FailureTriageRequest", "FailureTriageResult",
+    "FailureTriageService", "Stage8ExecutionService", "GovernedToolInvoker",
 ]

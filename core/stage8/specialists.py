@@ -181,6 +181,7 @@ class SpecialistAgentApplicationService:
         "feature_understanding": (FeatureUnderstandingRequest, FeatureUnderstandingResult),
         "risk_analysis": (RiskAnalysisRequest, RiskAnalysisResult),
         "test_planning": (TestPlanningRequest, TestPlanResult),
+        "failure_triage": (None, None),
     }
 
     def __init__(self, runtime_factory=None, *, runner: Callable[[str, str], Awaitable[str]] | None = None,
@@ -304,6 +305,32 @@ class SpecialistAgentApplicationService:
 
         return await self._invoke("test_planning", request, TestPlanResult, validate)
 
+    async def failure_triage(self, request):
+        """Failure Triage 使用同一 strict JSON + 一次 repair runner。
+
+        类型放在 execution 模块以避免 WP1 专家模型依赖 WP3 业务编排；这里
+        只依赖其 Pydantic contract 和验证入口。
+        """
+        from core.stage8.execution import FailureTriageResult
+
+        authoritative = {
+            item["evidence_id"]: item
+            for item in request.available_evidence
+            if "evidence_id" in item
+        }
+
+        def validate(result: BaseModel):
+            if not isinstance(result, FailureTriageResult):
+                raise Stage8ValidationError("invalid failure triage result")
+            unknown = set(result.evidence_ids) - set(authoritative)
+            if unknown:
+                raise Stage8ValidationError(f"unknown evidence_id: {sorted(unknown)[0]}")
+            if result.classification == "PRODUCT" and result.ticket_draft is None:
+                raise Stage8ValidationError("PRODUCT triage requires ticket_draft")
+            return result
+
+        return await self._invoke("failure_triage", request, FailureTriageResult, validate, None)
+
     async def planning_workflow(self, request: FeatureUnderstandingRequest) -> dict[str, Any]:
         mission = None
         if request.mission_id:
@@ -340,6 +367,7 @@ class SpecialistAgentApplicationService:
             review = await self.review_service.create_review(
                 request.mission_id,
                 "TEST_PLAN",
+                subject_id=stored.subject_id,
                 subject_version=stored.version,
                 subject_digest=stored.subject_digest,
             )

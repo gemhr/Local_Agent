@@ -469,6 +469,7 @@ class CoordinatedRuntimeFactory:
                 ),
                 ("risk_analysis_adapter", AgentRouterSingleAgentAdapter(router)),
                 ("test_planning_adapter", AgentRouterSingleAgentAdapter(router)),
+                ("failure_triage_adapter", AgentRouterSingleAgentAdapter(router)),
                 ("synthesis_agent_adapter", SynthesisAgentAdapter(router)),
             ),
         )

@@ -3,7 +3,7 @@
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow
+from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow, Stage8ExternalExecutionJobRow
 
 
 async def add_mission(session: AsyncSession, values: dict) -> FeatureTestMissionRow:
@@ -42,3 +42,77 @@ async def decide_review(session: AsyncSession, review_id: str, expected_status: 
     return await session.scalar(update(BusinessReviewRow).where(
         BusinessReviewRow.review_id == review_id, BusinessReviewRow.status == expected_status,
     ).values(status=status, decided_at=func.now(), decided_by=decided_by, decision_comment=comment).returning(BusinessReviewRow))
+
+
+async def get_current_test_plan(session: AsyncSession, mission_id: str):
+    """返回 mission 当前版本的 TestPlan subject。
+
+    当前 subject 由稳定 version、创建时间和 subject_id 顺序确定。
+    """
+    return await session.scalar(select(Stage8TestPlanRow).where(
+        Stage8TestPlanRow.mission_id == mission_id,
+    ).order_by(
+        Stage8TestPlanRow.version.desc(), Stage8TestPlanRow.created_at.desc(),
+        Stage8TestPlanRow.subject_id.desc(),
+    ).limit(1))
+
+
+async def get_approved_test_plan_review(session: AsyncSession, mission_id: str):
+    """只返回批准当前 TestPlan subject 的 BusinessReview。
+
+    不能把同一 mission 下旧版本（或缺少 TestPlan subject）的 APPROVED
+    Review 当作当前执行门禁。
+    """
+    plan = await get_current_test_plan(session, mission_id)
+    if plan is None:
+        return None
+    return await session.scalar(select(BusinessReviewRow).where(
+        BusinessReviewRow.mission_id == mission_id,
+        BusinessReviewRow.review_type == "TEST_PLAN",
+        BusinessReviewRow.status == "APPROVED",
+        BusinessReviewRow.subject_id == plan.subject_id,
+        BusinessReviewRow.subject_version == plan.version,
+        BusinessReviewRow.subject_digest == plan.subject_digest,
+    ).order_by(BusinessReviewRow.decided_at.desc()))
+
+
+async def add_execution_job(session, values: dict):
+    row = Stage8ExternalExecutionJobRow(**values); session.add(row); await session.flush(); return row
+
+
+async def get_execution_job(session, execution_id: str, *, for_update=False):
+    query = select(Stage8ExternalExecutionJobRow).where(Stage8ExternalExecutionJobRow.execution_id == execution_id)
+    if for_update: query = query.with_for_update()
+    return await session.scalar(query)
+
+
+async def get_execution_job_by_id(session, job_id: str, *, for_update=False):
+    query = select(Stage8ExternalExecutionJobRow).where(
+        Stage8ExternalExecutionJobRow.job_id == job_id
+    )
+    if for_update: query = query.with_for_update()
+    return await session.scalar(query)
+
+
+async def update_execution_job(session, execution_id: str, values: dict):
+    return await session.scalar(update(Stage8ExternalExecutionJobRow).where(
+        Stage8ExternalExecutionJobRow.execution_id == execution_id,
+    ).values(**values, version=Stage8ExternalExecutionJobRow.version + 1, updated_at=func.now()).returning(Stage8ExternalExecutionJobRow))
+
+
+async def update_execution_job_by_id(session, job_id: str, values: dict):
+    return await session.scalar(update(Stage8ExternalExecutionJobRow).where(
+        Stage8ExternalExecutionJobRow.job_id == job_id,
+    ).values(**values, version=Stage8ExternalExecutionJobRow.version + 1, updated_at=func.now()).returning(Stage8ExternalExecutionJobRow))
+
+
+async def claim_execution_triage(session, execution_id: str):
+    return await session.scalar(update(Stage8ExternalExecutionJobRow).where(
+        Stage8ExternalExecutionJobRow.execution_id == execution_id,
+        Stage8ExternalExecutionJobRow.status == "FAILED",
+        Stage8ExternalExecutionJobRow.triage_payload.is_(None),
+    ).values(
+        triage_payload={"state": "RUNNING"},
+        version=Stage8ExternalExecutionJobRow.version + 1,
+        updated_at=func.now(),
+    ).returning(Stage8ExternalExecutionJobRow))
