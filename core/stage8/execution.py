@@ -464,6 +464,11 @@ class Stage8ExecutionService:
             job = _job(row)
         if triage_needed and self.triage_service is not None:
             await self.triage(job)
+            async with self.database.session() as session:
+                refreshed = await repo.get_execution_job(session, result.execution_id)
+            if refreshed is None:
+                raise Stage8ConflictError("execution job disappeared after triage")
+            return _job(refreshed)
         return job
 
     async def triage_execution(self, execution_id: str) -> FailureTriageResult:

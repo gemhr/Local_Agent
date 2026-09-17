@@ -121,6 +121,8 @@ async def test_failed_result_builds_authoritative_evidence_and_triages(clean_dat
     await service.start_execution(plan)
     job = await service.ingest_result(ExecutionResult("EXEC-WP3-F", ExternalExecutionStatus.FAILED, "assertion failed", expected_result="ok", logs=["process exited 1"]))
     assert job.status is ExternalExecutionStatus.FAILED
+    assert job.triage["state"] == "COMPLETED"
+    assert job.triage["result"]["classification"] == "ENVIRONMENT"
     assert (await missions.get_mission("m-wp3-f")).status is MissionStatus.TRIAGING
     assert triage.request.evidence["FEATURE_BINDING"]["feature_id"] == "FEATURE-001"
     assert triage.request.evidence["TEST_PLAN_BINDING"]["subject_id"] == "plan-wp3"

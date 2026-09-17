@@ -9,11 +9,13 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path as FilePath
 from typing import Annotated, Literal, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Path, Query, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from core.agent_router import AgentRouter
@@ -1332,6 +1334,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
+
+# Stage8-WP5：演示层只提供静态资源和页面入口；业务动作继续走下方
+# canonical /api/stage8/* 路由，不在 UI 层复制 Workflow 或 Domain Authority。
+_STAGE8_STATIC_DIR = FilePath(__file__).resolve().parent / "static" / "stage8"
+app.mount("/static/stage8", StaticFiles(directory=str(_STAGE8_STATIC_DIR)), name="stage8-static")
+
+
+@app.get("/stage8", include_in_schema=False)
+async def stage8_demo_page():
+    return FileResponse(_STAGE8_STATIC_DIR / "index.html")
 
 
 class Stage8MissionCreateRequest(BaseModel):

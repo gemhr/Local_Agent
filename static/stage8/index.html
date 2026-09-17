@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentCore — Stage8 Demo</title>
+  <link rel="stylesheet" href="/static/stage8/styles.css">
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">AGENTCORE / STAGE8</p>
+      <h1>Agentic Test Engineering Demo</h1>
+      <p class="muted">Feature → Risk → Test Plan → Review → Execution → Triage → CI Guardian</p>
+    </div>
+    <a class="api-link" href="/docs" target="_blank" rel="noreferrer">API docs ↗</a>
+  </header>
+  <div class="auth-bar"><label for="auth-token">Authorization Token <input id="auth-token" type="password" autocomplete="off" placeholder="仅保存在当前页面内存"></label><span class="muted">不会写入 localStorage</span></div>
+  <nav class="tabs" aria-label="Demo sections">
+    <button class="tab active" data-tab="workflow">Mission Workflow</button>
+    <button class="tab" data-tab="toolbox">Agent Toolbox</button>
+    <button class="tab" data-tab="ci">CI Guardian</button>
+  </nav>
+  <main>
+    <section id="workflow" class="panel active">
+      <div class="section-heading"><div><p class="eyebrow">MISSION</p><h2>Mission Workflow</h2></div><button id="load-sample" class="secondary">Load demo scenario</button></div>
+      <div class="grid two">
+        <div class="card"><h3>1. Create Mission</h3><label>Feature ID<input id="feature-id" value="5g-rrc-reconnect"></label><label>Title<input id="mission-title" value="5G RRC reconnect optimization"></label><label>Description<textarea id="mission-summary">Improve reconnection after radio link failure.</textarea></label><button id="create-mission">Create Mission</button></div>
+        <div class="card"><h3>2. Feature Context</h3><label>Requirement<textarea id="feature-document">Improve reconnection after radio link failure.</textarea></label><label>Code change<textarea id="code-diff">RRC retry/timer logic changed.</textarea></label><label>Meeting note<textarea id="meeting-summary">Focus on reconnect timeout and degraded RF environment.</textarea></label><label>Affected modules<input id="affected-modules" value="RRC, radio-link-control"></label><button id="run-planning" disabled>Run Feature → Risk → Test Plan</button></div>
+      </div>
+      <div class="card pipeline"><div class="pipeline-label">Current state</div><div id="mission-badge" class="badge">No mission</div><div id="mission-ids" class="muted">Create a mission to begin.</div></div>
+      <div class="grid three"><div class="card result"><h3>Feature Understanding</h3><div id="understanding"></div></div><div class="card result"><h3>Risk Analysis</h3><div id="risks"></div></div><div class="card result"><h3>Test Plan</h3><div id="test-plan"></div></div></div>
+      <div class="grid two"><div class="card"><h3>3. Business Review</h3><div id="review-meta" class="muted">Planning will create a version-bound review.</div><div class="actions"><button id="approve-review" disabled>Approve</button><button id="reject-review" class="danger" disabled>Reject</button></div></div><div class="card"><h3>4. Execution</h3><label>Case<input id="case-id" value="rrc-reconnect-timeout"></label><label>Environment<input id="environment-id" value="degraded-rf-lab"></label><label>Executor<input id="executor-id" value="mock-executor"></label><button id="start-execution" disabled>Start Execution</button><div id="job-result"></div></div></div>
+      <div class="card"><h3>5. Mock Result Callback & Failure Triage</h3><p class="muted">Callbacks go through the real Stage8 execution endpoint. Triage evidence comes from the stored execution result.</p><div class="actions"><button id="submit-success" disabled>Submit SUCCESS</button><button id="submit-product" class="danger" disabled>Submit PRODUCT-Like Failure</button><button id="submit-test-data" class="secondary" disabled>Submit Test-Data-Like Failure</button></div><div id="triage-result"></div></div>
+    </section>
+    <section id="toolbox" class="panel"><div class="section-heading"><div><p class="eyebrow">SPECIALISTS</p><h2>Agent Toolbox</h2></div></div><div class="card"><label>Agent<select id="agent-select"><option value="feature-understanding">Feature Understanding</option><option value="risk-analysis">Risk Analysis</option><option value="test-planning">Test Planning</option><option value="failure-triage">Failure Triage</option><option value="ci-guardian">CI Guardian</option></select></label><label id="toolbox-input-label">Input JSON<textarea id="toolbox-input"></textarea></label><p class="muted">独立调用现有 Specialist API；Failure Triage 只接受后端已有的 execution_id。</p><button id="run-agent">Run Agent</button><div id="toolbox-output"></div></div></section>
+    <section id="ci" class="panel"><div class="section-heading"><div><p class="eyebrow">QUALITY SIGNAL</p><h2>CI Guardian</h2></div><button id="load-ci" class="secondary">Load demo CI scenario</button></div><div class="card"><p class="muted">CI Run 独立于 Mission。Correlation 是 suspected change，不代表 confirmed root cause。</p><div class="actions"><button id="analyze-ci" disabled>Analyze Current CI</button><button id="read-ci" class="secondary" disabled>Read Analysis</button></div><div id="ci-status"></div><div id="ci-result"></div></div></section>
+    <div id="toast" role="status" aria-live="polite"></div>
+  </main>
+  <script src="/static/stage8/app.js"></script>
+</body>
+</html>
