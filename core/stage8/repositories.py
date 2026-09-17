@@ -3,7 +3,7 @@
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow, Stage8GeneratedCaseArtifactRow, Stage8ExternalExecutionJobRow, Stage8CIRunRow, Stage8CIAnalysisRow
+from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow, Stage8GeneratedCaseArtifactRow, Stage8ExternalExecutionJobRow, Stage8CIRunRow, Stage8CIAnalysisRow, Stage8TicketContinuationRow
 
 
 async def add_mission(session: AsyncSession, values: dict) -> FeatureTestMissionRow:
@@ -146,6 +146,45 @@ async def claim_execution_triage(session, execution_id: str):
         version=Stage8ExternalExecutionJobRow.version + 1,
         updated_at=func.now(),
     ).returning(Stage8ExternalExecutionJobRow))
+
+
+async def add_ticket_continuation(session: AsyncSession, values: dict):
+    row = Stage8TicketContinuationRow(**values)
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_ticket_continuation(session: AsyncSession, continuation_id: str, *, for_update: bool = False):
+    query = select(Stage8TicketContinuationRow).where(
+        Stage8TicketContinuationRow.continuation_id == continuation_id
+    )
+    if for_update:
+        query = query.with_for_update()
+    return await session.scalar(query)
+
+
+async def get_ticket_continuation_by_approval(session: AsyncSession, approval_id: str, *, for_update: bool = False):
+    query = select(Stage8TicketContinuationRow).where(
+        Stage8TicketContinuationRow.approval_id == approval_id
+    )
+    if for_update:
+        query = query.with_for_update()
+    return await session.scalar(query)
+
+
+async def claim_ticket_continuation(session: AsyncSession, continuation_id: str):
+    return await session.scalar(update(Stage8TicketContinuationRow).where(
+        Stage8TicketContinuationRow.continuation_id == continuation_id,
+        Stage8TicketContinuationRow.state == "READY",
+    ).values(state="PROCESSING", version=Stage8TicketContinuationRow.version + 1,
+             updated_at=func.now()).returning(Stage8TicketContinuationRow))
+
+
+async def list_ready_ticket_continuations(session: AsyncSession):
+    return list((await session.scalars(select(Stage8TicketContinuationRow).where(
+        Stage8TicketContinuationRow.state.in_(("PENDING_APPROVAL", "READY"))
+    ).order_by(Stage8TicketContinuationRow.created_at, Stage8TicketContinuationRow.continuation_id))).all())
 
 async def get_ci_run(session, ci_run_id: str, *, for_update: bool = False):
     query = select(Stage8CIRunRow).where(Stage8CIRunRow.ci_run_id == ci_run_id)

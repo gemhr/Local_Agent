@@ -210,6 +210,7 @@ from core.stage8 import (
     CaseGenerationApplicationService,
     FailureTriageService,
     GovernedToolInvoker,
+    TicketContinuationService,
     CIRun, CIGuardianApplicationService,
 )
 from core.stage8.platforms import DeterministicMockPlatform, FeatureContextBuilder
@@ -549,6 +550,7 @@ async def lifespan(app: FastAPI):
     app.state.stage8_execution_service = None
     app.state.stage8_case_generation_service = None
     app.state.stage8_ci_guardian_service = None
+    app.state.stage8_ticket_continuation_service = None
     # Redis owns only cache/admission state.  Connection establishment is lazy so
     # cache outage never prevents the PostgreSQL/RAG authority from starting.
     redis_service = await initialization_stack.create(
@@ -1283,10 +1285,18 @@ async def lifespan(app: FastAPI):
         durable_approval=runtime_services.durable_approval,
         owner_id=runtime_services.run_control_owner_id,
     )
+    app.state.stage8_ticket_continuation_service = TicketContinuationService(
+        persistence_database,
+        tool_invoker=governed_stage8_tool_invoker,
+        durable_approval=durable_approval,
+        durable_run_control=durable_run_control,
+        owner_id=runtime_services.run_control_owner_id,
+    )
     app.state.stage8_execution_service = Stage8ExecutionService(
         persistence_database,
         tool_invoker=governed_stage8_tool_invoker,
         triage_service=FailureTriageService(app.state.stage8_specialist_service),
+        ticket_continuation_service=app.state.stage8_ticket_continuation_service,
     )
     app.state.stage8_case_generation_service = CaseGenerationApplicationService(
         persistence_database, tool_invoker=governed_stage8_tool_invoker
@@ -1337,6 +1347,7 @@ async def lifespan(app: FastAPI):
         app.state.stage8_execution_service = None
         app.state.stage8_case_generation_service = None
         app.state.stage8_ci_guardian_service = None
+        app.state.stage8_ticket_continuation_service = None
         app.state.runtime_services = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
@@ -1555,6 +1566,25 @@ async def stage8_failure_triage(body: Stage8FailureTriageRunRequest, request: Re
     return _stage8_projection(
         await _stage8_execution(request).triage_execution(body.execution_id)
     )
+
+
+@app.get("/api/stage8/ticket-continuations/{continuation_id}")
+async def stage8_get_ticket_continuation(continuation_id: str, request: Request):
+    service = getattr(request.app.state, "stage8_ticket_continuation_service", None)
+    if service is None:
+        raise Stage8ValidationError("ticket continuation service is not configured")
+    result = await service.get(continuation_id)
+    if result is None:
+        raise Stage8NotFoundError("ticket continuation not found")
+    return _stage8_projection(result)
+
+
+@app.post("/api/stage8/ticket-continuations/process-ready")
+async def stage8_process_ticket_continuation(request: Request):
+    service = getattr(request.app.state, "stage8_ticket_continuation_service", None)
+    if service is None:
+        raise Stage8ValidationError("ticket continuation service is not configured")
+    return _stage8_projection(await service.process_ready_once())
 
 
 @app.post("/api/stage8/ci/runs", status_code=201)
@@ -3081,6 +3111,9 @@ async def _handle_tool_approval_decision(
             decision=decision,
             actor_id=str(principal.user_id),
         )
+        continuation_service = getattr(request.app.state, "stage8_ticket_continuation_service", None)
+        if continuation_service is not None and result.safe_error_code is None:
+            await continuation_service.on_approval_decision(approval_id, decision)
         error_code = result.safe_error_code
         status_code = (
             200

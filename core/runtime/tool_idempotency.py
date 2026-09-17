@@ -129,6 +129,11 @@ class DurableToolInvocationService:
                 session.add(row)
                 await session.flush()
             else:
+                binds_execution_claim = (
+                    row.state == ToolInvocationState.PREPARED.value
+                    and row.execution_claim_id is None
+                    and execution_claim_id is not None
+                )
                 self._assert_identity(
                     row,
                     lease.run_id,
@@ -138,8 +143,12 @@ class DurableToolInvocationService:
                     idempotency_digest,
                     approval_id,
                     execution_claim_id,
+                    allow_new_execution_claim=binds_execution_claim,
                 )
                 if row.state == ToolInvocationState.PREPARED.value:
+                    if binds_execution_claim:
+                        row.execution_claim_id = execution_claim_id
+                        row.version += 1
                     if row.owner_id != lease.owner_id or row.fencing_token != lease.fencing_token:
                         row.owner_id = lease.owner_id
                         row.fencing_token = lease.fencing_token
@@ -334,6 +343,8 @@ class DurableToolInvocationService:
         idempotency_digest: str,
         approval_id: str | None,
         execution_claim_id: str | None,
+        *,
+        allow_new_execution_claim: bool = False,
     ) -> None:
         if (
             row.run_id != run_id
@@ -342,7 +353,14 @@ class DurableToolInvocationService:
             or row.invocation_binding_digest != binding
             or row.idempotency_key_digest != idempotency_digest
             or row.approval_id != approval_id
-            or row.execution_claim_id != execution_claim_id
+            or (
+                row.execution_claim_id != execution_claim_id
+                and not (
+                    allow_new_execution_claim
+                    and row.execution_claim_id is None
+                    and execution_claim_id is not None
+                )
+            )
         ):
             raise ValueError("Tool invocation immutable binding conflict")
 

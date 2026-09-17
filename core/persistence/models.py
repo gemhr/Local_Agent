@@ -135,6 +135,33 @@ class Stage8ExternalExecutionJobRow(PersistenceBase):
     completed_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class Stage8TicketContinuationRow(PersistenceBase):
+    """PRODUCT failure 的 durable downstream ticket action。"""
+    __tablename__ = "stage8_ticket_continuations"
+    continuation_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(ForeignKey("stage8_feature_test_missions.mission_id", ondelete="CASCADE"), nullable=False)
+    execution_job_id: Mapped[str] = mapped_column(ForeignKey("stage8_external_execution_jobs.job_id", ondelete="CASCADE"), nullable=False)
+    triage_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    ticket_draft_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    approval_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    tool_invocation_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    invocation_binding_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'PENDING_APPROVAL'"))
+    external_ticket_id: Mapped[str | None] = mapped_column(String(255))
+    external_ticket_url: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    __table_args__ = (
+        CheckConstraint("state IN ('PENDING_APPROVAL', 'REJECTED', 'READY', 'PROCESSING', 'SUCCEEDED', 'FAILED', 'UNKNOWN')", name="ck_stage8_ticket_continuation_state"),
+        UniqueConstraint("execution_job_id", "ticket_draft_id", name="uq_stage8_ticket_continuation_draft"),
+        Index("ix_stage8_ticket_continuations_state", "state"),
+    )
+
+
 class Stage8CIRunRow(PersistenceBase):
     __tablename__ = "stage8_ci_runs"
     ci_run_id: Mapped[str] = mapped_column(String(255), primary_key=True)
@@ -894,6 +921,7 @@ CANONICAL_TABLES = (
     "stage8_test_plans",
     "stage8_generated_case_artifacts",
     "stage8_external_execution_jobs",
+    "stage8_ticket_continuations",
     "stage8_ci_runs",
     "stage8_ci_analysis",
     "users",
@@ -953,6 +981,7 @@ __all__ = [
     "Stage8TestPlanRow",
     "Stage8GeneratedCaseArtifactRow",
     "Stage8ExternalExecutionJobRow",
+    "Stage8TicketContinuationRow",
     "Stage8CIRunRow",
     "Stage8CIAnalysisRow",
 ]

@@ -29,6 +29,7 @@ from core.stage8.execution import (
     FailureClassification, FailureTriageRequest, FailureTriageResult,
     FailureTriageService, Stage8ExecutionService, GovernedToolInvoker,
 )
+from core.stage8.ticket_continuation import TicketContinuation, TicketContinuationService
 from core.stage8.case_generation import CaseGenerationApplicationService
 from core.stage8.execution_list import ExecutionListBuilder
 from core.stage8.ci_guardian import (

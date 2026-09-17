@@ -19,6 +19,7 @@ from core.runtime import (
     ToolExecutionError,
     ToolExecutionStatus,
     ToolSideEffectState,
+    ApprovalStatus,
     compute_invocation_binding_digest,
     create_run_context,
 )
@@ -190,8 +191,9 @@ class GovernedToolInvoker:
                     ),
                     risk_facts=risk_facts,
                 )
+                approval_id = uuid.uuid4().hex
                 request = await self.durable_approval.create(ApprovalRequest(
-                    approval_id=uuid.uuid4().hex,
+                    approval_id=approval_id,
                     run_id=run_id,
                     step_id=step_id,
                     invocation_id=invocation.invocation_id,
@@ -207,12 +209,24 @@ class GovernedToolInvoker:
                     invocation_binding_digest=binding,
                     requested_at=datetime.now(UTC),
                 ))
+                # Approval stores only safe digests.  Prepare the same immutable
+                # invocation in Tool Runtime so continuation can resume it.
+                durable_invocation = getattr(self.tool_execution, "durable_invocation_service", None)
+                if durable_invocation is not None:
+                    await durable_invocation.prepare(
+                        lease=lease, step_id=step_id, invocation=invocation,
+                        tool_name=spec.tool_name, approval_id=request.approval_id,
+                        invocation_binding_digest=request.invocation_binding_digest,
+                    )
                 return {
                     "status": "APPROVAL_REQUIRED",
                     "tool_name": tool_name,
                     "run_id": request.run_id,
                     "approval_id": request.approval_id,
                     "invocation_binding_digest": request.invocation_binding_digest,
+                    "invocation_id": invocation.invocation_id,
+                    "step_id": step_id,
+                    "request_snapshot": dict(payload),
                 }
             finally:
                 await self.durable_run_control.release(lease)
@@ -256,6 +270,71 @@ class GovernedToolInvoker:
             raise Stage8ToolInvocationError(
                 "STAGE8_TOOL_EXECUTION_FAILED", outcome_unknown=False
             )
+        return json.loads(result.output.content)
+
+    async def resume_approved(self, continuation):
+        """Resume exactly the invocation bound to the durable approval."""
+        approval = await self.durable_approval.get(continuation.approval_id)
+        if approval is None or (await self.durable_approval.status(continuation.approval_id)) is not ApprovalStatus.APPROVED:
+            raise Stage8ValidationError("ticket approval is not approved")
+        if approval.invocation_id != continuation.tool_invocation_id or approval.invocation_binding_digest != continuation.invocation_binding_digest:
+            raise Stage8ValidationError("ticket approval binding mismatch")
+        if approval.tool_name != "stage8_create_ticket":
+            raise Stage8ValidationError("ticket continuation requires stage8_create_ticket")
+        registration = self.registry.require(approval.tool_name)
+        invocation = registration.adapter.build_invocation(
+            json.dumps(continuation.request_snapshot, ensure_ascii=False)
+        )
+        invocation = replace(invocation, invocation_id=continuation.tool_invocation_id)
+        binding = compute_invocation_binding_digest(
+            invocation_identity_digest=safe_key_digest(invocation.invocation_id),
+            tool_name=invocation.tool_name,
+            arguments_digest=invocation.arguments_digest,
+            idempotency_key_digest=safe_key_digest(invocation.idempotency_key),
+            resource_key_digest=safe_key_digest(invocation.resource_key),
+            risk_level=approval.risk_level,
+            risk_facts=approval.risk_facts,
+        )
+        if binding != continuation.invocation_binding_digest:
+            raise Stage8ValidationError("ticket request snapshot binding mismatch")
+        durable_invocations = getattr(self.tool_execution, "durable_invocation_service", None)
+        if durable_invocations is None:
+            raise Stage8ValidationError("durable tool invocation service is not configured")
+        durable_invocation = await durable_invocations.get(continuation.tool_invocation_id)
+        if (
+            durable_invocation is None
+            or durable_invocation.approval_id != approval.approval_id
+            or durable_invocation.run_id != approval.run_id
+            or durable_invocation.step_id != approval.step_id
+            or durable_invocation.tool_name != approval.tool_name
+            or durable_invocation.invocation_binding_digest != approval.invocation_binding_digest
+        ):
+            raise Stage8ValidationError("durable tool invocation binding mismatch")
+        if durable_invocation.state.value != "PREPARED":
+            raise Stage8ToolInvocationError(
+                "TOOL_INVOCATION_NOT_RESUMABLE", outcome_unknown=True
+            )
+        lease = await self.durable_run_control.claim(approval.run_id, self.owner_id)
+        try:
+            context, _ = create_run_context(run_id=approval.run_id, entry_agent_id="failure_triage", timeout_seconds=30)
+            context.attach_durable_lease(lease)
+            context.attach_ownership_validator(lambda: self.durable_run_control.assert_current(lease))
+            context.attach_budget_ledger(BudgetLedger(RunBudget(max_tool_calls=1)))
+            claim = await self.durable_approval.claim_execution(
+                lease=lease, approval_id=approval.approval_id,
+                invocation_binding_digest=approval.invocation_binding_digest,
+            )
+            result = await self.tool_execution.execute(
+                invocation=invocation, adapter=registration.adapter,
+                run_context=context, step_id=approval.step_id,
+                durable_approval_id=approval.approval_id,
+                durable_execution_claim_id=claim.claim_id,
+                durable_binding_digest=approval.invocation_binding_digest,
+            )
+        finally:
+            await self.durable_run_control.release(lease)
+        if isinstance(result, ToolExecutionError):
+            raise Stage8ToolInvocationError(result.safe_error_code, outcome_unknown=result.side_effect_state is ToolSideEffectState.UNKNOWN)
         return json.loads(result.output.content)
 
 
@@ -321,12 +400,14 @@ class Stage8ExecutionService:
         triage_service: FailureTriageService | None = None,
         mission_service: MissionService | None = None,
         execution_list_builder: ExecutionListBuilder | None = None,
+        ticket_continuation_service=None,
     ):
         self.database = database
         self.tool_invoker = tool_invoker
         self.triage_service = triage_service
         self.mission_service = mission_service or MissionService(database)
         self.execution_list_builder = execution_list_builder or ExecutionListBuilder()
+        self.ticket_continuation_service = ticket_continuation_service
 
     async def _plan_from_artifact(
         self,
@@ -914,11 +995,22 @@ class Stage8ExecutionService:
                     raise Stage8ValidationError(
                         "governed create_ticket tool is not configured"
                     )
-                triage_payload["ticket_request"] = await self._invoke_tool(
+                ticket_request = await self._invoke_tool(
                     "stage8_create_ticket",
                     triage.ticket_draft.model_dump(mode="json"),
                     principal_agent_id="failure_triage",
                 )
+                triage_payload["ticket_request"] = ticket_request
+                if self.ticket_continuation_service is not None and ticket_request.get("status") == "APPROVAL_REQUIRED":
+                    required = {"approval_id", "invocation_id", "invocation_binding_digest", "request_snapshot"}
+                    if required.issubset(ticket_request):
+                        continuation = await self.ticket_continuation_service.create_from_approval(
+                            mission_id=job.mission_id, execution_job_id=job.job_id,
+                            triage_id=f"triage:{job.execution_id}",
+                            ticket_draft_id=f"ticket-draft:{job.execution_id}",
+                            draft=ticket_request["request_snapshot"], approval=ticket_request,
+                        )
+                        triage_payload["ticket_continuation_id"] = continuation.continuation_id
             async with self.database.transaction() as session:
                 await repo.update_execution_job(
                     session, job.execution_id, {"triage_payload": triage_payload}

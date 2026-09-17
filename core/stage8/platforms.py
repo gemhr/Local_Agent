@@ -121,6 +121,7 @@ class TicketRecord(_DTO):
     status: str
     title: str
     severity: str
+    ticket_url: str | None = None
 
 
 class TicketDraft(_DTO):
@@ -408,7 +409,7 @@ class DeterministicMockPlatform:
         return result
     def create_ticket(self, draft):
         ticket_id = f"BUG-{len(self.tickets) + 1:03d}"
-        record = TicketRecord(ticket_id=ticket_id, status="OPEN", title=draft.title, severity=draft.severity)
+        record = TicketRecord(ticket_id=ticket_id, ticket_url=f"mock://tickets/{ticket_id}", status="OPEN", title=draft.title, severity=draft.severity)
         self.tickets[ticket_id] = record
         return record
     def search_tickets(self, query):
