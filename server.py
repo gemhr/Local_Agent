@@ -1386,10 +1386,8 @@ class Stage8ReviewDecisionRequest(BaseModel):
 
 
 class Stage8ExecutionStartRequest(BaseModel):
-    case_id: StrictStr = Field(min_length=1, max_length=255)
-    environment_id: StrictStr = Field(min_length=1, max_length=255)
-    executor_id: StrictStr = Field(min_length=1, max_length=255)
-    parameters: dict[str, StrictStr] = Field(default_factory=dict)
+    model_config = ConfigDict(extra="forbid")
+    generated_case_artifact_id: StrictStr = Field(min_length=1, max_length=255)
 
 
 class Stage8CaseGenerationRequest(BaseModel):
@@ -1503,8 +1501,9 @@ async def stage8_planning_workflow(mission_id: str, body: FeatureUnderstandingRe
 @app.post("/api/stage8/missions/{mission_id}/execution")
 async def stage8_start_execution(mission_id: str, body: Stage8ExecutionStartRequest, request: Request):
     service = _stage8_execution(request)
-    plan = await service.build_plan(mission_id, case_id=body.case_id, environment_id=body.environment_id, executor_id=body.executor_id, parameters=body.parameters)
-    return _stage8_projection(await service.start_execution(plan))
+    return _stage8_projection(await service.start_execution(
+        mission_id, generated_case_artifact_id=body.generated_case_artifact_id,
+    ))
 
 
 @app.post("/api/stage8/executions/{execution_id}/result")

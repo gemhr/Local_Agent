@@ -20,6 +20,7 @@ from core.stage8 import (
     TestPlanRepository as Stage8TestPlanRepository,
     Stage8ValidationError,
 )
+from core.stage8 import repositories as stage8_repo
 from core.stage8.execution import FailureTriageService
 from core.runtime import ToolExecutionService
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
@@ -53,6 +54,12 @@ async def _approve_current_test_plan(database, mission_id: str, *, subject_id: s
         "version": version,
         "summary": "wp3 plan",
         "scenarios": [{"scenario_id": "case-1", "title": "case", "category": "NEGATIVE"}],
+        "environment_requirements": {
+            "version": "1",
+            "network_type": "isolated",
+            "hardware_type": "linux",
+            "required_capabilities": ["CASE_EXECUTION"],
+        },
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     digest = hashlib.sha256(canonical).hexdigest()
@@ -70,6 +77,33 @@ async def _approve_current_test_plan(database, mission_id: str, *, subject_id: s
     return stored
 
 
+async def _add_artifact(database, mission_id: str, plan, *, artifact_id: str):
+    async with database.transaction() as session:
+        return await stage8_repo.add_generated_case_artifact(session, {
+            "artifact_id": artifact_id,
+            "mission_id": mission_id,
+            "test_plan_subject_id": plan.subject_id,
+            "test_plan_version": plan.version,
+            "test_plan_digest": plan.subject_digest,
+            "scenario_id": "case-1",
+            "provider_case_id": "CASE-GEN-001",
+            "case_path": "/generated/cases/CASE-GEN-001",
+            "status": "GENERATED",
+        })
+
+
+def _execution_invoker(execution_id, calls=None):
+    async def invoke(name, payload):
+        if calls is not None:
+            calls.append((name, payload))
+        if name == "stage8_search_environments":
+            return [{"environment_id": "ENV-001", "version": "1", "network_type": "isolated", "board": "linux", "status": "FREE", "ip": "10.0.0.1", "capabilities": ["CASE_EXECUTION"], "feature_flags": []}]
+        if name == "stage8_get_environment":
+            return {"environment_id": "ENV-001", "version": "1", "network_type": "isolated", "board": "linux", "status": "FREE", "ip": "10.0.0.1", "capabilities": ["CASE_EXECUTION"], "feature_flags": []}
+        return {"execution_id": execution_id, "status": "RUNNING"}
+    return invoke
+
+
 @pytest.mark.asyncio
 async def test_start_returns_without_waiting_and_success_completes(clean_database):
     missions = MissionService(clean_database)
@@ -77,23 +111,25 @@ async def test_start_returns_without_waiting_and_success_completes(clean_databas
     await missions.create_mission("FEATURE-001", mission_id="m-wp3")
     await missions.transition_mission("m-wp3", MissionStatus.CONTEXT_READY, 1)
     await missions.transition_mission("m-wp3", MissionStatus.AWAITING_REVIEW, 2)
-    await _approve_current_test_plan(clean_database, "m-wp3")
+    plan_row = await _approve_current_test_plan(clean_database, "m-wp3")
+    artifact = await _add_artifact(clean_database, "m-wp3", plan_row, artifact_id="artifact-wp3")
     await missions.transition_mission("m-wp3", MissionStatus.READY_FOR_EXECUTION, 3)
 
     calls = []
     async def invoke(name, payload):
         calls.append((name, payload))
-        return {"execution_id": "EXEC-WP3-1", "status": "RUNNING"}
+        return await _execution_invoker("EXEC-WP3-1")(name, payload)
 
     service = Stage8ExecutionService(clean_database, tool_invoker=invoke)
-    plan = await service.build_plan("m-wp3", case_id="CASE-001", environment_id="ENV-001", executor_id="EXECUTOR-001")
-    job = await service.start_execution(plan)
+    job = await service.start_execution("m-wp3", generated_case_artifact_id=artifact.artifact_id)
     assert job.execution_id == "EXEC-WP3-1"
-    assert calls[0][0] == "stage8_start_execution"
+    assert [name for name, _ in calls] == [
+        "stage8_search_environments", "stage8_get_environment", "stage8_start_execution"
+    ]
     assert (await missions.get_mission("m-wp3")).status is MissionStatus.EXECUTING
-    with pytest.raises(Stage8ValidationError, match="mission is not ready"):
-        await service.start_execution(plan)
-    assert len(calls) == 1
+    replay = await service.start_execution("m-wp3", generated_case_artifact_id=artifact.artifact_id)
+    assert replay.job_id == job.job_id
+    assert len(calls) == 3
 
     completed = await service.ingest_result(ExecutionResult("EXEC-WP3-1", ExternalExecutionStatus.SUCCEEDED, "ok"))
     duplicate = await service.ingest_result(ExecutionResult("EXEC-WP3-1", ExternalExecutionStatus.FAILED, "late"))
@@ -109,16 +145,16 @@ async def test_failed_result_builds_authoritative_evidence_and_triages(clean_dat
     await missions.create_mission("FEATURE-001", mission_id="m-wp3-f")
     await missions.transition_mission("m-wp3-f", MissionStatus.CONTEXT_READY, 1)
     await missions.transition_mission("m-wp3-f", MissionStatus.AWAITING_REVIEW, 2)
-    await _approve_current_test_plan(clean_database, "m-wp3-f")
+    plan_row = await _approve_current_test_plan(clean_database, "m-wp3-f")
+    artifact = await _add_artifact(clean_database, "m-wp3-f", plan_row, artifact_id="artifact-wp3-f")
     await missions.transition_mission("m-wp3-f", MissionStatus.READY_FOR_EXECUTION, 3)
     triage = _Triage()
     service = Stage8ExecutionService(
         clean_database,
-        tool_invoker=lambda *_: _async_result({"execution_id": "EXEC-WP3-F"}),
+        tool_invoker=_execution_invoker("EXEC-WP3-F"),
         triage_service=FailureTriageService(triage),
     )
-    plan = await service.build_plan("m-wp3-f", case_id="CASE-001", environment_id="ENV-001", executor_id="EXECUTOR-001")
-    await service.start_execution(plan)
+    await service.start_execution("m-wp3-f", generated_case_artifact_id=artifact.artifact_id)
     job = await service.ingest_result(ExecutionResult("EXEC-WP3-F", ExternalExecutionStatus.FAILED, "assertion failed", expected_result="ok", logs=["process exited 1"]))
     assert job.status is ExternalExecutionStatus.FAILED
     assert job.triage["state"] == "COMPLETED"
@@ -136,6 +172,7 @@ async def test_stale_approved_test_plan_review_cannot_start_current_plan(clean_d
     await missions.transition_mission("m-wp3-binding", MissionStatus.CONTEXT_READY, 1)
     await missions.transition_mission("m-wp3-binding", MissionStatus.AWAITING_REVIEW, 2)
     old = await _approve_current_test_plan(clean_database, "m-wp3-binding", subject_id="plan-old")
+    artifact = await _add_artifact(clean_database, "m-wp3-binding", old, artifact_id="artifact-wp3-binding")
     await Stage8TestPlanRepository(clean_database).save(
         "m-wp3-binding", "plan-current", 2, "b" * 64,
         {"subject_id": "plan-current", "version": 2},
@@ -147,9 +184,9 @@ async def test_stale_approved_test_plan_review_cannot_start_current_plan(clean_d
         clean_database,
         tool_invoker=lambda *_: _async_result({"execution_id": "must-not-start"}),
     )
-    with pytest.raises(Stage8ValidationError, match="approved TestPlan review is required"):
-        await service.build_plan(
-            "m-wp3-binding", case_id="CASE-001", environment_id="ENV-001", executor_id="EXECUTOR-001"
+    with pytest.raises(Stage8ValidationError, match="current approved TestPlan"):
+        await service.start_execution(
+            "m-wp3-binding", generated_case_artifact_id=artifact.artifact_id
         )
 
 
@@ -173,7 +210,8 @@ async def test_duplicate_failed_callback_does_not_repeat_triage_or_ticket_reques
     await missions.create_mission("FEATURE-001", mission_id="m-wp3-duplicate-failure")
     await missions.transition_mission("m-wp3-duplicate-failure", MissionStatus.CONTEXT_READY, 1)
     await missions.transition_mission("m-wp3-duplicate-failure", MissionStatus.AWAITING_REVIEW, 2)
-    await _approve_current_test_plan(clean_database, "m-wp3-duplicate-failure")
+    plan_row = await _approve_current_test_plan(clean_database, "m-wp3-duplicate-failure")
+    artifact = await _add_artifact(clean_database, "m-wp3-duplicate-failure", plan_row, artifact_id="artifact-wp3-duplicate")
     await missions.transition_mission("m-wp3-duplicate-failure", MissionStatus.READY_FOR_EXECUTION, 3)
 
     calls = []
@@ -183,17 +221,16 @@ async def test_duplicate_failed_callback_does_not_repeat_triage_or_ticket_reques
         calls.append((name, payload))
         if name == "stage8_create_ticket":
             return {"status": "APPROVAL_REQUIRED", "tool_name": name}
-        return {"execution_id": "EXEC-WP3-DUP"}
+        return await _execution_invoker("EXEC-WP3-DUP")(name, payload)
 
     service = Stage8ExecutionService(
         clean_database,
         tool_invoker=invoke,
         triage_service=FailureTriageService(triage),
     )
-    plan = await service.build_plan(
-        "m-wp3-duplicate-failure", case_id="CASE-001", environment_id="ENV-001", executor_id="EXECUTOR-001"
+    await service.start_execution(
+        "m-wp3-duplicate-failure", generated_case_artifact_id=artifact.artifact_id
     )
-    await service.start_execution(plan)
     failed = ExecutionResult("EXEC-WP3-DUP", ExternalExecutionStatus.FAILED, "assertion failed")
     await service.ingest_result(failed)
     duplicate = await service.ingest_result(failed)
@@ -209,16 +246,16 @@ async def test_unknown_external_result_does_not_enter_failure_triage(clean_datab
     await missions.create_mission("FEATURE-001", mission_id="m-wp3-unknown")
     await missions.transition_mission("m-wp3-unknown", MissionStatus.CONTEXT_READY, 1)
     await missions.transition_mission("m-wp3-unknown", MissionStatus.AWAITING_REVIEW, 2)
-    await _approve_current_test_plan(clean_database, "m-wp3-unknown")
+    plan_row = await _approve_current_test_plan(clean_database, "m-wp3-unknown")
+    artifact = await _add_artifact(clean_database, "m-wp3-unknown", plan_row, artifact_id="artifact-wp3-unknown")
     await missions.transition_mission("m-wp3-unknown", MissionStatus.READY_FOR_EXECUTION, 3)
     service = Stage8ExecutionService(
         clean_database,
-        tool_invoker=lambda *_: _async_result({"execution_id": "EXEC-WP3-UNKNOWN"}),
+        tool_invoker=_execution_invoker("EXEC-WP3-UNKNOWN"),
     )
-    plan = await service.build_plan(
-        "m-wp3-unknown", case_id="CASE-001", environment_id="ENV-001", executor_id="EXECUTOR-001"
+    await service.start_execution(
+        "m-wp3-unknown", generated_case_artifact_id=artifact.artifact_id
     )
-    await service.start_execution(plan)
 
     job = await service.ingest_result(
         ExecutionResult("EXEC-WP3-UNKNOWN", ExternalExecutionStatus.UNKNOWN, "status unavailable")
@@ -265,7 +302,7 @@ async def test_governed_invoker_uses_durable_runtime_and_creates_pending_ticket_
 
     started = await invoker(
         "stage8_start_execution",
-        {"case_id": "CASE-001", "environment_id": "ENV-001", "executor_id": "EXECUTOR-001"},
+        {"provider_case_id": "CASE-001", "case_path": "/official/CASE-001", "environment_id": "ENV-001", "environment_ip": "10.0.0.1", "execution_list_ref": "data/stage8/execution_lists/test.xls", "executor_id": "EXECUTOR-001"},
         principal_agent_id="test_planning",
     )
     assert started["execution_id"] == "EXEC-001"

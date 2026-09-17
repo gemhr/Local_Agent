@@ -89,7 +89,7 @@ def test_query_allow_and_side_effect_requires_approval():
 async def test_start_execution_mutates_queryable_mock_external_state_through_runtime():
     platform = DeterministicMockPlatform.seeded()
     adapter = dict((name, adapter) for name, _, adapter in build_stage8_tool_adapters(platform))["stage8_start_execution"]
-    invocation = adapter.build_invocation(json.dumps({"case_id": "CASE-001", "environment_id": "ENV-001", "executor_id": "EXECUTOR-001"}))
+    invocation = adapter.build_invocation(json.dumps({"provider_case_id": "CASE-001", "case_path": "/official/CASE-001", "environment_id": "ENV-001", "environment_ip": "10.0.0.1", "execution_list_ref": "data/stage8/execution_lists/test.xls", "executor_id": "EXECUTOR-001"}))
     result = await ToolExecutionService().execute(invocation=invocation, adapter=adapter, run_context=_context(), step_id="start")
     assert result.status is ToolExecutionStatus.SUCCEEDED
     assert result.side_effect_state is ToolSideEffectState.COMMITTED
@@ -100,7 +100,7 @@ async def test_start_execution_mutates_queryable_mock_external_state_through_run
 async def test_start_execution_provider_replays_same_key_without_new_execution():
     platform = DeterministicMockPlatform.seeded()
     adapter = dict((name, adapter) for name, _, adapter in build_stage8_tool_adapters(platform))["stage8_start_execution"]
-    arguments = json.dumps({"case_id": "CASE-001", "environment_id": "ENV-001", "executor_id": "EXECUTOR-001"})
+    arguments = json.dumps({"provider_case_id": "CASE-001", "case_path": "/official/CASE-001", "environment_id": "ENV-001", "environment_ip": "10.0.0.1", "execution_list_ref": "data/stage8/execution_lists/test.xls", "executor_id": "EXECUTOR-001"})
     first_invocation = adapter.build_invocation(arguments)
     replay_invocation = adapter.build_invocation(arguments)
     assert first_invocation.invocation_id != replay_invocation.invocation_id

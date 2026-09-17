@@ -10,6 +10,7 @@ class MissionStatus(StrEnum):
     CONTEXT_READY = "CONTEXT_READY"
     AWAITING_REVIEW = "AWAITING_REVIEW"
     READY_FOR_EXECUTION = "READY_FOR_EXECUTION"
+    WAITING_FOR_RESOURCE = "WAITING_FOR_RESOURCE"
     EXECUTING = "EXECUTING"
     TRIAGING = "TRIAGING"
     COMPLETED = "COMPLETED"
@@ -21,7 +22,8 @@ ALLOWED_TRANSITIONS = {
     MissionStatus.CREATED: {MissionStatus.CONTEXT_READY, MissionStatus.CANCELLED},
     MissionStatus.CONTEXT_READY: {MissionStatus.AWAITING_REVIEW, MissionStatus.CANCELLED},
     MissionStatus.AWAITING_REVIEW: {MissionStatus.READY_FOR_EXECUTION, MissionStatus.CONTEXT_READY, MissionStatus.CANCELLED},
-    MissionStatus.READY_FOR_EXECUTION: {MissionStatus.EXECUTING, MissionStatus.CANCELLED},
+    MissionStatus.READY_FOR_EXECUTION: {MissionStatus.EXECUTING, MissionStatus.WAITING_FOR_RESOURCE, MissionStatus.CANCELLED},
+    MissionStatus.WAITING_FOR_RESOURCE: {MissionStatus.READY_FOR_EXECUTION, MissionStatus.CANCELLED},
     MissionStatus.EXECUTING: {MissionStatus.TRIAGING, MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED},
     MissionStatus.TRIAGING: {MissionStatus.EXECUTING, MissionStatus.COMPLETED, MissionStatus.FAILED, MissionStatus.CANCELLED},
     MissionStatus.COMPLETED: set(), MissionStatus.CANCELLED: set(), MissionStatus.FAILED: set(),
@@ -100,6 +102,50 @@ class GeneratedCaseArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class EnvironmentRequirements:
+    """TestPlan 可表达的最小、结构化环境要求。"""
+
+    version: str | None = None
+    network_type: str | None = None
+    hardware_type: str | None = None
+    required_capabilities: tuple[str, ...] = ()
+    feature_flags: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("version", "network_type", "hardware_type"):
+            value = getattr(self, name)
+            if value is not None:
+                normalized = value.strip()
+                if not normalized or len(normalized) > 128:
+                    raise ValueError(f"{name} must be 1..128 characters")
+                object.__setattr__(self, name, normalized)
+        for name in ("required_capabilities", "feature_flags"):
+            normalized = tuple(dict.fromkeys(item.strip() for item in getattr(self, name)))
+            if any(not item or len(item) > 128 for item in normalized) or len(normalized) > 32:
+                raise ValueError(f"{name} must contain at most 32 non-empty values")
+            object.__setattr__(self, name, normalized)
+
+    @property
+    def is_empty(self) -> bool:
+        return not any((
+            self.version,
+            self.network_type,
+            self.hardware_type,
+            self.required_capabilities,
+            self.feature_flags,
+        ))
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceUnavailable:
+    mission_id: str
+    status: str
+    required_capabilities: tuple[str, ...]
+    matched_but_busy_count: int
+    no_match_reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionPlan:
     plan_id: str
     mission_id: str
@@ -107,9 +153,15 @@ class ExecutionPlan:
     test_plan_subject_id: str
     test_plan_version: int
     test_plan_digest: str
-    case_id: str
+    generated_case_artifact_id: str
+    provider_case_id: str
+    case_path: str
     environment_id: str
-    executor_id: str
+    environment_ip: str
+    execution_list_ref: str
+    execution_request_digest: str
+    executor_id: str = "EXECUTOR-001"
+    environment_requirements: EnvironmentRequirements = field(default_factory=EnvironmentRequirements)
     parameters: dict[str, str] = field(default_factory=dict)
 
 

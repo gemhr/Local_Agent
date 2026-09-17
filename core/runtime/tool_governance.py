@@ -628,6 +628,7 @@ def register_default_tool_policies(catalog: ToolPolicyCatalog) -> None:
         ("stage8_get_meeting_summary", ()),
         ("stage8_get_case", ()),
         ("stage8_get_environment", ()),
+        ("stage8_search_environments", ()),
         ("stage8_get_executor", ()),
         ("stage8_get_logs", ()),
         ("stage8_search_tickets", ()),

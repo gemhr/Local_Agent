@@ -47,6 +47,11 @@ async def get_generated_case_artifact(session: AsyncSession, *, mission_id: str,
         Stage8GeneratedCaseArtifactRow.scenario_id == scenario_id,
     ))
 
+async def get_generated_case_artifact_by_id(session: AsyncSession, artifact_id: str):
+    return await session.scalar(select(Stage8GeneratedCaseArtifactRow).where(
+        Stage8GeneratedCaseArtifactRow.artifact_id == artifact_id
+    ))
+
 async def add_generated_case_artifact(session: AsyncSession, values: dict):
     row = Stage8GeneratedCaseArtifactRow(**values); session.add(row); await session.flush(); return row
 
@@ -109,6 +114,14 @@ async def get_execution_job_by_id(session, job_id: str, *, for_update=False):
     )
     if for_update: query = query.with_for_update()
     return await session.scalar(query)
+
+async def list_execution_jobs(session, mission_id: str):
+    return list((await session.scalars(select(Stage8ExternalExecutionJobRow).where(
+        Stage8ExternalExecutionJobRow.mission_id == mission_id
+    ).order_by(
+        Stage8ExternalExecutionJobRow.created_at.desc(),
+        Stage8ExternalExecutionJobRow.job_id.desc(),
+    ))).all())
 
 
 async def update_execution_job(session, execution_id: str, values: dict):

@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.stage8.domain import MissionStatus
+from core.stage8.domain import EnvironmentRequirements
 from core.stage8.service import Stage8ValidationError
 
 
@@ -113,7 +114,7 @@ class TestPlanResult(BaseModel):
     version: int = Field(ge=1)
     summary: str = Field(min_length=1)
     scenarios: list[TestScenario] = Field(min_length=1)
-    environment_requirements: list[str] = Field(default_factory=list)
+    environment_requirements: EnvironmentRequirements = Field(default_factory=EnvironmentRequirements)
     regression_scope: list[str] = Field(default_factory=list)
     risk_coverage: list[str] = Field(default_factory=list)
 

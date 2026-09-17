@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -31,13 +32,17 @@ from core.runtime.tool_governance import (
 from core.stage8 import repositories as repo
 from core.stage8.domain import (
     ExecutionPlan,
+    EnvironmentRequirements,
+    GeneratedCaseArtifact,
     ExecutionResult,
     ExternalExecutionJob,
     ExternalExecutionStatus,
     FailureEvidencePackage,
     MissionStatus,
+    ResourceUnavailable,
 )
-from core.stage8.platforms import TicketDraft
+from core.stage8.platforms import SearchEnvironmentsRequest, TicketDraft
+from core.stage8.execution_list import ExecutionListBuilder
 from core.stage8.service import (
     MissionService,
     Stage8ConflictError,
@@ -253,6 +258,57 @@ class GovernedToolInvoker:
         return json.loads(result.output.content)
 
 
+def _execution_request_digest(
+    mission_id: str,
+    artifact_id: str,
+    parameters: dict[str, str],
+) -> str:
+    payload = {
+        "mission_id": mission_id,
+        "generated_case_artifact_id": artifact_id,
+        "parameters": parameters,
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _environment_status(payload: dict) -> str | None:
+    return payload.get("status") or payload.get("availability")
+
+
+def _environment_matches(
+    payload: dict,
+    requirements: EnvironmentRequirements,
+) -> bool:
+    return (
+        (requirements.version is None or payload.get("version") == requirements.version)
+        and (
+            requirements.network_type is None
+            or payload.get("network_type") == requirements.network_type
+        )
+        and (
+            requirements.hardware_type is None
+            or payload.get("board") == requirements.hardware_type
+        )
+        and set(requirements.required_capabilities).issubset(
+            set(payload.get("capabilities") or ())
+        )
+        and set(requirements.feature_flags).issubset(
+            set(payload.get("feature_flags") or ())
+        )
+    )
+
+
+def _execution_plan_from_payload(payload: dict) -> ExecutionPlan:
+    values = dict(payload)
+    values["environment_requirements"] = EnvironmentRequirements(
+        **values.get("environment_requirements", {})
+    )
+    return ExecutionPlan(**values)
+
+
 class Stage8ExecutionService:
     """Stage8 业务 transaction owner；不拥有 Tool Runtime 状态。"""
 
@@ -263,43 +319,147 @@ class Stage8ExecutionService:
         tool_invoker: Callable[..., Awaitable[object]] | None = None,
         triage_service: FailureTriageService | None = None,
         mission_service: MissionService | None = None,
+        execution_list_builder: ExecutionListBuilder | None = None,
     ):
         self.database = database
         self.tool_invoker = tool_invoker
         self.triage_service = triage_service
         self.mission_service = mission_service or MissionService(database)
+        self.execution_list_builder = execution_list_builder or ExecutionListBuilder()
 
-    async def build_plan(
+    async def _plan_from_artifact(
         self,
         mission_id: str,
-        *,
-        case_id: str,
-        environment_id: str,
-        executor_id: str,
-        parameters: dict[str, str] | None = None,
-    ) -> ExecutionPlan:
+        artifact_id: str,
+        parameters: dict[str, str],
+        execution_request_digest: str,
+    ):
         async with self.database.session() as session:
             mission = await repo.get_mission(session, mission_id)
+            current_plan = await repo.get_current_test_plan(session, mission_id)
+            review = await repo.get_approved_test_plan_review(session, mission_id)
+            artifact = await repo.get_generated_case_artifact_by_id(session, artifact_id)
             if mission is None:
                 raise Stage8NotFoundError("mission not found")
-            if mission.status != MissionStatus.READY_FOR_EXECUTION.value:
+            if mission.status not in {
+                MissionStatus.READY_FOR_EXECUTION.value,
+                MissionStatus.WAITING_FOR_RESOURCE.value,
+            }:
                 raise Stage8ValidationError("mission is not ready for execution")
-            plan = await repo.get_current_test_plan(session, mission_id)
-            review = await repo.get_approved_test_plan_review(session, mission_id)
-            if plan is None or review is None:
-                raise Stage8ValidationError("approved TestPlan review is required")
-        return ExecutionPlan(
-            uuid.uuid4().hex,
-            mission_id,
-            mission.version,
-            plan.subject_id,
-            plan.version,
-            plan.subject_digest,
-            case_id,
-            environment_id,
-            executor_id,
-            parameters or {},
+            if artifact is None or artifact.mission_id != mission_id:
+                raise Stage8NotFoundError("generated case artifact not found")
+            binding = (artifact.test_plan_subject_id, artifact.test_plan_version, artifact.test_plan_digest)
+            if current_plan is None or review is None or (current_plan.subject_id, current_plan.version, current_plan.subject_digest) != binding or (review.subject_id, review.subject_version, review.subject_digest) != binding:
+                raise Stage8ValidationError("generated case artifact does not belong to current approved TestPlan")
+            requirements_payload = current_plan.payload.get("environment_requirements", {})
+            if isinstance(requirements_payload, list):
+                requirements_payload = {"required_capabilities": requirements_payload}
+            try:
+                requirements = EnvironmentRequirements(
+                    version=requirements_payload.get("version"),
+                    network_type=requirements_payload.get("network_type"),
+                    hardware_type=requirements_payload.get("hardware_type"),
+                    required_capabilities=tuple(requirements_payload.get("required_capabilities", ())),
+                    feature_flags=tuple(requirements_payload.get("feature_flags", ())),
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise Stage8ValidationError("invalid environment requirements") from exc
+            mission_version = mission.version
+            feature = GeneratedCaseArtifact(
+                artifact.artifact_id, artifact.mission_id, artifact.test_plan_subject_id,
+                artifact.test_plan_version, artifact.test_plan_digest, artifact.scenario_id,
+                artifact.provider_case_id, artifact.case_path, artifact.status, artifact.created_at,
+            )
+        if requirements.is_empty:
+            return await self._resource_unavailable(
+                mission_id, requirements, 0, "RESOURCE_REQUIREMENTS_UNSPECIFIED"
+            )
+        query = SearchEnvironmentsRequest(
+            version=requirements.version, network_type=requirements.network_type,
+            hardware_type=requirements.hardware_type,
+            required_capabilities=list(requirements.required_capabilities),
+            feature_flags=list(requirements.feature_flags),
         )
+        candidates = await self._invoke_tool("stage8_search_environments", query.model_dump(mode="json"), principal_agent_id="test_planning")
+        if isinstance(candidates, BaseModel):
+            candidates = candidates.model_dump(mode="json")
+        if isinstance(candidates, dict):
+            candidates = candidates.get("root", candidates.get("items", []))
+        candidates = sorted(
+            (item for item in (candidates or []) if _environment_matches(item, requirements)),
+            key=lambda item: item["environment_id"],
+        )
+        free = [item for item in candidates if _environment_status(item) == "FREE"]
+        if not free:
+            busy = sum(1 for item in candidates if _environment_status(item) != "FREE")
+            return await self._resource_unavailable(
+                mission_id, requirements, busy, "no compatible FREE environment"
+            )
+        return [
+            (feature, requirements, mission_version, item, parameters, execution_request_digest)
+            for item in free
+        ]
+
+    async def _resource_unavailable(
+        self,
+        mission_id: str,
+        requirements: EnvironmentRequirements,
+        busy_count: int,
+        reason: str,
+    ) -> ResourceUnavailable:
+        async with self.database.transaction() as session:
+            current = await repo.get_mission(session, mission_id, for_update=True)
+            if current and current.status == MissionStatus.READY_FOR_EXECUTION.value:
+                await self.mission_service.transition_mission(
+                    mission_id,
+                    MissionStatus.WAITING_FOR_RESOURCE,
+                    current.version,
+                    session=session,
+                )
+        return ResourceUnavailable(
+            mission_id,
+            "WAITING_FOR_RESOURCE",
+            requirements.required_capabilities,
+            busy_count,
+            reason,
+        )
+
+    async def _validate_execution_plan_binding(self, plan: ExecutionPlan) -> None:
+        async with self.database.session() as session:
+            artifact = await repo.get_generated_case_artifact_by_id(
+                session, plan.generated_case_artifact_id
+            )
+            current_plan = await repo.get_current_test_plan(session, plan.mission_id)
+            review = await repo.get_approved_test_plan_review(session, plan.mission_id)
+        binding = (
+            plan.test_plan_subject_id,
+            plan.test_plan_version,
+            plan.test_plan_digest,
+        )
+        if (
+            artifact is None
+            or artifact.mission_id != plan.mission_id
+            or (
+                artifact.test_plan_subject_id,
+                artifact.test_plan_version,
+                artifact.test_plan_digest,
+            ) != binding
+            or current_plan is None
+            or (
+                current_plan.subject_id,
+                current_plan.version,
+                current_plan.subject_digest,
+            ) != binding
+            or review is None
+            or (
+                review.subject_id,
+                review.subject_version,
+                review.subject_digest,
+            ) != binding
+        ):
+            raise Stage8ValidationError(
+                "generated case artifact does not belong to current approved TestPlan"
+            )
 
     async def _invoke_tool(
         self, tool_name: str, payload: dict, *, principal_agent_id: str
@@ -315,56 +475,176 @@ class Stage8ExecutionService:
                 raise
             return await self.tool_invoker(tool_name, payload)
 
-    async def start_execution(self, plan: ExecutionPlan) -> ExternalExecutionJob:
+    async def start_execution(
+        self,
+        mission_id: str,
+        *,
+        generated_case_artifact_id: str,
+        parameters: dict[str, str] | None = None,
+    ) -> ExternalExecutionJob | ResourceUnavailable:
         if self.tool_invoker is None:
             raise Stage8ValidationError("governed start_execution tool is not configured")
-        job_id = uuid.uuid4().hex
-        async with self.database.transaction() as session:
-            mission = await repo.get_mission(session, plan.mission_id, for_update=True)
-            current_plan = await repo.get_current_test_plan(session, plan.mission_id)
-            review = await repo.get_approved_test_plan_review(session, plan.mission_id)
-            if mission is None:
-                raise Stage8NotFoundError("mission not found")
-            if mission.status != MissionStatus.READY_FOR_EXECUTION.value:
-                raise Stage8ValidationError("mission is not ready for execution")
-            if mission.version != plan.mission_version:
-                raise Stage8ConflictError("stale mission version")
-            if current_plan is None or review is None or (
-                current_plan.subject_id,
-                current_plan.version,
-                current_plan.subject_digest,
-            ) != (
-                plan.test_plan_subject_id,
-                plan.test_plan_version,
-                plan.test_plan_digest,
-            ):
-                raise Stage8ValidationError("approved TestPlan review is required")
-            row = await repo.add_execution_job(session, dict(
-                job_id=job_id,
-                mission_id=plan.mission_id,
-                execution_id=None,
-                plan_id=plan.plan_id,
-                case_id=plan.case_id,
-                environment_id=plan.environment_id,
-                executor_id=plan.executor_id,
-                status=ExternalExecutionStatus.PENDING.value,
-                attempt_no=1,
-                auto_repair_count=0,
-                plan_payload=asdict(plan),
-            ))
-            await self.mission_service.transition_mission(
-                plan.mission_id,
-                MissionStatus.EXECUTING,
-                plan.mission_version,
-                session=session,
+        canonical_parameters = dict(parameters or {})
+        execution_request_digest = _execution_request_digest(
+            mission_id, generated_case_artifact_id, canonical_parameters
+        )
+        existing_pending = None
+        async with self.database.session() as session:
+            existing_jobs = await repo.list_execution_jobs(session, mission_id)
+        for existing in existing_jobs:
+            if existing.plan_payload.get("execution_request_digest") == execution_request_digest:
+                existing_plan = _execution_plan_from_payload(existing.plan_payload)
+                await self._validate_execution_plan_binding(existing_plan)
+                if existing.status in {
+                    ExternalExecutionStatus.RUNNING.value,
+                    ExternalExecutionStatus.UNKNOWN.value,
+                }:
+                    return _job(existing)
+                if existing.status == ExternalExecutionStatus.PENDING.value:
+                    existing_pending = existing
+                    break
+
+        if existing_pending is not None:
+            plan = _execution_plan_from_payload(existing_pending.plan_payload)
+            job_id = existing_pending.job_id
+        else:
+            candidates = await self._plan_from_artifact(
+                mission_id,
+                generated_case_artifact_id,
+                canonical_parameters,
+                execution_request_digest,
             )
+            if isinstance(candidates, ResourceUnavailable):
+                return candidates
+            # Candidate loop is bounded by this single search result.
+            for artifact, requirements, mission_version, candidate, params, request_digest in candidates:
+                current = await self._invoke_tool("stage8_get_environment", {"environment_id": candidate["environment_id"]}, principal_agent_id="test_planning")
+                current_payload = current.model_dump(mode="json") if isinstance(current, BaseModel) else dict(current)
+                if (
+                    current_payload.get("environment_id") != candidate["environment_id"]
+                    or not current_payload.get("ip")
+                    or _environment_status(current_payload) != "FREE"
+                    or not _environment_matches(current_payload, requirements)
+                ):
+                    continue
+                execution_list_ref = self.execution_list_builder.build(
+                    mission_id, artifact, request_digest
+                )
+                plan = ExecutionPlan(
+                    uuid.uuid4().hex,
+                    mission_id,
+                    mission_version,
+                    artifact.test_plan_subject_id,
+                    artifact.test_plan_version,
+                    artifact.test_plan_digest,
+                    artifact.artifact_id,
+                    artifact.provider_case_id,
+                    artifact.case_path,
+                    current_payload["environment_id"],
+                    current_payload.get("ip", ""),
+                    execution_list_ref,
+                    request_digest,
+                    "EXECUTOR-001",
+                    requirements,
+                    params,
+                )
+                break
+            else:
+                return await self._resource_unavailable(
+                    mission_id,
+                    candidates[0][1],
+                    len(candidates),
+                    "all candidates became busy before execution",
+                )
+            job_id = uuid.uuid4().hex
+            async with self.database.transaction() as session:
+                mission = await repo.get_mission(session, plan.mission_id, for_update=True)
+                current_plan = await repo.get_current_test_plan(session, plan.mission_id)
+                review = await repo.get_approved_test_plan_review(session, plan.mission_id)
+                if mission is None:
+                    raise Stage8NotFoundError("mission not found")
+                concurrent = next((
+                    row
+                    for row in await repo.list_execution_jobs(session, plan.mission_id)
+                    if row.plan_payload.get("execution_request_digest")
+                    == execution_request_digest
+                    and row.status in {
+                        ExternalExecutionStatus.PENDING.value,
+                        ExternalExecutionStatus.RUNNING.value,
+                        ExternalExecutionStatus.UNKNOWN.value,
+                    }
+                ), None)
+                if concurrent is not None:
+                    plan = _execution_plan_from_payload(concurrent.plan_payload)
+                    job_id = concurrent.job_id
+                artifact = await repo.get_generated_case_artifact_by_id(
+                    session, plan.generated_case_artifact_id
+                )
+                binding = (
+                    plan.test_plan_subject_id,
+                    plan.test_plan_version,
+                    plan.test_plan_digest,
+                )
+                if (
+                    artifact is None
+                    or artifact.mission_id != plan.mission_id
+                    or (
+                        artifact.test_plan_subject_id,
+                        artifact.test_plan_version,
+                        artifact.test_plan_digest,
+                    ) != binding
+                    or current_plan is None
+                    or (
+                        current_plan.subject_id,
+                        current_plan.version,
+                        current_plan.subject_digest,
+                    ) != binding
+                    or review is None
+                ):
+                    raise Stage8ValidationError(
+                        "generated case artifact does not belong to current approved TestPlan"
+                    )
+                if concurrent is not None and concurrent.status in {
+                    ExternalExecutionStatus.RUNNING.value,
+                    ExternalExecutionStatus.UNKNOWN.value,
+                }:
+                    return _job(concurrent)
+                if mission.status == MissionStatus.WAITING_FOR_RESOURCE.value:
+                    mission = await self.mission_service.transition_mission(
+                        plan.mission_id,
+                        MissionStatus.READY_FOR_EXECUTION,
+                        mission.version,
+                        session=session,
+                    )
+                    plan = replace(plan, mission_version=mission.version)
+                if mission.status != MissionStatus.READY_FOR_EXECUTION.value:
+                    raise Stage8ValidationError("mission is not ready for execution")
+                if mission.version != plan.mission_version:
+                    raise Stage8ConflictError("stale mission version")
+                if concurrent is None:
+                    await repo.add_execution_job(session, dict(
+                        job_id=job_id,
+                        mission_id=plan.mission_id,
+                        execution_id=None,
+                        plan_id=plan.plan_id,
+                        case_id=plan.provider_case_id,
+                        environment_id=plan.environment_id,
+                        executor_id=plan.executor_id,
+                        status=ExternalExecutionStatus.PENDING.value,
+                        attempt_no=1,
+                        auto_repair_count=0,
+                        plan_payload=asdict(plan),
+                    ))
 
         try:
             raw = await self._invoke_tool(
                 "stage8_start_execution",
                 {
-                    "case_id": plan.case_id,
+                    "provider_case_id": plan.provider_case_id,
+                    "case_path": plan.case_path,
                     "environment_id": plan.environment_id,
+                    "environment_ip": plan.environment_ip,
+                    "execution_list_ref": plan.execution_list_ref,
                     "executor_id": plan.executor_id,
                     "parameters": plan.parameters,
                 },
@@ -383,28 +663,36 @@ class Stage8ExecutionService:
                         "tool_outcome_unknown": exc.outcome_unknown,
                     },
                 })
-                mission = await repo.get_mission(session, plan.mission_id, for_update=True)
-                if mission is not None and mission.status == MissionStatus.EXECUTING.value:
-                    await self.mission_service.transition_mission(
-                        plan.mission_id,
-                        (
-                            MissionStatus.TRIAGING
-                            if exc.outcome_unknown
-                            else MissionStatus.FAILED
-                        ),
-                        mission.version,
-                        session=session,
-                    )
+            raise
+        except Exception:
+            async with self.database.transaction() as session:
+                await repo.update_execution_job_by_id(session, job_id, {
+                    "status": ExternalExecutionStatus.UNKNOWN.value,
+                    "result_payload": {
+                        "start_error_code": "STAGE8_START_OUTCOME_UNKNOWN",
+                        "tool_outcome_unknown": True,
+                    },
+                })
             raise
 
         payload = raw.model_dump(mode="json") if isinstance(raw, BaseModel) else dict(raw)
         execution_id = payload.get("execution_id")
         if not execution_id:
+            async with self.database.transaction() as session:
+                await repo.update_execution_job_by_id(session, job_id, {
+                    "status": ExternalExecutionStatus.UNKNOWN.value,
+                    "result_payload": {
+                        "start_error_code": "STAGE8_EXECUTION_ID_MISSING",
+                        "tool_outcome_unknown": True,
+                    },
+                })
             raise Stage8ValidationError("start_execution did not return execution_id")
         async with self.database.transaction() as session:
             row = await repo.get_execution_job_by_id(session, job_id, for_update=True)
             if row is None:
                 raise Stage8ConflictError("execution job disappeared")
+            if row.status == ExternalExecutionStatus.RUNNING.value:
+                return _job(row)
             if row.status != ExternalExecutionStatus.PENDING.value:
                 raise Stage8ConflictError("execution job start state conflict")
             row = await repo.update_execution_job_by_id(session, job_id, {
@@ -412,6 +700,16 @@ class Stage8ExecutionService:
                 "status": ExternalExecutionStatus.RUNNING.value,
                 "started_at": datetime.now(UTC),
             })
+            mission = await repo.get_mission(session, plan.mission_id, for_update=True)
+            if mission is None:
+                raise Stage8NotFoundError("mission not found")
+            if mission.status == MissionStatus.READY_FOR_EXECUTION.value:
+                await self.mission_service.transition_mission(
+                    plan.mission_id,
+                    MissionStatus.EXECUTING,
+                    mission.version,
+                    session=session,
+                )
             return _job(row)
 
     async def ingest_result(self, result: ExecutionResult) -> ExternalExecutionJob:

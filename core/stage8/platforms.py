@@ -58,7 +58,15 @@ class EnvironmentSnapshot(_DTO):
     board: str
     ue: str
     tool_version: str
-    availability: str
+    availability: str = "FREE"
+    ip: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    feature_flags: list[str] = Field(default_factory=list)
+    status: str | None = None
+
+    @property
+    def effective_status(self) -> str:
+        return self.status or self.availability
 
 
 class TestCaseSnapshot(_DTO):
@@ -96,9 +104,12 @@ class TicketDraft(_DTO):
 
 
 class StartExecutionRequest(_DTO):
-    case_id: str = Field(min_length=1)
+    provider_case_id: str = Field(min_length=1)
+    case_path: str = Field(min_length=1)
     environment_id: str = Field(min_length=1)
-    executor_id: str = Field(min_length=1)
+    environment_ip: str = Field(min_length=1)
+    execution_list_ref: str = Field(min_length=1)
+    executor_id: str = "EXECUTOR-001"
     parameters: dict[str, str] = Field(default_factory=dict)
 
 
@@ -129,6 +140,14 @@ class GetCaseRequest(_DTO):
 
 class GetEnvironmentRequest(_DTO):
     environment_id: str = Field(min_length=1)
+
+
+class SearchEnvironmentsRequest(_DTO):
+    version: str | None = None
+    network_type: str | None = None
+    hardware_type: str | None = None
+    required_capabilities: list[str] = Field(default_factory=list)
+    feature_flags: list[str] = Field(default_factory=list)
 
 
 class GetExecutorRequest(_DTO):
@@ -182,6 +201,7 @@ class _CasePort(Protocol):
 
 
 class _EnvironmentPort(Protocol):
+    def search_environments(self, request: SearchEnvironmentsRequest) -> list[EnvironmentSnapshot]: ...
     def get_environment(self, environment_id: str) -> EnvironmentSnapshot: ...
 
 
@@ -241,7 +261,7 @@ class DeterministicMockPlatform:
             diffs={"FEATURE-001": CodeDiff(feature_id="FEATURE-001", commit_id="abc123", affected_files=["core/messaging.py"], diff_summary="新增撤回路径", changed_components=["messaging"])},
             meetings={"MEETING-001": MeetingSummary(meeting_id="MEETING-001", change_points=["增加撤回窗口"], clarifications=["撤回后不可恢复"], known_risks=["权限校验"], unsupported_scenarios=[], config_changes=[], compatibility_notes=[])},
             cases={"CASE-001": TestCaseSnapshot(case_id="CASE-001", version=1, title="撤回消息", inputs={"role": "owner"}, expected_result="消息不可见", assertion="message.status == REVOKED")},
-            environments={"ENV-001": EnvironmentSnapshot(environment_id="ENV-001", version="1", variant="staging", network_type="isolated", board="linux", ue="mock-ue", tool_version="agentcore-mock-1", availability="AVAILABLE")},
+            environments={"ENV-001": EnvironmentSnapshot(environment_id="ENV-001", version="1", variant="staging", network_type="isolated", board="linux", ue="mock-ue", tool_version="agentcore-mock-1", availability="FREE", status="FREE", ip="10.0.0.1", capabilities=["CASE_EXECUTION"], feature_flags=[])},
             executors={"EXECUTOR-001": ExecutorSnapshot(executor_id="EXECUTOR-001", name="Mock Executor", capabilities=["CASE_EXECUTION"], availability="AVAILABLE")},
         )
 
@@ -250,6 +270,16 @@ class DeterministicMockPlatform:
     def get_meeting_summary(self, meeting_id): return self.meetings[meeting_id]
     def get_case(self, case_id): return self.cases[case_id]
     def get_environment(self, environment_id): return self.environments[environment_id]
+    def search_environments(self, request):
+        def matches(item):
+            return (
+                (request.version is None or item.version == request.version)
+                and (request.network_type is None or item.network_type == request.network_type)
+                and (request.hardware_type is None or item.board == request.hardware_type)
+                and set(request.required_capabilities).issubset(item.capabilities)
+                and set(request.feature_flags).issubset(item.feature_flags)
+            )
+        return sorted((item for item in self.environments.values() if matches(item)), key=lambda item: item.environment_id)
     def get_executor(self, executor_id): return self.executors[executor_id]
     def get_execution(self, execution_id): return self.executions[execution_id]
     def get_logs(self, execution_id, max_lines):
@@ -268,7 +298,7 @@ class DeterministicMockPlatform:
         if existing is not None:
             return existing, True
         execution_id = f"EXEC-{len(self.executions) + 1:03d}"
-        record = ExecutionRecord(execution_id=execution_id, case_id=request.case_id, environment_id=request.environment_id, executor_id=request.executor_id, status="RUNNING", parameters=request.parameters)
+        record = ExecutionRecord(execution_id=execution_id, case_id=request.provider_case_id, environment_id=request.environment_id, executor_id=request.executor_id, status="RUNNING", parameters={**request.parameters, "case_path": request.case_path, "environment_ip": request.environment_ip, "execution_list_ref": request.execution_list_ref})
         self.executions[execution_id] = record
         self.execution_idempotency[idempotency_key] = record
         self.logs[execution_id] = LogRecord(execution_id=execution_id, lines=["execution accepted", "status=RUNNING"])
@@ -368,6 +398,7 @@ def build_stage8_tool_adapters(platform: DeterministicMockPlatform | None = None
         item("stage8_get_meeting_summary", "Query a typed meeting summary from the mock business platform.", GetMeetingSummaryRequest, MeetingSummary, lambda r: p.get_meeting_summary(r.meeting_id)),
         item("stage8_get_case", "Query an official typed test case snapshot.", GetCaseRequest, TestCaseSnapshot, lambda r: p.get_case(r.case_id)),
         item("stage8_get_environment", "Query a typed test environment snapshot.", GetEnvironmentRequest, EnvironmentSnapshot, lambda r: p.get_environment(r.environment_id)),
+        item("stage8_search_environments", "Search typed test environments by requirements.", SearchEnvironmentsRequest, list[EnvironmentSnapshot], p.search_environments),
         item("stage8_get_executor", "Query a typed executor snapshot.", GetExecutorRequest, ExecutorSnapshot, lambda r: p.get_executor(r.executor_id)),
         item("stage8_get_logs", "Query bounded logs for an external execution.", GetLogsRequest, LogRecord, lambda r: p.get_logs(r.execution_id, r.max_lines)),
         item("stage8_search_tickets", "Search external tickets without creating a ticket.", SearchTicketsRequest, list[TicketRecord], lambda r: p.search_tickets(r.query)),

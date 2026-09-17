@@ -10,6 +10,7 @@ from core.stage8.domain import (
     ExternalExecutionStatus, ExecutionPlan, ExternalExecutionJob, ExecutionResult,
     FailureEvidencePackage,
     GeneratedCaseArtifact,
+    EnvironmentRequirements, ResourceUnavailable,
 )
 from core.stage8.service import (
     BusinessReviewService,
@@ -29,6 +30,7 @@ from core.stage8.execution import (
     FailureTriageService, Stage8ExecutionService, GovernedToolInvoker,
 )
 from core.stage8.case_generation import CaseGenerationApplicationService
+from core.stage8.execution_list import ExecutionListBuilder
 from core.stage8.ci_guardian import (
     CIRunStatus, ChangeType, CIExecutionResult, CIRun, ChangeEvent,
     FailureCluster, HistoricalComparison, ChangeCorrelationCandidate,
@@ -41,6 +43,7 @@ __all__ = [
     "MissionRunReference", "MissionStatus", "BusinessReviewService",
     "ExternalExecutionStatus", "ExecutionPlan", "ExternalExecutionJob", "ExecutionResult", "FailureEvidencePackage",
     "GeneratedCaseArtifact", "CaseGenerationApplicationService",
+    "EnvironmentRequirements", "ResourceUnavailable", "ExecutionListBuilder",
     "MissionService", "Stage8ConflictError", "Stage8NotFoundError",
     "Stage8ValidationError",
     "TestPlanRepository",
