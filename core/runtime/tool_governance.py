@@ -632,6 +632,7 @@ def register_default_tool_policies(catalog: ToolPolicyCatalog) -> None:
         ("stage8_get_logs", ()),
         ("stage8_search_tickets", ()),
         ("stage8_start_execution", ()),
+        ("stage8_generate_case", ()),
         ("stage8_create_ticket", ()),
     )
     for tool_name, risk_facts in policies:

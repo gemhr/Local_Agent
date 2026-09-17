@@ -96,6 +96,22 @@ class Stage8TestPlanRow(PersistenceBase):
     __table_args__ = (UniqueConstraint("mission_id", "subject_id", "version", name="uq_stage8_test_plan_version"),)
 
 
+class Stage8GeneratedCaseArtifactRow(PersistenceBase):
+    """正式 Case Platform 结果及其 approved TestPlan snapshot 绑定。"""
+    __tablename__ = "stage8_generated_case_artifacts"
+    artifact_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(ForeignKey("stage8_feature_test_missions.mission_id", ondelete="CASCADE"), nullable=False)
+    test_plan_subject_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    test_plan_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    test_plan_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    scenario_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_case_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    case_path: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'GENERATED'"))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    __table_args__ = (UniqueConstraint("mission_id", "test_plan_subject_id", "test_plan_version", "test_plan_digest", "scenario_id", name="uq_stage8_generated_case_binding"),)
+
+
 class Stage8ExternalExecutionJobRow(PersistenceBase):
     """Stage8 外部执行 Job；是外部测试生命周期的业务 Authority。"""
     __tablename__ = "stage8_external_execution_jobs"
@@ -876,6 +892,7 @@ CANONICAL_TABLES = (
     "stage8_mission_run_refs",
     "stage8_business_reviews",
     "stage8_test_plans",
+    "stage8_generated_case_artifacts",
     "stage8_external_execution_jobs",
     "stage8_ci_runs",
     "stage8_ci_analysis",
@@ -934,6 +951,7 @@ __all__ = [
     "MissionRunReferenceRow",
     "BusinessReviewRow",
     "Stage8TestPlanRow",
+    "Stage8GeneratedCaseArtifactRow",
     "Stage8ExternalExecutionJobRow",
     "Stage8CIRunRow",
     "Stage8CIAnalysisRow",

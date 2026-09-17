@@ -86,6 +86,20 @@ class BusinessReview:
 
 
 @dataclass(frozen=True, slots=True)
+class GeneratedCaseArtifact:
+    artifact_id: str
+    mission_id: str
+    test_plan_subject_id: str
+    test_plan_version: int
+    test_plan_digest: str
+    scenario_id: str
+    provider_case_id: str
+    case_path: str
+    status: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionPlan:
     plan_id: str
     mission_id: str

@@ -3,7 +3,7 @@
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow, Stage8ExternalExecutionJobRow, Stage8CIRunRow, Stage8CIAnalysisRow
+from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow, Stage8GeneratedCaseArtifactRow, Stage8ExternalExecutionJobRow, Stage8CIRunRow, Stage8CIAnalysisRow
 
 
 async def add_mission(session: AsyncSession, values: dict) -> FeatureTestMissionRow:
@@ -37,6 +37,23 @@ async def get_review(session: AsyncSession, review_id: str, *, for_update: bool 
 
 async def add_test_plan(session: AsyncSession, values: dict) -> Stage8TestPlanRow:
     row = Stage8TestPlanRow(**values); session.add(row); await session.flush(); return row
+
+async def get_generated_case_artifact(session: AsyncSession, *, mission_id: str, subject_id: str, version: int, digest: str, scenario_id: str):
+    return await session.scalar(select(Stage8GeneratedCaseArtifactRow).where(
+        Stage8GeneratedCaseArtifactRow.mission_id == mission_id,
+        Stage8GeneratedCaseArtifactRow.test_plan_subject_id == subject_id,
+        Stage8GeneratedCaseArtifactRow.test_plan_version == version,
+        Stage8GeneratedCaseArtifactRow.test_plan_digest == digest,
+        Stage8GeneratedCaseArtifactRow.scenario_id == scenario_id,
+    ))
+
+async def add_generated_case_artifact(session: AsyncSession, values: dict):
+    row = Stage8GeneratedCaseArtifactRow(**values); session.add(row); await session.flush(); return row
+
+async def list_generated_case_artifacts(session: AsyncSession, mission_id: str):
+    return list((await session.scalars(select(Stage8GeneratedCaseArtifactRow).where(
+        Stage8GeneratedCaseArtifactRow.mission_id == mission_id
+    ).order_by(Stage8GeneratedCaseArtifactRow.created_at, Stage8GeneratedCaseArtifactRow.artifact_id))).all())
 
 async def decide_review(session: AsyncSession, review_id: str, expected_status: str, status: str, *, decided_by: str | None, comment: str | None):
     return await session.scalar(update(BusinessReviewRow).where(

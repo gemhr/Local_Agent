@@ -207,6 +207,7 @@ from core.stage8 import (
     ExecutionResult,
     ExternalExecutionStatus,
     Stage8ExecutionService,
+    CaseGenerationApplicationService,
     FailureTriageService,
     GovernedToolInvoker,
     CIRun, CIGuardianApplicationService,
@@ -545,6 +546,7 @@ async def lifespan(app: FastAPI):
     app.state.stage8_mock_platform = stage8_platform
     app.state.stage8_feature_context_builder = FeatureContextBuilder(stage8_platform)
     app.state.stage8_execution_service = None
+    app.state.stage8_case_generation_service = None
     app.state.stage8_ci_guardian_service = None
     # Redis owns only cache/admission state.  Connection establishment is lazy so
     # cache outage never prevents the PostgreSQL/RAG authority from starting.
@@ -1271,18 +1273,22 @@ async def lifespan(app: FastAPI):
         review_service=app.state.stage8_review_service,
         test_plan_repository=TestPlanRepository(persistence_database),
     )
+    governed_stage8_tool_invoker = GovernedToolInvoker(
+        tool_registry,
+        tool_governance_service,
+        router.tool_execution_service,
+        resource_authorization=resource_authorization_service,
+        durable_run_control=runtime_services.durable_run_control,
+        durable_approval=runtime_services.durable_approval,
+        owner_id=runtime_services.run_control_owner_id,
+    )
     app.state.stage8_execution_service = Stage8ExecutionService(
         persistence_database,
-        tool_invoker=GovernedToolInvoker(
-            tool_registry,
-            tool_governance_service,
-            router.tool_execution_service,
-            resource_authorization=resource_authorization_service,
-            durable_run_control=runtime_services.durable_run_control,
-            durable_approval=runtime_services.durable_approval,
-            owner_id=runtime_services.run_control_owner_id,
-        ),
+        tool_invoker=governed_stage8_tool_invoker,
         triage_service=FailureTriageService(app.state.stage8_specialist_service),
+    )
+    app.state.stage8_case_generation_service = CaseGenerationApplicationService(
+        persistence_database, tool_invoker=governed_stage8_tool_invoker
     )
     app.state.stage8_ci_guardian_service = CIGuardianApplicationService(
         persistence_database, app.state.stage8_specialist_service
@@ -1328,6 +1334,7 @@ async def lifespan(app: FastAPI):
         app.state.stage8_review_service = None
         app.state.stage8_specialist_service = None
         app.state.stage8_execution_service = None
+        app.state.stage8_case_generation_service = None
         app.state.stage8_ci_guardian_service = None
         app.state.runtime_services = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
@@ -1383,6 +1390,12 @@ class Stage8ExecutionStartRequest(BaseModel):
     environment_id: StrictStr = Field(min_length=1, max_length=255)
     executor_id: StrictStr = Field(min_length=1, max_length=255)
     parameters: dict[str, StrictStr] = Field(default_factory=dict)
+
+
+class Stage8CaseGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scenario_ids: list[StrictStr] | None = Field(default=None, min_length=1)
 
 
 class Stage8ExecutionResultRequest(BaseModel):
@@ -1581,6 +1594,22 @@ async def stage8_approve_review(review_id: str, body: Stage8ReviewDecisionReques
 async def stage8_reject_review(review_id: str, body: Stage8ReviewDecisionRequest, request: Request):
     _, review = _stage8_services(request)
     return _stage8_projection(await review.reject_review(review_id, body.mission_id, decided_by=body.decided_by, comment=body.decision_comment, subject_id=body.subject_id, subject_version=body.subject_version, subject_digest=body.subject_digest))
+
+
+@app.post("/api/stage8/missions/{mission_id}/cases/generate")
+async def stage8_generate_cases(mission_id: str, body: Stage8CaseGenerationRequest, request: Request):
+    service = getattr(request.app.state, "stage8_case_generation_service", None)
+    if service is None:
+        raise Stage8ValidationError("case generation service is not configured")
+    return _stage8_projection(await service.generate(mission_id, body.scenario_ids))
+
+
+@app.get("/api/stage8/missions/{mission_id}/cases")
+async def stage8_list_generated_cases(mission_id: str, request: Request):
+    service = getattr(request.app.state, "stage8_case_generation_service", None)
+    if service is None:
+        raise Stage8ValidationError("case generation service is not configured")
+    return _stage8_projection(await service.list(mission_id))
 
 _ADMIN_ONLY_API_PATHS = frozenset({
     "/api/runtime/evaluation-execute/v3",

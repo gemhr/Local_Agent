@@ -25,6 +25,9 @@ async def test_stage8_web_route_and_static_assets(monkeypatch, tmp_path):
     assert "localStorage" not in script.text
     assert "Authorization" in script.text
     assert "/api/stage8/ci/runs/${encodeURIComponent(payload.ci_run_id)}/analyze" in script.text
+    assert "/api/stage8/missions/${state.missionId}/transition" in script.text
+    assert "READY_FOR_EXECUTION" in script.text
+    assert "CONTEXT_READY" in script.text
     assert "agents/failure-triage/run" not in script.text
     assert "Tool Approval Pending" in script.text
     assert "PRODUCT-Like Failure" in page.text

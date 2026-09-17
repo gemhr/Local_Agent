@@ -148,6 +148,29 @@ class CreateTicketRequest(TicketDraft):
     pass
 
 
+class CaseGenerationRequest(_DTO):
+    feature_id: str = Field(min_length=1)
+    mission_id: str = Field(min_length=1)
+    test_plan_subject_id: str = Field(min_length=1)
+    test_plan_version: int = Field(ge=1)
+    test_plan_digest: str = Field(min_length=1)
+    scenario_id: str = Field(min_length=1)
+    scenario_description: str = Field(min_length=1)
+    preconditions: list[str] = Field(default_factory=list)
+    expected_behavior: str = Field(min_length=1)
+
+
+class GeneratedCaseResult(_DTO):
+    provider_case_id: str = Field(min_length=1)
+    case_path: str = Field(min_length=1)
+
+
+def case_generation_idempotency_key(request: CaseGenerationRequest) -> str:
+    """由完整且稳定的 Case Generation 业务输入构造 provider 幂等键。"""
+    payload = request.model_dump(mode="json")
+    return f"stage8_generate_case:{json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+
+
 class _FeaturePort(Protocol):
     def get_feature_document(self, feature_id: str) -> FeatureDocument: ...
     def get_code_diff(self, feature_id: str) -> CodeDiff: ...
@@ -188,6 +211,13 @@ LogPlatform = _LogPort
 TicketPlatform = _TicketPort
 
 
+class CaseGenerationPlatform(Protocol):
+    def generate_case(self, request: CaseGenerationRequest) -> GeneratedCaseResult: ...
+    def generate_case_with_key(
+        self, request: CaseGenerationRequest, idempotency_key: str
+    ) -> tuple[GeneratedCaseResult, bool]: ...
+
+
 @dataclass
 class DeterministicMockPlatform:
     """所有 WP2 mock port 的最小 process-local implementation。"""
@@ -202,6 +232,7 @@ class DeterministicMockPlatform:
     execution_idempotency: dict[str, ExecutionRecord] = field(default_factory=dict)
     tickets: dict[str, TicketRecord] = field(default_factory=dict)
     logs: dict[str, LogRecord] = field(default_factory=dict)
+    generated_cases: dict[str, GeneratedCaseResult] = field(default_factory=dict)
 
     @classmethod
     def seeded(cls) -> "DeterministicMockPlatform":
@@ -246,6 +277,27 @@ class DeterministicMockPlatform:
     def start_execution(self, request: StartExecutionRequest, idempotency_key: str | None = None) -> ExecutionRecord:
         record, _ = self.start_execution_with_key(request, idempotency_key or self.execution_idempotency_key(request))
         return record
+
+    def generate_case_with_key(self, request: CaseGenerationRequest, idempotency_key: str) -> tuple[GeneratedCaseResult, bool]:
+        expected_key = case_generation_idempotency_key(request)
+        if idempotency_key != expected_key:
+            raise ValueError("generate_case idempotency key must bind the full request")
+        existing = self.generated_cases.get(idempotency_key)
+        if existing is not None:
+            return existing, True
+        provider_case_id = f"CASE-GEN-{len(self.generated_cases) + 1:03d}"
+        result = GeneratedCaseResult(
+            provider_case_id=provider_case_id,
+            case_path=f"/generated/cases/{provider_case_id}",
+        )
+        self.generated_cases[idempotency_key] = result
+        return result, False
+
+    def generate_case(self, request: CaseGenerationRequest, idempotency_key: str | None = None) -> GeneratedCaseResult:
+        result, _ = self.generate_case_with_key(
+            request, idempotency_key or case_generation_idempotency_key(request)
+        )
+        return result
     def create_ticket(self, draft):
         ticket_id = f"BUG-{len(self.tickets) + 1:03d}"
         record = TicketRecord(ticket_id=ticket_id, status="OPEN", title=draft.title, severity=draft.severity)
@@ -285,7 +337,13 @@ class Stage8PlatformToolAdapter(ToolAdapter, Generic[RequestT, ResultT]):
         resource_key = self._resource_key or next((values[key] for key in ("feature_id", "case_id", "environment_id", "executor_id", "execution_id") if key in values), None)
         idempotency_key = None
         if self.spec.idempotency is OperationIdempotency.IDEMPOTENT_WITH_KEY:
-            idempotency_key = DeterministicMockPlatform.execution_idempotency_key(self.request_type.model_validate(values))
+            request_for_key = self.request_type.model_validate(values)
+            if self.spec.tool_name == "stage8_start_execution":
+                idempotency_key = DeterministicMockPlatform.execution_idempotency_key(request_for_key)
+            elif self.spec.tool_name == "stage8_generate_case":
+                idempotency_key = case_generation_idempotency_key(request_for_key)
+            else:
+                idempotency_key = f"{self.spec.tool_name}:{json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}"
         return ToolInvocation.create(tool_name=self.spec.tool_name, arguments=values, resource_key=(f"stage8:{resource_key}" if self._side_effect and resource_key and self._resource_key is None else resource_key), idempotency_key=idempotency_key)
 
     def invoke_once(self, invocation: ToolInvocation, context: ToolAdapterContext) -> ToolAdapterResponse:
@@ -298,7 +356,7 @@ class Stage8PlatformToolAdapter(ToolAdapter, Generic[RequestT, ResultT]):
         else:
             result = self._call(request)
         payload = result.model_dump(mode="json") if isinstance(result, BaseModel) else TypeAdapter(self.result_type).dump_python(result, mode="json")
-        return ToolAdapterResponse(content=json.dumps(payload, ensure_ascii=False, sort_keys=True), content_type="application/json", safe_summary=f"{self.spec.tool_name} completed", side_effect_state=(ToolSideEffectState.COMMITTED if self._side_effect else ToolSideEffectState.NOT_STARTED), idempotency_replayed=replayed, provider_operation_id=getattr(result, "execution_id", None) or getattr(result, "ticket_id", None))
+        return ToolAdapterResponse(content=json.dumps(payload, ensure_ascii=False, sort_keys=True), content_type="application/json", safe_summary=f"{self.spec.tool_name} completed", side_effect_state=(ToolSideEffectState.COMMITTED if self._side_effect else ToolSideEffectState.NOT_STARTED), idempotency_replayed=replayed, provider_operation_id=getattr(result, "execution_id", None) or getattr(result, "ticket_id", None) or getattr(result, "provider_case_id", None))
 
 
 def build_stage8_tool_adapters(platform: DeterministicMockPlatform | None = None) -> tuple[tuple[str, str, ToolAdapter], ...]:
@@ -314,6 +372,7 @@ def build_stage8_tool_adapters(platform: DeterministicMockPlatform | None = None
         item("stage8_get_logs", "Query bounded logs for an external execution.", GetLogsRequest, LogRecord, lambda r: p.get_logs(r.execution_id, r.max_lines)),
         item("stage8_search_tickets", "Search external tickets without creating a ticket.", SearchTicketsRequest, list[TicketRecord], lambda r: p.search_tickets(r.query)),
         item("stage8_start_execution", "Start one external test execution through governed runtime.", StartExecutionRequest, ExecutionRecord, p.start_execution, True, keyed_call=p.start_execution_with_key),
+        item("stage8_generate_case", "Generate one official executable test case from a reviewed scenario.", CaseGenerationRequest, GeneratedCaseResult, p.generate_case, True, keyed_call=p.generate_case_with_key),
         item("stage8_create_ticket", "Create one external ticket after required tool approval.", CreateTicketRequest, TicketRecord, p.create_ticket, True, idempotency=OperationIdempotency.NON_IDEMPOTENT, resource_key="stage8:tickets"),
     )
 
