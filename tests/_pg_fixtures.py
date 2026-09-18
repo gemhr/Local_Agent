@@ -121,6 +121,12 @@ def _truncate_all(database: Database) -> None:
                         + " RESTART IDENTITY CASCADE"
                     )
                 )
+                await connection.execute(
+                    text(
+                        "INSERT INTO tenants (tenant_id) VALUES "
+                        "('00000000-0000-0000-0000-000000000001')"
+                    )
+                )
         finally:
             await database.engine.dispose()
 

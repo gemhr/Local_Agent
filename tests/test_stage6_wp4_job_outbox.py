@@ -67,6 +67,7 @@ def _principal(user_id: uuid.UUID, role: str = "USER") -> Principal:
         uuid.uuid4().hex,
         now,
         now + timedelta(minutes=5),
+        tenant_id="00000000-0000-0000-0000-000000000001",
     )
 
 

@@ -67,6 +67,7 @@ class _TransportAuthService(AuthService):
             token_id="tool-approval-transport-test",
             issued_at=now,
             expires_at=now + timedelta(hours=1),
+            tenant_id="00000000-0000-0000-0000-000000000001",
         )
 
 
@@ -76,8 +77,9 @@ class _TransportAuthorizationService(AuthorizationService):
     ) -> None:
         return None
 
-    async def require_owner(
-        self, principal: Principal, object_type: str, object_id: str
+    async def authorize(
+        self, principal: Principal, object_type: str, object_id: str, action,
+        *, required_scope=None,
     ) -> None:
         return None
 

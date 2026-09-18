@@ -4,6 +4,8 @@ import uuid
 from dataclasses import asdict
 from sqlalchemy.exc import IntegrityError
 
+from core.persistence.models import ObjectOwnershipRow
+
 from core.stage8 import repositories as repo
 from core.stage8.domain import *
 
@@ -23,10 +25,23 @@ def _review(row): return BusinessReview(row.review_id, row.mission_id, ReviewTyp
 class MissionService:
     def __init__(self, database): self.database = database
 
-    async def create_mission(self, feature_id: str, *, title=None, summary=None, mission_id=None):
+    async def create_mission(
+        self, feature_id: str, *, title=None, summary=None, mission_id=None,
+        owner_user_id=None, tenant_id: str | None = None,
+    ):
         if not feature_id.strip(): raise Stage8ValidationError("feature_id is required")
+        if (owner_user_id is None) != (tenant_id is None):
+            raise Stage8ValidationError("mission ownership binding is incomplete")
         async with self.database.transaction() as session:
             row = await repo.add_mission(session, dict(mission_id=mission_id or uuid.uuid4().hex, feature_id=feature_id, status=MissionStatus.CREATED.value, version=1, title=title, summary=summary))
+            if owner_user_id is not None:
+                session.add(ObjectOwnershipRow(
+                    object_type="MISSION",
+                    object_id=row.mission_id,
+                    owner_user_id=owner_user_id,
+                    tenant_id=tenant_id,
+                ))
+                await session.flush()
             return _mission(row)
     async def get_mission(self, mission_id):
         async with self.database.session() as session: row = await repo.get_mission(session, mission_id)

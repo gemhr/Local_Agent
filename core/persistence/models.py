@@ -27,6 +27,7 @@ from sqlalchemy import (
     Computed,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -41,6 +42,13 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class PersistenceBase(DeclarativeBase):
     """所有持久化模型的公共 Base；不提供通用 CRUD。"""
+
+
+class TenantRow(PersistenceBase):
+    """Stage9 最小 Tenant identity；不承载组织层级或成员关系。"""
+    __tablename__ = "tenants"
+    tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
 class FeatureTestMissionRow(PersistenceBase):
@@ -186,6 +194,10 @@ class Stage8CIAnalysisRow(PersistenceBase):
 class UserRow(PersistenceBase):
     __tablename__ = "users"
     id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("tenants.tenant_id", ondelete="RESTRICT"),
+        nullable=False, server_default=text("'00000000-0000-0000-0000-000000000001'"),
+    )
     subject: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     disabled_at: Mapped[object | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -194,6 +206,10 @@ class UserRow(PersistenceBase):
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     principal_kind: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'HUMAN'"))
     service_scopes: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_users_id_tenant"),
+    )
 
 
 class RoleRow(PersistenceBase):
@@ -224,14 +240,24 @@ class ObjectOwnershipRow(PersistenceBase):
     owner_user_id: Mapped[object] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
+    tenant_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("tenants.tenant_id", ondelete="RESTRICT"),
+        nullable=False, server_default=text("'00000000-0000-0000-0000-000000000001'"),
+    )
     created_at: Mapped[object] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")
     )
 
     __table_args__ = (
         CheckConstraint(
-            "object_type IN ('RUN', 'CONVERSATION')",
+            "object_type IN ('RUN', 'CONVERSATION', 'MISSION', 'REVIEW', 'TEST_PLAN', 'ARTIFACT', 'GENERATED_CASE_ARTIFACT', 'EXTERNAL_EXECUTION_JOB', 'APPROVAL', 'TICKET_CONTINUATION', 'EVALUATION_JOB')",
             name="ck_object_ownership_type",
+        ),
+        ForeignKeyConstraint(
+            ["owner_user_id", "tenant_id"],
+            ["users.id", "users.tenant_id"],
+            name="fk_object_ownership_owner_tenant",
+            ondelete="RESTRICT",
         ),
         Index("ix_object_ownership_owner_type", "owner_user_id", "object_type"),
     )
@@ -924,6 +950,7 @@ CANONICAL_TABLES = (
     "stage8_ticket_continuations",
     "stage8_ci_runs",
     "stage8_ci_analysis",
+    "tenants",
     "users",
     "roles",
     "user_roles",

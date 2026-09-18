@@ -114,13 +114,12 @@ class TicketContinuationService:
             row = await repo.get_ticket_continuation(session, continuation_id)
             return None if row is None else _record(row)
 
-    async def process_ready_once(self, continuation_id: str | None = None):
+    async def process_ready_once(self, continuation_id: str):
         async with self.database.transaction() as session:
-            if continuation_id is not None:
-                row = await repo.get_ticket_continuation(session, continuation_id, for_update=True)
-                rows = [] if row is None else [row]
-            else:
-                rows = await repo.list_ready_ticket_continuations(session)
+            row = await repo.get_ticket_continuation(
+                session, continuation_id, for_update=True
+            )
+            rows = [] if row is None else [row]
             selected = None
             for candidate in rows:
                 approval = await self.durable_approval.get(candidate.approval_id)

@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any
 
 from core.persistence.database import Database
+from core.persistence.models import ObjectOwnershipRow, UserRow
 from core.persistence.repositories import evaluation_jobs as repository
 
 
@@ -176,6 +177,9 @@ class EvaluationJobService:
         }
         trace_context = self._trace_context()
         async with self._database.transaction() as session:
+            owner = await session.get(UserRow, owner_user_id)
+            if owner is None:
+                raise JobError(JobErrorCode.JOB_NOT_FOUND)
             row = await repository.insert_job(
                 session,
                 {
@@ -202,6 +206,13 @@ class EvaluationJobService:
                     "status": "PENDING",
                 },
             )
+            session.add(ObjectOwnershipRow(
+                object_type="EVALUATION_JOB",
+                object_id=str(job_id),
+                owner_user_id=owner_user_id,
+                tenant_id=owner.tenant_id,
+            ))
+            await session.flush()
         self._observe("observe_job_created")
         return _project_job(row)
 

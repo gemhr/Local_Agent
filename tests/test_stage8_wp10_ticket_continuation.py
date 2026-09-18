@@ -334,7 +334,6 @@ async def test_reject_is_durable_and_executes_zero_tools(clean_database):
     rejected = await service.get(continuation.continuation_id)
     assert rejected.state == "REJECTED"
     assert await service.process_ready_once(continuation.continuation_id) is None
-    assert await service.process_ready_once() is None
     assert platform.tickets == {}
 
 

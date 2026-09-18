@@ -261,10 +261,10 @@ async def test_cancel_endpoint_writes_durable_intent_before_registry_miss(
         raising=False,
     )
 
-    async def allow(_request, _run_id):
+    async def allow(_request, _run_id, _action):
         return None
 
-    monkeypatch.setattr(server, "_require_run_owner", allow)
+    monkeypatch.setattr(server, "_authorize_run", allow)
     run_id = uuid.uuid4().hex
     first = await server.cancel_run_endpoint(run_id, object())
     second = await server.cancel_run_endpoint(run_id, object())
@@ -305,10 +305,10 @@ async def test_cancel_endpoint_does_not_fallback_to_registry_on_db_failure(monke
         raising=False,
     )
 
-    async def allow(_request, _run_id):
+    async def allow(_request, _run_id, _action):
         return None
 
-    monkeypatch.setattr(server, "_require_run_owner", allow)
+    monkeypatch.setattr(server, "_authorize_run", allow)
     with pytest.raises(RuntimeError, match="database unavailable"):
         await server.cancel_run_endpoint(uuid.uuid4().hex, object())
     assert registry.called is False

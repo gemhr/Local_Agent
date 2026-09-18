@@ -825,12 +825,24 @@ class Stage8ExecutionService:
                 )
             return _job(row)
 
-    async def ingest_result(self, result: ExecutionResult) -> ExternalExecutionJob:
+    async def ingest_result(
+        self, result: ExecutionResult, *, expected_job_id: str | None = None
+    ) -> ExternalExecutionJob:
         triage_needed = False
         async with self.database.transaction() as session:
-            row = await repo.get_execution_job(session, result.execution_id, for_update=True)
+            row = (
+                await repo.get_execution_job_by_id(
+                    session, expected_job_id, for_update=True
+                )
+                if expected_job_id is not None
+                else await repo.get_execution_job(
+                    session, result.execution_id, for_update=True
+                )
+            )
             if row is None:
                 raise Stage8NotFoundError("execution not found")
+            if row.execution_id != result.execution_id:
+                raise Stage8ValidationError("execution job identity mismatch")
             if row.status in {
                 ExternalExecutionStatus.SUCCEEDED.value,
                 ExternalExecutionStatus.FAILED.value,
@@ -881,7 +893,11 @@ class Stage8ExecutionService:
         if triage_needed and self.triage_service is not None:
             await self.triage(job)
             async with self.database.session() as session:
-                refreshed = await repo.get_execution_job(session, result.execution_id)
+                refreshed = (
+                    await repo.get_execution_job_by_id(session, expected_job_id)
+                    if expected_job_id is not None
+                    else await repo.get_execution_job(session, result.execution_id)
+                )
             if refreshed is None:
                 raise Stage8ConflictError("execution job disappeared after triage")
             return _job(refreshed)
@@ -943,6 +959,15 @@ class Stage8ExecutionService:
             row = await repo.get_execution_job(session, execution_id)
             if row is None:
                 raise Stage8NotFoundError("execution not found")
+            job = _job(row)
+        return await self.triage(job)
+
+    async def triage_job(self, job_id: str) -> FailureTriageResult:
+        """只按 canonical AgentCore job identity 执行 triage。"""
+        async with self.database.session() as session:
+            row = await repo.get_execution_job_by_id(session, job_id)
+            if row is None:
+                raise Stage8NotFoundError("execution job not found")
             job = _job(row)
         return await self.triage(job)
 

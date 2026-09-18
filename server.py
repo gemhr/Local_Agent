@@ -13,7 +13,12 @@ from pathlib import Path as FilePath
 from typing import Annotated, Literal, Optional
 
 import uvicorn
-from fastapi import Body, FastAPI, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Body, FastAPI, HTTPException, Path, Query, Request
+from fastapi.exception_handlers import (
+    http_exception_handler as default_http_exception_handler,
+    request_validation_exception_handler as default_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
@@ -24,6 +29,7 @@ from core.auth import (
     AUTHORIZATION_FORBIDDEN,
     AuthError,
     AuthService,
+    AuthorizationAction,
     AuthorizationService,
     require_role,
     require_scope,
@@ -219,6 +225,8 @@ from core.stage8.platforms import DeterministicMockPlatform, FeatureContextBuild
 # （最小配置约束：不新增 Settings；默认与 observability queue 一致）。
 AGENTEVALOPS_TRACE_EXPORT_QUEUE_CAPACITY = 256
 STAGE8_RESULT_CALLBACK_SCOPE = "localagent:stage8:result-callback"
+STAGE8_PROCESS_SCOPE = "localagent:stage8:process"
+RUNTIME_CANCEL_SCOPE = "localagent:runtime:cancel"
 
 
 class _RequestOwnedStreamingResponse(StreamingResponse):
@@ -1353,6 +1361,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
+v1_router = APIRouter(prefix="/api/v1")
 
 # Stage8-WP5：演示层只提供静态资源和页面入口；业务动作继续走下方
 # canonical /api/stage8/* 路由，不在 UI 层复制 Workflow 或 Domain Authority。
@@ -1442,6 +1451,11 @@ class Stage8TicketApprovalDecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class Stage8ProcessContinuationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    continuation_id: StrictStr = Field(min_length=1, max_length=255)
+
+
 class Stage8CIRunRequest(CIRun):
     pass
 
@@ -1464,16 +1478,22 @@ def _stage8_projection(value):
 
 @app.exception_handler(Stage8NotFoundError)
 async def stage8_not_found_handler(request: Request, exc: Stage8NotFoundError):
+    if request.url.path.startswith("/api/v1/"):
+        return _api_error(request, "NOT_FOUND", 404)
     return JSONResponse(status_code=404, content={"error": {"code": "STAGE8_NOT_FOUND", "message": str(exc)}})
 
 
 @app.exception_handler(Stage8ConflictError)
 async def stage8_conflict_handler(request: Request, exc: Stage8ConflictError):
+    if request.url.path.startswith("/api/v1/"):
+        return _api_error(request, "CONFLICT", 409)
     return JSONResponse(status_code=409, content={"error": {"code": "STAGE8_CONFLICT", "message": str(exc)}})
 
 
 @app.exception_handler(Stage8ValidationError)
 async def stage8_validation_handler(request: Request, exc: Stage8ValidationError):
+    if request.url.path.startswith("/api/v1/"):
+        return _api_error(request, "VALIDATION_ERROR", 422)
     return JSONResponse(status_code=422, content={"error": {"code": "STAGE8_VALIDATION_ERROR", "message": str(exc)}})
 
 
@@ -1525,6 +1545,9 @@ async def stage8_test_planning(body: TestPlanningRequest, request: Request):
 async def stage8_planning_workflow(mission_id: str, body: FeatureUnderstandingRequest, request: Request):
     if body.mission_id not in (None, mission_id):
         raise Stage8ValidationError("mission_id mismatch")
+    await _authorize_stage8(
+        request, "MISSION", mission_id, AuthorizationAction.MUTATE
+    )
     return _stage8_projection(await _stage8_specialists(request).planning_workflow(
         body.model_copy(update={"mission_id": mission_id})
     ))
@@ -1533,6 +1556,7 @@ async def stage8_planning_workflow(mission_id: str, body: FeatureUnderstandingRe
 @app.post("/api/stage8/missions/{mission_id}/execution")
 async def stage8_start_execution(mission_id: str, body: Stage8ExecutionStartRequest, request: Request):
     service = _stage8_execution(request)
+    await _authorize_stage8(request, "MISSION", mission_id, AuthorizationAction.PROCESS)
     return _stage8_projection(await service.start_execution(
         mission_id, generated_case_artifact_id=body.generated_case_artifact_id,
     ))
@@ -1546,12 +1570,20 @@ async def stage8_ingest_execution_result(execution_id: str, body: Stage8Executio
     if body.execution_id != execution_id:
         raise Stage8ValidationError("execution_id mismatch")
     service = _stage8_execution(request)
+    job_id = await _authorization_service(request).authorize_external_execution(
+        request.state.principal,
+        execution_id,
+        AuthorizationAction.PROCESS,
+        required_scope=STAGE8_RESULT_CALLBACK_SCOPE,
+    )
     try:
         status = ExternalExecutionStatus(body.status)
     except ValueError as exc:
         raise Stage8ValidationError("invalid external execution status") from exc
     result = ExecutionResult(execution_id=execution_id, status=status, actual_result=body.actual_result, expected_result=body.expected_result, failure_signature=body.failure_signature, logs=body.logs, completed_at=body.completed_at)
-    return _stage8_projection(await service.ingest_result(result))
+    return _stage8_projection(
+        await service.ingest_result(result, expected_job_id=job_id)
+    )
 
 
 @app.post("/api/stage8/execution-jobs/{job_id}/observe")
@@ -1562,13 +1594,19 @@ async def stage8_observe_execution(
 ):
     """观察 provider-owned result；请求方只能指定 AgentCore job identity。"""
     del body
+    await _authorize_stage8(request, "EXTERNAL_EXECUTION_JOB", job_id, AuthorizationAction.READ)
     return _stage8_projection(await _stage8_execution(request).observe_once(job_id))
 
 
 @app.post("/api/stage8/agents/failure-triage/run")
 async def stage8_failure_triage(body: Stage8FailureTriageRunRequest, request: Request):
+    job_id = await _authorization_service(request).authorize_external_execution(
+        request.state.principal,
+        body.execution_id,
+        AuthorizationAction.PROCESS,
+    )
     return _stage8_projection(
-        await _stage8_execution(request).triage_execution(body.execution_id)
+        await _stage8_execution(request).triage_job(job_id)
     )
 
 
@@ -1577,6 +1615,7 @@ async def stage8_get_ticket_continuation(continuation_id: str, request: Request)
     service = getattr(request.app.state, "stage8_ticket_continuation_service", None)
     if service is None:
         raise Stage8ValidationError("ticket continuation service is not configured")
+    await _authorize_stage8(request, "TICKET_CONTINUATION", continuation_id, AuthorizationAction.READ)
     result = await service.get(continuation_id)
     if result is None:
         raise Stage8NotFoundError("ticket continuation not found")
@@ -1591,6 +1630,7 @@ async def _stage8_decide_ticket_continuation(
     service = getattr(request.app.state, "stage8_ticket_continuation_service", None)
     if service is None:
         raise Stage8ValidationError("ticket continuation service is not configured")
+    await _authorize_stage8(request, "TICKET_CONTINUATION", continuation_id, AuthorizationAction.APPROVE)
     principal = request.state.principal
     return _stage8_projection(await service.decide(
         continuation_id,
@@ -1624,11 +1664,22 @@ async def stage8_reject_ticket_continuation(
 
 
 @app.post("/api/stage8/ticket-continuations/process-ready")
-async def stage8_process_ticket_continuation(request: Request):
+async def stage8_process_ticket_continuation(
+    body: Stage8ProcessContinuationRequest, request: Request
+):
     service = getattr(request.app.state, "stage8_ticket_continuation_service", None)
     if service is None:
         raise Stage8ValidationError("ticket continuation service is not configured")
-    return _stage8_projection(await service.process_ready_once())
+    await _authorize_stage8(
+        request,
+        "TICKET_CONTINUATION",
+        body.continuation_id,
+        AuthorizationAction.PROCESS,
+        required_scope=STAGE8_PROCESS_SCOPE,
+    )
+    return _stage8_projection(
+        await service.process_ready_once(body.continuation_id)
+    )
 
 
 @app.post("/api/stage8/ci/runs", status_code=201)
@@ -1649,54 +1700,71 @@ async def stage8_get_ci_analysis(ci_run_id: str, request: Request):
 @app.post("/api/stage8/missions", status_code=201)
 async def stage8_create_mission(body: Stage8MissionCreateRequest, request: Request):
     mission, _ = _stage8_services(request)
-    return _stage8_projection(await mission.create_mission(body.feature_id, title=body.title, summary=body.summary))
+    principal = request.state.principal
+    result = await mission.create_mission(
+        body.feature_id,
+        title=body.title,
+        summary=body.summary,
+        owner_user_id=principal.user_id,
+        tenant_id=principal.tenant_id,
+    )
+    return _stage8_projection(result)
 
 
 @app.get("/api/stage8/missions/{mission_id}")
+@v1_router.get("/missions/{mission_id}")
 async def stage8_get_mission(mission_id: str, request: Request):
     mission, _ = _stage8_services(request)
+    await _authorize_stage8(request, "MISSION", mission_id, AuthorizationAction.READ)
     return _stage8_projection(await mission.get_mission(mission_id))
 
 
 @app.post("/api/stage8/missions/{mission_id}/transition")
 async def stage8_transition_mission(mission_id: str, body: Stage8TransitionRequest, request: Request):
     mission, _ = _stage8_services(request)
+    await _authorize_stage8(request, "MISSION", mission_id, AuthorizationAction.MUTATE)
     return _stage8_projection(await mission.transition_mission(mission_id, body.status, body.expected_version))
 
 
 @app.post("/api/stage8/missions/{mission_id}/run-references", status_code=201)
 async def stage8_attach_run(mission_id: str, body: Stage8RunReferenceRequest, request: Request):
     mission, _ = _stage8_services(request)
+    await _authorize_stage8(request, "MISSION", mission_id, AuthorizationAction.MUTATE)
     return _stage8_projection(await mission.attach_run_reference(mission_id, body.run_id, body.run_purpose))
 
 
 @app.get("/api/stage8/missions/{mission_id}/run-references")
 async def stage8_list_runs(mission_id: str, request: Request):
     mission, _ = _stage8_services(request)
+    await _authorize_stage8(request, "MISSION", mission_id, AuthorizationAction.READ)
     return _stage8_projection(await mission.list_run_references(mission_id))
 
 
 @app.post("/api/stage8/missions/{mission_id}/reviews", status_code=201)
 async def stage8_create_review(mission_id: str, body: Stage8ReviewCreateRequest, request: Request):
     _, review = _stage8_services(request)
+    await _authorize_stage8(request, "MISSION", mission_id, AuthorizationAction.MUTATE)
     return _stage8_projection(await review.create_review(mission_id, body.review_type, subject_id=body.subject_id, subject_version=body.subject_version, subject_digest=body.subject_digest))
 
 
 @app.get("/api/stage8/reviews/{review_id}")
 async def stage8_get_review(review_id: str, request: Request):
     _, review = _stage8_services(request)
+    await _authorize_stage8(request, "REVIEW", review_id, AuthorizationAction.READ)
     return _stage8_projection(await review.get_review(review_id))
 
 
 @app.post("/api/stage8/reviews/{review_id}/approve")
 async def stage8_approve_review(review_id: str, body: Stage8ReviewDecisionRequest, request: Request):
     _, review = _stage8_services(request)
+    await _authorize_stage8(request, "REVIEW", review_id, AuthorizationAction.APPROVE)
     return _stage8_projection(await review.approve_review(review_id, body.mission_id, decided_by=body.decided_by, comment=body.decision_comment, subject_id=body.subject_id, subject_version=body.subject_version, subject_digest=body.subject_digest))
 
 
 @app.post("/api/stage8/reviews/{review_id}/reject")
 async def stage8_reject_review(review_id: str, body: Stage8ReviewDecisionRequest, request: Request):
     _, review = _stage8_services(request)
+    await _authorize_stage8(request, "REVIEW", review_id, AuthorizationAction.APPROVE)
     return _stage8_projection(await review.reject_review(review_id, body.mission_id, decided_by=body.decided_by, comment=body.decision_comment, subject_id=body.subject_id, subject_version=body.subject_version, subject_digest=body.subject_digest))
 
 
@@ -1705,6 +1773,7 @@ async def stage8_generate_cases(mission_id: str, body: Stage8CaseGenerationReque
     service = getattr(request.app.state, "stage8_case_generation_service", None)
     if service is None:
         raise Stage8ValidationError("case generation service is not configured")
+    await _authorize_stage8(request, "MISSION", mission_id, AuthorizationAction.PROCESS)
     return _stage8_projection(await service.generate(mission_id, body.scenario_ids))
 
 
@@ -1713,6 +1782,7 @@ async def stage8_list_generated_cases(mission_id: str, request: Request):
     service = getattr(request.app.state, "stage8_case_generation_service", None)
     if service is None:
         raise Stage8ValidationError("case generation service is not configured")
+    await _authorize_stage8(request, "MISSION", mission_id, AuthorizationAction.READ)
     return _stage8_projection(await service.list(mission_id))
 
 _ADMIN_ONLY_API_PATHS = frozenset({
@@ -1763,6 +1833,23 @@ async def job_error_handler(request: Request, exc: JobError) -> JSONResponse:
     )
 
 
+@app.exception_handler(HTTPException)
+async def v1_http_exception_handler(request: Request, exc: HTTPException):
+    if request.url.path.startswith("/api/v1/"):
+        code = str(exc.detail) if isinstance(exc.detail, str) else "HTTP_ERROR"
+        return _api_error(request, code, exc.status_code)
+    return await default_http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def v1_validation_exception_handler(
+    request: Request, exc: RequestValidationError
+):
+    if request.url.path.startswith("/api/v1/"):
+        return _api_error(request, "VALIDATION_ERROR", 422)
+    return await default_validation_exception_handler(request, exc)
+
+
 def _is_stage8_result_callback_path(path: str) -> bool:
     parts = path.strip("/").split("/")
     return (
@@ -1795,8 +1882,9 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                     request.state.principal, STAGE8_RESULT_CALLBACK_SCOPE
                 )
             elif request.state.principal.principal_kind == "SERVICE" and not (
-                request.url.path.startswith("/api/runtime/runs/")
-                and request.url.path.endswith("/cancel")
+                (request.url.path.startswith("/api/runtime/runs/") and request.url.path.endswith("/cancel"))
+                or (request.url.path.startswith("/api/v1/runs/") and request.url.path.endswith("/cancel"))
+                or request.url.path == "/api/stage8/ticket-continuations/process-ready"
             ):
                 raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
             limiter = getattr(request.app.state, "rate_limiter", None)
@@ -2245,6 +2333,15 @@ def _authorization_service(request: Request) -> AuthorizationService:
     return service
 
 
+async def _authorize_stage8(request: Request, object_type: str, object_id: str,
+                            action: AuthorizationAction, *, required_scope: str | None = None) -> None:
+    """Stage8 transport guard；子对象归属沿已有 Mission FK 继承。"""
+    await _authorization_service(request).authorize(
+        request.state.principal, object_type, object_id, action,
+        required_scope=required_scope,
+    )
+
+
 def _evaluation_job_service(request: Request) -> EvaluationJobService:
     service = getattr(request.app.state, "evaluation_job_service", None)
     if not isinstance(service, EvaluationJobService):
@@ -2269,18 +2366,22 @@ def _parse_job_id(job_id: str) -> uuid.UUID:
 
 
 async def _owned_evaluation_job(
-    request: Request, job_id: uuid.UUID
+    request: Request,
+    job_id: uuid.UUID,
+    action: AuthorizationAction = AuthorizationAction.READ,
 ) -> EvaluationJob:
-    job = await _evaluation_job_service(request).get(job_id)
     try:
-        _authorization_service(request).require_owner_id(
-            request.state.principal, job.owner_user_id
+        await _authorization_service(request).authorize(
+            request.state.principal,
+            "EVALUATION_JOB",
+            str(job_id),
+            action,
         )
     except AuthError as exc:
         if exc.status_code == 404:
             raise JobError(JobErrorCode.JOB_NOT_FOUND) from None
         raise
-    return job
+    return await _evaluation_job_service(request).get(job_id)
 
 
 async def _bind_new_run_and_conversation(
@@ -2293,9 +2394,18 @@ async def _bind_new_run_and_conversation(
     await authz.bind_new(principal, "RUN", run_id)
 
 
-async def _require_run_owner(request: Request, run_id: str) -> None:
-    await _authorization_service(request).require_owner(
-        request.state.principal, "RUN", run_id
+async def _authorize_run(
+    request: Request, run_id: str, action: AuthorizationAction
+) -> None:
+    principal = request.state.principal
+    required_scope = (
+        RUNTIME_CANCEL_SCOPE
+        if principal.principal_kind == "SERVICE"
+        and action is AuthorizationAction.CANCEL
+        else None
+    )
+    await _authorization_service(request).authorize(
+        principal, "RUN", run_id, action, required_scope=required_scope
     )
 
 
@@ -2412,7 +2522,9 @@ async def cancel_evaluation_job_endpoint(
     job_id: Annotated[str, Path(max_length=36)], request: Request
 ) -> EvaluationJobResponse:
     parsed_job_id = _parse_job_id(job_id)
-    await _owned_evaluation_job(request, parsed_job_id)
+    await _owned_evaluation_job(
+        request, parsed_job_id, AuthorizationAction.CANCEL
+    )
     job = await _evaluation_job_service(request).cancel(parsed_job_id)
     return _evaluation_job_response(job)
 
@@ -3077,6 +3189,7 @@ async def runtime_evaluation_execute_v3_endpoint(
 
 
 @app.post("/api/runtime/runs/{run_id}/cancel")
+@v1_router.post("/runs/{run_id}/cancel")
 async def cancel_run_endpoint(
     run_id: Annotated[
         str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
@@ -3088,7 +3201,7 @@ async def cancel_run_endpoint(
         uuid.UUID(run_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
-    await _require_run_owner(request, run_id)
+    await _authorize_run(request, run_id, AuthorizationAction.CANCEL)
     service = require_service()
     control = _require_runtime_services().durable_run_control
     await control.request_cancel(run_id, CancellationReason.REQUEST_CANCELLED.value)
@@ -3101,6 +3214,24 @@ async def cancel_run_endpoint(
         "status": "cancelled" if local_result is not False else "already_cancelled",
         "run_id": run_id,
     }
+
+
+@v1_router.get("/principal")
+async def v1_principal_endpoint(request: Request):
+    """最小 v1 身份投影；只返回服务器验证后的低敏字段。"""
+    principal = request.state.principal
+    return {
+        "principal": {
+            "user_id": str(principal.user_id),
+            "principal_kind": principal.principal_kind,
+            "roles": sorted(principal.roles),
+            "scopes": sorted(principal.scopes),
+            "tenant_id": principal.tenant_id,
+        }
+    }
+
+
+app.include_router(v1_router)
 
 
 # WP2 Frozen Contract：approval 命令面的 domain error → HTTP 投影。
@@ -3143,7 +3274,7 @@ async def _handle_tool_approval_decision(
     """
     _validate_uuid_path_value(run_id, "run_id")
     _validate_uuid_path_value(approval_id, "approval_id")
-    await _require_run_owner(request, run_id)
+    await _authorize_run(request, run_id, AuthorizationAction.APPROVE)
     principal = request.state.principal
     service = require_service()
     try:
@@ -3264,8 +3395,11 @@ async def get_history_endpoint(
     ] = REQUEST_PAYLOAD_POLICY.HISTORY_OFFSET_DEFAULT,
 ):
     """按页返回某个智能体的历史消息。"""
-    await _authorization_service(request).require_owner(
-        request.state.principal, "CONVERSATION", agent_id
+    await _authorization_service(request).authorize(
+        request.state.principal,
+        "CONVERSATION",
+        agent_id,
+        AuthorizationAction.READ,
     )
     service = require_service()
     result = service.get_history(agent_id=agent_id, limit=limit, offset=offset)

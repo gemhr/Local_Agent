@@ -12,9 +12,23 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from core.auth import AuthError, AuthService, AuthorizationService, Principal
-from core.persistence.models import ObjectOwnershipRow, RoleRow, UserRoleRow, UserRow
+from core.auth import (
+    AuthError,
+    AuthService,
+    AuthorizationAction,
+    AuthorizationService,
+    Principal,
+)
+from core.evaluation_jobs import EvaluationJobRequest, EvaluationJobService
+from core.persistence.models import (
+    ObjectOwnershipRow,
+    RoleRow,
+    TenantRow,
+    UserRoleRow,
+    UserRow,
+)
 from core.redis_service import RedisTokenBucketRateLimiter
+from core.stage8.service import BusinessReviewService, MissionService
 import server
 from tests._runtime_assembly_fixtures import make_services
 
@@ -27,6 +41,7 @@ _ROLE_IDS = {
     "ADMIN": uuid.UUID("00000000-0000-0000-0000-000000000003"),
     "SERVICE": uuid.UUID("00000000-0000-0000-0000-000000000004"),
 }
+_DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
 
 async def _ensure_roles(database) -> None:
@@ -44,18 +59,23 @@ async def _create_user(
     *,
     principal_kind: str = "HUMAN",
     service_scopes: list[str] | None = None,
+    tenant_id: str = _DEFAULT_TENANT_ID,
 ) -> uuid.UUID:
     await _ensure_roles(database)
     user_id = uuid.uuid4()
     session = database.session_factory()
     try:
       async with session.begin():
+        if await session.get(TenantRow, tenant_id) is None:
+            session.add(TenantRow(tenant_id=tenant_id))
+            await session.flush()
         session.add(UserRow(
             id=user_id,
             subject=str(user_id),
             display_name="test",
             principal_kind=principal_kind,
             service_scopes=service_scopes or [],
+            tenant_id=tenant_id,
         ))
         await session.flush()
         role_rows = (await session.scalars(
@@ -68,9 +88,19 @@ async def _create_user(
     return user_id
 
 
-def _principal(user_id: uuid.UUID, *roles: str) -> Principal:
+def _principal(
+    user_id: uuid.UUID, *roles: str, tenant_id: str = _DEFAULT_TENANT_ID
+) -> Principal:
     now = datetime.now(UTC)
-    return Principal(user_id, str(user_id), frozenset(roles), "test-jti", now, now + timedelta(minutes=5))
+    return Principal(
+        user_id,
+        str(user_id),
+        frozenset(roles),
+        "test-jti",
+        now,
+        now + timedelta(minutes=5),
+        tenant_id=tenant_id,
+    )
 
 
 def _token(
@@ -79,16 +109,18 @@ def _token(
     roles: list[str],
     *,
     scopes: list[str] | None = None,
+    tenant_id: str | None = None,
 ) -> str:
     now = datetime.now(UTC)
-    return jwt.encode(
-        {
+    payload = {
             "iss": "test-issuer", "aud": "test-api", "sub": str(user_id),
             "roles": roles, "jti": uuid.uuid4().hex, "iat": now,
             "nbf": now, "exp": now + timedelta(minutes=2),
             "scopes": scopes or [],
-        }, private, algorithm="EdDSA",
-    )
+        }
+    if tenant_id is not None:
+        payload["tenant_id"] = tenant_id
+    return jwt.encode(payload, private, algorithm="EdDSA")
 
 
 def _disabled_rate_limiter() -> RedisTokenBucketRateLimiter:
@@ -125,7 +157,155 @@ async def test_real_postgresql_identity_constraints_and_ownership(clean_database
     with pytest.raises(AuthError) as historical:
         await authz.require_owner(principal_a, "RUN", "historical-no-owner")
     assert historical.value.status_code == 404
-    await authz.require_owner(_principal(user_b, "ADMIN"), "RUN", "historical-no-owner")
+    with pytest.raises(AuthError) as admin_denied:
+        await authz.require_owner(
+            _principal(user_b, "ADMIN"), "RUN", "historical-no-owner"
+        )
+    assert admin_denied.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_tenant_admin_and_service_object_policy(clean_database):
+    owner_id = await _create_user(clean_database, ("USER",))
+    admin_id = await _create_user(clean_database, ("ADMIN",))
+    cross_admin_id = await _create_user(
+        clean_database, ("ADMIN",), tenant_id="tenant-b"
+    )
+    service_id = await _create_user(
+        clean_database,
+        ("SERVICE",),
+        principal_kind="SERVICE",
+        service_scopes=["localagent:stage8:process"],
+    )
+    cross_service_id = await _create_user(
+        clean_database,
+        ("SERVICE",),
+        principal_kind="SERVICE",
+        service_scopes=["localagent:stage8:process"],
+        tenant_id="tenant-b",
+    )
+    no_scope_id = await _create_user(
+        clean_database, ("SERVICE",), principal_kind="SERVICE"
+    )
+    authz = AuthorizationService(clean_database)
+    await authz.bind_new(_principal(owner_id, "USER"), "MISSION", "mission-a")
+
+    await authz.authorize(
+        _principal(owner_id, "USER"),
+        "MISSION",
+        "mission-a",
+        AuthorizationAction.READ,
+    )
+    await authz.authorize(
+        _principal(admin_id, "ADMIN"),
+        "MISSION",
+        "mission-a",
+        AuthorizationAction.MUTATE,
+    )
+    await authz.authorize(
+        Principal(
+            service_id,
+            str(service_id),
+            frozenset({"SERVICE"}),
+            "service-jti",
+            datetime.now(UTC),
+            datetime.now(UTC) + timedelta(minutes=5),
+            "SERVICE",
+            frozenset({"localagent:stage8:process"}),
+            _DEFAULT_TENANT_ID,
+        ),
+        "MISSION",
+        "mission-a",
+        AuthorizationAction.PROCESS,
+        required_scope="localagent:stage8:process",
+    )
+
+    for denied_principal in (
+        _principal(cross_admin_id, "ADMIN", tenant_id="tenant-b"),
+        Principal(
+            cross_service_id,
+            str(cross_service_id),
+            frozenset({"SERVICE"}),
+            "cross-service-jti",
+            datetime.now(UTC),
+            datetime.now(UTC) + timedelta(minutes=5),
+            "SERVICE",
+            frozenset({"localagent:stage8:process"}),
+            "tenant-b",
+        ),
+    ):
+        with pytest.raises(AuthError) as denied:
+            await authz.authorize(
+                denied_principal,
+                "MISSION",
+                "mission-a",
+                AuthorizationAction.PROCESS,
+                required_scope=(
+                    "localagent:stage8:process"
+                    if denied_principal.principal_kind == "SERVICE"
+                    else None
+                ),
+            )
+        assert denied.value.status_code == 404
+
+    with pytest.raises(AuthError) as missing_scope:
+        await authz.authorize(
+            Principal(
+                no_scope_id,
+                str(no_scope_id),
+                frozenset({"SERVICE"}),
+                "no-scope-jti",
+                datetime.now(UTC),
+                datetime.now(UTC) + timedelta(minutes=5),
+                "SERVICE",
+                frozenset(),
+                _DEFAULT_TENANT_ID,
+            ),
+            "MISSION",
+            "mission-a",
+            AuthorizationAction.PROCESS,
+            required_scope="localagent:stage8:process",
+        )
+    assert missing_scope.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_evaluation_job_uses_canonical_tenant_ownership(clean_database):
+    owner_id = await _create_user(clean_database, ("USER",))
+    foreign_id = await _create_user(clean_database, ("USER",))
+    admin_id = await _create_user(clean_database, ("ADMIN",))
+    cross_admin_id = await _create_user(
+        clean_database, ("ADMIN",), tenant_id="tenant-b"
+    )
+    job = await EvaluationJobService(clean_database).submit(
+        owner_id, EvaluationJobRequest("agent", "question", 30)
+    )
+    authz = AuthorizationService(clean_database)
+
+    await authz.authorize(
+        _principal(owner_id, "USER"),
+        "EVALUATION_JOB",
+        str(job.job_id),
+        AuthorizationAction.READ,
+    )
+    await authz.authorize(
+        _principal(admin_id, "ADMIN"),
+        "EVALUATION_JOB",
+        str(job.job_id),
+        AuthorizationAction.CANCEL,
+    )
+    for denied_principal in (
+        _principal(foreign_id, "USER"),
+        _principal(cross_admin_id, "ADMIN", tenant_id="tenant-b"),
+    ):
+        with pytest.raises(AuthError) as denied:
+            await authz.authorize(
+                denied_principal,
+                "EVALUATION_JOB",
+                str(job.job_id),
+                AuthorizationAction.READ,
+            )
+        assert denied.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -144,6 +324,13 @@ async def test_real_eddsa_bearer_identity_chain_uses_postgresql_roles(clean_data
     principal = await AuthService(clean_database, settings).authenticate(f"Bearer {token}")
     assert principal.user_id == user_id
     assert principal.roles == frozenset({"USER"})
+    assert principal.tenant_id == _DEFAULT_TENANT_ID
+
+    with pytest.raises(AuthError) as spoofed_tenant:
+        await AuthService(clean_database, settings).authenticate(
+            f"Bearer {_token(private, user_id, ['USER'], tenant_id='tenant-b')}"
+        )
+    assert spoofed_tenant.value.code == "AUTH_INVALID_TOKEN"
 
     with pytest.raises(AuthError) as escalated:
         await AuthService(clean_database, settings).authenticate(
@@ -340,13 +527,20 @@ async def test_real_http_service_cancel_is_limited_to_owned_run(clean_database, 
         clean_database,
         ("SERVICE",),
         principal_kind="SERVICE",
-        service_scopes=["localagent:evaluation:execute"],
+        service_scopes=["localagent:runtime:cancel"],
     )
     other_id = await _create_user(
         clean_database,
         ("SERVICE",),
         principal_kind="SERVICE",
-        service_scopes=["localagent:evaluation:execute"],
+        service_scopes=["localagent:runtime:cancel"],
+        tenant_id="tenant-b",
+    )
+    missing_scope_id = await _create_user(
+        clean_database,
+        ("SERVICE",),
+        principal_kind="SERVICE",
+        service_scopes=[],
     )
     run_id = "10000000-0000-0000-0000-000000000001"
     await AuthorizationService(clean_database).bind_new(
@@ -358,7 +552,8 @@ async def test_real_http_service_cancel_is_limited_to_owned_run(clean_database, 
             datetime.now(UTC),
             datetime.now(UTC) + timedelta(minutes=5),
             "SERVICE",
-            frozenset({"localagent:evaluation:execute"}),
+            frozenset({"localagent:runtime:cancel"}),
+            _DEFAULT_TENANT_ID,
         ),
         "RUN",
         run_id,
@@ -381,9 +576,13 @@ async def test_real_http_service_cancel_is_limited_to_owned_run(clean_database, 
     local_registry = SimpleNamespace(cancel=lambda *_: True)
 
     class _DurableControl:
+        calls = 0
+
         async def request_cancel(self, *_args, **_kwargs):
+            self.calls += 1
             return None
 
+    durable_control = _DurableControl()
     monkeypatch.setattr(
         server.app.state,
         "chat_service",
@@ -395,7 +594,7 @@ async def test_real_http_service_cancel_is_limited_to_owned_run(clean_database, 
         "runtime_services",
         replace(
             make_services(),
-            durable_run_control=_DurableControl(),
+            durable_run_control=durable_control,
             run_registry=local_registry,
         ),
         raising=False,
@@ -404,16 +603,137 @@ async def test_real_http_service_cancel_is_limited_to_owned_run(clean_database, 
     owner = TestClient(server.app).post(
         path,
         headers={
-            "Authorization": f"Bearer {_token(private, owner_id, ['SERVICE'], scopes=['localagent:evaluation:execute'])}"
+            "Authorization": f"Bearer {_token(private, owner_id, ['SERVICE'], scopes=['localagent:runtime:cancel'])}"
         },
     )
     foreign = TestClient(server.app).post(
         path,
         headers={
-            "Authorization": f"Bearer {_token(private, other_id, ['SERVICE'], scopes=['localagent:evaluation:execute'])}"
+            "Authorization": f"Bearer {_token(private, other_id, ['SERVICE'], scopes=['localagent:runtime:cancel'])}"
+        },
+    )
+    missing_scope = TestClient(server.app).post(
+        path,
+        headers={
+            "Authorization": f"Bearer {_token(private, missing_scope_id, ['SERVICE'])}"
         },
     )
 
     assert owner.status_code == 200
     assert owner.json()["status"] == "cancelled"
     assert foreign.status_code == 404
+    assert missing_scope.status_code == 403
+    assert durable_control.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_principal_mission_and_cancel_contract(clean_database, monkeypatch):
+    owner_id = await _create_user(clean_database, ("USER",))
+    foreign_id = await _create_user(clean_database, ("USER",))
+    mission = await MissionService(clean_database).create_mission(
+        "feature-v1",
+        mission_id="mission-v1",
+        owner_user_id=owner_id,
+        tenant_id=_DEFAULT_TENANT_ID,
+    )
+    run_id = "10000000-0000-0000-0000-000000000010"
+    await AuthorizationService(clean_database).bind_new(
+        _principal(owner_id, "USER"), "RUN", run_id
+    )
+    private = Ed25519PrivateKey.generate()
+    settings = SimpleNamespace(
+        jwt_public_key=private.public_key().public_bytes(
+            Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
+        ),
+        jwt_issuer="test-issuer",
+        jwt_audience="test-api",
+        jwt_allowed_algorithm="EdDSA",
+        jwt_clock_skew_seconds=0,
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "auth_service",
+        AuthService(clean_database, settings),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "authorization_service",
+        AuthorizationService(clean_database),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state, "rate_limiter", _disabled_rate_limiter(), raising=False
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "stage8_mission_service",
+        MissionService(clean_database),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "stage8_review_service",
+        BusinessReviewService(clean_database),
+        raising=False,
+    )
+
+    class _DurableControl:
+        calls: list[str] = []
+
+        async def request_cancel(self, requested_run_id, _reason):
+            self.calls.append(requested_run_id)
+
+    durable_control = _DurableControl()
+    local_registry = SimpleNamespace(cancel=lambda *_: True)
+    monkeypatch.setattr(
+        server.app.state,
+        "chat_service",
+        SimpleNamespace(run_registry=local_registry),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        server.app.state,
+        "runtime_services",
+        replace(
+            make_services(),
+            durable_run_control=durable_control,
+            run_registry=local_registry,
+        ),
+        raising=False,
+    )
+    client = TestClient(server.app)
+    owner_headers = {
+        "Authorization": f"Bearer {_token(private, owner_id, ['USER'])}"
+    }
+    foreign_headers = {
+        "Authorization": f"Bearer {_token(private, foreign_id, ['USER'])}"
+    }
+
+    principal = client.get("/api/v1/principal", headers=owner_headers)
+    assert principal.status_code == 200
+    assert principal.json()["principal"]["tenant_id"] == _DEFAULT_TENANT_ID
+    assert client.get(
+        f"/api/v1/missions/{mission.mission_id}", headers=owner_headers
+    ).status_code == 200
+
+    denied = client.get(
+        f"/api/v1/missions/{mission.mission_id}", headers=foreign_headers
+    )
+    assert denied.status_code == 404
+    assert set(denied.json()["error"]) == {"code", "message", "request_id"}
+
+    invalid = client.post("/api/v1/runs/not-a-uuid/cancel", headers=owner_headers)
+    assert invalid.status_code == 422
+    assert set(invalid.json()["error"]) == {"code", "message", "request_id"}
+
+    foreign_cancel = client.post(
+        f"/api/v1/runs/{run_id}/cancel", headers=foreign_headers
+    )
+    assert foreign_cancel.status_code == 404
+    assert durable_control.calls == []
+    owner_cancel = client.post(
+        f"/api/v1/runs/{run_id}/cancel", headers=owner_headers
+    )
+    assert owner_cancel.status_code == 200
+    assert durable_control.calls == [run_id]
