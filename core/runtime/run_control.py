@@ -183,6 +183,20 @@ class DurableRunControlService:
             if exists is None:
                 raise OwnershipLost("Run fencing token 已过期或不是 current owner")
 
+    async def assert_current_in_transaction(self, session, lease: RunLease) -> None:
+        """在调用方 mutation 的同一事务内锁定并验证 current Run fence。"""
+        self._validate_lease(lease)
+        await runtime_repository.lock_run_scope(session, lease.run_id)
+        current = (await session.execute(select(RunControlRow.run_id).where(
+            RunControlRow.run_id == lease.run_id,
+            RunControlRow.owner_id == lease.owner_id,
+            RunControlRow.fencing_token == lease.fencing_token,
+            RunControlRow.state == "ACTIVE",
+            RunControlRow.lease_until > func.now(),
+        ).with_for_update())).scalar_one_or_none()
+        if current is None:
+            raise OwnershipLost("Run fencing token 已过期或不是 current owner")
+
     async def finalize_terminal(
         self, lease: RunLease, event: RuntimeEvent, journal, client_event_feed=None
     ):

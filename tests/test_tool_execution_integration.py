@@ -32,6 +32,7 @@ from core.runtime.tool_registry import (
     ToolRegistryError,
     ToolRegistryErrorCode,
 )
+from core.runtime.tool_discovery import create_tool_snapshot
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from core.runtime.tool_governance import (
     PRODUCTION_AGENT_IDS,
@@ -527,6 +528,9 @@ def test_native_invalid_arguments_are_repaired_once_before_execution():
     )
     context, _ = create_run_context(entry_agent_id="core_router", timeout_seconds=2)
     context.attach_budget_ledger(BudgetLedger(RunBudget(max_tool_calls=1)))
+    context.attach_tool_resolution_snapshot(
+        create_tool_snapshot(context.run_id, router.tool_registry.registrations())
+    )
     tool_name = adapter.spec.tool_name
     responses = iter((
         SimpleNamespace(
@@ -596,6 +600,9 @@ def test_native_repair_failure_stops_before_governance_approval_and_execution(re
     approval_spy = ApprovalSpy()
     context, _ = create_run_context(entry_agent_id="core_router", timeout_seconds=2)
     context.attach_budget_ledger(BudgetLedger(RunBudget(max_tool_calls=1)))
+    context.attach_tool_resolution_snapshot(
+        create_tool_snapshot(context.run_id, router.tool_registry.registrations())
+    )
     tool_name = adapter.spec.tool_name
     responses = iter((
         SimpleNamespace(output="", response=SimpleNamespace(

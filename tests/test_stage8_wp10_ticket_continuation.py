@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
-from core.persistence.models import DurableApprovalRow
+from core.persistence.models import (
+    DurableApprovalRow,
+    DurableContinuationRow,
+    DurableToolInvocationRow,
+    ToolResolutionSnapshotRow,
+)
 from core.runtime import ToolExecutionService
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from core.runtime.approval import ApprovalDecisionValue, ApprovalStatus
@@ -20,6 +27,7 @@ from core.runtime.tool_governance import (
 )
 from core.runtime.tool_idempotency import DurableToolInvocationService
 from core.runtime.tool_registry import ToolRegistry
+from core.runtime.tool_snapshot_store import PostgresToolResolutionSnapshotStore
 from core.stage8 import TicketContinuationService
 from core.stage8 import repositories as stage8_repo
 from core.stage8 import FailureTriageResult, FailureTriageService, Stage8ExecutionService
@@ -59,6 +67,7 @@ def _runtime(database, platform):
         durable_run_control=DurableRunControlService(database),
         durable_approval=approvals,
         owner_id="stage8-wp10-test",
+        tool_snapshot_store=PostgresToolResolutionSnapshotStore(database),
     )
     return invoker, approvals
 
@@ -158,6 +167,9 @@ async def test_approve_is_durable_then_worker_creates_one_ticket_and_writes_back
     completed = await service.process_ready_once(continuation.continuation_id)
     assert completed.state == "SUCCEEDED"
     assert completed.external_ticket_id in platform.tickets
+    async with clean_database.session() as session:
+        generic = await session.get(DurableContinuationRow, continuation.continuation_id)
+        assert generic.state == "SUCCEEDED"
     assert completed.external_ticket_url == (
         f"mock://tickets/{completed.external_ticket_id}"
     )
@@ -366,7 +378,7 @@ class _UnknownInvoker:
     def __init__(self):
         self.calls = 0
 
-    async def resume_approved(self, continuation):
+    async def resume_approved(self, continuation, lease):
         self.calls += 1
         error = RuntimeError("provider response uncertain")
         error.outcome_unknown = True
@@ -390,3 +402,103 @@ async def test_unknown_is_terminal_for_worker_and_never_blind_retries(clean_data
     assert (await service.get(continuation.continuation_id)).state == "UNKNOWN"
     assert await service.process_ready_once(continuation.continuation_id) is None
     assert unknown_invoker.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invocation_state", "expected_code", "expected_business_state"),
+    [
+        ("UNKNOWN", "TOOL_INVOCATION_OUTCOME_UNKNOWN", "UNKNOWN"),
+        ("STARTED", "TOOL_INVOCATION_OUTCOME_UNKNOWN", "UNKNOWN"),
+        (
+            "COMMITTED",
+            "TOOL_INVOCATION_COMMITTED_REPAIR_REQUIRED",
+            "FAILED",
+        ),
+    ],
+)
+async def test_existing_tool_terminal_or_ambiguous_state_never_calls_provider(
+    clean_database, invocation_state, expected_code, expected_business_state
+):
+    platform, _, approvals, service, pending, continuation = await _pending_continuation(
+        clean_database, f"existing-{invocation_state.lower()}"
+    )
+    await _approve(approvals, service, pending, ApprovalDecisionValue.APPROVE)
+    async with clean_database.transaction() as session:
+        await session.execute(update(DurableToolInvocationRow).where(
+            DurableToolInvocationRow.invocation_id == continuation.tool_invocation_id
+        ).values(state=invocation_state))
+
+    with pytest.raises(Exception) as caught:
+        await service.process_ready_once(continuation.continuation_id)
+    assert getattr(caught.value, "safe_error_code", None) == expected_code
+    stored = await service.get(continuation.continuation_id)
+    assert stored.state == expected_business_state
+    assert stored.error_code == expected_code
+    assert platform.tickets == {}
+
+
+@pytest.mark.asyncio
+async def test_snapshot_drift_fails_closed_without_rediscovery_or_tool_call(clean_database):
+    platform, _, approvals, service, pending, continuation = await _pending_continuation(
+        clean_database, "snapshot-drift"
+    )
+    await _approve(approvals, service, pending, ApprovalDecisionValue.APPROVE)
+    async with clean_database.transaction() as session:
+        row = await session.get(ToolResolutionSnapshotRow, pending["run_id"])
+        items = [dict(item) for item in row.tool_items]
+        items[0]["schema_digest"] = "0" * 64
+        row.tool_items = items
+        digest_payload = {
+            "run_id": row.run_id,
+            "registry_digest": row.registry_digest,
+            "selection_algorithm_version": row.selection_algorithm_version,
+            "snapshot_schema_version": row.snapshot_schema_version,
+            "selection_query_digest": row.selection_query_digest,
+            "tools": items,
+        }
+        row.snapshot_digest = hashlib.sha256(json.dumps(
+            digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
+
+    with pytest.raises(Exception) as caught:
+        await service.process_ready_once(continuation.continuation_id)
+    assert getattr(getattr(caught.value, "error_code", None), "value", None) == (
+        "TOOL_SNAPSHOT_SCHEMA_DRIFT"
+    )
+    assert (await service.get(continuation.continuation_id)).state == "FAILED"
+    assert platform.tickets == {}
+
+
+@pytest.mark.asyncio
+async def test_approval_is_rechecked_after_ready_and_invalidated_stops_tool(clean_database):
+    platform, _, approvals, service, pending, continuation = await _pending_continuation(
+        clean_database, "approval-invalidated"
+    )
+    await _approve(approvals, service, pending, ApprovalDecisionValue.APPROVE)
+    async with clean_database.transaction() as session:
+        await session.execute(update(DurableApprovalRow).where(
+            DurableApprovalRow.approval_id == continuation.approval_id
+        ).values(state="INVALIDATED", invalidated_reason="CANCELLED"))
+
+    with pytest.raises(Exception, match="not approved"):
+        await service.process_ready_once(continuation.continuation_id)
+    assert (await service.get(continuation.continuation_id)).state == "FAILED"
+    assert platform.tickets == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_stops_ticket_resume_before_tool_execution(clean_database):
+    platform, invoker, approvals, service, pending, continuation = await _pending_continuation(
+        clean_database, "cancelled-run"
+    )
+    await _approve(approvals, service, pending, ApprovalDecisionValue.APPROVE)
+    await invoker.durable_run_control.request_cancel(pending["run_id"], "user cancelled")
+
+    stopped = await service.process_ready_once(continuation.continuation_id)
+    assert stopped.state == "FAILED"
+    assert stopped.error_code == "RUN_CANCELLED"
+    assert platform.tickets == {}
+    async with clean_database.session() as session:
+        generic = await session.get(DurableContinuationRow, continuation.continuation_id)
+        assert generic.state == "CANCELLED"

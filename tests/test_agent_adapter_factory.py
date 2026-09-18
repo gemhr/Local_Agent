@@ -39,6 +39,7 @@ from core.runtime.tool_registry import (
     ToolRegistration,
     ToolRegistry,
 )
+from core.runtime.tool_discovery import create_tool_snapshot
 
 
 def default_adapter_map():
@@ -214,19 +215,31 @@ def _deny_router(tool_name: str = "alpha_tool") -> AgentRouter:
     router.tool_governance_service = ToolGovernanceService(
         catalog, DEFAULT_AGENT_REGISTRY
     )
-    router._build_messages = lambda **_: [
-        {"role": "system", "content": "s"},
-        {"role": "user", "content": "q"},
-    ]
-    router._plan_tool_call = lambda _m, _a: (tool_name, "x")
+    def build_messages(**kwargs):
+        context = kwargs.get("run_context")
+        if context is not None and context.tool_resolution_snapshot is None:
+            context.attach_tool_resolution_snapshot(
+                create_tool_snapshot(context.run_id, registry.registrations())
+            )
+        return [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "q"},
+        ]
+
+    router._build_messages = build_messages
+    router._plan_tool_call = lambda *_args, **_kwargs: (tool_name, "x")
     return router
 
 
 def test_governance_denial_flows_through_single_agent_adapter_as_safe_result() -> None:
     """COORDINATED-facing internal path：denial 是安全业务结果，不是 CALL_FAILED。"""
-    adapter = AgentRouterSingleAgentAdapter(_deny_router())
+    router = _deny_router()
+    adapter = AgentRouterSingleAgentAdapter(router)
     context, _ = create_run_context(entry_agent_id="core_router")
     context.attach_budget_ledger(BudgetLedger(RunBudget()))
+    context.attach_tool_resolution_snapshot(
+        create_tool_snapshot(context.run_id, router.tool_registry.registrations())
+    )
     request = AgentExecutionRequest(
         step_id="step-1",
         agent_id="core_router",

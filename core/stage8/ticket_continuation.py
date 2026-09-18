@@ -6,10 +6,12 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
+from sqlalchemy import func
 
 from core.runtime.approval import ApprovalDecisionValue, ApprovalStatus
 from core.stage8 import repositories as repo
 from core.stage8.service import Stage8ConflictError, Stage8NotFoundError
+from core.runtime.continuation import GenericContinuationService, payload_digest
 
 
 def _digest(payload: dict) -> str:
@@ -69,17 +71,42 @@ class TicketContinuationService:
                 "invocation_binding_digest": approval["invocation_binding_digest"],
                 "request_digest": request_digest, "request_snapshot": snapshot,
             })
+            await repo.add_generic_continuation(session, {
+                "continuation_id": row.continuation_id, "run_id": approval["run_id"],
+                "continuation_kind": "STAGE8_TICKET", "subject_type": "ticket_draft",
+                "subject_id": ticket_draft_id, "state": "WAITING", "payload": {
+                    "approval_id": approval["approval_id"], "tool_invocation_id": approval["invocation_id"],
+                    "invocation_binding_digest": approval["invocation_binding_digest"],
+                    "request_digest": request_digest,
+                }, "payload_digest": payload_digest({
+                    "approval_id": approval["approval_id"], "tool_invocation_id": approval["invocation_id"],
+                    "invocation_binding_digest": approval["invocation_binding_digest"], "request_digest": request_digest,
+                })
+            })
             return _record(row)
 
     async def on_approval_decision(self, approval_id: str, decision: ApprovalDecisionValue):
+        approval_status = await self.durable_approval.status(approval_id)
         async with self.database.transaction() as session:
             row = await repo.get_ticket_continuation_by_approval(session, approval_id, for_update=True)
             if row is None:
                 return None
             if row.state != "PENDING_APPROVAL":
                 return _record(row)
-            row.state = "READY" if decision is ApprovalDecisionValue.APPROVE else "REJECTED"
+            if approval_status is ApprovalStatus.APPROVED:
+                row.state = "READY"
+            elif approval_status is ApprovalStatus.REJECTED or (
+                approval_status is not None
+                and approval_status.name.startswith("INVALIDATED")
+            ):
+                row.state = "REJECTED"
+            else:
+                return _record(row)
             row.version += 1
+            if row.state == "READY":
+                generic = await repo.get_generic_continuation(session, row.continuation_id, for_update=True)
+                if generic is not None and generic.state == "WAITING":
+                    generic.state = "READY"; generic.updated_at = func.now()
             return _record(row)
 
     async def decide(self, continuation_id: str, decision: ApprovalDecisionValue, *, actor_id: str | None = None):
@@ -129,47 +156,95 @@ class TicketContinuationService:
                         candidate.state = "REJECTED"; candidate.version += 1
                     elif status is ApprovalStatus.APPROVED and candidate.state == "PENDING_APPROVAL":
                         candidate.state = "READY"; candidate.version += 1
-                if candidate.state == "READY":
-                    selected = await repo.claim_ticket_continuation(session, candidate.continuation_id)
-                    if selected is not None:
-                        break
+                if candidate.state in {"READY", "PROCESSING", "SUCCEEDED"}:
+                    selected = candidate
+                    break
             if selected is None:
                 return None
             continuation = _record(selected)
+        run_control = self.durable_run_control or getattr(
+            self.tool_invoker, "durable_run_control", None
+        )
+        generic = GenericContinuationService(
+            self.database, lease_seconds=30, run_control=run_control
+        )
+        generic_claim = await generic.claim_ready(self.owner_id, continuation_id=continuation.continuation_id)
+        if generic_claim is None:
+            return None
+
+        async def resume_ticket(_generic_item, lease):
+            async with self.database.transaction() as session:
+                selected = await repo.get_ticket_continuation(
+                    session, continuation.continuation_id, for_update=True
+                )
+                if selected is None or selected.state not in {
+                    "READY", "PROCESSING", "SUCCEEDED"
+                }:
+                    raise Stage8ConflictError("TICKET_CONTINUATION_STATE_CONFLICT")
+                if selected.state == "SUCCEEDED":
+                    return _record(selected)
+                if selected.state == "READY":
+                    selected.state = "PROCESSING"
+                    selected.version += 1
+                    selected.updated_at = func.now()
+                await session.flush()
+                current = _record(selected)
+
+            if _digest(current.request_snapshot) != current.request_digest:
+                error = Stage8ConflictError("ticket request snapshot digest mismatch")
+                error.safe_error_code = "TICKET_REQUEST_DIGEST_MISMATCH"
+                raise error
+            result = await self.tool_invoker.resume_approved(current, lease)
+            ticket_id = result.get("ticket_id")
+            ticket_url = result.get("ticket_url")
+            if (
+                not isinstance(ticket_id, str) or not ticket_id
+                or not isinstance(ticket_url, str) or not ticket_url
+            ):
+                error = ValueError("ticket platform result is missing ticket identity")
+                error.safe_error_code = "TICKET_PLATFORM_RESULT_INVALID"
+                raise error
+            async with self.database.transaction() as session:
+                await generic.run_control.assert_current_in_transaction(session, lease)
+                stored = await repo.get_ticket_continuation(
+                    session, current.continuation_id, for_update=True
+                )
+                if stored is None or stored.state != "PROCESSING":
+                    raise Stage8ConflictError("TICKET_CONTINUATION_STATE_CONFLICT")
+                stored.state = "SUCCEEDED"
+                stored.external_ticket_id = ticket_id
+                stored.external_ticket_url = ticket_url
+                stored.version += 1
+                return _record(stored)
+
         try:
-            if _digest(continuation.request_snapshot) != continuation.request_digest:
-                raise ValueError("ticket request snapshot digest mismatch")
-            result = await self.tool_invoker.resume_approved(continuation)
+            result, terminal = await generic.resume_claimed(
+                generic_claim, resume_ticket
+            )
         except Exception as exc:
-            # Tool Runtime owns UNKNOWN semantics; the worker never retries a
-            # non-idempotent call after an uncertain outcome.
-            code = getattr(exc, "safe_error_code", "TICKET_CONTINUATION_FAILED")
+            code = (
+                getattr(exc, "safe_error_code", None)
+                or getattr(exc, "error_code", None)
+                or "TICKET_CONTINUATION_FAILED"
+            )
+            if hasattr(code, "value"):
+                code = code.value
             async with self.database.transaction() as session:
                 current = await repo.get_ticket_continuation(session, continuation.continuation_id, for_update=True)
-                if current is not None:
+                if current is not None and current.state in {"READY", "PROCESSING"}:
                     current.state = "UNKNOWN" if getattr(exc, "outcome_unknown", False) else "FAILED"
                     current.error_code = code
                     current.version += 1
             raise
-        ticket_id = result.get("ticket_id")
-        ticket_url = result.get("ticket_url")
-        if not isinstance(ticket_id, str) or not ticket_id or not isinstance(ticket_url, str) or not ticket_url:
+        if terminal.state == "CANCELLED":
             async with self.database.transaction() as session:
                 current = await repo.get_ticket_continuation(session, continuation.continuation_id, for_update=True)
-                if current is not None:
+                if current is not None and current.state in {"READY", "PROCESSING"}:
                     current.state = "FAILED"
-                    current.error_code = "TICKET_PLATFORM_RESULT_INVALID"
+                    current.error_code = "RUN_CANCELLED"
                     current.version += 1
-            raise ValueError("ticket platform result is missing ticket identity")
-        async with self.database.transaction() as session:
-            current = await repo.get_ticket_continuation(session, continuation.continuation_id, for_update=True)
-            if current is None:
-                return None
-            current.state = "SUCCEEDED"
-            current.external_ticket_id = ticket_id
-            current.external_ticket_url = ticket_url
-            current.version += 1
-            return _record(current)
+            return await self.get(continuation.continuation_id)
+        return result
 
 
 __all__ = ["TicketContinuation", "TicketContinuationService"]

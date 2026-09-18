@@ -67,6 +67,7 @@ from core.persistence import (
 from core.runtime.run_control import DurableRunControlService
 from core.runtime.durable_approval import DurableApprovalService
 from core.runtime.tool_idempotency import DurableToolInvocationService
+from core.runtime.tool_snapshot_store import PostgresToolResolutionSnapshotStore
 from core.observability import HttpObservabilityMiddleware, ObservabilityService
 from core.redis_service import (
     RagQueryCache,
@@ -574,6 +575,7 @@ async def lifespan(app: FastAPI):
     durable_run_control = DurableRunControlService(persistence_database)
     durable_approval = DurableApprovalService(persistence_database)
     durable_tool_invocation = DurableToolInvocationService(persistence_database)
+    tool_snapshot_store = PostgresToolResolutionSnapshotStore(persistence_database)
     app.state.durable_run_control = durable_run_control
     app.state.auth_service = AuthService(persistence_database, settings)
     app.state.authorization_service = AuthorizationService(persistence_database)
@@ -1120,6 +1122,8 @@ async def lifespan(app: FastAPI):
             tool_registry=tool_registry,
             tool_governance_service=tool_governance_service,
             resource_authorization_service=resource_authorization_service,
+            tool_discovery_top_k=settings.tool_discovery_top_k,
+            tool_snapshot_store=tool_snapshot_store,
             retrieval_strategy=settings.retrieval_strategy.value,
             hybrid_generation=hybrid_validated_generation,
             hybrid_rrf_profile=(
@@ -1315,6 +1319,7 @@ async def lifespan(app: FastAPI):
         review_service=app.state.stage8_review_service,
         test_plan_repository=TestPlanRepository(persistence_database),
     )
+    router.tool_discovery.metrics_recorder = runtime_metrics
     governed_stage8_tool_invoker = GovernedToolInvoker(
         tool_registry,
         tool_governance_service,
@@ -1323,6 +1328,7 @@ async def lifespan(app: FastAPI):
         durable_run_control=runtime_services.durable_run_control,
         durable_approval=runtime_services.durable_approval,
         owner_id=runtime_services.run_control_owner_id,
+        tool_snapshot_store=tool_snapshot_store,
     )
     app.state.stage8_ticket_continuation_service = TicketContinuationService(
         persistence_database,

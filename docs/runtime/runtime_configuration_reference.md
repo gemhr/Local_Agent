@@ -94,6 +94,7 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_SUMMARY_KEEP_RECENT` | MemoryManager/router | int | profile-derived | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `12` |
 | `LOCAL_AGENT_SUMMARY_MAX_CHARS` | MemoryManager/router | int | profile-derived | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `1600` |
 | `LOCAL_AGENT_RAG_TOP_K` | retrieval | int | profile-derived | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `3` |
+| `LOCAL_AGENT_TOOL_DISCOVERY_TOP_K` | ToolDiscovery | int | `10` | integer `1..100` | no | APPLICATION_SCOPE | yes | internal config | 候选数上限；非法或越界显式值 fail closed | `10` |
 | `LOCAL_AGENT_RAG_MIN_SCORE` | retrieval | float | `0.55` | 0..1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `0.55` |
 | `LOCAL_AGENT_RAG_DOC_MAX_CHARS` | retrieval | int | profile-derived | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `1000` |
 | `LOCAL_AGENT_RAG_CONTEXT_MAX_CHARS` | retrieval | int | profile-derived | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `2400` |

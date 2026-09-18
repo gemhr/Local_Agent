@@ -520,6 +520,31 @@ class ClientDeliveryEventRow(PersistenceBase):
     )
 
 
+class ToolResolutionSnapshotRow(PersistenceBase):
+    """每个 Run 唯一且不可变的 Tool contract snapshot。"""
+
+    __tablename__ = "tool_resolution_snapshots"
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runtime_run_control.run_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    snapshot_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    snapshot_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    registry_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    selection_algorithm_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    selection_query_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    tool_items: Mapped[list] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "snapshot_schema_version > 0",
+            name="ck_tool_resolution_snapshot_schema_version",
+        ),
+    )
+
+
 class RunControlRow(PersistenceBase):
     """Durable Run control aggregate；不承接 Journal terminal truth。"""
 
@@ -647,6 +672,34 @@ class DurableToolInvocationRow(PersistenceBase):
         ),
         CheckConstraint("version > 0", name="ck_runtime_tool_invocation_version"),
         Index("ix_runtime_tool_invocations_run_state", "run_id", "state"),
+    )
+
+
+class DurableContinuationRow(PersistenceBase):
+    """Generic durable resume scheduling aggregate; not a side-effect authority."""
+
+    __tablename__ = "runtime_continuations"
+    continuation_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runtime_run_control.run_id", ondelete="RESTRICT"), nullable=False)
+    continuation_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'WAITING'"))
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    payload_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    claim_token: Mapped[str | None] = mapped_column(String(255))
+    claimed_by: Mapped[str | None] = mapped_column(String(255))
+    claim_deadline_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    last_error_code: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    __table_args__ = (
+        CheckConstraint("state IN ('WAITING', 'READY', 'PROCESSING', 'SUCCEEDED', 'FAILED', 'CANCELLED')", name="ck_runtime_continuation_state"),
+        CheckConstraint("attempt_count >= 0", name="ck_runtime_continuation_attempt_count"),
+        Index("ix_runtime_continuations_ready", "state", "created_at"),
+        Index("ix_runtime_continuations_expired", "state", "claim_deadline_at"),
+        Index("ix_runtime_continuations_run", "run_id", "created_at"),
     )
 
 
@@ -977,11 +1030,13 @@ CANONICAL_TABLES = (
     "outbox_events",
     "runtime_event_journal",
     "client_delivery_events",
+    "tool_resolution_snapshots",
     "runtime_run_control_commands",
     "runtime_run_control",
     "runtime_tool_approvals",
     "runtime_tool_execution_claims",
     "runtime_tool_invocations",
+    "runtime_continuations",
     "runtime_snapshots",
     "event_consumption_checkpoint",
     "consumer_processed_events",
@@ -1014,11 +1069,13 @@ __all__ = [
     "UserRow",
     "ProjectSemanticMemoryRow",
     "RuntimeEventJournalRow",
+    "ToolResolutionSnapshotRow",
     "RunControlRow",
     "RunControlCommandRow",
     "DurableApprovalRow",
     "DurableToolExecutionClaimRow",
     "DurableToolInvocationRow",
+    "DurableContinuationRow",
     "RuntimeSnapshotRow",
     "FeatureTestMissionRow",
     "MissionRunReferenceRow",

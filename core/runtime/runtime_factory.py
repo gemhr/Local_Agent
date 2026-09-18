@@ -620,6 +620,12 @@ class CoordinatedRuntimeFactory:
             )
             run_context.attach_durable_lease(durable_lease)
             run_context.attach_project_memory_access(project_identity, project_grants)
+            prepare_tool_snapshot = getattr(
+                self._router, "prepare_tool_resolution_snapshot", None
+            )
+            if callable(prepare_tool_snapshot):
+                # Snapshot 持久化/兼容校验完成后，才允许 PlanResolver 或模型运行。
+                await prepare_tool_snapshot(run_context, agent_id, query)
             ledger = BudgetLedger(
                 budget or RunBudget(),
                 deadline_remaining=run_context.remaining_seconds,

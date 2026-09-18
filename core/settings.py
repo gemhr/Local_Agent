@@ -696,6 +696,7 @@ class Settings:
     runtime_shutdown_grace_seconds: float
     runtime_component_close_timeout_seconds: float
     metrics_tool_name_allowlist: tuple[str, ...]
+    tool_discovery_top_k: int
     knowledge_collection_name: str
     knowledge_chunk_size: int
     knowledge_chunk_overlap: int
@@ -1333,6 +1334,9 @@ class Settings:
                     "LOCAL_AGENT_METRICS_TOOL_NAME_ALLOWLIST", ""
                 ).split(",")
                 if value.strip()
+            ),
+            tool_discovery_top_k=_env_strict_int(
+                "LOCAL_AGENT_TOOL_DISCOVERY_TOP_K", 10, minimum=1, maximum=100
             ),
             knowledge_collection_name=os.getenv(
                 "LOCAL_AGENT_KB_COLLECTION", "huawei_wiki_collection"

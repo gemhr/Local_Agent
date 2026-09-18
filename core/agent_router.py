@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, Callable, Generator, Mapping, Optional
 
 from core.memory_manager import MemoryManager
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
-from core.runtime.tool_registry import ToolRegistry
+from core.runtime.tool_registry import ToolRegistry, ToolRegistryError, ToolRegistryErrorCode
+from core.runtime.tool_discovery import (
+    ToolCatalog,
+    ToolDiscovery,
+    hydrate_tool_snapshot,
+)
 from core.runtime.tool_contract import ToolInvocation
 from core.runtime.approval import (
     ApprovalCommandErrorCode,
@@ -129,6 +134,9 @@ class AgentRouter:
         tool_registry: ToolRegistry | None = None,
         tool_governance_service: ToolGovernanceService | None = None,
         resource_authorization_service: ResourceAuthorizationService | None = None,
+        tool_discovery_top_k: int = 10,
+        tool_snapshot_store=None,
+        metrics_recorder=None,
     ) -> None:
         """初始化路由器依赖与本地编排参数。"""
         self.llm = llm_engine
@@ -276,6 +284,14 @@ class AgentRouter:
         if not tool_registry.frozen:
             raise RuntimeError("ToolRegistry 必须在注入 AgentRouter 前冻结")
         self.tool_registry = tool_registry
+        self.tool_catalog = ToolCatalog(tool_registry)
+        self.tool_discovery = ToolDiscovery(
+            self.tool_catalog,
+            top_k=tool_discovery_top_k,
+            governance=tool_governance_service,
+            metrics_recorder=metrics_recorder,
+        )
+        self.tool_snapshot_store = tool_snapshot_store
         # WP2-B Tool Governance：生产 Composition Root 必须显式注入；未注入时
         # 使用冻结空 policy 的 deterministic deny-all 兼容 Service（非生产使用，
         # 不隐含 allow-all，无 module-global mutable authority）。任何 Tool 执行
@@ -410,7 +426,9 @@ class AgentRouter:
             )
         return "\n".join(lines)
 
-    def _build_tool_planner_prompt(self, agent_id: str) -> str:
+    def _build_tool_planner_prompt(
+        self, agent_id: str, registrations=None
+    ) -> str:
         """构造工具规划提示词。"""
         config = self.agents_config.get(agent_id, self.agents_config["core_router"])
         lines = [
@@ -424,7 +442,14 @@ class AgentRouter:
             "不得用 approved、low_risk 或类似文字决定审批、风险或执行权限；这些由 Runtime 决定。",
             "不要直接回答用户。",
         ]
-        descriptors = self.tool_registry.descriptors()
+        descriptors = tuple(
+            registration.descriptor
+            for registration in (
+                registrations
+                if registrations is not None
+                else self.tool_registry.registrations()
+            )
+        )
         if descriptors:
             lines.append("可用工具：")
             for descriptor in descriptors:
@@ -1569,9 +1594,13 @@ class AgentRouter:
         self,
         messages: list[dict[str, str]],
         agent_id: str,
+        run_context: RunContext | None = None,
     ) -> Optional[tuple[str, str]]:
         """决定当前回答前是否需要调用工具。"""
-        if not self.tool_registry.descriptors():
+        registrations = self._tool_registrations_for_run(
+            agent_id, messages[-1]["content"], run_context
+        )
+        if not registrations:
             return None
         explicit_tool_call = self._extract_explicit_tool_call(
             messages[-1]["content"]
@@ -1584,7 +1613,7 @@ class AgentRouter:
         planner_messages = list(messages)
         planner_messages[0] = {
             "role": "system",
-            "content": self._build_tool_planner_prompt(agent_id),
+            "content": self._build_tool_planner_prompt(agent_id, registrations),
         }
         planner_response = self._collect_model_response(
             planner_messages,
@@ -1597,12 +1626,80 @@ class AgentRouter:
         )
         return self._parse_tool_call(planner_response)
 
+    def _tool_registrations_for_run(
+        self, agent_id: str, user_query: str, run_context: RunContext | None
+    ):
+        """Run 首次进入 Tool 路径时创建并复用 Tool Resolution Snapshot。"""
+        # 保留历史 object.__new__ 测试桩的最小兼容 seam；生产构造始终在
+        # __init__ 中注入同一 Catalog/Discovery。
+        if not hasattr(self, "tool_discovery"):
+            self.tool_catalog = ToolCatalog(self.tool_registry)
+            self.tool_discovery = ToolDiscovery(
+                self.tool_catalog, governance=self.tool_governance_service
+            )
+        if run_context is None:
+            return self.tool_discovery.discover_tools(user_query, agent_id)
+        snapshot = run_context.tool_resolution_snapshot
+        if snapshot is None:
+            if getattr(self, "tool_snapshot_store", None) is not None:
+                raise RuntimeError(
+                    "durable ToolResolutionSnapshot 必须在 planning 前完成 hydration"
+                )
+            candidates = self.tool_discovery.discover_tools(
+                user_query, agent_id, run_context
+            )
+            snapshot = self.tool_discovery.create_tool_snapshot(
+                run_context.run_id, candidates, selection_query=user_query
+            )
+            run_context.attach_tool_resolution_snapshot(snapshot)
+        return snapshot.registrations()
+
+    async def prepare_tool_resolution_snapshot(
+        self, run_context: RunContext, agent_id: str, user_query: str
+    ):
+        """在任何 planning/model tool exposure 前 load-or-create durable snapshot。"""
+        if run_context.tool_resolution_snapshot is not None:
+            return run_context.tool_resolution_snapshot
+        if self.tool_snapshot_store is not None:
+            snapshot = await self.tool_snapshot_store.load(run_context.run_id)
+            if snapshot is None:
+                candidates = self.tool_discovery.discover_tools(
+                    user_query, agent_id, run_context
+                )
+                candidate = self.tool_discovery.create_tool_snapshot(
+                    run_context.run_id,
+                    candidates,
+                    selection_query=user_query,
+                )
+                # persist 成功是 Planner 获取 Tool 的前置条件；异常原样 fail closed。
+                snapshot = await self.tool_snapshot_store.save(candidate)
+            snapshot = hydrate_tool_snapshot(snapshot, self.tool_registry)
+        else:
+            candidates = self.tool_discovery.discover_tools(
+                user_query, agent_id, run_context
+            )
+            snapshot = self.tool_discovery.create_tool_snapshot(
+                run_context.run_id, candidates, selection_query=user_query
+            )
+        run_context.attach_tool_resolution_snapshot(snapshot)
+        return snapshot
+
+    async def load_tool_resolution_snapshot(self, run_id: str):
+        """WP4 resume seam：只 load/validate，不重新 discovery。"""
+        if self.tool_snapshot_store is None:
+            raise RuntimeError("durable ToolResolutionSnapshot store 未配置")
+        snapshot = await self.tool_snapshot_store.load(run_id)
+        if snapshot is None:
+            raise RuntimeError("ToolResolutionSnapshot 不存在")
+        return hydrate_tool_snapshot(snapshot, self.tool_registry)
+
     def _repair_tool_call(
         self,
         *,
         messages: list[dict[str, str]],
         agent_id: str,
         tool_name: str,
+        registration,
         safe_error_code: str,
     ) -> str | None:
         """对 planner 参数只提供一次、仅限 validation 前的修复机会。"""
@@ -1610,7 +1707,7 @@ class AgentRouter:
         repair_messages[0] = {
             "role": "system",
             "content": (
-                self._build_tool_planner_prompt(agent_id)
+                self._build_tool_planner_prompt(agent_id, (registration,))
                 + f"\n上一份 {tool_name} 参数未通过校验（{safe_error_code}）。"
                 "请检查必填业务字段、字段类型和 enum 值；不要补写运行时或测试字段。"
                 "请仅根据用户业务意图重新输出该工具的一行 CALL；无法确定则输出 NO_TOOL。"
@@ -1639,6 +1736,7 @@ class AgentRouter:
         tool_args: str,
         messages: list[dict[str, str]],
         agent_id: str,
+        registration=None,
         allow_repair: bool = True,
     ) -> ToolInvocation:
         """在进入 invocation governance 前最多修复一次 planner 参数。"""
@@ -1653,6 +1751,9 @@ class AgentRouter:
                     messages=messages,
                     agent_id=agent_id,
                     tool_name=tool_name,
+                    registration=(
+                        registration or self.tool_registry.require(tool_name)
+                    ),
                     safe_error_code=exc.safe_error_code,
                 )
                 if repaired_args is None:
@@ -1801,14 +1902,29 @@ class AgentRouter:
         )
         if native_selection:
             return messages
-        tool_call = tool_call if tool_call is not None else self._plan_tool_call(messages, agent_id)
+        if run_context is not None and run_context.tool_resolution_snapshot is None:
+            self._tool_registrations_for_run(agent_id, user_query, run_context)
+        tool_call = tool_call if tool_call is not None else self._plan_tool_call(
+            messages, agent_id, run_context
+        )
         if not tool_call:
             return messages
 
         tool_name, tool_args = tool_call
         if run_context is not None:
             run_context.raise_if_inactive()
-        registration = self.tool_registry.require(tool_name)
+        registration = (
+            run_context.tool_resolution_snapshot.resolve(tool_name)
+            if run_context is not None
+            and run_context.tool_resolution_snapshot is not None
+            else self.tool_registry.require(tool_name)
+        )
+        if registration is None and (
+            run_context is None or run_context.tool_resolution_snapshot is None
+        ):
+            registration = self.tool_registry.resolve(tool_name)
+        if registration is None:
+            raise ToolRegistryError(ToolRegistryErrorCode.NOT_REGISTERED, "Tool 未注册")
         adapter = registration.adapter
         active_context = run_context
         if active_context is None:
@@ -1836,7 +1952,8 @@ class AgentRouter:
                 )
         try:
             invocation = validated_invocation or self._build_valid_tool_invocation(
-                adapter=adapter, tool_name=tool_name, tool_args=tool_args,
+                adapter=adapter, registration=registration,
+                tool_name=tool_name, tool_args=tool_args,
                 messages=messages, agent_id=agent_id,
                 allow_repair=native_assistant_message is None,
             )
@@ -2112,10 +2229,10 @@ class AgentRouter:
                 if invocation_result_out is not None:
                     invocation_result_out.append(invocation_result)
                 return invocation_result.output
-            tools = [
-                registration.native_function_definition()
-                for registration in self.tool_registry.registrations()
-            ]
+            registrations = self._tool_registrations_for_run(
+                agent_id, user_query, run_context
+            )
+            tools = [registration.native_function_definition() for registration in registrations]
             invocation_result = self._invoke_model_contract(
                 agent_id=agent_id,
                 user_query=user_query,
@@ -2136,7 +2253,11 @@ class AgentRouter:
             )
             native_call = invocation_result.response.native_tool_call
             if native_call is not None:
-                registration = self.tool_registry.resolve(native_call.tool_name)
+                if run_context.tool_resolution_snapshot is None:
+                    raise RuntimeError("Run ToolResolutionSnapshot 未绑定")
+                registration = run_context.tool_resolution_snapshot.resolve(
+                    native_call.tool_name
+                )
                 if registration is None:
                     raise ToolExecutionFailed(
                         ToolExecutionError(
@@ -2483,6 +2604,9 @@ class AgentRouter:
         调用方（ResolvedSingleStepDriver）传入；delegated specialist /
         synthesis 不传（SPECIALIST_MEMORY_VISIBILITY = NO，fail closed）。
         """
+        # Run 创建后立即解析并绑定 Tool Snapshot；Planner/Execution 只消费该
+        # 快照，不在 Step 边界重新读取 ToolRegistry。
+        self._tool_registrations_for_run(agent_id, user_query, run_context)
         return self._run_agent_once(
             agent_id=agent_id,
             user_query=user_query,

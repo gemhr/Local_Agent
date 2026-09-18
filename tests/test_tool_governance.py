@@ -58,6 +58,7 @@ from core.runtime.tool_registry import (
     ToolRegistration,
     ToolRegistry,
 )
+from core.runtime.tool_discovery import create_tool_snapshot
 from tools.complex_workflow_simulator import InMemoryWorkflowStateStore
 from tools.registry import register_all_tools
 
@@ -141,6 +142,9 @@ class CountingGovernedAdapter(ToolAdapter):
             idempotency=idempotency,
         )
 
+    def llm_input_schema(self) -> dict[str, object]:
+        return {"type": "string"}
+
     def build_invocation(self, argument_text: str) -> ToolInvocation:
         self.build_calls += 1
         return ToolInvocation.create(
@@ -208,11 +212,19 @@ def make_router(
     router.tool_registry = registry
     router.tool_governance_service = governance_service
     router.tool_execution_service = service or ToolExecutionService()
-    router._build_messages = lambda **_: [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": "query"},
-    ]
-    router._plan_tool_call = lambda _messages, _agent_id: (tool_name, tool_args)
+    def build_messages(**kwargs):
+        context = kwargs.get("run_context")
+        if context is not None and context.tool_resolution_snapshot is None:
+            context.attach_tool_resolution_snapshot(
+                create_tool_snapshot(context.run_id, registry.registrations())
+            )
+        return [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "query"},
+        ]
+
+    router._build_messages = build_messages
+    router._plan_tool_call = lambda *_args, **_kwargs: (tool_name, tool_args)
     return router
 
 

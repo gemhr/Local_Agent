@@ -24,6 +24,8 @@ from core.runtime import (
     create_run_context,
 )
 from core.runtime.tool_contract import safe_key_digest
+from core.runtime.tool_discovery import create_tool_snapshot, hydrate_tool_snapshot
+from core.runtime.tool_idempotency import ToolInvocationState
 from core.runtime.tool_governance import (
     ToolGovernanceContext,
     ToolGovernanceErrorCode,
@@ -136,6 +138,7 @@ class GovernedToolInvoker:
         durable_run_control,
         durable_approval,
         owner_id: str,
+        tool_snapshot_store=None,
     ):
         self.registry = registry
         self.governance = governance
@@ -144,6 +147,7 @@ class GovernedToolInvoker:
         self.durable_run_control = durable_run_control
         self.durable_approval = durable_approval
         self.owner_id = owner_id
+        self.tool_snapshot_store = tool_snapshot_store
 
     async def __call__(
         self,
@@ -193,6 +197,12 @@ class GovernedToolInvoker:
         if decision.outcome is ToolGovernanceOutcome.APPROVAL_REQUIRED:
             lease = await self.durable_run_control.claim(run_id, self.owner_id)
             try:
+                if self.tool_snapshot_store is not None:
+                    await self.tool_snapshot_store.save(
+                        create_tool_snapshot(
+                            run_id, (registration,), selection_query=tool_name
+                        )
+                    )
                 risk_facts = tuple(
                     fact.value if hasattr(fact, "value") else str(fact)
                     for fact in decision.risk_facts
@@ -295,16 +305,47 @@ class GovernedToolInvoker:
             )
         return json.loads(result.output.content)
 
-    async def resume_approved(self, continuation):
+    async def resume_approved(self, continuation, lease):
         """Resume exactly the invocation bound to the durable approval."""
+        if lease is None:
+            raise Stage8ValidationError("ticket continuation requires current Run lease")
+        await self.durable_run_control.assert_current(lease)
         approval = await self.durable_approval.get(continuation.approval_id)
-        if approval is None or (await self.durable_approval.status(continuation.approval_id)) is not ApprovalStatus.APPROVED:
-            raise Stage8ValidationError("ticket approval is not approved")
+        if approval is None:
+            error = Stage8ValidationError("ticket approval does not exist")
+            error.safe_error_code = "TICKET_APPROVAL_MISSING"
+            raise error
+        if (await self.durable_approval.status(
+            continuation.approval_id
+        )) is not ApprovalStatus.APPROVED:
+            error = Stage8ValidationError("ticket approval is not approved")
+            error.safe_error_code = "TICKET_APPROVAL_NOT_APPROVED"
+            raise error
         if approval.invocation_id != continuation.tool_invocation_id or approval.invocation_binding_digest != continuation.invocation_binding_digest:
-            raise Stage8ValidationError("ticket approval binding mismatch")
+            error = Stage8ValidationError("ticket approval binding mismatch")
+            error.safe_error_code = "TICKET_APPROVAL_BINDING_MISMATCH"
+            raise error
         if approval.tool_name != "stage8_create_ticket":
             raise Stage8ValidationError("ticket continuation requires stage8_create_ticket")
-        registration = self.registry.require(approval.tool_name)
+        if lease.run_id != approval.run_id:
+            raise Stage8ValidationError("ticket continuation Run binding mismatch")
+        if self.tool_snapshot_store is None:
+            error = Stage8ValidationError(
+                "durable ToolResolutionSnapshot store is not configured"
+            )
+            error.safe_error_code = "TOOL_SNAPSHOT_STORE_MISSING"
+            raise error
+        snapshot = await self.tool_snapshot_store.load(approval.run_id)
+        if snapshot is None:
+            error = Stage8ValidationError("ToolResolutionSnapshot does not exist")
+            error.safe_error_code = "TOOL_SNAPSHOT_MISSING"
+            raise error
+        hydrated = hydrate_tool_snapshot(snapshot, self.registry)
+        registration = hydrated.resolve(approval.tool_name)
+        if registration is None:
+            error = Stage8ValidationError("approved Tool is absent from snapshot")
+            error.safe_error_code = "TOOL_SNAPSHOT_TOOL_MISSING"
+            raise error
         invocation = registration.adapter.build_invocation(
             json.dumps(continuation.request_snapshot, ensure_ascii=False)
         )
@@ -333,29 +374,49 @@ class GovernedToolInvoker:
             or durable_invocation.invocation_binding_digest != approval.invocation_binding_digest
         ):
             raise Stage8ValidationError("durable tool invocation binding mismatch")
-        if durable_invocation.state.value != "PREPARED":
+        if durable_invocation.state in {
+            ToolInvocationState.STARTED, ToolInvocationState.UNKNOWN
+        }:
             raise Stage8ToolInvocationError(
-                "TOOL_INVOCATION_NOT_RESUMABLE", outcome_unknown=True
+                "TOOL_INVOCATION_OUTCOME_UNKNOWN", outcome_unknown=True
             )
-        lease = await self.durable_run_control.claim(approval.run_id, self.owner_id)
+        if durable_invocation.state is ToolInvocationState.COMMITTED:
+            raise Stage8ToolInvocationError(
+                "TOOL_INVOCATION_COMMITTED_REPAIR_REQUIRED", outcome_unknown=False
+            )
+        if durable_invocation.state is not ToolInvocationState.PREPARED:
+            raise Stage8ToolInvocationError(
+                "TOOL_INVOCATION_NOT_RESUMABLE", outcome_unknown=False
+            )
+        context, _ = create_run_context(
+            run_id=approval.run_id,
+            entry_agent_id="failure_triage",
+            timeout_seconds=30,
+        )
+        context.attach_durable_lease(lease)
+        context.attach_ownership_validator(
+            lambda: self.durable_run_control.assert_current(lease)
+        )
+        context.attach_budget_ledger(BudgetLedger(RunBudget(max_tool_calls=1)))
         try:
-            context, _ = create_run_context(run_id=approval.run_id, entry_agent_id="failure_triage", timeout_seconds=30)
-            context.attach_durable_lease(lease)
-            context.attach_ownership_validator(lambda: self.durable_run_control.assert_current(lease))
-            context.attach_budget_ledger(BudgetLedger(RunBudget(max_tool_calls=1)))
             claim = await self.durable_approval.claim_execution(
                 lease=lease, approval_id=approval.approval_id,
                 invocation_binding_digest=approval.invocation_binding_digest,
             )
-            result = await self.tool_execution.execute(
-                invocation=invocation, adapter=registration.adapter,
-                run_context=context, step_id=approval.step_id,
-                durable_approval_id=approval.approval_id,
-                durable_execution_claim_id=claim.claim_id,
-                durable_binding_digest=approval.invocation_binding_digest,
+        except ValueError as exc:
+            if "already exists" not in str(exc):
+                raise
+            claim = await self.durable_approval.resume_execution_claim(
+                lease=lease, approval_id=approval.approval_id,
+                invocation_binding_digest=approval.invocation_binding_digest,
             )
-        finally:
-            await self.durable_run_control.release(lease)
+        result = await self.tool_execution.execute(
+            invocation=invocation, adapter=registration.adapter,
+            run_context=context, step_id=approval.step_id,
+            durable_approval_id=approval.approval_id,
+            durable_execution_claim_id=claim.claim_id,
+            durable_binding_digest=approval.invocation_binding_digest,
+        )
         if isinstance(result, ToolExecutionError):
             raise Stage8ToolInvocationError(result.safe_error_code, outcome_unknown=result.side_effect_state is ToolSideEffectState.UNKNOWN)
         return json.loads(result.output.content)

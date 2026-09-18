@@ -162,6 +162,42 @@ class DurableApprovalService:
             await session.flush()
             return DurableExecutionClaim(claim.claim_id, claim.approval_id, claim.run_id, claim.invocation_binding_digest, claim.owner_id, claim.fencing_token, now)
 
+    async def resume_execution_claim(
+        self, *, lease: RunLease, approval_id: str, invocation_binding_digest: str
+    ) -> DurableExecutionClaim:
+        """恢复同一 immutable invocation 已创建的 claim；不创建第二个 claim。"""
+        async with self.database.transaction() as session:
+            await runtime_repository.lock_run_scope(session, lease.run_id)
+            from core.persistence.models import RunControlRow
+            control = (await session.execute(select(RunControlRow).where(
+                RunControlRow.run_id == lease.run_id,
+                RunControlRow.owner_id == lease.owner_id,
+                RunControlRow.fencing_token == lease.fencing_token,
+                RunControlRow.state == "ACTIVE",
+                RunControlRow.lease_until > func.now(),
+            ).with_for_update())).scalar_one_or_none()
+            if control is None:
+                raise OwnershipLost("approval execution claim resume 的 Run fencing 已失效")
+            approval = (await session.execute(select(DurableApprovalRow).where(
+                DurableApprovalRow.approval_id == approval_id,
+            ).with_for_update())).scalar_one_or_none()
+            claim = (await session.execute(select(DurableToolExecutionClaimRow).where(
+                DurableToolExecutionClaimRow.approval_id == approval_id,
+            ))).scalar_one_or_none()
+            if (
+                approval is None or approval.state != "APPROVED"
+                or approval.run_id != lease.run_id
+                or approval.invocation_binding_digest != invocation_binding_digest
+                or claim is None or claim.run_id != lease.run_id
+                or claim.invocation_binding_digest != invocation_binding_digest
+            ):
+                raise ValueError("existing execution claim binding mismatch")
+            return DurableExecutionClaim(
+                claim.claim_id, claim.approval_id, claim.run_id,
+                claim.invocation_binding_digest, claim.owner_id,
+                int(claim.fencing_token), claim.created_at,
+            )
+
     @staticmethod
     async def _run_control(session, run_id):
         from core.persistence.models import RunControlRow

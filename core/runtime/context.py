@@ -139,6 +139,20 @@ class RunContext:
         self._retrieval_cache_authz_domain: str | None = None
         self._ownership_validator: Callable[[], Awaitable[None]] | None = None
         self._durable_lease = None
+        self._tool_resolution_snapshot = None
+
+    @property
+    def tool_resolution_snapshot(self):
+        """当前 Run 创建时冻结的 Tool Resolution Snapshot。"""
+        return self._tool_resolution_snapshot
+
+    def attach_tool_resolution_snapshot(self, snapshot: object) -> None:
+        """由 Run Owner 在创建阶段绑定一次；后续执行只读取该快照。"""
+        if self._tool_resolution_snapshot is not None:
+            raise RuntimeError("RunContext 已绑定 ToolResolutionSnapshot")
+        if getattr(snapshot, "run_id", None) != self.run_id:
+            raise ValueError("ToolResolutionSnapshot run_id mismatch")
+        self._tool_resolution_snapshot = snapshot
 
     @property
     def budget_ledger(self):

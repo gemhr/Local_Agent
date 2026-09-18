@@ -201,6 +201,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_MCP_CONFIG_PATH` | 空 | Phase9 MCP Integration（默认关闭）；指向 operator 本地 JSON 配置文件（`localagent-mcp-config.v1`：server identity/command/arguments/environment/enabled + 可选 per-tool `tools` 本地映射），留空即不构造 MCP 集成组件、不启动子进程；该文件不得提交进仓库 |
 | `LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS` | `5.0` | MCP stdio 子进程 spawn + initialize 的 bounded IO timeout；严格正有限数 |
 | `LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS` | `10.0` | MCP `tools/list` / `tools/call` 单请求的 bounded IO 上界；严格正有限数（Runtime effective deadline 才是 timeout authority） |
+| `LOCAL_AGENT_TOOL_DISCOVERY_TOP_K` | `10` | Run Tool Discovery 返回给 planner/native model 的最大候选数；整数 `1..100`，确定性 metadata ranking |
 
 Phase9-WP3 已用真实独立 stdio MCP demo server（`demo/mcp_demo_server.py`，零第三方依赖的标准 2025-06-18 JSON-RPC 实现，提供 read-only `get_demo_status` 与 side-effect `append_demo_record` 两个 demo tool）完成 REAL_MCP_E2E：自然语言 → DeepSeek native selection → 既有 Governance/HITL → `tools/call` → final answer。`tools/call` 结果支持 `TextContent` 及 `EmbeddedResource(TextResourceContents)` 文本，不会自动访问 resource URI；MCP Resources primitive（如 `resources/list` / `resources/read`）仍不支持。配置模板见 `demo/mcp_config.template.json`（生成后属于 operator 本地配置，不得提交进仓库）。
 

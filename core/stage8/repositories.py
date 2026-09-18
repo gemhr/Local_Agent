@@ -3,7 +3,7 @@
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow, Stage8GeneratedCaseArtifactRow, Stage8ExternalExecutionJobRow, Stage8CIRunRow, Stage8CIAnalysisRow, Stage8TicketContinuationRow
+from core.persistence.models import BusinessReviewRow, MissionRunReferenceRow, FeatureTestMissionRow, Stage8TestPlanRow, Stage8GeneratedCaseArtifactRow, Stage8ExternalExecutionJobRow, Stage8CIRunRow, Stage8CIAnalysisRow, Stage8TicketContinuationRow, DurableContinuationRow
 
 
 async def add_mission(session: AsyncSession, values: dict) -> FeatureTestMissionRow:
@@ -173,12 +173,13 @@ async def get_ticket_continuation_by_approval(session: AsyncSession, approval_id
     return await session.scalar(query)
 
 
-async def claim_ticket_continuation(session: AsyncSession, continuation_id: str):
-    return await session.scalar(update(Stage8TicketContinuationRow).where(
-        Stage8TicketContinuationRow.continuation_id == continuation_id,
-        Stage8TicketContinuationRow.state == "READY",
-    ).values(state="PROCESSING", version=Stage8TicketContinuationRow.version + 1,
-             updated_at=func.now()).returning(Stage8TicketContinuationRow))
+async def add_generic_continuation(session: AsyncSession, values: dict):
+    row = DurableContinuationRow(**values); session.add(row); await session.flush(); return row
+
+async def get_generic_continuation(session: AsyncSession, continuation_id: str, *, for_update=False):
+    query = select(DurableContinuationRow).where(DurableContinuationRow.continuation_id == continuation_id)
+    if for_update: query = query.with_for_update()
+    return await session.scalar(query)
 
 
 async def list_ready_ticket_continuations(session: AsyncSession):
