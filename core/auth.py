@@ -191,7 +191,7 @@ class ObjectAuthorizationService:
         tenant_id = ObjectAuthorizationService._require_tenant(principal)
         if row is None or row.tenant_id != tenant_id:
             raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
-        if action in {AuthorizationAction.RESUME, AuthorizationAction.SUBSCRIBE}:
+        if action is AuthorizationAction.RESUME:
             raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
         if principal.principal_kind == "SERVICE":
             if (

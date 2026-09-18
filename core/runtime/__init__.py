@@ -193,6 +193,13 @@ from core.runtime.event_consumer import (
     InMemoryEventConsumptionCheckpointStore,
     PostgresEventConsumptionCheckpointStore,
 )
+from core.runtime.client_event_feed import (
+    CLIENT_FEED_POLL_INTERVAL_SECONDS,
+    ClientDeliveryEvent,
+    InMemoryClientEventFeed,
+    PostgresClientEventFeed,
+    project_client_event,
+)
 from core.runtime.stream_adapter import (
     ChatStreamChunk,
     ChatStreamChunkKind,

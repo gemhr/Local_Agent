@@ -503,6 +503,23 @@ class RuntimeEventJournalRow(PersistenceBase):
     )
 
 
+class ClientDeliveryEventRow(PersistenceBase):
+    """Client-safe durable delivery projection; it is not Run authority."""
+
+    __tablename__ = "client_delivery_events"
+    run_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    cursor: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    __table_args__ = (
+        Index("ix_client_delivery_events_run_cursor", "run_id", "cursor"),
+        CheckConstraint("cursor > 0", name="ck_client_delivery_events_cursor"),
+    )
+
+
 class RunControlRow(PersistenceBase):
     """Durable Run control aggregate；不承接 Journal terminal truth。"""
 
@@ -959,6 +976,7 @@ CANONICAL_TABLES = (
     "evaluation_results",
     "outbox_events",
     "runtime_event_journal",
+    "client_delivery_events",
     "runtime_run_control_commands",
     "runtime_run_control",
     "runtime_tool_approvals",

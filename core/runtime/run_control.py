@@ -183,30 +183,43 @@ class DurableRunControlService:
             if exists is None:
                 raise OwnershipLost("Run fencing token 已过期或不是 current owner")
 
-    async def finalize_terminal(self, lease: RunLease, event: RuntimeEvent, journal):
-        """原子完成 fence 校验、Journal terminal append 与 control close。"""
+    async def finalize_terminal(
+        self, lease: RunLease, event: RuntimeEvent, journal, client_event_feed=None
+    ):
+        """原子完成 fence、Journal terminal、Client Feed 与 control close。"""
         self._validate_lease(lease)
         if not isinstance(event, RuntimeEvent):
             raise TypeError("event 必须是 RuntimeEvent")
         append_in_transaction = getattr(journal, "append_in_transaction", None)
         if not callable(append_in_transaction):
             raise TypeError("journal 必须支持 append_in_transaction")
-        async with self.database.transaction() as session:
-            await runtime_repository.lock_run_scope(session, lease.run_id)
-            row = (await session.execute(select(RunControlRow).where(
-                RunControlRow.run_id == lease.run_id
-            ).with_for_update())).scalar_one_or_none()
-            if row is None or row.state != "ACTIVE" or row.owner_id != lease.owner_id \
-                    or row.fencing_token != lease.fencing_token or row.lease_until is None:
-                raise OwnershipLost("terminal write 的 fencing token 已失效")
-            current = (await session.execute(select(RunControlRow.run_id).where(
-                RunControlRow.run_id == lease.run_id,
-                RunControlRow.lease_until > func.now(),
-            ))).scalar_one_or_none()
-            if current is None:
-                raise OwnershipLost("terminal write 时 lease 已过期")
-            append_status = await append_in_transaction(session, event)
-            await self._close_terminal_locked(session, row, event.sequence)
+        projected = False
+        try:
+            async with self.database.transaction() as session:
+                await runtime_repository.lock_run_scope(session, lease.run_id)
+                row = (await session.execute(select(RunControlRow).where(
+                    RunControlRow.run_id == lease.run_id
+                ).with_for_update())).scalar_one_or_none()
+                if row is None or row.state != "ACTIVE" or row.owner_id != lease.owner_id \
+                        or row.fencing_token != lease.fencing_token or row.lease_until is None:
+                    raise OwnershipLost("terminal write 的 fencing token 已失效")
+                current = (await session.execute(select(RunControlRow.run_id).where(
+                    RunControlRow.run_id == lease.run_id,
+                    RunControlRow.lease_until > func.now(),
+                ))).scalar_one_or_none()
+                if current is None:
+                    raise OwnershipLost("terminal write 时 lease 已过期")
+                append_status = await append_in_transaction(session, event)
+                if client_event_feed is not None:
+                    projected = await client_event_feed.append_event_in_transaction(
+                        session, event
+                    )
+                await self._close_terminal_locked(session, row, event.sequence)
+        except Exception:
+            raise
+
+        if projected:
+            client_event_feed.record_write_succeeded()
 
         return append_status
 

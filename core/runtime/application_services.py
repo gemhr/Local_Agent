@@ -242,6 +242,7 @@ class ApplicationRuntimeServices:
         RuntimeActivityTracker
     )
     extra_closeables: tuple[tuple[str, object], ...] = ()
+    client_event_feed: object | None = None
     startup_dependency_snapshot: StartupDependencySnapshot = field(
         default_factory=StartupDependencySnapshot
     )

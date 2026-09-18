@@ -126,6 +126,11 @@ from core.runtime.metrics import (
     RuntimeMetricsCollector,
     RuntimeMetricsProjector,
 )
+from core.runtime.client_event_feed import (
+    CLIENT_FEED_POLL_INTERVAL_SECONDS,
+    PostgresClientEventFeed,
+    client_event_data,
+)
 from core.runtime.observability_dispatcher import RuntimeObservabilityDispatcher
 from core.runtime.retrieval_evaluation import (
     MAX_RESPONSE_BYTES,
@@ -262,6 +267,31 @@ class _RequestOwnedStreamingResponse(StreamingResponse):
                 "more_body": False,
             }
         )
+
+
+class RunExecutionSupervisor:
+    """Owns in-process producer tasks without owning Run terminal truth."""
+
+    def __init__(self) -> None:
+        self._tasks: dict[str, asyncio.Task] = {}
+
+    def spawn(self, run_id: str, stream) -> None:
+        async def consume() -> None:
+            try:
+                async for _event in stream:
+                    pass
+            finally:
+                await stream.aclose()
+                self._tasks.pop(run_id, None)
+        self._tasks[run_id] = asyncio.create_task(consume(), name=f"run:{run_id}")
+
+    async def close(self) -> None:
+        if self._tasks:
+            await asyncio.gather(*tuple(self._tasks.values()), return_exceptions=True)
+        self._tasks.clear()
+
+
+MAX_RESUME_CURSOR = 2_147_483_647
 
 
 try:
@@ -1216,6 +1246,7 @@ async def lifespan(app: FastAPI):
             startup_dependency_snapshot=StartupDependencySnapshot(
                 knowledge_base_degraded=knowledge_base_error is not None
             ),
+            client_event_feed=PostgresClientEventFeed(persistence_database, runtime_metrics),
             extra_closeables=(
                 ("observability_service", observability_service),
                 ("logger_checkpoint_store", logger_checkpoints),
@@ -1321,6 +1352,8 @@ async def lifespan(app: FastAPI):
         runtime_services.admission_gate
     )
     app.state.runtime_shutdown_coordinator = shutdown_coordinator
+    app.state.run_execution_supervisor = RunExecutionSupervisor()
+    app.state.client_event_feed = runtime_services.client_event_feed
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
     initialization_stack.release()
     try:
@@ -1328,6 +1361,9 @@ async def lifespan(app: FastAPI):
     finally:
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.SHUTTING_DOWN
         shutdown_report = await shutdown_coordinator.shutdown()
+        supervisor = getattr(app.state, "run_execution_supervisor", None)
+        if supervisor is not None:
+            await supervisor.close()
         if shutdown_report.error_codes:
             logger.warning(
                 "Runtime services closed with safe lifecycle issues",
@@ -1357,6 +1393,8 @@ async def lifespan(app: FastAPI):
         app.state.stage8_ci_guardian_service = None
         app.state.stage8_ticket_continuation_service = None
         app.state.runtime_services = None
+        app.state.run_execution_supervisor = None
+        app.state.client_event_feed = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
 
@@ -1930,6 +1968,10 @@ class ChatRequest(BaseModel):
     run_id: Annotated[
         str, Field(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
     ] | None = None
+
+
+class V1ChatRequest(ChatRequest):
+    model_config = ConfigDict(extra="forbid")
 
 
 RUNTIME_EXECUTE_TIMEOUT_MAX_SECONDS = 3_600.0
@@ -2609,6 +2651,77 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         generate(),
         media_type="text/plain",
         headers={"X-Run-Id": run_id},
+    )
+
+
+@v1_router.post("/chat")
+async def v1_chat_endpoint(payload: V1ChatRequest, request: Request):
+    """启动 Run；订阅生命周期由独立 SSE endpoint 管理。"""
+    service = require_service()
+    run_id = payload.run_id or uuid.uuid4().hex
+    try:
+        uuid.UUID(run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid run_id") from exc
+    await _bind_new_run_and_conversation(request, run_id=run_id, agent_id=payload.agent_id)
+    query = payload.query
+    if payload.file_path:
+        query += f"\n\nPlease analyze this file path: '{payload.file_path}'"
+    stream = service.stream_coordinated_agent_events(
+        payload.agent_id, query, run_id=run_id,
+        retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
+    )
+    supervisor = getattr(request.app.state, "run_execution_supervisor", None)
+    if supervisor is None:
+        await stream.aclose()
+        raise HTTPException(status_code=503, detail="RUN_SUPERVISOR_UNAVAILABLE")
+    supervisor.spawn(run_id, stream)
+    return {"run_id": run_id, "events_url": f"/api/v1/runs/{run_id}/events"}
+
+
+def _parse_resume_cursor(request: Request, after_cursor: int | None) -> int:
+    header = request.headers.get("Last-Event-ID")
+    if header is None or not header.strip():
+        return after_cursor or 0
+    try:
+        parsed = int(header)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid Last-Event-ID") from exc
+    if parsed < 0 or parsed > MAX_RESUME_CURSOR:
+        raise HTTPException(status_code=422, detail="invalid Last-Event-ID")
+    if after_cursor is not None and parsed != after_cursor:
+        raise HTTPException(status_code=422, detail="conflicting resume cursor")
+    return parsed
+
+
+@v1_router.get("/runs/{run_id}/events")
+async def v1_run_events_endpoint(
+    run_id: Annotated[str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)],
+    request: Request,
+    after_cursor: Annotated[int | None, Query(ge=0, le=MAX_RESUME_CURSOR)] = None,
+):
+    await _authorize_run(request, run_id, AuthorizationAction.SUBSCRIBE)
+    feed = getattr(request.app.state, "client_event_feed", None)
+    if feed is None:
+        raise HTTPException(status_code=503, detail="CLIENT_EVENT_FEED_UNAVAILABLE")
+    cursor = _parse_resume_cursor(request, after_cursor)
+
+    async def generate():
+        nonlocal cursor
+        while True:
+            events = await feed.read_after(run_id, cursor)
+            if events:
+                for event in events:
+                    yield f"id: {event.cursor}\nevent: {event.event_type}\ndata: {client_event_data(event)}\n\n"
+                    cursor = event.cursor
+                    if event.event_type in {"run.completed", "run.failed", "run.cancelled"}:
+                        return
+                continue
+            await asyncio.sleep(CLIENT_FEED_POLL_INTERVAL_SECONDS)
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

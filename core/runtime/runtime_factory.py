@@ -637,16 +637,34 @@ class CoordinatedRuntimeFactory:
             agent_state = AgentState.for_run_context(run_context.run_id)
             machine = AgentStateMachine()
             policy = ParallelExecutionPolicy(max_concurrency=self._max_concurrency)
+            client_event_feed = getattr(
+                self._services, "client_event_feed", None
+            )
+            atomic_client_event_feed = (
+                client_event_feed
+                if callable(
+                    getattr(
+                        client_event_feed,
+                        "append_event_in_transaction",
+                        None,
+                    )
+                )
+                else None
+            )
             channel = RuntimeEventChannel(
                 self._event_channel_capacity,
                 run_id=run_context.run_id,
                 cancellation_token=run_context.cancellation_token,
                 journal=self._services.event_journal,
                 terminal_append=lambda event: durable_control.finalize_terminal(
-                    durable_lease, event, self._services.event_journal
+                    durable_lease,
+                    event,
+                    self._services.event_journal,
+                    atomic_client_event_feed,
                 ),
                 observability_dispatcher=self._services.observability_dispatcher,
                 fault_controller=fault_controller,
+                client_event_feed=client_event_feed,
             )
             if gauge_provider is not None and callable(
                 getattr(gauge_provider, "register_channel", None)

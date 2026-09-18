@@ -350,6 +350,35 @@ class PostgresRunEventJournal:
             pass
         return status
 
+    async def append_with_client_projection(
+        self, event: RuntimeEvent, client_event_feed
+    ) -> JournalAppendStatus:
+        """原子追加 Journal 与 client-safe projection。"""
+        started = time.perf_counter()
+        projected = False
+        try:
+            status, projected = await self._append_with_constraint_retry(
+                event, client_event_feed
+            )
+        except Exception:
+            try:
+                self._metrics_hook.journal_append_failed(
+                    duration_seconds=time.perf_counter() - started
+                )
+            except Exception:
+                pass
+            raise
+        if projected:
+            client_event_feed.record_write_succeeded()
+        try:
+            self._metrics_hook.journal_append_succeeded(
+                duration_seconds=time.perf_counter() - started,
+                duplicate=status is JournalAppendStatus.DUPLICATE,
+            )
+        except Exception:
+            pass
+        return status
+
     async def append_in_transaction(
         self, session, event: RuntimeEvent
     ) -> JournalAppendStatus:
@@ -385,12 +414,13 @@ class PostgresRunEventJournal:
         return JournalAppendStatus.APPENDED
 
     async def _append_with_constraint_retry(
-        self, event: RuntimeEvent
-    ) -> JournalAppendStatus:
+        self, event: RuntimeEvent, client_event_feed=None
+    ):
         attempts = 0
         while True:
             try:
-                return await self._append_once(event)
+                result = await self._append_once(event, client_event_feed)
+                return result
             except IntegrityError:
                 # 唯一约束兜底：另一 Run 的并发写入抢先提交。重新读取后在
                 # 新事务内重新判定，会得到正确的 DUPLICATE 或 typed conflict。
@@ -401,7 +431,7 @@ class PostgresRunEventJournal:
                         "Journal 追加被数据库约束拒绝",
                     ) from None
 
-    async def _append_once(self, event: RuntimeEvent) -> JournalAppendStatus:
+    async def _append_once(self, event: RuntimeEvent, client_event_feed=None):
         try:
             record = JournalRecord.from_event(event)
         except JournalError:
@@ -455,11 +485,20 @@ class PostgresRunEventJournal:
                     terminal_sequence=terminal_sequence,
                 )
                 if decision is not None:
-                    return decision
-                await runtime_repository.insert_journal_row(
-                    session, journal_row_values(record)
-                )
-                return JournalAppendStatus.APPENDED
+                    status = decision
+                else:
+                    await runtime_repository.insert_journal_row(
+                        session, journal_row_values(record)
+                    )
+                    status = JournalAppendStatus.APPENDED
+                projected = False
+                if client_event_feed is not None:
+                    projected = await client_event_feed.append_event_in_transaction(
+                        session, event
+                    )
+                if client_event_feed is None:
+                    return status
+                return status, projected
         except JournalError:
             raise
         except IntegrityError:

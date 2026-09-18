@@ -205,6 +205,7 @@ class RuntimeEventChannel:
         | None = None,
         observability_dispatcher: ObservabilityRecordSubmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
+        client_event_feed: object | None = None,
     ) -> None:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("capacity 必须是正整数且不能是 bool")
@@ -231,6 +232,7 @@ class RuntimeEventChannel:
         self._terminal_append = terminal_append
         self._observability_dispatcher = observability_dispatcher
         self._fault_controller = fault_controller
+        self._client_event_feed = client_event_feed
         self._sequence = 0
         # Stage6-WP1：Journal 是 async PostgreSQL。channel 构造保持同步，因此
         # watermark 读取推迟到第一个 async 边界（publish / capture），语义不变：
@@ -324,6 +326,7 @@ class RuntimeEventChannel:
                 await self._ensure_watermark_loaded()
                 sequence = self._sequence + 1
                 event = RuntimeEvent.from_draft(draft, sequence)
+                projection_persisted = False
                 if self._journal is not None:
                     if event.event_type.value == "RUN_COMPLETED":
                         await self._execute_publication_fault(
@@ -342,8 +345,41 @@ class RuntimeEventChannel:
                         and self._terminal_append is not None
                     ):
                         append_status = await self._terminal_append(event)
+                        projection_persisted = (
+                            self._client_event_feed is not None
+                            and callable(
+                                getattr(
+                                    self._client_event_feed,
+                                    "append_event_in_transaction",
+                                    None,
+                                )
+                            )
+                            and callable(
+                                getattr(
+                                    self._journal,
+                                    "append_with_client_projection",
+                                    None,
+                                )
+                            )
+                        )
                     else:
-                        append_value = self._journal.append(event)
+                        atomic_append = getattr(
+                            self._journal, "append_with_client_projection", None
+                        )
+                        atomic_projection = callable(
+                            getattr(
+                                self._client_event_feed,
+                                "append_event_in_transaction",
+                                None,
+                            )
+                        )
+                        if callable(atomic_append) and atomic_projection:
+                            append_value = atomic_append(
+                                event, self._client_event_feed
+                            )
+                            projection_persisted = True
+                        else:
+                            append_value = self._journal.append(event)
                         if (
                             event.event_type.value == "OUTPUT_DELTA"
                             and not ignore_run_cancellation
@@ -381,6 +417,8 @@ class RuntimeEventChannel:
                         except Exception:
                             # Observability 永远不能改变 Journal 或 Runtime Transport。
                             pass
+                if self._client_event_feed is not None and not projection_persisted:
+                    await self._client_event_feed.append_event(event)
                 await self._execute_publication_fault(
                     FaultPoint.EVENT_BEFORE_CHANNEL_ENQUEUE,
                     event,
