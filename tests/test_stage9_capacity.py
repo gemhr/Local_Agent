@@ -32,6 +32,24 @@ def test_slo_evaluator_distinguishes_insufficient_evidence_and_failure() -> None
     assert evaluate_slo(spec, {**valid, "attempted": 100, "succeeded": 100})["status"] == "PASS"
 
 
+def test_slo_evaluator_does_not_pass_missing_latency_metric() -> None:
+    spec = {"metric": "latency_ms.p95", "objective": "at_most", "threshold": 500, "minimum_samples": 1}
+    result = evaluate_slo(spec, {"attempted": 1})
+    assert result == {"status": "NOT_ENOUGH_EVIDENCE", "reason": "missing metric latency_ms.p95"}
+
+
+@pytest.mark.parametrize(
+    ("metric", "reason"),
+    (("success_rate", "missing metric success_rate"), ("error_rate", "missing metric error_rate")),
+)
+def test_slo_evaluator_rejects_missing_rate_metric(metric: str, reason: str) -> None:
+    result = evaluate_slo(
+        {"metric": metric, "objective": "at_most", "threshold": 1, "minimum_samples": 1},
+        {"attempted": 1},
+    )
+    assert result == {"status": "NOT_ENOUGH_EVIDENCE", "reason": reason}
+
+
 def test_runtime_slo_rejects_synthetic_or_wrong_scenario_evidence() -> None:
     spec = {"required_evidence_profile": "PLATFORM_RUNTIME", "required_scenario": "runtime_run_start", "metric": "success_rate", "objective": "at_least", "threshold": 0.99, "minimum_samples": 100}
     synthetic = {"evidence_profile": "SYNTHETIC", "scenario": "synthetic_start", "attempted": 100, "succeeded": 100}

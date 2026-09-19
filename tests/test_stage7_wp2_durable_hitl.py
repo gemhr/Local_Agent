@@ -44,9 +44,10 @@ from core.runtime import (
 )
 from core.runtime.event_journal_store import InMemoryRunEventJournal
 from core.runtime.tool_contract import ToolInvocation, safe_key_digest
+from core.runtime.tool_discovery import create_tool_snapshot
 import server
 from tests._runtime_assembly_fixtures import make_services
-from tests.test_stage6_wp2_ownership import _create_user, _token
+from tests.test_stage6_wp2_ownership import _DEFAULT_TENANT_ID, _create_user, _token
 from tests.test_tool_approval_router_integration import _make_router, _tool_args
 from tests.test_tool_governance import production_registry, production_service
 
@@ -148,7 +149,11 @@ async def _wait_for(predicate, timeout: float = 10.0):
 async def _authenticated_http_setup(database, monkeypatch, run_id: str):
     user_id = await _create_user(database, ("USER",))
     await AuthorizationService(database).bind_new(
-        SimpleNamespace(user_id=user_id, roles=frozenset({"USER"})),
+        SimpleNamespace(
+            user_id=user_id,
+            roles=frozenset({"USER"}),
+            tenant_id=_DEFAULT_TENANT_ID,
+        ),
         "RUN",
         run_id,
     )
@@ -344,7 +349,13 @@ async def test_authenticated_http_approve_reaches_durable_service(clean_database
     user_id = await _create_user(clean_database, ("USER",))
     run_id = str(uuid.uuid4())
     await AuthorizationService(clean_database).bind_new(
-        SimpleNamespace(user_id=user_id, roles=frozenset({"USER"})), "RUN", run_id
+        SimpleNamespace(
+            user_id=user_id,
+            roles=frozenset({"USER"}),
+            tenant_id=_DEFAULT_TENANT_ID,
+        ),
+        "RUN",
+        run_id,
     )
     private = Ed25519PrivateKey.generate()
     settings = SimpleNamespace(
@@ -469,11 +480,23 @@ async def test_cross_instance_authenticated_http_continues_production_tool_chain
     registry = production_registry()
     governance = production_service(registry)
     adapter = registry.require("complex_workflow_simulator").adapter
+    tool_args = _tool_args(f"wp2-http-{decision_path}")
     router = _make_router(
         registry,
         governance,
         "complex_workflow_simulator",
-        _tool_args(f"wp2-http-{decision_path}"),
+        tool_args,
+    )
+    router._plan_tool_call = lambda _messages, _agent_id, _run_context=None: (
+        "complex_workflow_simulator",
+        tool_args,
+    )
+    harness.context.attach_tool_resolution_snapshot(
+        create_tool_snapshot(
+            lease.run_id,
+            (registry.require("complex_workflow_simulator"),),
+            selection_query="query",
+        )
     )
     headers = await _authenticated_http_setup(
         clean_database, monkeypatch, lease.run_id

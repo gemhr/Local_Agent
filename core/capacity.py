@@ -76,11 +76,19 @@ def evaluate_slo(spec: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str
     objective = str(spec.get("objective", "at_most"))
     threshold = float(spec["threshold"])
     if metric == "success_rate":
-        observed = float(result.get("succeeded", 0)) / samples if samples else 0.0
+        if "succeeded" not in result:
+            return {"status": "NOT_ENOUGH_EVIDENCE", "reason": "missing metric success_rate"}
+        observed = float(result["succeeded"]) / samples if samples else 0.0
     elif metric.startswith("latency_ms."):
-        observed = float(result.get("latency_ms", {}).get(metric.split(".", 1)[1], 0))
+        key = metric.split(".", 1)[1]
+        latency = result.get("latency_ms")
+        if not isinstance(latency, Mapping) or key not in latency:
+            return {"status": "NOT_ENOUGH_EVIDENCE", "reason": f"missing metric {metric}"}
+        observed = float(latency[key])
     elif metric == "error_rate":
-        observed = float(result.get("failed", 0)) / samples if samples else 1.0
+        if "failed" not in result:
+            return {"status": "NOT_ENOUGH_EVIDENCE", "reason": "missing metric error_rate"}
+        observed = float(result["failed"]) / samples if samples else 1.0
     elif metric.startswith("correctness."):
         key = metric.split(".", 1)[1]
         correctness = result.get("correctness", {})
