@@ -33,7 +33,7 @@ def capacity_model(settings: Any) -> tuple[CapacityBound, ...]:
     """从当前 Settings 和冻结的 Runtime 常量汇总容量边界。"""
     return (
         CapacityBound("API requests", "uvicorn worker/process mode (not set by Settings)", "FastAPI/uvicorn", "latency or process-level rejection"),
-        CapacityBound("Active Runs", f"{settings.blocking_max_workers} supervised producers", "RunExecutionSupervisor", "API admission wait before Run binding"),
+        CapacityBound("Active Runs", f"{settings.max_active_runs} supervised producers", "RunExecutionSupervisor", "API admission wait before Run binding"),
         CapacityBound("Model calls", str(settings.model_threads), "Model Runtime", "wait latency at model executor/thread capacity"),
         CapacityBound("Tool execution", "16 global; per-tool max declared by Tool", "ToolConcurrencyController", "semaphore queue or timeout"),
         CapacityBound("DB connections", f"{settings.db_pool_size} pool + {settings.db_max_overflow} overflow", "SQLAlchemy PostgreSQL engine", "checkout wait or pool timeout"),

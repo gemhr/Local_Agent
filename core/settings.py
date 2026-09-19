@@ -714,6 +714,7 @@ class Settings:
     environment_id: str
     service_version: str
     blocking_max_workers: int
+    max_active_runs: int
     blocking_max_pending_tasks: int
     event_channel_capacity: int
     planning_timeout_seconds: float
@@ -894,9 +895,12 @@ class Settings:
         environment_id = _env_environment_id(environment_profile)
         service_version = _resolve_service_version()
 
-        # 7 个批准进入 Settings 的 Runtime Application Knob；默认保持当前行为。
+        # 8 个批准进入 Settings 的 Runtime Application Knob。
         blocking_max_workers = _env_strict_int(
             "LOCAL_AGENT_BLOCKING_MAX_WORKERS", 4, minimum=1
+        )
+        max_active_runs = _env_strict_int(
+            "LOCAL_AGENT_MAX_ACTIVE_RUNS", 12, minimum=1
         )
         blocking_max_pending_tasks = _env_strict_int(
             "LOCAL_AGENT_BLOCKING_MAX_PENDING_TASKS", 8, minimum=0
@@ -1374,6 +1378,7 @@ class Settings:
             environment_id=environment_id,
             service_version=service_version,
             blocking_max_workers=blocking_max_workers,
+            max_active_runs=max_active_runs,
             blocking_max_pending_tasks=blocking_max_pending_tasks,
             event_channel_capacity=event_channel_capacity,
             planning_timeout_seconds=planning_timeout_seconds,

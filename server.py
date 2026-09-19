@@ -1382,7 +1382,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.runtime_shutdown_coordinator = shutdown_coordinator
     app.state.run_execution_supervisor = RunExecutionSupervisor(
-        max_active_runs=settings.blocking_max_workers
+        max_active_runs=settings.max_active_runs
     )
     app.state.client_event_feed = runtime_services.client_event_feed
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY

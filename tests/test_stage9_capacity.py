@@ -17,11 +17,11 @@ def test_percentile_uses_nearest_rank() -> None:
 
 
 def test_capacity_model_reads_existing_settings_without_new_authority() -> None:
-    settings = SimpleNamespace(model_threads=10, db_pool_size=5, db_max_overflow=5, blocking_max_workers=4, blocking_max_pending_tasks=8, redis_max_connections=10)
+    settings = SimpleNamespace(model_threads=10, db_pool_size=5, db_max_overflow=5, blocking_max_workers=4, max_active_runs=12, blocking_max_pending_tasks=8, redis_max_connections=10)
     model = {item.resource: item for item in capacity_model(settings)}
     assert model["DB connections"].capacity == "5 pool + 5 overflow"
     assert model["Tool execution"].capacity.startswith("16 global")
-    assert model["Active Runs"].capacity == "4 supervised producers"
+    assert model["Active Runs"].capacity == "12 supervised producers"
 
 
 def test_slo_evaluator_distinguishes_insufficient_evidence_and_failure() -> None:

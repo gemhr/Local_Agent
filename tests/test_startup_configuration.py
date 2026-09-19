@@ -2,7 +2,7 @@
 
 覆盖：role 边界（server 不要求 client cookie、client 不要求 model endpoint）、
 role/parse/semantic failure 先于首个 resource 构造、KB required/degraded 策略、
-7 个批准 knob 注入、并发语义回归（max_concurrency 仍为合同常量 2）、
+8 个批准 knob 注入、并发语义回归（max_concurrency 仍为合同常量 2）、
 两个 deprecated 表面、Fault 面保持隔离。
 """
 
@@ -493,6 +493,7 @@ def test_lifespan_wires_approved_knobs_from_settings() -> None:
     source = inspect.getsource(server.lifespan)
     for attribute in (
         "blocking_max_workers",
+        "max_active_runs",
         "blocking_max_pending_tasks",
         "event_channel_capacity",
         "planning_timeout_seconds",
@@ -501,6 +502,13 @@ def test_lifespan_wires_approved_knobs_from_settings() -> None:
         "step_result_max_entries",
     ):
         assert f"settings.{attribute}" in source
+
+
+def test_lifespan_keeps_active_run_and_blocking_executor_settings_independent() -> None:
+    source = inspect.getsource(server.lifespan)
+    assert "RunExecutionSupervisor(\n        max_active_runs=settings.max_active_runs\n    )" in source
+    assert "max_workers=settings.blocking_max_workers" in source
+    assert "max_active_runs=settings.blocking_max_workers" not in source
 
 
 def test_settings_has_no_max_concurrency_field() -> None:

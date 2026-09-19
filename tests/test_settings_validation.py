@@ -199,19 +199,32 @@ def test_result_cap_equal_run_total_is_allowed(monkeypatch) -> None:
 # ---- precedence ----
 
 def test_explicit_env_overrides_code_default(monkeypatch) -> None:
-    settings = _load(monkeypatch, LOCAL_AGENT_BLOCKING_MAX_WORKERS="7")
+    settings = _load(
+        monkeypatch,
+        LOCAL_AGENT_BLOCKING_MAX_WORKERS="7",
+        LOCAL_AGENT_MAX_ACTIVE_RUNS="8",
+    )
     assert settings.blocking_max_workers == 7
+    assert settings.max_active_runs == 8
 
 
 def test_missing_env_uses_application_defaults(monkeypatch) -> None:
-    settings = _load(monkeypatch)
+    settings = _load(monkeypatch, LOCAL_AGENT_MAX_ACTIVE_RUNS=None)
     assert settings.blocking_max_workers == 4
+    assert settings.max_active_runs == 12
     assert settings.blocking_max_pending_tasks == 8
     assert settings.event_channel_capacity == 32
     assert settings.planning_timeout_seconds == 15.0
     assert settings.step_result_per_result_chars == 20000
     assert settings.step_result_run_total_chars == 60000
     assert settings.step_result_max_entries == 16
+
+
+@pytest.mark.parametrize("raw", ["0", "-1"])
+def test_max_active_runs_rejects_non_positive_values(monkeypatch, raw) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(monkeypatch, LOCAL_AGENT_MAX_ACTIVE_RUNS=raw)
+    assert captured.value.field == "LOCAL_AGENT_MAX_ACTIVE_RUNS"
 
 
 def test_derived_api_base_url_uses_merged_host_port(monkeypatch) -> None:

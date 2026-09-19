@@ -33,6 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.capacity import percentile
 from core.persistence.database import Database, DatabaseConfig
+from core.settings import Settings
 from core.persistence.models import (
     ClientDeliveryEventRow,
     DurableApprovalRow,
@@ -58,6 +59,8 @@ from core.runtime.run_control import DurableRunControlService
 
 TENANT_ID = "00000000-0000-0000-0000-000000000001"
 EVIDENCE_PROFILE = "PLATFORM_RUNTIME"
+NOT_INSTRUMENTED = "NOT_INSTRUMENTED"
+ACTIVE_RUN_ENV = "LOCAL_AGENT_MAX_ACTIVE_RUNS"
 
 
 def _database_url() -> str:
@@ -196,6 +199,133 @@ async def _wait_terminals(database: Database, run_ids: list[str], timeout: float
             return found
         await asyncio.sleep(0.1)
     return found
+
+
+def _prometheus_gauge(body: str, name: str, *, state: str | None = None) -> float | None:
+    prefix = name if state is None else f'{name}{{state="{state}"}}'
+    for line in body.splitlines():
+        if line.startswith(prefix + " "):
+            try:
+                return float(line.rsplit(" ", 1)[-1])
+            except ValueError:
+                return None
+    return None
+
+
+async def _collect_resource_evidence(
+    client: httpx.AsyncClient,
+    process: subprocess.Popen,
+    stop: asyncio.Event,
+) -> dict[str, Any]:
+    cpu_peak: float | str = NOT_INSTRUMENTED
+    rss_peak: int | str = NOT_INSTRUMENTED
+    process_samples = 0
+    server_process = None
+    observed_processes: dict[int, Any] = {}
+    try:
+        import psutil
+
+        server_process = psutil.Process(process.pid)
+    except Exception:
+        server_process = None
+
+    metric_peaks: dict[str, float | str] = {
+        "runtime_active_runs": NOT_INSTRUMENTED,
+        "runtime_blocking_executor_active": NOT_INSTRUMENTED,
+        "runtime_blocking_executor_pending": NOT_INSTRUMENTED,
+        "db_pool_checked_out": NOT_INSTRUMENTED,
+        "db_pool_overflow": NOT_INSTRUMENTED,
+        "db_pool_size": NOT_INSTRUMENTED,
+    }
+    metrics_samples = 0
+
+    while True:
+        if server_process is not None:
+            try:
+                process_tree = [
+                    server_process,
+                    *server_process.children(recursive=True),
+                ]
+                for member in process_tree:
+                    if member.pid not in observed_processes:
+                        member.cpu_percent(interval=None)
+                        observed_processes[member.pid] = member
+                active_members = [
+                    observed_processes[member.pid] for member in process_tree
+                ]
+                cpu = sum(
+                    float(member.cpu_percent(interval=None))
+                    for member in active_members
+                )
+                rss = sum(int(member.memory_info().rss) for member in active_members)
+                cpu_peak = cpu if isinstance(cpu_peak, str) else max(cpu_peak, cpu)
+                rss_peak = rss if isinstance(rss_peak, str) else max(rss_peak, rss)
+                process_samples += 1
+            except Exception:
+                server_process = None
+        try:
+            response = await client.get("/metrics")
+            if response.status_code == 200:
+                metrics_samples += 1
+                values = {
+                    "runtime_active_runs": _prometheus_gauge(
+                        response.text, "runtime_active_runs"
+                    ),
+                    "runtime_blocking_executor_active": _prometheus_gauge(
+                        response.text, "runtime_blocking_executor_active"
+                    ),
+                    "runtime_blocking_executor_pending": _prometheus_gauge(
+                        response.text, "runtime_blocking_executor_pending"
+                    ),
+                    "db_pool_checked_out": _prometheus_gauge(
+                        response.text,
+                        "localagent_postgresql_pool_connections",
+                        state="checked_out",
+                    ),
+                    "db_pool_overflow": _prometheus_gauge(
+                        response.text,
+                        "localagent_postgresql_pool_connections",
+                        state="overflow",
+                    ),
+                    "db_pool_size": _prometheus_gauge(
+                        response.text,
+                        "localagent_postgresql_pool_connections",
+                        state="size",
+                    ),
+                }
+                for name, value in values.items():
+                    if value is not None:
+                        previous = metric_peaks[name]
+                        metric_peaks[name] = (
+                            value if isinstance(previous, str) else max(previous, value)
+                        )
+        except httpx.HTTPError:
+            pass
+        if stop.is_set():
+            break
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.1)
+        except TimeoutError:
+            pass
+
+    return {
+        "server_process": {
+            "cpu_percent_peak": cpu_peak,
+            "rss_bytes_peak": rss_peak,
+            "sample_count": process_samples,
+        },
+        "metrics_endpoint": {
+            **metric_peaks,
+            "sample_count": metrics_samples,
+            "db_checkout_timeout": NOT_INSTRUMENTED,
+        },
+        "event_loop_lag": NOT_INSTRUMENTED,
+        "notes": {
+            "server_process_scope": "launcher plus recursive child process tree",
+            "db_pool_source": "server /metrics gauge; not benchmark client Database.pool_snapshot()",
+            "runtime_gauges": "recorded only if exposed by /metrics",
+        },
+    }
 
 
 async def _run_start_point(
@@ -587,12 +717,37 @@ def _write(output_dir: Path, name: str, payload: dict[str, Any], environment: di
     )
 
 
+def _run_start_file_name(args, concurrency: int) -> str:
+    if args.run_start_only and args.active_run_slots is not None:
+        if args.confirmation_run is not None:
+            return (
+                f"active_run_slots_{args.active_run_slots}_confirmation_"
+                f"c{concurrency}_run{args.confirmation_run}.json"
+            )
+        if args.concurrency == [25] and args.samples == 50:
+            return f"active_run_slots_{args.active_run_slots}_screening.json"
+        return f"active_run_slots_{args.active_run_slots}_c{concurrency}.json"
+    return f"runtime_run_start_c{concurrency}.json"
+
+
+def _configure_active_run_slots(
+    server_env: dict[str, str], active_run_slots: int | None, settings: Any | None = None
+) -> int:
+    """Apply an explicit benchmark override through the canonical Settings env."""
+    if active_run_slots is not None:
+        server_env[ACTIVE_RUN_ENV] = str(active_run_slots)
+        return active_run_slots
+    loaded_settings = Settings.load() if settings is None else settings
+    return int(loaded_settings.max_active_runs)
+
+
 async def run(args) -> None:
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     database = Database(DatabaseConfig(url=_database_url()))
     await database.verify_reachable()
     environment = _environment()
+    environment["blocking_max_workers"] = 4
     user_id, public_key, token = await _bootstrap_identity(database)
     headers = {"Authorization": f"Bearer {token}"}
     base_url = f"http://127.0.0.1:{args.port}"
@@ -612,7 +767,11 @@ async def run(args) -> None:
             "LOCAL_AGENT_API_PORT": str(args.port),
             "LOCAL_AGENT_API_BASE_URL": base_url,
             "LOCAL_AGENT_SUMMARY_TRIGGER_MESSAGES": "10000",
+            "LOCAL_AGENT_BLOCKING_MAX_WORKERS": "4",
         }
+    )
+    environment["active_run_slots"] = _configure_active_run_slots(
+        server_env, args.active_run_slots
     )
     log_handle = tempfile.NamedTemporaryFile(prefix="wp5-runtime-", suffix=".log", delete=False)
     log_path = Path(log_handle.name)
@@ -635,18 +794,30 @@ async def run(args) -> None:
         ) as client:
             runtime_runs: list[str] = []
             for concurrency in args.concurrency:
-                result, run_ids, terminal_run_ids = await _run_start_point(
-                    client,
-                    database,
-                    headers,
-                    concurrency=concurrency,
-                    samples=args.samples,
-                    terminal_timeout=args.terminal_timeout,
+                resource_stop = asyncio.Event()
+                resource_task = asyncio.create_task(
+                    _collect_resource_evidence(client, process, resource_stop)
                 )
+                try:
+                    result, run_ids, terminal_run_ids = await _run_start_point(
+                        client,
+                        database,
+                        headers,
+                        concurrency=concurrency,
+                        samples=args.samples,
+                        terminal_timeout=args.terminal_timeout,
+                    )
+                finally:
+                    resource_stop.set()
+                    resource_evidence = await resource_task
+                result["active_run_slots"] = environment["active_run_slots"]
+                result["blocking_max_workers"] = 4
+                result["resource_evidence"] = resource_evidence
                 runtime_runs.extend(terminal_run_ids)
                 all_run_ids.update(run_ids)
-                _write(output_dir, f"runtime_run_start_c{concurrency}.json", result, environment)
-                print(json.dumps({"file": f"runtime_run_start_c{concurrency}.json", "summary": result}, ensure_ascii=False))
+                output_name = _run_start_file_name(args, concurrency)
+                _write(output_dir, output_name, result, environment)
+                print(json.dumps({"file": output_name, "summary": result}, ensure_ascii=False))
                 correctness = result["correctness"]
                 if result["failed"] or any(
                     correctness[key]
@@ -667,6 +838,8 @@ async def run(args) -> None:
                         )
                     )
                     break
+            if args.run_start_only:
+                return
             completed = list(dict.fromkeys(runtime_runs))
             if len(completed) < args.samples:
                 raise RuntimeError("insufficient completed Runtime runs for SSE replay")
@@ -727,9 +900,21 @@ def main() -> None:
     parser.add_argument("--startup-timeout", type=float, default=30.0)
     parser.add_argument("--request-timeout", type=float, default=15.0)
     parser.add_argument("--terminal-timeout", type=float, default=60.0)
+    parser.add_argument("--active-run-slots", type=int)
+    parser.add_argument("--run-start-only", action="store_true")
+    parser.add_argument("--confirmation-run", type=int)
     args = parser.parse_args()
-    if args.samples <= 0 or args.resume_samples <= 0 or any(value <= 0 for value in args.concurrency):
-        parser.error("samples, resume-samples and concurrency must be positive")
+    if (
+        args.samples <= 0
+        or args.resume_samples <= 0
+        or any(value <= 0 for value in args.concurrency)
+        or (args.active_run_slots is not None and args.active_run_slots <= 0)
+        or (args.confirmation_run is not None and args.confirmation_run <= 0)
+    ):
+        parser.error(
+            "samples, resume-samples, concurrency, active-run-slots and "
+            "confirmation-run must be positive"
+        )
     asyncio.run(run(args))
 
 

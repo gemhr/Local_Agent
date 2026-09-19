@@ -188,6 +188,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_KB_REQUIRED` | Profile 默认：`LOCAL=0`、`TEST=0`、`PRODUCTION=1` | PRODUCTION 默认 KB 失败阻止启动；显式 `false` 才允许 degraded |
 | `LOCAL_AGENT_EMBEDDING_MODEL_PATH` | `data/models/Qwen3-Embedding-0.6B` | 本地 embedding 模型目录；相对路径按项目根目录解析，仅离线加载 |
 | `LOCAL_AGENT_BLOCKING_MAX_WORKERS` / `LOCAL_AGENT_BLOCKING_MAX_PENDING_TASKS` | `4` / `8` | 三个 lifespan 有界 executor 的统一容量 |
+| `LOCAL_AGENT_MAX_ACTIVE_RUNS` | `12` | RunExecutionSupervisor 的 in-flight Run admission 容量；与 blocking executor 容量独立 |
 | `LOCAL_AGENT_EVENT_CHANNEL_CAPACITY` | `32` | per-run RuntimeEventChannel 容量 |
 | `LOCAL_AGENT_PLANNING_TIMEOUT_SECONDS` | `15.0` | planner 独立超时 |
 | `RUNTIME_DISCONNECT_GRACE_SECONDS` | `0.75` | 客户端断连后的有界 drain 时间 |
