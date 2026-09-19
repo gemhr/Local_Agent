@@ -588,7 +588,11 @@ class ParallelExecutor:
                     remaining = context.remaining_seconds()
                     return 86400.0 if remaining is None else remaining
 
-                handle = self._blocking_executor.submit(
+                # admission 可能在 worker + pending 全满时等待；不能在 Runtime
+                # Event Loop 上同步等待，否则已有 worker 通过 EventEmitter /
+                # Persistence bridge 回到同一 loop 时会形成 starvation deadlock。
+                handle = await asyncio.to_thread(
+                    self._blocking_executor.submit,
                     lambda: driver.execute(claim, context),
                     kind=BlockingTaskKind.RUNTIME_STEP,
                     run_id=context.run_id,
@@ -597,7 +601,7 @@ class ParallelExecutor:
                     remaining_seconds=remaining_seconds,
                 )
                 try:
-                    return await asyncio.to_thread(handle.result)
+                    return await handle.result_async()
                 except asyncio.CancelledError:
                     handle.cancel_or_detach()
                     raise

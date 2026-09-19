@@ -330,6 +330,28 @@ async def test_v1_subscription_disconnect_does_not_cancel_supervised_producer(
 
 
 @pytest.mark.asyncio
+async def test_run_execution_supervisor_bounds_active_producers():
+    supervisor = server.RunExecutionSupervisor(max_active_runs=1)
+    first_release = asyncio.Event()
+
+    async def first_stream():
+        await first_release.wait()
+        if False:
+            yield None
+
+    first_slot = await supervisor.acquire_slot()
+    supervisor.spawn("first", first_stream(), reserved_slot=first_slot)
+    second_slot_task = asyncio.create_task(supervisor.acquire_slot())
+    await asyncio.sleep(0)
+    assert second_slot_task.done() is False
+
+    first_release.set()
+    assert await asyncio.wait_for(second_slot_task, timeout=1) is True
+    supervisor.release_slot(True)
+    await supervisor.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_v1_cancel_uses_authorization_and_durable_control(
     clean_database, monkeypatch
 ):

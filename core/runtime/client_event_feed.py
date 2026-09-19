@@ -106,7 +106,7 @@ class InMemoryClientEventFeed:
             if existing is not None and existing != projected:
                 raise ValueError("Client Feed cursor conflict")
             run[projected.cursor] = projected
-        _counter(self._metrics, "client_event_feed_write_total")
+        _counter(self._metrics, "runtime_client_event_feed_write_total")
 
     async def read_after(self, run_id: str, cursor: int, limit: int = 100):
         async with self._lock:
@@ -175,10 +175,10 @@ class PostgresClientEventFeed:
             raise ValueError("Client Feed cursor conflict")
 
     def record_write_succeeded(self) -> None:
-        _counter(self._metrics, "client_event_feed_write_total")
+        _counter(self._metrics, "runtime_client_event_feed_write_total")
 
     def record_write_failed(self) -> None:
-        _counter(self._metrics, "client_event_feed_write_failures")
+        _counter(self._metrics, "runtime_client_event_feed_write_failures_total")
 
     async def read_after(self, run_id: str, cursor: int, limit: int = 100):
         async with self._database.session() as session:

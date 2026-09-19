@@ -63,6 +63,46 @@ class ParallelExecutionTests(unittest.IsolatedAsyncioTestCase):
         report=await ParallelExecutor().execute(claims=batch,state=state,run_context=context,driver=Driver(),execution_mode=StepExecutionMode.SYNC_BLOCKING)
         self.assertNotEqual(report.outcomes[0].result,caller)
 
+    async def test_sync_driver_admission_does_not_block_event_loop(self):
+        import threading
+        import time
+        from core.runtime.blocking_executor import BoundedBlockingExecutor, BlockingTaskKind
+
+        executor = BoundedBlockingExecutor(max_workers=1, max_pending_tasks=0)
+        gate = threading.Event()
+        executor.submit(
+            gate.wait,
+            kind=BlockingTaskKind.RUNTIME_STEP,
+            run_id="filler",
+            operation_id="filler",
+            cancellation_check=lambda: None,
+            remaining_seconds=lambda: 5.0,
+        )
+        state=AgentState.for_run_context('run'); context,_=create_run_context(entry_agent_id='test'); state.run_id=context.run_id; batch=claims(state,'a')
+        class Driver:
+            def execute(self, claim, context): return 'ok'
+        timer = threading.Timer(0.25, gate.set)
+        timer.start()
+        try:
+            started = time.perf_counter()
+            task = asyncio.create_task(
+                ParallelExecutor(blocking_executor=executor).execute(
+                    claims=batch,
+                    state=state,
+                    run_context=context,
+                    driver=Driver(),
+                    execution_mode=StepExecutionMode.SYNC_BLOCKING,
+                )
+            )
+            await asyncio.sleep(0.05)
+            self.assertLess(time.perf_counter() - started, 0.15)
+            report = await asyncio.wait_for(task, 2)
+            self.assertEqual(report.succeeded_step_ids, ('a',))
+        finally:
+            gate.set()
+            timer.cancel()
+            executor.shutdown(timeout=2)
+
 class ParallelExecutionCancellationAndPreflightTests(unittest.IsolatedAsyncioTestCase):
     def _batch(self, *ids):
         state = AgentState.for_run_context('run')

@@ -1,0 +1,12 @@
+{
+  "slo_version": "CANDIDATE_SLO_V1",
+  "profile_name": "stage9_wp5_candidate_regression",
+  "slos": [
+    {"name": "Synthetic baseline success", "required_evidence_profile": "SYNTHETIC", "required_scenario": "api_baseline", "metric": "success_rate", "objective": "at_least", "threshold": 0.99, "minimum_samples": 100},
+    {"name": "Synthetic baseline p95", "required_evidence_profile": "SYNTHETIC", "required_scenario": "api_baseline", "metric": "latency_ms.p95", "objective": "at_most", "threshold": 500, "minimum_samples": 100},
+    {"name": "Runtime run start success", "required_evidence_profile": "PLATFORM_RUNTIME", "required_scenario": "runtime_run_start", "metric": "success_rate", "objective": "at_least", "threshold": 0.99, "minimum_samples": 100},
+    {"name": "Runtime run start p95", "required_evidence_profile": "PLATFORM_RUNTIME", "required_scenario": "runtime_run_start", "metric": "latency_ms.p95", "objective": "at_most", "threshold": 2000, "minimum_samples": 100},
+    {"name": "SSE replay correctness", "required_evidence_profile": "PLATFORM_RUNTIME", "required_scenario": "sse_replay", "metric": "success_rate", "objective": "at_least", "threshold": 1.0, "minimum_samples": 100},
+    {"name": "Continuation duplicate claims", "required_evidence_profile": "PLATFORM_RUNTIME", "required_scenario": "continuation_claim", "metric": "correctness.duplicate_claims", "objective": "at_most", "threshold": 0, "minimum_samples": 100}
+  ]
+}

@@ -490,6 +490,8 @@ RUNTIME_METRIC_DESCRIPTORS = tuple(
         _descriptor("runtime_timeouts_total", MetricType.COUNTER, "超时数", "events", "component", "status"),
         _descriptor("runtime_cancellations_total", MetricType.COUNTER, "取消数", "events", "component", "cancellation_reason", "status"),
         _descriptor("runtime_journal_append_failures_total", MetricType.COUNTER, "Journal 追加失败数", "events"),
+        _descriptor("runtime_client_event_feed_write_total", MetricType.COUNTER, "Client Feed 持久化成功数", "events"),
+        _descriptor("runtime_client_event_feed_write_failures_total", MetricType.COUNTER, "Client Feed 持久化失败数", "events"),
         _descriptor("runtime_event_duplicates_total", MetricType.COUNTER, "重复检测次数", "occurrences", "component"),
         _descriptor("runtime_observability_dropped_records_total", MetricType.COUNTER, "Observability 丢弃记录数", "records"),
         _descriptor(

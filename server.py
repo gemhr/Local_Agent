@@ -273,18 +273,41 @@ class _RequestOwnedStreamingResponse(StreamingResponse):
 class RunExecutionSupervisor:
     """Owns in-process producer tasks without owning Run terminal truth."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_active_runs: int | None = None) -> None:
+        if max_active_runs is not None and max_active_runs <= 0:
+            raise ValueError("max_active_runs must be positive")
         self._tasks: dict[str, asyncio.Task] = {}
+        self._slots = (
+            asyncio.Semaphore(max_active_runs)
+            if max_active_runs is not None
+            else None
+        )
 
-    def spawn(self, run_id: str, stream) -> None:
+    async def acquire_slot(self) -> bool:
+        """Reserve producer capacity before a Run becomes externally accepted."""
+        if self._slots is None:
+            return False
+        await self._slots.acquire()
+        return True
+
+    def release_slot(self, reserved: bool) -> None:
+        if reserved and self._slots is not None:
+            self._slots.release()
+
+    def spawn(self, run_id: str, stream, *, reserved_slot: bool = False) -> None:
         async def consume() -> None:
             try:
                 async for _event in stream:
                     pass
             finally:
-                await stream.aclose()
-                self._tasks.pop(run_id, None)
-        self._tasks[run_id] = asyncio.create_task(consume(), name=f"run:{run_id}")
+                try:
+                    await stream.aclose()
+                finally:
+                    self._tasks.pop(run_id, None)
+                    self.release_slot(reserved_slot)
+        self._tasks[run_id] = asyncio.create_task(
+            consume(), name=f"run:{run_id}"
+        )
 
     async def close(self) -> None:
         if self._tasks:
@@ -1358,7 +1381,9 @@ async def lifespan(app: FastAPI):
         runtime_services.admission_gate
     )
     app.state.runtime_shutdown_coordinator = shutdown_coordinator
-    app.state.run_execution_supervisor = RunExecutionSupervisor()
+    app.state.run_execution_supervisor = RunExecutionSupervisor(
+        max_active_runs=settings.blocking_max_workers
+    )
     app.state.client_event_feed = runtime_services.client_event_feed
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
     initialization_stack.release()
@@ -2669,19 +2694,31 @@ async def v1_chat_endpoint(payload: V1ChatRequest, request: Request):
         uuid.UUID(run_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
-    await _bind_new_run_and_conversation(request, run_id=run_id, agent_id=payload.agent_id)
-    query = payload.query
-    if payload.file_path:
-        query += f"\n\nPlease analyze this file path: '{payload.file_path}'"
-    stream = service.stream_coordinated_agent_events(
-        payload.agent_id, query, run_id=run_id,
-        retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
-    )
     supervisor = getattr(request.app.state, "run_execution_supervisor", None)
     if supervisor is None:
-        await stream.aclose()
         raise HTTPException(status_code=503, detail="RUN_SUPERVISOR_UNAVAILABLE")
-    supervisor.spawn(run_id, stream)
+    reserved_slot = await supervisor.acquire_slot()
+    try:
+        await _bind_new_run_and_conversation(
+            request, run_id=run_id, agent_id=payload.agent_id
+        )
+    except BaseException:
+        supervisor.release_slot(reserved_slot)
+        raise
+    try:
+        query = payload.query
+        if payload.file_path:
+            query += f"\n\nPlease analyze this file path: '{payload.file_path}'"
+        stream = service.stream_coordinated_agent_events(
+            payload.agent_id, query, run_id=run_id,
+            retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
+        )
+        supervisor.spawn(run_id, stream, reserved_slot=reserved_slot)
+    except BaseException:
+        supervisor.release_slot(reserved_slot)
+        if "stream" in locals():
+            await stream.aclose()
+        raise
     return {"run_id": run_id, "events_url": f"/api/v1/runs/{run_id}/events"}
 
 
