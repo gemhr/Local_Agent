@@ -14,6 +14,7 @@ from jwt import InvalidAudienceError, InvalidIssuerError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from core.persistence.errors import DatabaseErrorCode, PersistenceError
 from core.persistence.models import (
     BusinessReviewRow, ObjectOwnershipRow, RoleRow,
     Stage8ExternalExecutionJobRow, Stage8GeneratedCaseArtifactRow,
@@ -275,6 +276,14 @@ class ObjectAuthorizationService:
                 )
                 if not is_admin and str(row.owner_user_id) != str(principal.user_id):
                     raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
+        except PersistenceError as exc:
+            if exc.error_code is not DatabaseErrorCode.DATABASE_INTEGRITY_VIOLATION:
+                raise
+            # Database.transaction() maps the concurrent unique violation to a
+            # typed persistence error before it reaches this owner boundary.
+            # Re-read only this exact conflict; unrelated persistence failures
+            # must remain visible to the caller.
+            await self._require_existing_binding(principal, object_type, object_id)
         except IntegrityError:
             # 并发首建时，下一次请求必须作为既有对象授权，而不是抢占 owner。
             await self._require_existing_binding(principal, object_type, object_id)

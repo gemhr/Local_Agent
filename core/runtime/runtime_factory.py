@@ -1004,28 +1004,42 @@ class CoordinatedRuntimeFactory:
                 )
                 else None
             )
+
+            # Dynamic planning can fail before its Plan/Step execution
+            # aggregate exists.  Keep that pre-initialization terminal on the
+            # Run-control seam; after aggregate initialization, use the
+            # repository's atomic execution-root finalization.
+            coordinator_holder: dict[str, object] = {}
+
+            async def finalize_terminal(event):
+                coordinator = coordinator_holder.get("coordinator")
+                durable_initialized = bool(
+                    getattr(
+                        coordinator,
+                        "_durable_initialized",
+                        rehydrated_root is not None,
+                    )
+                )
+                if repository is not None and durable_initialized:
+                    return await repository.finalize_terminal(
+                        durable_lease,
+                        event=event,
+                        journal=self._services.event_journal,
+                        client_event_feed=atomic_client_event_feed,
+                    )
+                return await durable_control.finalize_terminal(
+                    durable_lease,
+                    event,
+                    self._services.event_journal,
+                    atomic_client_event_feed,
+                )
+
             channel = RuntimeEventChannel(
                 self._event_channel_capacity,
                 run_id=run_context.run_id,
                 cancellation_token=run_context.cancellation_token,
                 journal=self._services.event_journal,
-                terminal_append=(
-                    lambda event: (
-                        repository.finalize_terminal(
-                            durable_lease,
-                            event=event,
-                            journal=self._services.event_journal,
-                            client_event_feed=atomic_client_event_feed,
-                        )
-                        if repository is not None
-                        else durable_control.finalize_terminal(
-                            durable_lease,
-                            event,
-                            self._services.event_journal,
-                            atomic_client_event_feed,
-                        )
-                    )
-                ),
+                terminal_append=finalize_terminal,
                 observability_dispatcher=self._services.observability_dispatcher,
                 fault_controller=fault_controller,
                 client_event_feed=client_event_feed,
@@ -1211,6 +1225,7 @@ class CoordinatedRuntimeFactory:
                 plan = None
                 scheduler = None
                 executor = None
+            coordinator_holder["coordinator"] = coordinator
             scope = CoordinatedRunScope(
                 run_context=run_context,
                 cancellation_source=cancellation_source,

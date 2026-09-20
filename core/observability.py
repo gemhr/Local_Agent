@@ -226,6 +226,56 @@ class ObservabilityService:
             "localagent_postgresql_pool_connections", "SQLAlchemy pool snapshot.",
             ("state",), registry=self.registry,
         )
+        self.db_checkout_wait = Histogram(
+            "localagent_runtime_db_checkout_wait_seconds",
+            "Time observed between database session creation and first pool checkout.",
+            buckets=HTTP_DURATION_BUCKETS, registry=self.registry,
+        )
+        self.db_checkout_timeouts = Counter(
+            "localagent_runtime_db_checkout_timeout_total",
+            "Database pool checkout timeouts.", registry=self.registry,
+        )
+        self.run_admission_wait = Histogram(
+            "localagent_runtime_run_admission_wait_seconds",
+            "Time spent waiting for an active Run producer slot.",
+            buckets=HTTP_DURATION_BUCKETS, registry=self.registry,
+        )
+        self.run_admission_waiting = Gauge(
+            "localagent_runtime_run_admission_waiting",
+            "Run producer requests currently waiting for a slot.", registry=self.registry,
+        )
+        self.run_admission_rejected = Counter(
+            "localagent_runtime_run_admission_rejected_total",
+            "Run producer admission rejections.", ("reason",), registry=self.registry,
+        )
+        self.tool_permit_wait = Histogram(
+            "localagent_runtime_tool_permit_wait_seconds",
+            "Time spent waiting for Tool concurrency permits.",
+            buckets=HTTP_DURATION_BUCKETS, registry=self.registry,
+        )
+        self.tool_active = Gauge(
+            "localagent_runtime_tool_active",
+            "Tool executions currently holding concurrency permits.", registry=self.registry,
+        )
+        self.tool_permit_timeouts = Counter(
+            "localagent_runtime_tool_permit_timeout_total",
+            "Tool permit waits that timed out or were cancelled.", ("reason",), registry=self.registry,
+        )
+        self.sse_active = Gauge(
+            "localagent_runtime_sse_active_connections",
+            "Live client SSE connections.", registry=self.registry,
+        )
+        self.sse_polls = Counter(
+            "localagent_runtime_sse_poll_total", "SSE feed poll operations.", registry=self.registry
+        )
+        self.sse_poll_duration = Histogram(
+            "localagent_runtime_sse_poll_duration_seconds",
+            "SSE feed poll duration.", buckets=HTTP_DURATION_BUCKETS, registry=self.registry,
+        )
+        self.sse_events = Counter(
+            "localagent_runtime_sse_events_delivered_total",
+            "Client events delivered over SSE.", registry=self.registry
+        )
 
         self._tracer_provider: TracerProvider | None = None
         self.tracer: Tracer = trace.get_tracer("localagent.disabled")
@@ -384,6 +434,55 @@ class ObservabilityService:
             value = snapshot.get(state)
             if isinstance(value, int):
                 self.postgresql_pool_connections.labels(state=state).set(value)
+
+    def observe_run_admission_wait(self, duration_seconds: float) -> None:
+        if self.metrics_enabled:
+            self.run_admission_wait.observe(max(0.0, duration_seconds))
+
+    def observe_db_checkout_wait(self, duration_seconds: float) -> None:
+        if self.metrics_enabled:
+            self.db_checkout_wait.observe(max(0.0, duration_seconds))
+
+    def observe_db_checkout_timeout(self) -> None:
+        if self.metrics_enabled:
+            self.db_checkout_timeouts.inc()
+
+    def set_run_admission_waiting(self, value: int) -> None:
+        if self.metrics_enabled:
+            self.run_admission_waiting.set(max(0, value))
+
+    def observe_run_admission_rejected(self, reason: str = "unavailable") -> None:
+        if self.metrics_enabled:
+            self.run_admission_rejected.labels(reason=reason).inc()
+
+    def observe_tool_permit_wait(self, duration_seconds: float) -> None:
+        if self.metrics_enabled:
+            self.tool_permit_wait.observe(max(0.0, duration_seconds))
+
+    def set_tool_active(self, value: int) -> None:
+        if self.metrics_enabled:
+            self.tool_active.set(max(0, value))
+
+    def observe_tool_permit_timeout(self, reason: str = "timeout") -> None:
+        if self.metrics_enabled:
+            self.tool_permit_timeouts.labels(reason=reason).inc()
+
+    def observe_sse_open(self) -> None:
+        if self.metrics_enabled:
+            self.sse_active.inc()
+
+    def observe_sse_close(self) -> None:
+        if self.metrics_enabled:
+            self.sse_active.dec()
+
+    def observe_sse_poll(self, duration_seconds: float) -> None:
+        if self.metrics_enabled:
+            self.sse_polls.inc()
+            self.sse_poll_duration.observe(max(0.0, duration_seconds))
+
+    def observe_sse_events(self, count: int = 1) -> None:
+        if self.metrics_enabled:
+            self.sse_events.inc(max(0, count))
 
     def begin_http_request(self, method: str) -> tuple[str, float]:
         normalized_method = self.normalize_method(method)

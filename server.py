@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path as FilePath
@@ -285,10 +286,12 @@ class _RequestOwnedStreamingResponse(StreamingResponse):
 class RunExecutionSupervisor:
     """Owns in-process producer tasks without owning Run terminal truth."""
 
-    def __init__(self, *, max_active_runs: int | None = None) -> None:
+    def __init__(self, *, max_active_runs: int | None = None, metrics=None) -> None:
         if max_active_runs is not None and max_active_runs <= 0:
             raise ValueError("max_active_runs must be positive")
         self._tasks: dict[str, asyncio.Task] = {}
+        self._waiting = 0
+        self._metrics = metrics
         self._slots = (
             asyncio.Semaphore(max_active_runs)
             if max_active_runs is not None
@@ -299,7 +302,21 @@ class RunExecutionSupervisor:
         """Reserve producer capacity before a Run becomes externally accepted."""
         if self._slots is None:
             return False
-        await self._slots.acquire()
+        started = time.perf_counter()
+        self._waiting += 1
+        _observe_only(self._metrics, "set_run_admission_waiting", self._waiting)
+        try:
+            await self._slots.acquire()
+        finally:
+            self._waiting -= 1
+            _observe_only(
+                self._metrics, "set_run_admission_waiting", self._waiting
+            )
+            _observe_only(
+                self._metrics,
+                "observe_run_admission_wait",
+                time.perf_counter() - started,
+            )
         return True
 
     def release_slot(self, reserved: bool) -> None:
@@ -317,9 +334,39 @@ class RunExecutionSupervisor:
                 finally:
                     self._tasks.pop(run_id, None)
                     self.release_slot(reserved_slot)
-        self._tasks[run_id] = asyncio.create_task(
-            consume(), name=f"run:{run_id}"
+        task = asyncio.create_task(consume(), name=f"run:{run_id}")
+        self._tasks[run_id] = task
+        task.add_done_callback(
+            lambda completed: self._observe_producer_result(run_id, completed)
         )
+
+    @staticmethod
+    def _observe_producer_result(run_id: str, task: asyncio.Task) -> None:
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning(
+                "Run producer task result could not be retrieved",
+                extra={
+                    "component": "run_execution_supervisor",
+                    "phase": "producer",
+                    "run_id": run_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            return
+        if error is not None:
+            logger.warning(
+                "Run producer task failed",
+                extra={
+                    "component": "run_execution_supervisor",
+                    "phase": "producer",
+                    "run_id": run_id,
+                    "error_type": type(error).__name__,
+                },
+            )
 
     async def close(self) -> None:
         if self._tasks:
@@ -344,6 +391,18 @@ evaluation_rewrite_fixture: EvaluationRewriteFixture | None = None
 evaluation_hybrid_rrf_profile = None
 evaluation_validated_generation = None
 logger = logging.getLogger(__name__)
+
+
+def _observe_only(target: object | None, method_name: str, *args: object) -> None:
+    """Metrics callbacks are advisory and must not affect runtime control flow."""
+    try:
+        callback = getattr(target, method_name, None)
+        if callable(callback):
+            callback(*args)
+    except Exception:
+        return
+
+
 def _next_or_none(stream):
     """避免 StopIteration 穿透 Future 边界。"""
     try:
@@ -1200,6 +1259,9 @@ async def lifespan(app: FastAPI):
             tool_name_allowlist=frozenset(settings.metrics_tool_name_allowlist)
         )
     )
+    router.tool_execution_service.concurrency_controller.set_metrics_hook(
+        observability_service
+    )
     infrastructure_metrics = RecorderInfrastructureMetricsHook(runtime_metrics)
     blocking_executor.set_metrics_hook(infrastructure_metrics)
     run_registry = RunRegistry()
@@ -1468,7 +1530,8 @@ async def lifespan(app: FastAPI):
     )
     app.state.runtime_shutdown_coordinator = shutdown_coordinator
     app.state.run_execution_supervisor = RunExecutionSupervisor(
-        max_active_runs=settings.max_active_runs
+        max_active_runs=settings.max_active_runs,
+        metrics=observability_service,
     )
     app.state.client_event_feed = runtime_services.client_event_feed
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
@@ -2866,16 +2929,28 @@ async def v1_run_events_endpoint(
 
     async def generate():
         nonlocal cursor
-        while True:
-            events = await feed.read_after(run_id, cursor)
-            if events:
-                for event in events:
-                    yield f"id: {event.cursor}\nevent: {event.event_type}\ndata: {client_event_data(event)}\n\n"
-                    cursor = event.cursor
-                    if event.event_type in {"run.completed", "run.failed", "run.cancelled"}:
-                        return
-                continue
-            await asyncio.sleep(CLIENT_FEED_POLL_INTERVAL_SECONDS)
+        service = getattr(request.app.state, "observability_service", None)
+        _observe_only(service, "observe_sse_open")
+        try:
+            while True:
+                poll_started = time.perf_counter()
+                events = await feed.read_after(run_id, cursor)
+                _observe_only(
+                    service,
+                    "observe_sse_poll",
+                    time.perf_counter() - poll_started,
+                )
+                if events:
+                    _observe_only(service, "observe_sse_events", len(events))
+                    for event in events:
+                        yield f"id: {event.cursor}\nevent: {event.event_type}\ndata: {client_event_data(event)}\n\n"
+                        cursor = event.cursor
+                        if event.event_type in {"run.completed", "run.failed", "run.cancelled"}:
+                            return
+                    continue
+                await asyncio.sleep(CLIENT_FEED_POLL_INTERVAL_SECONDS)
+        finally:
+            _observe_only(service, "observe_sse_close")
 
     return StreamingResponse(
         generate(), media_type="text/event-stream",

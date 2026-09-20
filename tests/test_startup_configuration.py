@@ -506,7 +506,7 @@ def test_lifespan_wires_approved_knobs_from_settings() -> None:
 
 def test_lifespan_keeps_active_run_and_blocking_executor_settings_independent() -> None:
     source = inspect.getsource(server.lifespan)
-    assert "RunExecutionSupervisor(\n        max_active_runs=settings.max_active_runs\n    )" in source
+    assert "RunExecutionSupervisor(\n        max_active_runs=settings.max_active_runs,\n        metrics=observability_service,\n    )" in source
     assert "max_workers=settings.blocking_max_workers" in source
     assert "max_active_runs=settings.blocking_max_workers" not in source
 

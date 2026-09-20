@@ -3,18 +3,25 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 import asyncio
+import tempfile
 
 import pytest
 
+from core.agent_router import AgentRouter
+from core.llm_engine import ScriptedEvaluationLLMEngine
+from core.memory_manager import MemoryManager
 from core.runtime.budget import BudgetLedger, RunBudget
 from core.runtime.execution_aggregate import ModelAttemptState
 from core.runtime.model_invocation import (
+    DurableModelLifecycleError,
     ModelAdapterResolver,
     ModelAdapterResponse,
     ModelInvocationChainError,
     ModelInvocationRouter,
 )
 from core.runtime.circuit_breaker import ModelCircuitBreakerRegistry
+from core.runtime.event_channel import RuntimeEventChannel
+from core.runtime.event_emitter import RunEventEmitter
 from core.runtime.model_routing import ModelFailureCategory
 from core.runtime.retry import RetryExecutor, RetryPolicy
 from core.runtime.context import create_run_context
@@ -152,3 +159,89 @@ def test_second_provider_failure_stays_fail_closed_after_retry_budget() -> None:
         ModelAttemptState.UNKNOWN.value,
         ModelAttemptState.UNKNOWN.value,
     ]
+
+
+@pytest.mark.asyncio
+async def test_production_planner_run_emitter_executes_before_step_aggregate() -> None:
+    """Dynamic core_router planning must not require a Step durable row."""
+    context, _ = create_run_context(entry_agent_id="core_router")
+    repository = _DurableRepository()
+    context.attach_durable_lease(
+        SimpleNamespace(run_id=context.run_id, fencing_token=1)
+    )
+    context.attach_execution_repository(repository)
+    ledger = BudgetLedger(RunBudget(), deadline_remaining=context.remaining_seconds)
+    context.attach_budget_ledger(ledger)
+
+    channel = RuntimeEventChannel(8, run_id=context.run_id)
+    emitter = RunEventEmitter(
+        run_id=context.run_id,
+        trace_id=context.trace_id,
+        channel=channel,
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        router = AgentRouter(
+            ScriptedEvaluationLLMEngine(),
+            MemoryManager(f"{directory}/memory.db"),
+            orchestration_enabled=False,
+        )
+        output = await asyncio.to_thread(
+            router.complete_planning_decision,
+            "fixture_env_probe",
+            run_context=context,
+            event_emitter=emitter,
+        )
+
+    assert '"decision":"DELEGATE"' in output
+    # The planner ran through the production AgentRouter/model provider, but
+    # no Step-scoped durable attempt exists before dynamic plan initialization.
+    assert repository.calls == []
+
+    await channel.close()
+    events = [event async for event in channel]
+    assert [event.event_type.value for event in events] == [
+        "MODEL_STARTED",
+        "MODEL_COMPLETED",
+    ]
+
+
+def test_step_scoped_model_without_step_id_remains_fail_closed() -> None:
+    context, _ = create_run_context(entry_agent_id="test")
+    repository = _DurableRepository()
+    adapter = RecordingAdapter([ModelAdapterResponse("must not run")])
+
+    with pytest.raises(DurableModelLifecycleError):
+        _invoke_with_emitter(
+            context,
+            repository,
+            adapter,
+            event_emitter=SimpleNamespace(),
+        )
+
+    assert adapter.calls == 0
+    assert repository.calls == []
+
+
+def _invoke_with_emitter(
+    context,
+    repository,
+    adapter,
+    *,
+    event_emitter,
+):
+    context.attach_durable_lease(SimpleNamespace(run_id=context.run_id, fencing_token=1))
+    context.attach_execution_repository(repository)
+    ledger = BudgetLedger(RunBudget(), deadline_remaining=context.remaining_seconds)
+    context.attach_budget_ledger(ledger)
+    return ModelInvocationRouter().invoke(
+        run_context=context,
+        budget_ledger=ledger,
+        routing_decision=routing(LOCAL),
+        messages=({"role": "user", "content": "redacted"},),
+        adapter_resolver=ModelAdapterResolver({LOCAL.profile_id: adapter}),
+        circuit_breaker_registry=ModelCircuitBreakerRegistry(),
+        token_estimate=1,
+        max_tokens=8,
+        event_emitter=event_emitter,
+        async_submit=lambda coroutine: asyncio.run(coroutine),
+    )

@@ -1525,6 +1525,13 @@ class ModelInvocationRouter:
         ``load`` is only used to select the current durable attempt number;
         the mutation itself remains owned by ``start_model_attempt``.
         """
+        # Planner invocations run before the dynamic Plan/Step aggregate is
+        # initialized and deliberately use the Run-level emitter.  They are
+        # still covered by the normal model invocation events, but cannot be
+        # represented as a Step-scoped durable attempt.  Keep the durable
+        # lifecycle fail-closed for every other emitter shape below.
+        if isinstance(event_emitter, RunEventEmitter):
+            return None
         repository = run_context.execution_repository
         if repository is None:
             return None

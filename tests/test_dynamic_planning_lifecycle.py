@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import hashlib
 import json
 
@@ -15,8 +16,13 @@ from core.runtime.metrics import InMemoryMetricsRecorder
 from core.runtime.model_context import ContextBuilder
 from core.runtime.parallel_execution import StepExecutionMode
 from core.runtime.run_coordinator import DynamicPlanState, RunCoordinatorError
+from core.runtime.multi_agent_planning import PlanningError, PlanningErrorCode
 from core.runtime.recovery_contract import RecoveryReason, RecoveryStatus
-from tests._runtime_assembly_fixtures import FakeRouter, make_services
+from tests._runtime_assembly_fixtures import (
+    FakeDurableRunControl,
+    FakeRouter,
+    make_services,
+)
 
 
 def direct_json(agent_id: str = "core_router") -> str:
@@ -97,6 +103,58 @@ def event_types(services, run_id: str) -> list[RuntimeEventType]:
 
 def last_index(types: list, event_type) -> int:
     return len(types) - 1 - list(reversed(types)).index(event_type)
+
+
+@pytest.mark.asyncio
+async def test_dynamic_planning_failure_uses_run_control_terminal_before_aggregate() -> None:
+    class FailingPlannerRouter(RecordingRouter):
+        def complete_planning_decision(self, user_request: str, **kwargs) -> str:
+            raise PlanningError(
+                PlanningErrorCode.PLANNING_MODEL_FAILED,
+                "planner failed",
+            )
+
+    class RecordingDurableRunControl(FakeDurableRunControl):
+        def __init__(self) -> None:
+            super().__init__()
+            self.terminal_calls = 0
+
+        async def finalize_terminal(self, lease, event, journal, client_event_feed=None):
+            self.terminal_calls += 1
+            return await super().finalize_terminal(
+                lease, event, journal, client_event_feed
+            )
+
+    class RecordingExecutionRepository:
+        def __init__(self) -> None:
+            self.initialized = False
+
+        async def initialize(self, root, *, lease):
+            self.initialized = True
+
+        async def finalize_terminal(self, *args, **kwargs):
+            raise AssertionError("pre-init terminal must not use execution root")
+
+    control = RecordingDurableRunControl()
+    services = replace(make_services(snapshot_enabled=False), durable_run_control=control)
+    repository = RecordingExecutionRepository()
+    scope = await CoordinatedRuntimeFactory(
+        FailingPlannerRouter(),
+        services,
+        execution_repository=repository,
+    ).create_run_scope("core_router", "planner failure")
+
+    try:
+        result = await scope.execute()
+        assert result.status is RunStatus.FAILED
+        assert repository.initialized is False
+        assert control.terminal_calls == 1
+        assert any(
+            record.event_type is RuntimeEventType.RUN_COMPLETED
+            for record in event_records(services, scope.run_id)
+        )
+    finally:
+        await scope.close()
 
 
 @pytest.mark.asyncio

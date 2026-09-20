@@ -76,7 +76,7 @@ class ToolResourceLease:
 class ToolConcurrencyController:
     """线程安全、Event Loop 无关的进程内 Controller，不承担调度职责。"""
 
-    def __init__(self, max_concurrency: int = 16, *, poll_seconds: float = 0.01) -> None:
+    def __init__(self, max_concurrency: int = 16, *, poll_seconds: float = 0.01, metrics=None) -> None:
         if (
             isinstance(max_concurrency, bool)
             or not isinstance(max_concurrency, int)
@@ -92,6 +92,8 @@ class ToolConcurrencyController:
         self._held_resources: set[str] = set()
         self._workers: dict[str, ToolWorkerRecord] = {}
         self._accepting = True
+        self._metrics = metrics
+        self._active_permits = 0
 
     async def acquire(
         self,
@@ -102,6 +104,7 @@ class ToolConcurrencyController:
         cancellation_token: CancellationToken,
         remaining_seconds: Callable[[], float | None],
     ) -> ToolResourceLease:
+        wait_started = time.perf_counter()
         with self._lock:
             if not self._accepting:
                 raise ToolResourceAcquireError(
@@ -132,10 +135,21 @@ class ToolConcurrencyController:
                     "TOOL_RESOURCE_WAIT_TIMEOUT",
                     "等待 Tool 资源时可用时间已耗尽。",
                 )
+            with self._lock:
+                self._active_permits += 1
+                self._set_tool_active_locked()
+            self._call_metric(
+                "observe_tool_permit_wait", time.perf_counter() - wait_started
+            )
             return ToolResourceLease(
                 self, tool_name, resource_key, tool_semaphore
             )
-        except BaseException:
+        except BaseException as exc:
+            self._call_metric(
+                "observe_tool_permit_wait", time.perf_counter() - wait_started
+            )
+            if isinstance(exc, (TimeoutError, ToolResourceAcquireError)):
+                self._call_metric("observe_tool_permit_timeout", "timeout")
             if resource_acquired:
                 with self._lock:
                     self._held_resources.discard(resource_key)
@@ -218,11 +232,36 @@ class ToolConcurrencyController:
         resource_key: str | None,
         tool_semaphore: threading.BoundedSemaphore,
     ) -> None:
-        if resource_key is not None:
-            with self._lock:
+        with self._lock:
+            if resource_key is not None:
                 self._held_resources.discard(resource_key)
-        tool_semaphore.release()
-        self._global.release()
+            tool_semaphore.release()
+            self._global.release()
+            self._active_permits -= 1
+            self._set_tool_active_locked()
+
+    def set_metrics_hook(self, metrics) -> None:
+        with self._lock:
+            self._metrics = metrics
+            self._set_tool_active_locked()
+
+    @property
+    def active_permit_count(self) -> int:
+        with self._lock:
+            return self._active_permits
+
+    def _set_tool_active_locked(self) -> None:
+        self._call_metric("set_tool_active", self._active_permits)
+
+    def _call_metric(self, method_name: str, *args: object) -> None:
+        try:
+            callback = getattr(self._metrics, method_name, None)
+            if callable(callback):
+                callback(*args)
+        except Exception:
+            # Metrics are observational only; callback failures must not alter
+            # permit ownership or Tool execution semantics.
+            return
 
     def is_resource_held(self, resource_key: str) -> bool:
         with self._lock:
