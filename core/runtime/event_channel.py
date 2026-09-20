@@ -306,6 +306,7 @@ class RuntimeEventChannel:
         draft: RuntimeEventDraft,
         *,
         ignore_run_cancellation: bool = False,
+        atomic_mutation: Callable[[RuntimeEvent], Awaitable[object]] | None = None,
     ) -> RuntimeEvent:
         """在同一发布锁内按 Journal-first 顺序持久化并入队。
 
@@ -340,7 +341,12 @@ class RuntimeEventChannel:
                             event,
                             partially_persisted=False,
                         )
-                    if (
+                    if atomic_mutation is not None:
+                        if not callable(atomic_mutation):
+                            raise TypeError("atomic_mutation must be callable")
+                        await atomic_mutation(event)
+                        append_status = JournalAppendStatus.APPENDED
+                    elif (
                         event.event_type.value == "RUN_COMPLETED"
                         and self._terminal_append is not None
                     ):

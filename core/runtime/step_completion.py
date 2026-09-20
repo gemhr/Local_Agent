@@ -61,6 +61,7 @@ from core.runtime.step_result_store import (
     StepResultStoreErrorCode,
 )
 from core.runtime.fault_injection_contract import InjectedFaultError
+from core.runtime.execution_aggregate import StepExecutionStatus
 
 
 class StepCommitStatus(str, Enum):
@@ -166,6 +167,9 @@ class StepResultCommitter:
         output_gate: OutputGate | None = None,
         final_memory_writer: FinalMemoryWriter | None = None,
         semantic_memory_formation: SemanticMemoryFormationRunner | None = None,
+        durable_repository=None,
+        durable_lease=None,
+        durable_journal=None,
     ) -> None:
         if not isinstance(store, StepResultStore):
             raise TypeError("committer 需要 StepResultStore")
@@ -196,6 +200,9 @@ class StepResultCommitter:
         self._output_gate = output_gate
         self._final_memory_writer = final_memory_writer
         self._semantic_memory_formation = semantic_memory_formation
+        self._durable_repository = durable_repository
+        self._durable_lease = durable_lease
+        self._durable_journal = durable_journal
         self._guard_lock = threading.Lock()
         self._completed_steps: set[str] = set()
         finals = tuple(
@@ -233,6 +240,8 @@ class StepResultCommitter:
         claim: StepClaim,
         result: StepResult,
         agent_state: AgentState,
+        *,
+        durable_attempt: int | None = None,
     ) -> StepCompletionResult:
         """Commit one StepResult; returns safe metadata, never raises for
         business failures."""
@@ -398,6 +407,8 @@ class StepResultCommitter:
                 else None
             ),
             delivery_duration_ms=delivery_duration_ms,
+            durable_attempt=durable_attempt,
+            durable_result=result,
         )
         if not emitted:
             return self._failure(
@@ -556,6 +567,8 @@ class StepResultCommitter:
         result_char_count: int = 0,
         delivery_status: str | None = None,
         delivery_duration_ms: int = 0,
+        durable_attempt: int | None = None,
+        durable_result: StepResult | None = None,
     ) -> bool:
         """Return False only when the event could not be published."""
         if self._event_emitter is None:
@@ -574,6 +587,40 @@ class StepResultCommitter:
                 0, int((step.ended_at - step.started_at).total_seconds() * 1000)
             )
         plan_step = self._plan_step(claim.step_id)
+        atomic_mutation = None
+        if (
+            durable_attempt is not None
+            and durable_result is not None
+            and self._durable_repository is not None
+            and self._durable_lease is not None
+            and self._durable_journal is not None
+        ):
+            payload = {
+                "content": durable_result.content,
+                "content_type": durable_result.content_type.value,
+                "producer_agent_id": durable_result.producer_agent_id,
+                "complete": durable_result.complete,
+                "result_disposition": durable_result.result_disposition.value,
+                "security_denial_code": (
+                    durable_result.security_denial_code.value
+                    if durable_result.security_denial_code is not None
+                    else None
+                ),
+            }
+
+            async def atomic_mutation(event):
+                await self._durable_repository.complete_step(
+                    self._durable_lease,
+                    step_id=claim.step_id,
+                    plan_version=claim.plan_version,
+                    attempt=durable_attempt,
+                    result=payload,
+                    status=StepExecutionStatus.SUCCEEDED,
+                    journal_append=lambda session: self._durable_journal.append_in_transaction(
+                        session, event
+                    ),
+                )
+
         try:
             await emitter.emit(
                 RuntimeEventType.STEP_COMPLETED,
@@ -598,6 +645,7 @@ class StepResultCommitter:
                 component="step_completion",
                 close=True,
                 ignore_run_cancellation=True,
+                atomic_mutation=atomic_mutation,
             )
             return True
         except asyncio.CancelledError:

@@ -69,6 +69,7 @@ class RunEventEmitter:
         *,
         component: str,
         ignore_run_cancellation: bool = False,
+        atomic_mutation: Callable[[RuntimeEvent], Coroutine[Any, Any, object]] | None = None,
     ) -> RuntimeEvent:
         span = current_trace_context()
         return await self.channel.publish(
@@ -82,6 +83,7 @@ class RunEventEmitter:
                 parent_span_id=span.parent_span_id if span else None,
             ),
             ignore_run_cancellation=ignore_run_cancellation,
+            atomic_mutation=atomic_mutation,
         )
 
     def emit_from_worker(
@@ -192,6 +194,7 @@ class StepEventEmitter:
         component: str,
         close: bool = False,
         ignore_run_cancellation: bool = False,
+        atomic_mutation: Callable[[RuntimeEvent], Coroutine[Any, Any, object]] | None = None,
     ) -> RuntimeEvent:
         async with self._lock:
             if self._closed:
@@ -212,6 +215,7 @@ class StepEventEmitter:
                         parent_span_id=span.parent_span_id if span else None,
                     ),
                     ignore_run_cancellation=ignore_run_cancellation,
+                    atomic_mutation=atomic_mutation,
                 )
             except EventPublicationError as exc:
                 if exc.partially_persisted:

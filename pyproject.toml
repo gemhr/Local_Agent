@@ -50,6 +50,7 @@ testpaths = ["tests"]
 addopts = ["-m", "not resource_intensive"]
 markers = [
     "resource_intensive: 加载真实本地模型等高资源依赖；默认测试排除，使用 -m resource_intensive 显式运行",
+    "REAL_PROCESS_CRASH_E2E: 使用独立 OS 进程验证 durable crash recovery",
 ]
 
 [tool.uv]

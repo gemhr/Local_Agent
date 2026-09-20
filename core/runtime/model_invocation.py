@@ -34,6 +34,7 @@ from core.runtime.model_routing import (
 from core.runtime.model_selection import ModelProfileId
 from core.runtime.retry import RetryExecutor, RetryPolicy
 from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
+from core.runtime.execution_aggregate import ModelAttemptState, canonical_payload_digest
 from core.runtime.event_journal import JournalError
 from core.runtime.fault_injection import FaultInjectionController
 from core.runtime.fault_injection_contract import (
@@ -411,6 +412,10 @@ class ModelInvocationChainError(RuntimeError):
         self.failure_category = final_category
         self.error_code = safe_error_code or f"MODEL_CHAIN_{final_category.value}"
         super().__init__("所有可用模型候选均未成功")
+
+
+class DurableModelLifecycleError(RuntimeError):
+    """Durable model state could not be fenced; provider must not be retried."""
 
 
 class ModelInvocationConfirmationRequired(RuntimeError):
@@ -991,6 +996,7 @@ class ModelInvocationRouter:
             )
             try:
                 started_event_emitted = False
+                durable_attempt = None
                 adapter = adapter_resolver.resolve(candidate.profile_id)
                 self._execute_fault_point(
                     fault_controller,
@@ -998,6 +1004,21 @@ class ModelInvocationRouter:
                     run_context=run_context,
                     attempt_number=len(attempts) + 1,
                 )
+                try:
+                    durable_attempt = self._start_durable_model_attempt(
+                        run_context=run_context,
+                        event_emitter=event_emitter,
+                        candidate=candidate,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        generation_options=generation_options,
+                        async_submit=async_submit,
+                        attempts=attempts,
+                    )
+                except Exception as exc:
+                    raise DurableModelLifecycleError(
+                        "MODEL_DURABLE_START_FAILED"
+                    ) from exc
                 attempt_started_monotonic = time.monotonic()
                 # Candidate、Context、Circuit、Budget、Cancellation/Deadline 与
                 # Adapter resolution 均已成功；进入 invoke 前由 Router 发布唯一
@@ -1048,9 +1069,39 @@ class ModelInvocationRouter:
                     )
                 else:
                     response = adapter.invoke(messages, max_tokens=max_tokens)
+            except DurableModelLifecycleError:
+                # A durable STARTED marker is a precondition for provider I/O;
+                # repository failure must not be interpreted as a provider
+                # failure and must never enter fallback/retry.
+                if durable_attempt is not None:
+                    budget_ledger.commit(
+                        reservation,
+                        None,
+                        usage_source=UsageSource.ESTIMATED,
+                    )
+                else:
+                    budget_ledger.release(reservation)
+                permit.abandon()
+                attempt_span.end_error("MODEL_DURABLE_START_FAILED")
+                reset_trace_context(attempt_trace_token)
+                raise
             except JournalError:
                 # Provider 尚未调用；Journal 失败必须终止本次调用且不得 fallback/retry。
-                budget_ledger.release(reservation)
+                if durable_attempt is not None:
+                    self._finish_durable_model_attempt(
+                        run_context=run_context,
+                        durable_attempt=durable_attempt,
+                        state=ModelAttemptState.UNKNOWN,
+                        async_submit=async_submit,
+                        safe_error="MODEL_STARTED_EVENT_FAILED",
+                    )
+                    budget_ledger.commit(
+                        reservation,
+                        None,
+                        usage_source=UsageSource.ESTIMATED,
+                    )
+                else:
+                    budget_ledger.release(reservation)
                 permit.abandon()
                 attempt_span.end_error("MODEL_STARTED_EVENT_FAILED")
                 reset_trace_context(attempt_trace_token)
@@ -1065,7 +1116,10 @@ class ModelInvocationRouter:
                     else isinstance(adapter, GeneratorModelAdapter)
                     and bool(getattr(exc, "output_started", False))
                 )
-                if started:
+                if started or durable_attempt is not None:
+                    # A durable STARTED row represents an uncertain provider
+                    # boundary; keep the reservation consumed even when an
+                    # adapter reports that it did not observe the request.
                     budget_ledger.commit(
                         reservation,
                         None,
@@ -1073,6 +1127,17 @@ class ModelInvocationRouter:
                     )
                 else:
                     budget_ledger.release(reservation)
+                if durable_attempt is not None:
+                    # Once the durable STARTED marker is written, every local
+                    # provider exception is uncertainty.  Recovery, rather
+                    # than this worker, owns any retry decision.
+                    self._finish_durable_model_attempt(
+                        run_context=run_context,
+                        durable_attempt=durable_attempt,
+                        state=ModelAttemptState.UNKNOWN,
+                        async_submit=async_submit,
+                        safe_error=_safe_error_code(exc, category),
+                    )
                 health_outcome = self._circuit_health_outcome(
                     category=category,
                     provider_started=started,
@@ -1195,6 +1260,30 @@ class ModelInvocationRouter:
                 reset_trace_context(attempt_trace_token)
                 raise
             actual = response.actual_usage
+            if durable_attempt is not None:
+                try:
+                    self._finish_durable_model_attempt(
+                        run_context=run_context,
+                        durable_attempt=durable_attempt,
+                        state=ModelAttemptState.COMPLETED,
+                        async_submit=async_submit,
+                        result=self._durable_model_result(response),
+                        usage=self._durable_usage(response.actual_usage),
+                    )
+                except Exception:
+                    # The provider already returned, but a fenced durable
+                    # commit failure must never fall through as a successful
+                    # invocation.  Preserve the conservative reservation and
+                    # leave STARTED for takeover classification.
+                    budget_ledger.commit(
+                        reservation,
+                        None,
+                        usage_source=UsageSource.ESTIMATED,
+                    )
+                    permit.record_indeterminate()
+                    attempt_span.end_error("MODEL_DURABLE_COMMIT_FAILED")
+                    reset_trace_context(attempt_trace_token)
+                    raise
             try:
                 budget_ledger.commit(
                     reservation,
@@ -1378,6 +1467,150 @@ class ModelInvocationRouter:
                 provider_started=False,
                 provider_responded=False,
             )
+
+    @staticmethod
+    def _durable_model_request_digest(
+        messages: Sequence[Mapping[str, str]],
+        *,
+        max_tokens: int,
+        generation_options: Mapping[str, object] | None,
+    ) -> str:
+        """Digest the request without persisting prompt or option contents."""
+        return canonical_payload_digest(
+            {
+                "messages": [dict(message) for message in messages],
+                "max_tokens": max_tokens,
+                "generation_options": dict(generation_options or {}),
+            }
+        )
+
+    @staticmethod
+    def _durable_model_result(response: ModelAdapterResponse) -> dict[str, object]:
+        """Return only JSON-safe data needed by a resumed step."""
+        result: dict[str, object] = {"output": response.output}
+        native = response.native_tool_call
+        if native is not None:
+            result["native_tool_call"] = {
+                "provider_tool_call_id": native.provider_tool_call_id,
+                "tool_name": native.tool_name,
+                "arguments_json": native.arguments_json,
+            }
+        return result
+
+    @staticmethod
+    def _durable_usage(usage: BudgetUsage | None) -> dict[str, int]:
+        if usage is None:
+            return {}
+        return {
+            name: int(getattr(usage, name))
+            for name in BudgetUsage.__dataclass_fields__
+            if not name.startswith("_")
+        }
+
+    def _start_durable_model_attempt(
+        self,
+        *,
+        run_context: RunContext,
+        event_emitter: RunEventEmitter | StepEventEmitter | None,
+        candidate: ModelRoutingCandidate,
+        messages: Sequence[Mapping[str, str]],
+        max_tokens: int,
+        generation_options: Mapping[str, object] | None,
+        async_submit: Callable[[object], object] | None,
+        attempts: Sequence[ModelInvocationAttempt],
+    ) -> tuple[object, str, int, int] | None:
+        """Persist a fenced STARTED marker before entering provider I/O.
+
+        The tuple is ``(repository, step_id, step_attempt, model_attempt)``.
+        ``load`` is only used to select the current durable attempt number;
+        the mutation itself remains owned by ``start_model_attempt``.
+        """
+        repository = run_context.execution_repository
+        if repository is None:
+            return None
+        lease = run_context.durable_lease
+        step_id = getattr(event_emitter, "step_id", None)
+        if lease is None or not isinstance(step_id, str) or not step_id.strip():
+            raise RuntimeError(
+                "durable model invocation requires durable lease and step_id"
+            )
+        if not callable(async_submit):
+            raise RuntimeError(
+                "durable model invocation requires owner-loop async_submit"
+            )
+        load = getattr(repository, "load", None)
+        step_attempt = 1
+        model_attempt = len(attempts) + 1
+        if callable(load):
+            image = async_submit(load(run_context.run_id))
+            step_row = next(
+                (
+                    row
+                    for row in getattr(image, "steps", ())
+                    if getattr(row, "step_id", None) == step_id
+                ),
+                None,
+            )
+            if step_row is not None:
+                step_attempt = int(getattr(step_row, "current_attempt", 0) or 0)
+                if step_attempt <= 0:
+                    step_attempt = 1
+            existing = [
+                int(getattr(row, "model_attempt_number", 0) or 0)
+                for row in getattr(image, "models", ())
+                if getattr(row, "step_id", None) == step_id
+                and int(getattr(row, "attempt_number", 0) or 0) == step_attempt
+            ]
+            if existing:
+                model_attempt = max(existing) + 1
+        start = getattr(repository, "start_model_attempt", None)
+        if not callable(start):
+            raise RuntimeError("execution repository lacks start_model_attempt")
+        async_submit(
+            start(
+                lease,
+                step_id=step_id,
+                attempt=step_attempt,
+                model_attempt=model_attempt,
+                request_digest=self._durable_model_request_digest(
+                    messages,
+                    max_tokens=max_tokens,
+                    generation_options=generation_options,
+                ),
+                provider_kind=candidate.profile.provider_kind,
+                profile_identity=candidate.profile.model_identity
+                or candidate.profile_id.value,
+            )
+        )
+        return repository, step_id, step_attempt, model_attempt
+
+    @staticmethod
+    def _finish_durable_model_attempt(
+        *,
+        run_context: RunContext,
+        durable_attempt: tuple[object, str, int, int],
+        state: ModelAttemptState,
+        async_submit: Callable[[object], object] | None,
+        result: Mapping[str, object] | None = None,
+        usage: Mapping[str, object] | None = None,
+        safe_error: str | None = None,
+    ) -> None:
+        repository, step_id, step_attempt, model_attempt = durable_attempt
+        finish = getattr(repository, "finish_model_attempt", None)
+        if not callable(finish) or not callable(async_submit):
+            raise RuntimeError("execution repository lacks fenced model completion")
+        async_submit(
+            finish(
+                run_context.durable_lease,
+                step_id=step_id,
+                attempt=step_attempt,
+                model_attempt=model_attempt,
+                state=state,
+                result=result,
+                usage=usage,
+                safe_error=safe_error,
+            )
+        )
 
     def _start_model_attempt_span(
         self,

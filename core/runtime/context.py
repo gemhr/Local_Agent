@@ -105,6 +105,29 @@ class Deadline:
         self.deadline_at = clock.utc_now() + timedelta(seconds=timeout_seconds)
         self._monotonic_deadline = clock.monotonic() + timeout_seconds
 
+    @classmethod
+    def from_absolute(
+        cls, absolute_deadline: datetime | None, *, clock: Clock
+    ) -> "Deadline":
+        """Rebuild a deadline from durable wall-clock state.
+
+        Recovery must preserve the persisted deadline rather than granting a
+        fresh timeout from the moment a new worker starts.
+        """
+        if absolute_deadline is not None:
+            _ensure_utc_datetime(absolute_deadline, "absolute_deadline")
+        deadline = cls.__new__(cls)
+        deadline._clock = clock
+        deadline.deadline_at = absolute_deadline
+        if absolute_deadline is None:
+            deadline._monotonic_deadline = None
+        else:
+            remaining = max(
+                0.0, (absolute_deadline - clock.utc_now()).total_seconds()
+            )
+            deadline._monotonic_deadline = clock.monotonic() + remaining
+        return deadline
+
     def remaining_seconds(self) -> float | None:
         """返回剩余秒数；无截止时间时返回 None，到期后返回零。"""
         if self._monotonic_deadline is None:
@@ -139,6 +162,8 @@ class RunContext:
         self._retrieval_cache_authz_domain: str | None = None
         self._ownership_validator: Callable[[], Awaitable[None]] | None = None
         self._durable_lease = None
+        self._execution_repository = None
+        self._durable_tool_invocation = None
         self._tool_resolution_snapshot = None
 
     @property
@@ -246,6 +271,43 @@ class RunContext:
             raise ValueError("durable lease 不能为空")
         self._durable_lease = lease
 
+    @property
+    def execution_repository(self):
+        """当前 Run 的 durable execution repository（未迁移路径为 None）。"""
+        return self._execution_repository
+
+    @property
+    def durable_execution_repository(self):
+        """execution_repository 的明确 durable 别名。"""
+        return self._execution_repository
+
+    def attach_execution_repository(self, repository: object) -> None:
+        """由 Run Owner 注入单一执行聚合 repository。"""
+        if self._execution_repository is not None:
+            raise RuntimeError("RunContext 已绑定 execution repository")
+        if repository is None:
+            raise ValueError("execution repository 不能为空")
+        self._execution_repository = repository
+
+    def attach_durable_execution_repository(self, repository: object) -> None:
+        """明确 durable 语义的兼容命名；仍绑定同一个 repository。"""
+        self.attach_execution_repository(repository)
+
+    @property
+    def durable_tool_invocation(self):
+        """恢复时已存在的 durable Tool invocation；仅作为执行绑定输入。"""
+        return self._durable_tool_invocation
+
+    def attach_durable_tool_invocation(self, invocation: object) -> None:
+        """绑定恢复镜像中的 invocation，禁止恢复路径生成第二个 identity。"""
+        if self._durable_tool_invocation is not None:
+            raise RuntimeError("RunContext 已绑定 durable Tool invocation")
+        if invocation is None or getattr(invocation, "run_id", None) != self.run_id:
+            raise ValueError("durable Tool invocation run_id mismatch")
+        if not getattr(invocation, "invocation_id", None):
+            raise ValueError("durable Tool invocation identity 不能为空")
+        self._durable_tool_invocation = invocation
+
     @classmethod
     def create(
         cls,
@@ -343,5 +405,39 @@ def create_run_context(
     )
     return (
         RunContext(data=data, deadline=deadline, cancellation_token=source.token, clock=active_clock),
+        source,
+    )
+
+
+def create_rehydrated_run_context(
+    *,
+    entry_agent_id: str,
+    session_id: str = DEFAULT_SESSION_ID,
+    trace_id: str,
+    run_id: str,
+    created_at: datetime,
+    absolute_deadline: datetime | None,
+    cancellation_source: CancellationSource | None = None,
+    clock: Clock | None = None,
+) -> tuple[RunContext, CancellationSource]:
+    """Rebuild a RunContext from durable identity and deadline facts."""
+    if not entry_agent_id or not session_id or not trace_id or not run_id:
+        raise ValueError("rehydrated RunContext identities must be non-empty")
+    _ensure_utc_datetime(created_at, "created_at")
+    active_clock = clock or SystemClock()
+    source = cancellation_source or CancellationSource()
+    data = RunContextData(
+        identifiers=RunIdentifiers(run_id=run_id, session_id=session_id, trace_id=trace_id),
+        created_at=created_at,
+        deadline_at=absolute_deadline,
+        entry_agent_id=entry_agent_id,
+    )
+    return (
+        RunContext(
+            data=data,
+            deadline=Deadline.from_absolute(absolute_deadline, clock=active_clock),
+            cancellation_token=source.token,
+            clock=active_clock,
+        ),
         source,
     )

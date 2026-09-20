@@ -81,7 +81,7 @@ class FakeDurableRunControl:
         if not isinstance(lease, tuple) or self.leases.get(lease[0]) != lease:
             raise RuntimeError("lease is not current")
 
-    async def finalize_terminal(self, lease: object, event, journal):
+    async def finalize_terminal(self, lease: object, event, journal, client_event_feed=None):
         await self.assert_current(lease)
         result = journal.append(event)
         if inspect.isawaitable(result):

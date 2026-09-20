@@ -68,6 +68,12 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_EMBEDDING_BATCH_SIZE` | embedding adapter | int | `8` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `8` |
 | `LOCAL_AGENT_SNAPSHOT_ENABLED` | PostgresSnapshotStore assembly | strict bool | `false` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | public-safe flag | typo fails Settings load | `false` |
 | `LOCAL_AGENT_DATABASE_URL` | PostgreSQL persistence（canonical） | DSN (`postgresql+asyncpg`) | 无（SERVER 必填） | 仅接受 `postgresql+asyncpg://` | SERVER/SCRIPT | APPLICATION_SCOPE | yes | **secret**：绝不进入 repr/log/trace/错误正文 | 空值或非 asyncpg driver 在 Settings 阶段 fail closed；不可达 / schema 未就绪阻止 startup READY | `<secret-store-reference>` |
+| `LOCAL_AGENT_RECOVERY_SCAN_CADENCE_SECONDS` | RecoveryCoordinator | float seconds | `5.0` | finite > 0 | no | APPLICATION_SCOPE | yes | internal config | 非正数 fail closed | `5.0` |
+| `LOCAL_AGENT_RECOVERY_SCAN_BATCH_SIZE` | RecoveryCoordinator | int | `20` | 1..1000 | no | APPLICATION_SCOPE | yes | internal config | 越界 fail closed | `20` |
+| `LOCAL_AGENT_RECOVERY_MAX_ATTEMPTS` | RecoveryCoordinator | int | `5` | 1..100 | no | APPLICATION_SCOPE | yes | internal config | 达上限后 durable manual-required，不再 blind loop | `5` |
+| `LOCAL_AGENT_RECOVERY_INITIAL_BACKOFF_SECONDS` | RecoveryCoordinator | int seconds | `5` | integer >= 1 | no | APPLICATION_SCOPE | yes | internal config | 非法值 fail closed | `5` |
+| `LOCAL_AGENT_RECOVERY_MAX_BACKOFF_SECONDS` | RecoveryCoordinator | int seconds | `60` | integer >= 5 且 >= initial | no | APPLICATION_SCOPE | yes | internal config | 小于 initial 时 fail closed | `60` |
+| `LOCAL_AGENT_RECOVERY_SHUTDOWN_GRACE_SECONDS` | RecoveryCoordinator | float seconds | `5.0` | finite >= 0 | no | APPLICATION_SCOPE | yes | internal config | 非法值 fail closed；超时后取消本机 recovery task | `5.0` |
 | `LOCAL_AGENT_DB_POOL_SIZE` | Database（pool） | int | `5` | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `5` |
 | `LOCAL_AGENT_DB_MAX_OVERFLOW` | Database（pool） | int | `5` | integer ≥0 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed | `5` |
 | `LOCAL_AGENT_DB_POOL_TIMEOUT_SECONDS` | Database（pool acquire） | finite float | `5.0` | >0 | no | APPLICATION_SCOPE | yes | internal config | pool 耗尽映射为 typed `DATABASE_POOL_EXHAUSTED`（HTTP 503），不无限等待 | `5.0` |

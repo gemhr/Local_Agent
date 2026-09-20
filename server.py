@@ -64,6 +64,7 @@ from core.persistence import (
     SyncPersistenceBridge,
     check_schema_readiness,
 )
+from core.persistence.repositories.execution import DurableExecutionRepository
 from core.runtime.run_control import DurableRunControlService
 from core.runtime.durable_approval import DurableApprovalService
 from core.runtime.tool_idempotency import DurableToolInvocationService
@@ -108,6 +109,10 @@ from core.runtime import (
     ToolResourceExtractorCatalog,
     ToolResourceExtractorDescriptor,
     RunStatus,
+)
+from core.runtime.recovery_coordinator import (
+    RecoveryCoordinator,
+    RecoveryCoordinatorConfig,
 )
 from core.runtime.generation_evidence import (
     FinalAnswerEvidenceError,
@@ -1299,6 +1304,10 @@ async def lifespan(app: FastAPI):
         "application_runtime_services",
         runtime_services,
     )
+    execution_repository = DurableExecutionRepository(
+        persistence_database,
+        durable_run_control,
+    )
     coordinated_runtime_factory = await initialization_stack.create(
         "coordinated_runtime_factory",
         lambda: CoordinatedRuntimeFactory(
@@ -1309,6 +1318,52 @@ async def lifespan(app: FastAPI):
             step_result_per_result_chars=settings.step_result_per_result_chars,
             step_result_run_total_chars=settings.step_result_run_total_chars,
             step_result_max_entries=settings.step_result_max_entries,
+            execution_repository=execution_repository,
+        ),
+    )
+
+    async def rehydrate_and_execute(
+        run_id: str,
+        lease,
+        recovery_image,
+    ) -> None:
+        """通过同一 Runtime Factory 恢复并执行一个 durable Run。
+
+        Factory 的 rehydration API 是恢复的唯一构造入口；在该 API 尚未
+        提供时明确失败并进入 RecoveryCoordinator 的 durable backoff，不能
+        退回 fresh scope 再手工覆盖其状态。
+        """
+        create_rehydrated = getattr(
+            coordinated_runtime_factory,
+            "create_rehydrated_run_scope",
+            None,
+        )
+        if not callable(create_rehydrated):
+            raise RuntimeError(
+                "CoordinatedRuntimeFactory.create_rehydrated_run_scope is required"
+            )
+        scope = await create_rehydrated(
+            run_id=run_id,
+            lease=lease,
+            recovery_image=recovery_image,
+        )
+        try:
+            await scope.execute()
+        finally:
+            await scope.close()
+
+    recovery_coordinator = RecoveryCoordinator(
+        execution_repository,
+        durable_run_control,
+        rehydrate_and_execute,
+        instance_id=app.state.application_metadata.instance_id,
+        config=RecoveryCoordinatorConfig(
+            cadence_seconds=settings.recovery_scan_cadence_seconds,
+            batch_size=settings.recovery_scan_batch_size,
+            max_attempts=settings.recovery_max_attempts,
+            initial_backoff_seconds=settings.recovery_initial_backoff_seconds,
+            max_backoff_seconds=settings.recovery_max_backoff_seconds,
+            shutdown_grace_seconds=settings.recovery_shutdown_grace_seconds,
         ),
     )
     chat_service = await initialization_stack.create(
@@ -1336,6 +1391,7 @@ async def lifespan(app: FastAPI):
     app.state.chat_service = chat_service
     app.state.runtime_services = runtime_services
     app.state.coordinated_runtime_factory = coordinated_runtime_factory
+    app.state.recovery_coordinator = recovery_coordinator
     app.state.stage8_specialist_service = SpecialistAgentApplicationService(
         coordinated_runtime_factory,
         mission_service=app.state.stage8_mission_service,
@@ -1387,10 +1443,12 @@ async def lifespan(app: FastAPI):
     app.state.client_event_feed = runtime_services.client_event_feed
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
     initialization_stack.release()
+    await recovery_coordinator.start()
     try:
         yield
     finally:
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.SHUTTING_DOWN
+        await recovery_coordinator.stop()
         shutdown_report = await shutdown_coordinator.shutdown()
         supervisor = getattr(app.state, "run_execution_supervisor", None)
         if supervisor is not None:
@@ -1424,6 +1482,7 @@ async def lifespan(app: FastAPI):
         app.state.stage8_ci_guardian_service = None
         app.state.stage8_ticket_continuation_service = None
         app.state.runtime_services = None
+        app.state.recovery_coordinator = None
         app.state.run_execution_supervisor = None
         app.state.client_event_feed = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED

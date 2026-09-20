@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 import inspect
+from collections.abc import Mapping
 from typing import Protocol
 
 from sqlalchemy import func, select
@@ -19,7 +20,16 @@ from core.persistence.database import Database
 from core.persistence.models import DurableToolInvocationRow, RunControlRow
 from core.persistence.repositories import runtime as runtime_repository
 from core.runtime.run_control import OwnershipLost, RunLease
-from core.runtime.tool_contract import ToolInvocation, canonical_json_digest, safe_key_digest
+from core.runtime.tool_contract import (
+    RetryDisposition,
+    ToolExecutionResult,
+    ToolExecutionStatus,
+    ToolInvocation,
+    ToolOutput,
+    ToolSideEffectState,
+    canonical_json_digest,
+    safe_key_digest,
+)
 
 
 class ToolInvocationState(str, Enum):
@@ -52,6 +62,7 @@ class DurableToolInvocation:
     run_id: str
     step_id: str
     tool_name: str
+    arguments_digest: str
     invocation_binding_digest: str
     idempotency_key_digest: str
     resource_key_digest: str | None
@@ -68,6 +79,13 @@ class DurableToolInvocation:
     committed_at: datetime | None
     unknown_at: datetime | None
     reconciled_at: datetime | None
+    committed_result: dict[str, object] | None
+    digest: str | None
+
+    @property
+    def result_digest(self) -> str | None:
+        """兼容调用方使用更具描述性的 result_digest 名称。"""
+        return self.digest
 
 
 def tool_invocation_binding_digest(invocation: ToolInvocation) -> str:
@@ -105,6 +123,33 @@ class DurableToolInvocationService:
         binding = invocation_binding_digest or tool_invocation_binding_digest(invocation)
         idempotency_digest = safe_key_digest(invocation.idempotency_key) or safe_key_digest(invocation.invocation_id)
         assert idempotency_digest is not None
+        row_values = {
+            "invocation_id": invocation.invocation_id,
+            "run_id": lease.run_id,
+            "step_id": step_id,
+            "tool_name": tool_name,
+            "invocation_binding_digest": binding,
+            "arguments_digest": invocation.arguments_digest,
+            "idempotency_key_digest": idempotency_digest,
+            "resource_key_digest": safe_key_digest(invocation.resource_key),
+            "owner_id": lease.owner_id,
+            "fencing_token": lease.fencing_token,
+            "approval_id": approval_id,
+            "execution_claim_id": execution_claim_id,
+        }
+        # 允许持久化 migration 与本模块分批落地；字段存在时必须写入，
+        # 旧数据库则继续使用既有 invocation contract，后续 migration 补齐事实列。
+        row_values = {
+            key: value
+            for key, value in row_values.items()
+            if key in {
+                "invocation_id", "run_id", "step_id", "tool_name",
+                "invocation_binding_digest", "idempotency_key_digest",
+                "resource_key_digest", "owner_id", "fencing_token",
+                "approval_id", "execution_claim_id",
+            }
+            or hasattr(DurableToolInvocationRow, key)
+        }
         async with self.database.transaction() as session:
             await self._lock_current_lease(session, lease)
             row = (await session.execute(
@@ -113,19 +158,7 @@ class DurableToolInvocationService:
                 .with_for_update()
             )).scalar_one_or_none()
             if row is None:
-                row = DurableToolInvocationRow(
-                    invocation_id=invocation.invocation_id,
-                    run_id=lease.run_id,
-                    step_id=step_id,
-                    tool_name=tool_name,
-                    invocation_binding_digest=binding,
-                    idempotency_key_digest=idempotency_digest,
-                    resource_key_digest=safe_key_digest(invocation.resource_key),
-                    owner_id=lease.owner_id,
-                    fencing_token=lease.fencing_token,
-                    approval_id=approval_id,
-                    execution_claim_id=execution_claim_id,
-                )
+                row = DurableToolInvocationRow(**row_values)
                 session.add(row)
                 await session.flush()
             else:
@@ -140,6 +173,7 @@ class DurableToolInvocationService:
                     step_id,
                     tool_name,
                     binding,
+                    invocation.arguments_digest,
                     idempotency_digest,
                     approval_id,
                     execution_claim_id,
@@ -173,12 +207,15 @@ class DurableToolInvocationService:
         lease: RunLease,
         invocation_id: str,
         provider_operation_id: str | None = None,
+        result: ToolExecutionResult | Mapping[str, object] | None = None,
     ) -> DurableToolInvocation:
+        result_payload, result_digest = _committed_result_payload(result)
         async with self.database.transaction() as session:
             await self._lock_current_lease(session, lease)
             row = await self._locked_row(session, invocation_id)
             self._assert_owner(row, lease)
             if row.state == ToolInvocationState.COMMITTED.value:
+                _assert_existing_result(row, result_payload, result_digest)
                 return self._record(row)
             if row.state != ToolInvocationState.STARTED.value:
                 raise ValueError("COMMITTED 只能从 STARTED 收口")
@@ -186,6 +223,8 @@ class DurableToolInvocationService:
             row.provider_operation_id = provider_operation_id or row.provider_operation_id
             row.committed_at = datetime.now(UTC)
             row.reconciled_at = None
+            if result_payload is not None:
+                _set_result_fields(row, result_payload, result_digest)
             row.version += 1
             return self._record(row)
 
@@ -340,6 +379,7 @@ class DurableToolInvocationService:
         step_id: str,
         tool_name: str,
         binding: str,
+        arguments_digest: str,
         idempotency_digest: str,
         approval_id: str | None,
         execution_claim_id: str | None,
@@ -363,6 +403,10 @@ class DurableToolInvocationService:
             )
         ):
             raise ValueError("Tool invocation immutable binding conflict")
+        persisted_arguments_digest = getattr(row, "arguments_digest", None)
+        if persisted_arguments_digest is not None:
+            if persisted_arguments_digest != arguments_digest:
+                raise ValueError("Tool invocation arguments digest is invalid")
 
     @staticmethod
     def _assert_reconciliation_identity(
@@ -378,6 +422,10 @@ class DurableToolInvocationService:
             row.run_id != run_id
             or row.tool_name != invocation.tool_name
             or row.invocation_binding_digest != binding
+            or (
+                getattr(row, "arguments_digest", invocation.arguments_digest)
+                != invocation.arguments_digest
+            )
             or row.idempotency_key_digest != idempotency_digest
             or row.resource_key_digest != safe_key_digest(invocation.resource_key)
         ):
@@ -385,11 +433,18 @@ class DurableToolInvocationService:
 
     @staticmethod
     def _record(row: DurableToolInvocationRow) -> DurableToolInvocation:
+        committed_result = getattr(row, "committed_result", None)
+        digest = getattr(row, "digest", None)
+        if digest is None:
+            digest = getattr(row, "result_digest", None)
+        if digest is None:
+            digest = getattr(row, "committed_result_digest", None)
         return DurableToolInvocation(
             invocation_id=row.invocation_id,
             run_id=row.run_id,
             step_id=row.step_id,
             tool_name=row.tool_name,
+            arguments_digest=getattr(row, "arguments_digest", ""),
             invocation_binding_digest=row.invocation_binding_digest,
             idempotency_key_digest=row.idempotency_key_digest,
             resource_key_digest=row.resource_key_digest,
@@ -406,7 +461,21 @@ class DurableToolInvocationService:
             committed_at=row.committed_at,
             unknown_at=row.unknown_at,
             reconciled_at=row.reconciled_at,
+            committed_result=committed_result,
+            digest=digest,
         )
+
+    @staticmethod
+    def restore_committed_result(record: DurableToolInvocation) -> ToolExecutionResult:
+        """从 durable COMMITTED payload 恢复完整 ToolExecutionResult；缺失即 fail closed。"""
+        if record.state is not ToolInvocationState.COMMITTED:
+            raise ValueError("只有 COMMITTED invocation 才能恢复结果")
+        payload = record.committed_result
+        if payload is None or record.digest is None:
+            raise ValueError("COMMITTED invocation 缺少 durable result")
+        if canonical_json_digest(payload) != record.digest:
+            raise ValueError("COMMITTED invocation result digest mismatch")
+        return _tool_execution_result_from_payload(payload)
 
 
 __all__ = [
@@ -417,3 +486,88 @@ __all__ = [
     "ToolInvocationState",
     "tool_invocation_binding_digest",
 ]
+
+
+def _committed_result_payload(
+    result: ToolExecutionResult | Mapping[str, object] | None,
+) -> tuple[dict[str, object] | None, str | None]:
+    if result is None:
+        return None, None
+    if isinstance(result, ToolExecutionResult):
+        payload = result.to_safe_dict(include_output=True)
+    elif isinstance(result, Mapping):
+        payload = dict(result)
+    else:
+        raise TypeError("committed result 必须是 ToolExecutionResult 或 JSON object")
+    digest = canonical_json_digest(payload)
+    return payload, digest
+
+
+def _set_result_fields(
+    row: DurableToolInvocationRow,
+    payload: dict[str, object],
+    digest: str,
+) -> None:
+    if hasattr(row, "committed_result"):
+        row.committed_result = payload
+    if hasattr(row, "digest"):
+        row.digest = digest
+    elif hasattr(row, "result_digest"):
+        row.result_digest = digest
+    elif hasattr(row, "committed_result_digest"):
+        row.committed_result_digest = digest
+
+
+def _assert_existing_result(
+    row: DurableToolInvocationRow,
+    payload: dict[str, object] | None,
+    digest: str | None,
+) -> None:
+    if payload is None:
+        return
+    stored_payload = getattr(row, "committed_result", None)
+    stored_digest = (
+        getattr(row, "digest", None)
+        or getattr(row, "result_digest", None)
+        or getattr(row, "committed_result_digest", None)
+    )
+    if stored_payload is None or stored_digest != digest or stored_payload != payload:
+        raise ValueError("COMMITTED invocation result binding conflict")
+
+
+def _tool_execution_result_from_payload(
+    payload: Mapping[str, object],
+) -> ToolExecutionResult:
+    output_payload = payload.get("output")
+    if not isinstance(output_payload, Mapping) or "content" not in output_payload:
+        raise ValueError("COMMITTED Tool result 缺少完整 output content")
+    try:
+        output = ToolOutput(
+            content_type=str(output_payload["content_type"]),
+            content=output_payload["content"],
+            original_size_bytes=int(output_payload["original_size_bytes"]),
+            returned_size_bytes=int(output_payload["returned_size_bytes"]),
+            truncated=bool(output_payload["truncated"]),
+            digest=str(output_payload["digest"]),
+        )
+        return ToolExecutionResult(
+            invocation_id=str(payload["invocation_id"]),
+            attempt_id=str(payload["attempt_id"]),
+            tool_name=str(payload["tool_name"]),
+            status=ToolExecutionStatus(str(payload["status"])),
+            output=output,
+            safe_summary=str(payload["safe_summary"]),
+            side_effect_state=ToolSideEffectState(str(payload["side_effect_state"])),
+            idempotency_replayed=bool(payload["idempotency_replayed"]),
+            retry_disposition=RetryDisposition(str(payload["retry_disposition"])),
+            resource_key_digest=payload.get("resource_key_digest"),
+            started_at=datetime.fromisoformat(str(payload["started_at"])),
+            completed_at=datetime.fromisoformat(str(payload["completed_at"])),
+            duration_ms=int(payload["duration_ms"]),
+            retry_index=int(payload.get("retry_index", 0)),
+            worker_terminated=bool(payload.get("worker_terminated", True)),
+            execution_detached=bool(payload.get("execution_detached", False)),
+            resource_release_pending=bool(payload.get("resource_release_pending", False)),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("COMMITTED Tool result payload invalid") from exc

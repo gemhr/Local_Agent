@@ -789,6 +789,13 @@ class Settings:
     kafka_security_protocol: str = "PLAINTEXT"
     kafka_sasl_username: str = field(default="", repr=False)
     kafka_sasl_password: str = field(default="", repr=False)
+    # Stage10-WP1 generic crash recovery worker bounds.
+    recovery_scan_cadence_seconds: float = 5.0
+    recovery_scan_batch_size: int = 20
+    recovery_max_attempts: int = 5
+    recovery_initial_backoff_seconds: int = 5
+    recovery_max_backoff_seconds: int = 60
+    recovery_shutdown_grace_seconds: float = 5.0
 
     @classmethod
     def load(cls) -> "Settings":
@@ -1197,6 +1204,19 @@ class Settings:
                 "credentials_not_allowed",
             )
 
+        recovery_initial_backoff_seconds = _env_strict_int(
+            "LOCAL_AGENT_RECOVERY_INITIAL_BACKOFF_SECONDS", 5, minimum=1
+        )
+        recovery_max_backoff_seconds = _env_strict_int(
+            "LOCAL_AGENT_RECOVERY_MAX_BACKOFF_SECONDS", 60, minimum=5
+        )
+        if recovery_max_backoff_seconds < recovery_initial_backoff_seconds:
+            raise SettingsValidationError(
+                SETTINGS_VALIDATION_ERROR,
+                "LOCAL_AGENT_RECOVERY_MAX_BACKOFF_SECONDS",
+                "below_initial_backoff",
+            )
+
         return cls(
             project_root=project_root,
             environment_profile=environment_profile,
@@ -1462,4 +1482,18 @@ class Settings:
             kafka_security_protocol=kafka_security_protocol,
             kafka_sasl_username=kafka_sasl_username,
             kafka_sasl_password=kafka_sasl_password,
+            recovery_scan_cadence_seconds=_env_strict_float(
+                "LOCAL_AGENT_RECOVERY_SCAN_CADENCE_SECONDS", 5.0, positive=True
+            ),
+            recovery_scan_batch_size=_env_strict_int(
+                "LOCAL_AGENT_RECOVERY_SCAN_BATCH_SIZE", 20, minimum=1, maximum=1000
+            ),
+            recovery_max_attempts=_env_strict_int(
+                "LOCAL_AGENT_RECOVERY_MAX_ATTEMPTS", 5, minimum=1, maximum=100
+            ),
+            recovery_initial_backoff_seconds=recovery_initial_backoff_seconds,
+            recovery_max_backoff_seconds=recovery_max_backoff_seconds,
+            recovery_shutdown_grace_seconds=_env_strict_float(
+                "LOCAL_AGENT_RECOVERY_SHUTDOWN_GRACE_SECONDS", 5.0, minimum=0.0
+            ),
         )

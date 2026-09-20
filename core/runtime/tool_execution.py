@@ -405,6 +405,7 @@ class ToolAttemptExecutor:
         durable_started = False
         durable_finalized = False
         durable_unknown = False
+        durable_commit_pending = False
         started_at = datetime.now(UTC)
         started_monotonic = time.monotonic()
 
@@ -520,12 +521,9 @@ class ToolAttemptExecutor:
                 tracker.observe(response.side_effect_state)
             if tracker.state is ToolSideEffectState.COMMITTED:
                 if durable_started and durable_invocation_service is not None:
-                    await durable_invocation_service.committed(
-                        lease=run_context.durable_lease,
-                        invocation_id=invocation.invocation_id,
-                        provider_operation_id=response.provider_operation_id,
-                    )
-                    durable_finalized = True
+                    # 先构造完整 typed result，再与 COMMITTED 状态一次性持久化，
+                    # 使恢复路径可直接复用 output content 而不再调用 provider。
+                    durable_commit_pending = True
                 await _execute_tool_fault_point(
                     fault_controller,
                     FaultPoint.TOOL_AFTER_AUTHORITATIVE_SIDE_EFFECT_RESOLUTION,
@@ -573,6 +571,14 @@ class ToolAttemptExecutor:
                 ),
                 retry_index=retry_index,
             )
+            if durable_commit_pending and durable_invocation_service is not None:
+                await durable_invocation_service.committed(
+                    lease=run_context.durable_lease,
+                    invocation_id=invocation.invocation_id,
+                    provider_operation_id=response.provider_operation_id,
+                    result=result,
+                )
+                durable_finalized = True
             completed = await self._emit_completed(
                 event_emitter,
                 spec=spec,
@@ -1358,6 +1364,45 @@ class ToolExecutionService:
         ledger = run_context.budget_ledger
         if not isinstance(ledger, BudgetLedger):
             raise RuntimeError("Tool Execution 需要 RunContext 已绑定 BudgetLedger")
+        recovered_invocation = getattr(run_context, "durable_tool_invocation", None)
+        if recovered_invocation is not None:
+            recovered_arguments_digest = getattr(recovered_invocation, "arguments_digest", None)
+            if (
+                getattr(recovered_invocation, "step_id", None) != step_id
+                or getattr(recovered_invocation, "tool_name", None) != invocation.tool_name
+                or (
+                    recovered_arguments_digest
+                    and recovered_arguments_digest != invocation.arguments_digest
+                )
+            ):
+                return ToolExecutionError(
+                    invocation_id=invocation.invocation_id,
+                    attempt_id=None,
+                    tool_name=invocation.tool_name,
+                    category=ToolErrorCategory.VALIDATION,
+                    safe_error_code="TOOL_RECOVERY_BINDING_MISMATCH",
+                    safe_message="Recovered Tool invocation binding mismatch.",
+                    phase=ToolExecutionPhase.INVOCATION,
+                    provider_started=False,
+                    side_effect_state=ToolSideEffectState.UNKNOWN,
+                    retry_disposition=RetryDisposition.OUTCOME_UNKNOWN,
+                )
+            if invocation.invocation_id != recovered_invocation.invocation_id:
+                invocation = ToolInvocation.create(
+                    tool_name=invocation.tool_name,
+                    invocation_id=recovered_invocation.invocation_id,
+                    arguments=invocation.arguments,
+                    idempotency_key=invocation.idempotency_key,
+                    resource_key=invocation.resource_key,
+                    requested_timeout_seconds=invocation.requested_timeout_seconds,
+                )
+            durable_approval_id = getattr(recovered_invocation, "approval_id", None)
+            durable_execution_claim_id = getattr(
+                recovered_invocation, "execution_claim_id", None
+            )
+            durable_binding_digest = getattr(
+                recovered_invocation, "invocation_binding_digest", durable_binding_digest
+            )
         try:
             spec = adapter.spec_for(invocation)
             _validate_invocation_against_spec(invocation, spec)
@@ -1410,6 +1455,22 @@ class ToolExecutionService:
                 invocation_binding_digest=durable_binding_digest,
             )
             if durable_record.state.value != "PREPARED":
+                if durable_record.state.value == "COMMITTED":
+                    try:
+                        return durable_service.restore_committed_result(durable_record)
+                    except (TypeError, ValueError):
+                        return ToolExecutionError(
+                            invocation_id=invocation.invocation_id,
+                            attempt_id=None,
+                            tool_name=spec.tool_name,
+                            category=ToolErrorCategory.SIDE_EFFECT_UNKNOWN,
+                            safe_error_code="TOOL_COMMITTED_RESULT_MISSING",
+                            safe_message="Committed Tool result is unavailable.",
+                            phase=ToolExecutionPhase.INVOCATION,
+                            provider_started=True,
+                            side_effect_state=ToolSideEffectState.COMMITTED,
+                            retry_disposition=RetryDisposition.UNSAFE,
+                        )
                 side_effect_state = (
                     ToolSideEffectState.COMMITTED
                     if durable_record.state.value == "COMMITTED"

@@ -641,6 +641,9 @@ class DurableToolInvocationRow(PersistenceBase):
     run_id: Mapped[str] = mapped_column(String(255), nullable=False)
     step_id: Mapped[str] = mapped_column(String(255), nullable=False)
     tool_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Stage10 recovery identity/result binding. Nullable keeps existing Tool
+    # rows readable until the Tool Runtime batch populates the safe digest.
+    arguments_digest: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
     invocation_binding_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     idempotency_key_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     resource_key_digest: Mapped[str | None] = mapped_column(String(64))
@@ -650,6 +653,8 @@ class DurableToolInvocationRow(PersistenceBase):
     execution_claim_id: Mapped[str | None] = mapped_column(String(255))
     state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'PREPARED'"))
     provider_operation_id: Mapped[str | None] = mapped_column(String(255))
+    committed_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    committed_result_digest: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
     uncertainty_reason: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     started_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
@@ -672,6 +677,10 @@ class DurableToolInvocationRow(PersistenceBase):
         ),
         CheckConstraint("version > 0", name="ck_runtime_tool_invocation_version"),
         Index("ix_runtime_tool_invocations_run_state", "run_id", "state"),
+        Index(
+            "ix_runtime_tool_invocations_recovery_identity",
+            "run_id", "step_id", "tool_name", "arguments_digest",
+        ),
     )
 
 
@@ -700,6 +709,133 @@ class DurableContinuationRow(PersistenceBase):
         Index("ix_runtime_continuations_ready", "state", "created_at"),
         Index("ix_runtime_continuations_expired", "state", "claim_deadline_at"),
         Index("ix_runtime_continuations_run", "run_id", "created_at"),
+    )
+
+
+class RuntimeRunExecutionRow(PersistenceBase):
+    """Canonical durable execution root; the source for rehydration."""
+
+    __tablename__ = "runtime_run_executions"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runtime_run_control.run_id", ondelete="RESTRICT"), primary_key=True
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    execution_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    resume_input: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    plan_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    plan_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    plan_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'ACTIVE'"))
+    stop_reason: Mapped[str | None] = mapped_column(String(64))
+    final_result_binding: Mapped[dict | None] = mapped_column(JSONB)
+    absolute_deadline: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    budget_totals: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    budget_reserved: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    budget_consumed: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    recovery_supported: Mapped[bool] = mapped_column(nullable=False, server_default=text("true"))
+    recovery_attempt_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    last_recovery_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    last_recovery_error: Mapped[str | None] = mapped_column(String(128))
+    next_recovery_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    manual_required: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
+    last_committed_fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    __table_args__ = (
+        CheckConstraint("schema_version > 0", name="ck_runtime_run_execution_schema_version"),
+        CheckConstraint("execution_version > 0", name="ck_runtime_run_execution_version"),
+        CheckConstraint(
+            "plan_version > 0", name="ck_runtime_run_execution_plan_version"
+        ),
+        CheckConstraint(
+            "status IN ('ACTIVE', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED')",
+            name="ck_runtime_run_execution_status",
+        ),
+        CheckConstraint("recovery_attempt_count >= 0", name="ck_runtime_run_execution_recovery_attempts"),
+        CheckConstraint(
+            "last_committed_fencing_token >= 0",
+            name="ck_runtime_run_execution_fencing_token",
+        ),
+        Index("ix_runtime_run_executions_recovery", "status", "recovery_supported", "next_recovery_at"),
+    )
+
+
+class RuntimeStepExecutionRow(PersistenceBase):
+    """Canonical durable step state and complete typed result binding."""
+
+    __tablename__ = "runtime_step_executions"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runtime_run_executions.run_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    step_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    plan_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'PENDING'"))
+    current_attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    execution_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    risk_classification: Mapped[str] = mapped_column(String(32), nullable=False)
+    typed_result_payload: Mapped[dict | None] = mapped_column(JSONB)
+    result_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    safe_error: Mapped[str | None] = mapped_column(String(128))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    last_committed_fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_id", name="uq_runtime_step_execution_identity"),
+        CheckConstraint("current_attempt >= 0", name="ck_runtime_step_execution_attempt"),
+        CheckConstraint("plan_version > 0", name="ck_runtime_step_execution_plan_version"),
+        CheckConstraint("version > 0", name="ck_runtime_step_execution_version"),
+        CheckConstraint(
+            "status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'BLOCKED', 'SKIPPED')",
+            name="ck_runtime_step_execution_status",
+        ),
+        CheckConstraint(
+            "last_committed_fencing_token >= 0",
+            name="ck_runtime_step_execution_fencing_token",
+        ),
+        Index("ix_runtime_step_executions_run_status", "run_id", "status"),
+    )
+
+
+class RuntimeModelInvocationRow(PersistenceBase):
+    """Durable model attempt; UNKNOWN is explicit and never inferred as success."""
+
+    __tablename__ = "runtime_model_invocations"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runtime_run_executions.run_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    step_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    model_attempt_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    provider_kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    profile_identity: Mapped[str] = mapped_column(String(255), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'NOT_STARTED'"))
+    result_binding: Mapped[dict | None] = mapped_column(JSONB)
+    result_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    usage_evidence: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    cost_evidence: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    safe_error: Mapped[str | None] = mapped_column(String(128))
+    started_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    last_committed_fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    __table_args__ = (
+        CheckConstraint("attempt_number > 0", name="ck_runtime_model_attempt_number"),
+        CheckConstraint("model_attempt_number > 0", name="ck_runtime_model_model_attempt_number"),
+        CheckConstraint("state IN ('NOT_STARTED', 'STARTED', 'COMPLETED', 'UNKNOWN')", name="ck_runtime_model_state"),
+        CheckConstraint(
+            "last_committed_fencing_token >= 0",
+            name="ck_runtime_model_fencing_token",
+        ),
+        Index("ix_runtime_model_invocations_run_state", "run_id", "state"),
     )
 
 
@@ -1037,6 +1173,9 @@ CANONICAL_TABLES = (
     "runtime_tool_execution_claims",
     "runtime_tool_invocations",
     "runtime_continuations",
+    "runtime_run_executions",
+    "runtime_step_executions",
+    "runtime_model_invocations",
     "runtime_snapshots",
     "event_consumption_checkpoint",
     "consumer_processed_events",

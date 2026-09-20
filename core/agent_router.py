@@ -1959,6 +1959,54 @@ class AgentRouter:
             )
         except ToolAdapterInvocationError as exc:
             raise self._tool_validation_failure(tool_name, exc) from None
+        recovered_invocation = getattr(
+            active_context, "durable_tool_invocation", None
+        )
+        if recovered_invocation is not None:
+            recovered_arguments_digest = getattr(
+                recovered_invocation, "arguments_digest", None
+            )
+            if (
+                getattr(recovered_invocation, "step_id", None) != step_id
+                or getattr(recovered_invocation, "tool_name", None)
+                != invocation.tool_name
+                or (
+                    recovered_arguments_digest
+                    and recovered_arguments_digest != invocation.arguments_digest
+                )
+            ):
+                raise ToolExecutionFailed(
+                    ToolExecutionError(
+                        invocation_id=invocation.invocation_id,
+                        attempt_id=None,
+                        tool_name=invocation.tool_name,
+                        category=ToolErrorCategory.VALIDATION,
+                        safe_error_code="TOOL_RECOVERY_BINDING_MISMATCH",
+                        safe_message="Recovered Tool invocation binding mismatch.",
+                        phase=ToolExecutionPhase.INVOCATION,
+                        provider_started=False,
+                        side_effect_state=ToolSideEffectState.UNKNOWN,
+                        retry_disposition=RetryDisposition.OUTCOME_UNKNOWN,
+                    )
+                )
+            recovered_invocation_id = getattr(
+                recovered_invocation, "invocation_id", None
+            )
+            if (
+                isinstance(recovered_invocation_id, str)
+                and recovered_invocation_id
+                and invocation.invocation_id != recovered_invocation_id
+            ):
+                invocation = ToolInvocation.create(
+                    tool_name=invocation.tool_name,
+                    invocation_id=recovered_invocation_id,
+                    arguments=invocation.arguments,
+                    idempotency_key=invocation.idempotency_key,
+                    resource_key=invocation.resource_key,
+                    requested_timeout_seconds=(
+                        invocation.requested_timeout_seconds
+                    ),
+                )
         if validated_invocation is not None:
             auth_decision = self.tool_governance_service.authorize_tool(
                 governance_context, registration
@@ -2009,15 +2057,34 @@ class AgentRouter:
                 invocation_decision.outcome
                 is ToolGovernanceOutcome.APPROVAL_REQUIRED
             ):
-                approval_result = self._await_tool_approval(
-                    agent_id=agent_id,
-                    invocation=invocation,
-                    invocation_decision=invocation_decision,
-                    step_id=step_id,
-                    run_context=active_context,
-                    event_emitter=event_emitter,
-                    approval_controller=approval_controller,
+                recovered_approval_id = getattr(
+                    recovered_invocation, "approval_id", None
                 )
+                recovered_claim_id = getattr(
+                    recovered_invocation, "execution_claim_id", None
+                )
+                if recovered_approval_id and recovered_claim_id:
+                    approval_result = ApprovalCommandResult(
+                        run_id=active_context.run_id,
+                        approval_id=recovered_approval_id,
+                        effective_status=ApprovalStatus.EXECUTION_CLAIMED,
+                        invocation_binding_digest=getattr(
+                            recovered_invocation,
+                            "invocation_binding_digest",
+                            None,
+                        ),
+                        execution_claim_id=recovered_claim_id,
+                    )
+                else:
+                    approval_result = self._await_tool_approval(
+                        agent_id=agent_id,
+                        invocation=invocation,
+                        invocation_decision=invocation_decision,
+                        step_id=step_id,
+                        run_context=active_context,
+                        event_emitter=event_emitter,
+                        approval_controller=approval_controller,
+                    )
                 durable_approval_id = approval_result.approval_id
             else:
                 raise ToolGovernanceError(

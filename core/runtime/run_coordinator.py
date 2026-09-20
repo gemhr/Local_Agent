@@ -128,6 +128,7 @@ from core.runtime.fault_injection_contract import (
     FaultPoint,
     InjectedFaultError,
 )
+from core.runtime.execution_aggregate import ExecutionRootInput
 
 
 _TERMINAL_RUN_STATUSES = frozenset(
@@ -250,6 +251,9 @@ class RunCoordinator:
         metrics_recorder=None,
         durable_approval_service=None,
         durable_lease=None,
+        durable_repository=None,
+        durable_journal=None,
+        durable_initialized: bool = False,
     ) -> None:
         self._initialize_base(
             run_context=run_context,
@@ -266,6 +270,9 @@ class RunCoordinator:
             metrics_recorder=metrics_recorder,
             durable_approval_service=durable_approval_service,
             durable_lease=durable_lease,
+            durable_repository=durable_repository,
+            durable_journal=durable_journal,
+            durable_initialized=durable_initialized,
         )
         self._bind_static_plan(plan, scheduler, executor)
 
@@ -273,6 +280,50 @@ class RunCoordinator:
     def for_static_plan(cls, **kwargs) -> "RunCoordinator":
         """显式构造已经拥有可信 Plan 的兼容 Runtime。"""
         return cls(**kwargs)
+
+    @classmethod
+    def for_rehydrated_plan(
+        cls,
+        *,
+        step_result_store=None,
+        output_gate=None,
+        completion_owner=None,
+        **kwargs,
+    ) -> "RunCoordinator":
+        """Construct a frozen coordinator with already-hydrated run objects."""
+        coordinator = cls(**kwargs)
+        coordinator.attach_rehydrated_typed_runtime(
+            step_result_store=step_result_store,
+            output_gate=output_gate,
+            completion_owner=completion_owner,
+        )
+        return coordinator
+
+    def attach_rehydrated_typed_runtime(
+        self, *, step_result_store, output_gate, completion_owner,
+        multi_agent_driver=None, invocation_bindings=None
+    ) -> None:
+        """Bind durable result collaborators before execution starts."""
+        if self._started:
+            raise RunCoordinatorError(
+                "REHYDRATED_RUNTIME_ALREADY_STARTED",
+                "已启动的 Coordinator 不能绑定恢复运行时",
+            )
+        if not isinstance(step_result_store, StepResultStore):
+            raise TypeError("step_result_store 必须是 StepResultStore")
+        if not isinstance(output_gate, OutputGate):
+            raise TypeError("output_gate 必须是 OutputGate")
+        if not isinstance(completion_owner, StepResultCommitter):
+            raise TypeError("completion_owner 必须是 StepResultCommitter")
+        self._step_result_store = step_result_store
+        self._output_gate = output_gate
+        self._step_completion_owner = completion_owner
+        if multi_agent_driver is not None:
+            self._multi_agent_driver = multi_agent_driver
+            self._invocation_bindings = invocation_bindings
+            self._dynamic = True
+            self._dynamic_plan_state = DynamicPlanState.FROZEN
+            self._typed_multi_step_plan = True
 
     @classmethod
     def for_dynamic_resolver(
@@ -304,6 +355,9 @@ class RunCoordinator:
         episodic_evaluation_observer: EpisodicEvaluationObserver | None = None,
         durable_approval_service=None,
         durable_lease=None,
+        durable_repository=None,
+        durable_journal=None,
+        durable_initialized: bool = False,
     ) -> "RunCoordinator":
         """构造尚无 Plan/Scheduler/Checkpoint 的动态规划 Runtime。"""
         if not isinstance(plan_resolver, PlanResolver):
@@ -354,6 +408,9 @@ class RunCoordinator:
             metrics_recorder=metrics_recorder,
             durable_approval_service=durable_approval_service,
             durable_lease=durable_lease,
+            durable_repository=durable_repository,
+            durable_journal=durable_journal,
+            durable_initialized=durable_initialized,
         )
         self._dynamic = True
         self._dynamic_plan_state = DynamicPlanState.UNRESOLVED
@@ -415,6 +472,9 @@ class RunCoordinator:
         metrics_recorder,
         durable_approval_service=None,
         durable_lease=None,
+        durable_repository=None,
+        durable_journal=None,
+        durable_initialized: bool = False,
     ) -> None:
         self.run_context = run_context
         self._plan: Plan | None = None
@@ -460,6 +520,9 @@ class RunCoordinator:
         self._episodic_evaluation_observer = None
         self._durable_approval_service = durable_approval_service
         self._durable_approval_lease = durable_lease
+        self._durable_repository = durable_repository
+        self._durable_journal = durable_journal
+        self._durable_initialized = durable_initialized
         self._tool_approval_controller: ToolApprovalController | None = None
 
         self._start_lock = threading.Lock()
@@ -725,6 +788,9 @@ class RunCoordinator:
             output_gate=gate,
             final_memory_writer=memory_writer,
             semantic_memory_formation=semantic_formation,
+            durable_repository=self._durable_repository,
+            durable_lease=self._durable_approval_lease,
+            durable_journal=self._durable_journal,
         )
         self._step_result_store = store
         self._step_completion_owner = committer
@@ -1145,6 +1211,7 @@ class RunCoordinator:
         )
         self.run_context.raise_if_inactive()
         self._freeze_dynamic_plan(resolved)
+        await self._initialize_durable_execution()
         self._update_memory_retrieval_injection(resolved, injection_reports)
         await self._emit_memory_retrieval_observation()
         evaluate_sync_fault(
@@ -1169,6 +1236,40 @@ class RunCoordinator:
                     "POST_PLAN_PRE_EXECUTION_CHECKPOINT_FAILED"
                 )
         return None
+
+    async def _initialize_durable_execution(self) -> None:
+        """Persist the canonical Run/Plan/Step aggregate before any Step event."""
+        if self._durable_initialized or self._durable_repository is None:
+            return
+        if self.plan is None:
+            raise RunCoordinatorError("PLAN_NOT_FROZEN", "durable 初始化要求 Plan 已冻结")
+        lease = self._durable_approval_lease
+        if lease is None:
+            raise RunCoordinatorError("DURABLE_LEASE_MISSING", "durable 初始化缺少 Run lease")
+        snapshot = self.budget_ledger.snapshot()
+        budget_fields = self.budget_ledger.budget.__dataclass_fields__
+        budget_totals = {
+            name: getattr(self.budget_ledger.budget, name)
+            for name in budget_fields
+            if getattr(self.budget_ledger.budget, name) is not None
+        }
+        resume_input = {
+            "entry_agent_id": getattr(self._planning_request, "selected_agent_id", self.run_context.data.entry_agent_id),
+            "session_id": self.run_context.session_id,
+            "trace_id": self.run_context.trace_id,
+            "user_query": getattr(self._planning_request, "user_request", ""),
+        }
+        root = ExecutionRootInput(
+            run_id=self.run_context.run_id,
+            resume_input=resume_input,
+            plan=self.plan,
+            absolute_deadline=self.run_context.data.deadline_at,
+            budget_totals=budget_totals,
+            budget_reserved={name: getattr(snapshot.reserved_usage, name) for name in snapshot.reserved_usage.__dataclass_fields__ if not name.startswith("_")},
+            budget_consumed={name: getattr(snapshot.committed_usage, name) for name in snapshot.committed_usage.__dataclass_fields__ if not name.startswith("_")},
+        )
+        await self._durable_repository.initialize(root, lease=lease)
+        self._durable_initialized = True
 
     @staticmethod
     def _planner_timeout_code():
@@ -1417,11 +1518,12 @@ class RunCoordinator:
                     component="planner", operation=RUNTIME_PLANNING_SPAN
                 )
                 with activate_span(planner_span):
-                    if self._dynamic:
+                    if self._dynamic and self._dynamic_plan_state is DynamicPlanState.UNRESOLVED:
                         decision = await self._prepare_dynamic_execution()
                     else:
                         assert self.plan is not None and self.scheduler is not None
                         PlanGraphValidator.validate(self.plan)
+                        await self._initialize_durable_execution()
                     self._attach_planning_span_attributes(planner_span)
                 if decision is None:
                     assert self.plan is not None and self.scheduler is not None

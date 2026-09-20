@@ -447,6 +447,15 @@ class StepResultStore:
                 created_at=datetime.now(UTC),
             )
 
+    def rehydrate_readable(self, entry: StepResult, agent_state: AgentState) -> None:
+        """Load one durable successful result as a READABLE entry.
+
+        This is intentionally the same validation path as a live completion;
+        it does not bypass plan identity, capacity, or terminal-step checks.
+        """
+        self.write_prepared(entry, expected_agent_id=entry.producer_agent_id)
+        self.mark_readable(entry.step_id, agent_state)
+
     def mark_readable(self, step_id: str, agent_state: AgentState) -> None:
         """PREPARED -> READABLE only after producer Step is SUCCEEDED."""
         evaluate_sync_fault(

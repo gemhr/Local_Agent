@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
 import pytest
 
 from core.runtime import (
@@ -8,6 +11,9 @@ from core.runtime import (
     FaultInjectionController,
 )
 from tests._runtime_assembly_fixtures import FakeRouter, make_services
+from tests._recovery_fixtures import recovery_plan
+from core.runtime.execution_aggregate import plan_payload
+from core.runtime.plan_fingerprint import PlanFingerprinter
 
 
 @pytest.mark.asyncio
@@ -108,3 +114,158 @@ async def test_factory_failure_unregisters_request_channel(monkeypatch) -> None:
         await factory.create_run_scope("core_router", "question")
 
     assert dispatcher.gauge_provider.channels == set()
+
+
+@pytest.mark.asyncio
+async def test_factory_rehydrates_terminal_step_into_state_and_store() -> None:
+    plan = recovery_plan()
+    now = datetime.now(UTC)
+    root = SimpleNamespace(
+        run_id="recovered-run",
+        plan_payload=plan_payload(plan),
+        plan_fingerprint=PlanFingerprinter.fingerprint(plan),
+        resume_input={"entry_agent_id": "router", "query": "resume"},
+        status="ACTIVE",
+        stop_reason=None,
+        final_result_binding=None,
+        absolute_deadline=now + timedelta(minutes=5),
+        budget_totals={"max_model_calls": 4},
+        budget_reserved={"model_calls": 1},
+        budget_consumed={"model_calls": 1},
+        created_at=now,
+        updated_at=now,
+    )
+    row = SimpleNamespace(
+        run_id="recovered-run",
+        step_id="step",
+        status="SUCCEEDED",
+        typed_result_payload={
+            "producer_agent_id": "router",
+            "content_type": "TEXT",
+            "content": "durable result",
+            "complete": True,
+        },
+        safe_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+    image = SimpleNamespace(root=root, steps=(row,), models=())
+    services = make_services()
+    scope = await CoordinatedRuntimeFactory(FakeRouter(), services).create_rehydrated_run_scope(
+        image, lease=("recovered-run", "worker-b"), run_id="recovered-run"
+    )
+    try:
+        assert scope.plan == plan
+        assert scope.run_context.data.deadline_at == root.absolute_deadline
+        assert scope.agent_state.steps["step"].status.value == "SUCCEEDED"
+        assert scope.coordinator.step_result_store is not None
+        assert scope.coordinator.step_result_store.has_readable("step")
+        assert scope.coordinator.output_gate is not None
+        assert scope.budget_ledger.snapshot().committed_usage.model_calls == 2
+        scope.agent_state.mark_running()
+        assert scope.scheduler.evaluate(plan, scope.agent_state).claimable_step_ids == ()
+    finally:
+        await scope.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_run_persists_plan_before_first_step_execution() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class RecordingExecutionRepository:
+        async def initialize(self, root, *, lease):
+            calls.append(("initialize", root.plan))
+
+        async def start_step(self, lease, *, step_id, plan_version, journal_append=None):
+            assert calls and calls[0][0] == "initialize"
+            calls.append(("start_step", step_id))
+            return 1
+
+        async def complete_step(self, lease, **kwargs):
+            calls.append(("complete_step", kwargs["step_id"]))
+            return True
+
+        async def finalize_terminal(self, lease, *, event, journal, **kwargs):
+            calls.append(("terminal", event.payload.status))
+            return None
+
+    repository = RecordingExecutionRepository()
+    services = make_services(snapshot_enabled=False)
+    scope = await CoordinatedRuntimeFactory(
+        FakeRouter(), services, execution_repository=repository
+    ).create_run_scope("core_router", "question")
+    try:
+        result = await scope.execute()
+        assert result.status.value == "SUCCEEDED"
+        assert [name for name, _ in calls] == [
+            "initialize",
+            "start_step",
+            "complete_step",
+            "terminal",
+        ]
+    finally:
+        await scope.close()
+
+
+@pytest.mark.asyncio
+async def test_factory_rehydrates_approval_and_execution_claim_binding() -> None:
+    plan = recovery_plan()
+    now = datetime.now(UTC)
+    root = SimpleNamespace(
+        run_id="approval-recovery-run",
+        plan_payload=plan_payload(plan),
+        plan_fingerprint=PlanFingerprinter.fingerprint(plan),
+        resume_input={"entry_agent_id": "router", "user_query": "resume"},
+        status="ACTIVE",
+        stop_reason=None,
+        final_result_binding=None,
+        absolute_deadline=now + timedelta(minutes=5),
+        budget_totals={},
+        budget_reserved={},
+        budget_consumed={},
+        created_at=now,
+        updated_at=now,
+    )
+    step = SimpleNamespace(
+        run_id=root.run_id,
+        step_id="step",
+        status="RUNNING",
+        typed_result_payload=None,
+        safe_error=None,
+        created_at=now,
+        updated_at=now,
+    )
+    approval = SimpleNamespace(
+        run_id=root.run_id,
+        step_id="step",
+        approval_id="approval-1",
+        invocation_id="invocation-1",
+        tool_name="complex_workflow_simulator",
+        arguments_digest="a" * 64,
+        invocation_binding_digest="b" * 64,
+    )
+    claim = SimpleNamespace(
+        run_id=root.run_id,
+        approval_id="approval-1",
+        claim_id="claim-1",
+    )
+    image = SimpleNamespace(
+        root=root,
+        steps=(step,),
+        models=(),
+        tool_invocations=(),
+        approvals=(approval,),
+        execution_claims=(claim,),
+    )
+    scope = await CoordinatedRuntimeFactory(
+        FakeRouter(), make_services()
+    ).create_rehydrated_run_scope(
+        image, lease=(root.run_id, "worker-b"), run_id=root.run_id
+    )
+    try:
+        binding = scope.run_context.durable_tool_invocation
+        assert binding.invocation_id == "invocation-1"
+        assert binding.approval_id == "approval-1"
+        assert binding.execution_claim_id == "claim-1"
+    finally:
+        await scope.close()

@@ -98,6 +98,32 @@ class BudgetLedger:
     """一个实例只属于一个 Run；锁内仅执行同步算术和状态转换。"""
     def __init__(self,budget:RunBudget, *, deadline_remaining:Callable[[],float|None]|None=None):
         self.budget=budget; self._deadline_remaining=deadline_remaining; self._started=monotonic(); self._lock=Lock(); self._committed=BudgetUsage(); self._reservations:dict[str,BudgetReservation]={}
+
+    @classmethod
+    def from_durable(
+        cls,
+        budget: RunBudget,
+        *,
+        committed_usage: BudgetUsage,
+        reserved_usage: BudgetUsage | None = None,
+        deadline_remaining: Callable[[], float | None] | None = None,
+    ) -> "BudgetLedger":
+        """Rebuild a ledger without releasing crash-time reservations.
+
+        A reservation held by a crashed worker is conservatively counted as
+        consumed.  No process-local reservation identity is recreated.
+        """
+        if not isinstance(budget, RunBudget):
+            raise TypeError("budget must be RunBudget")
+        if not isinstance(committed_usage, BudgetUsage):
+            raise TypeError("committed_usage must be BudgetUsage")
+        if reserved_usage is None:
+            reserved_usage = BudgetUsage()
+        if not isinstance(reserved_usage, BudgetUsage):
+            raise TypeError("reserved_usage must be BudgetUsage")
+        ledger = cls(budget, deadline_remaining=deadline_remaining)
+        ledger._committed = committed_usage.plus(reserved_usage)
+        return ledger
     def _reserved(self):
         value=BudgetUsage()
         for r in self._reservations.values(): value=value.plus(r.reserved_usage)

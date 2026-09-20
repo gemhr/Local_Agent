@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -126,6 +127,67 @@ def _tool_args(operation_id: str = "wp1-op-1") -> str:
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+@pytest.mark.asyncio
+async def test_recovered_approval_claim_reuses_invocation_without_second_approval():
+    harness = _Harness()
+    try:
+        registry = production_registry()
+        service = production_service(registry)
+        registration = registry.require("complex_workflow_simulator")
+        adapter = registration.adapter
+        invocation = adapter.build_invocation(_tool_args("recovered-claim"))
+        harness.context.attach_tool_resolution_snapshot(
+            SimpleNamespace(
+                run_id=harness.context.run_id,
+                resolve=lambda name: (
+                    registration
+                    if name == "complex_workflow_simulator"
+                    else None
+                ),
+            )
+        )
+        harness.context.attach_durable_tool_invocation(
+            SimpleNamespace(
+                run_id=harness.context.run_id,
+                step_id="step",
+                invocation_id="recovered-invocation",
+                tool_name=invocation.tool_name,
+                arguments_digest=invocation.arguments_digest,
+                approval_id="recovered-approval",
+                execution_claim_id="recovered-claim",
+                invocation_binding_digest="b" * 64,
+            )
+        )
+        router = _make_router(
+            registry,
+            service,
+            tool_name="complex_workflow_simulator",
+            tool_args=_tool_args("recovered-claim"),
+        )
+
+        messages = await asyncio.to_thread(
+            router._prepare_answer_messages,
+            "core_router",
+            "query",
+            run_context=harness.context,
+            event_emitter=harness.step_emitter,
+            approval_controller=None,
+            tool_call=(
+                "complex_workflow_simulator",
+                _tool_args("recovered-claim"),
+            ),
+        )
+
+        assert messages
+        assert len(adapter._state_store.committed_operations) == 1
+        assert not any(
+            record.event_type is RuntimeEventType.TOOL_APPROVAL_REQUESTED
+            for record in harness.events
+        )
+    finally:
+        await harness.close()
 
 
 @pytest.mark.asyncio

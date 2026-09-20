@@ -6,16 +6,23 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import math
 import time
+from collections.abc import Mapping
+from types import SimpleNamespace
 
 from core.runtime.application_services import (
     ApplicationRuntimeServices,
     RuntimeLifecycleState,
 )
 from core.runtime.cancellation import CancellationReason
-from core.runtime.budget import BudgetLedger, RunBudget
-from core.runtime.context import DEFAULT_SESSION_ID, create_run_context
+from core.runtime.budget import BudgetLedger, BudgetUsage, RunBudget
+from core.runtime.context import (
+    DEFAULT_SESSION_ID,
+    create_rehydrated_run_context,
+    create_run_context,
+)
 from core.runtime.project_memory import ProjectIdentity, ProjectMemoryGrant
 from core.runtime.event_channel import RuntimeEventChannel
 from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
@@ -41,9 +48,208 @@ from core.runtime.run_coordinator import RunCoordinator, RunCoordinatorResult
 from core.runtime.run_registry import ActiveRunControlHandle
 from core.runtime.state import RunStatus
 from core.runtime.scheduler import SerialScheduler, StepClaim
-from core.runtime.state import AgentState
+from core.runtime.state import AgentState, StepState, StepStatus, StopReason
 from core.runtime.state_machine import AgentStateMachine
 from core.runtime.tracing import OperationScopedSpanRecorder
+from core.runtime.execution_aggregate import plan_from_payload
+from core.runtime.plan_fingerprint import PlanFingerprinter
+from core.runtime.step_result import (
+    ResultContentType,
+    ResultDisposition,
+    SecurityDenialCode,
+    StepResult,
+)
+from core.runtime.step_result_store import StepResultStore
+from core.runtime.output_gate import OutputGate
+from core.runtime.step_completion import StepResultCommitter
+from core.runtime.invocation_bindings import (
+    AgentInvocationSpec,
+    InvocationRole,
+    StepInvocationBindings,
+)
+
+
+def _required_text(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"durable {name} must be a non-empty string")
+    return value.strip()
+
+
+def _as_utc(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise ValueError("durable timestamp must be datetime")
+    if value.tzinfo is None or value.utcoffset() != datetime.now(UTC).utcoffset():
+        raise ValueError("durable timestamp must be timezone-aware UTC")
+    return value
+
+
+def _usage_from_mapping(value: object) -> BudgetUsage:
+    if not isinstance(value, Mapping):
+        return BudgetUsage()
+    allowed = BudgetUsage.__dataclass_fields__
+    return BudgetUsage(
+        **{
+            key: int(raw)
+            for key, raw in value.items()
+            if key in allowed and key != "_allow_independent_total"
+        }
+    )
+
+
+def _rehydrated_budget(root: object, context) -> BudgetLedger:
+    totals = getattr(root, "budget_totals", {}) or {}
+    if not isinstance(totals, Mapping):
+        raise TypeError("durable budget_totals must be a mapping")
+    fields = set(RunBudget.__dataclass_fields__)
+    limits = {
+        key: value
+        for key, value in totals.items()
+        if key in fields and value is not None
+    }
+    budget = RunBudget(**limits)
+    committed = _usage_from_mapping(getattr(root, "budget_consumed", {}))
+    reserved = _usage_from_mapping(getattr(root, "budget_reserved", {}))
+    return BudgetLedger.from_durable(
+        budget,
+        committed_usage=committed,
+        reserved_usage=reserved,
+        deadline_remaining=context.remaining_seconds,
+    )
+
+
+def _rehydrate_agent_state(
+    root: object, rows: tuple[object, ...], run_id: str, plan: Plan
+) -> AgentState:
+    root_status = str(getattr(root, "status", "ACTIVE"))
+    if root_status in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        status = RunStatus(root_status)
+        stop_value = getattr(root, "stop_reason", None)
+        if status is RunStatus.SUCCEEDED:
+            stop_reason = StopReason.COMPLETED
+        elif status is RunStatus.CANCELLED:
+            try:
+                stop_reason = StopReason(str(stop_value or StopReason.USER_CANCELLED.value))
+            except ValueError:
+                stop_reason = StopReason.USER_CANCELLED
+        else:
+            try:
+                stop_reason = StopReason(str(stop_value or StopReason.UNHANDLED_ERROR.value))
+            except ValueError:
+                stop_reason = StopReason.UNHANDLED_ERROR
+    else:
+        # RunCoordinator owns the CREATED -> RUNNING transition when the
+        # recovered scope starts; do not pre-mark a new worker's local copy as
+        # already executing.
+        status = RunStatus.CREATED
+        stop_reason = None
+    created_at = _as_utc(getattr(root, "created_at", None)) or datetime.now(UTC)
+    updated_at = _as_utc(getattr(root, "updated_at", None)) or created_at
+    state = AgentState(
+        run_id=run_id,
+        status=status,
+        created_at=created_at,
+        updated_at=max(created_at, updated_at),
+        stop_reason=stop_reason,
+        final_output=(
+            (getattr(root, "final_result_binding", {}) or {}).get("content")
+            if isinstance(getattr(root, "final_result_binding", None), Mapping)
+            else None
+        ),
+    )
+    step_titles = {step.step_id: step.title for step in plan.steps}
+    for row in rows:
+        step_id = _required_text(getattr(row, "step_id", None), "step_id")
+        if step_id not in step_titles:
+            raise ValueError("durable Step is not present in Plan")
+        raw = str(getattr(row, "status", "PENDING"))
+        try:
+            durable_status = raw.rsplit(".", 1)[-1]
+            step_status = StepStatus(durable_status)
+        except ValueError as exc:
+            raise ValueError(f"unsupported durable step status: {raw}") from exc
+        # A process-local RUNNING claim is abandoned on takeover.  The
+        # scheduler sees it as a replayable pending step; terminal rows remain
+        # terminal and therefore cannot be claimed.
+        if step_status is StepStatus.RUNNING:
+            step_status = StepStatus.PENDING
+        step_created = _as_utc(getattr(row, "created_at", None)) or created_at
+        step_updated = _as_utc(getattr(row, "updated_at", None)) or updated_at
+        ended_at = step_updated if step_status in {
+            StepStatus.SUCCEEDED,
+            StepStatus.FAILED,
+            StepStatus.CANCELLED,
+            StepStatus.BLOCKED,
+            StepStatus.SKIPPED,
+        } else None
+        safe_error = getattr(row, "safe_error", None)
+        error_code = safe_error if step_status is StepStatus.FAILED else None
+        state.steps[step_id] = StepState(
+            step_id=step_id,
+            name=step_titles[step_id],
+            status=step_status,
+            created_at=step_created,
+            ended_at=ended_at,
+            error_code=error_code,
+            error_message=safe_error if step_status is StepStatus.FAILED else None,
+        )
+    state.validate()
+    return state
+
+
+def _rehydrate_store_entries(
+    store: StepResultStore,
+    rows: tuple[object, ...],
+    plan: Plan,
+    state: AgentState,
+) -> None:
+    steps_by_id = {step.step_id: step for step in plan.steps}
+    for row in rows:
+        raw_status = str(getattr(row, "status", "PENDING")).rsplit(".", 1)[-1]
+        if raw_status != StepStatus.SUCCEEDED.value:
+            continue
+        step_id = _required_text(getattr(row, "step_id", None), "step_id")
+        payload = getattr(row, "typed_result_payload", None)
+        if not isinstance(payload, Mapping):
+            raise ValueError(f"durable succeeded Step {step_id} has no typed result")
+        plan_step = steps_by_id.get(step_id)
+        if plan_step is None:
+            raise ValueError("durable Step is not present in Plan")
+        content = payload.get("content", payload.get("text", payload.get("result")))
+        producer = payload.get("producer_agent_id", plan_step.preferred_agent)
+        content_type = ResultContentType(str(payload.get("content_type", ResultContentType.TEXT.value)))
+        disposition = ResultDisposition(str(payload.get("result_disposition", ResultDisposition.NORMAL.value)))
+        denial = payload.get("security_denial_code")
+        denial_code = SecurityDenialCode(str(denial)) if denial is not None else None
+        entry = StepResult(
+            step_id,
+            str(producer),
+            content_type,
+            str(content) if content is not None else "",
+            bool(payload.get("complete", True)),
+            result_disposition=disposition,
+            security_denial_code=denial_code,
+            max_content_chars=store._per_result_chars,
+        )
+        store.rehydrate_readable(entry, state)
+
+
+def _rehydrated_bindings(plan: Plan) -> StepInvocationBindings:
+    """Reconstruct bindings from the immutable Plan without invoking planning."""
+    return StepInvocationBindings(
+        AgentInvocationSpec(
+            step.step_id,
+            step.preferred_agent,
+            step.description,
+            role=(
+                InvocationRole.SYNTHESIS
+                if step.execution_kind is ExecutionKind.SYNTHESIS
+                else InvocationRole.ENTRY
+            ),
+        )
+        for step in plan.steps
+    )
 
 
 class CoordinatedSingleAgentDriver:
@@ -395,6 +601,7 @@ class CoordinatedRuntimeFactory:
         "_step_result_per_result_chars",
         "_step_result_run_total_chars",
         "_step_result_max_entries",
+        "_execution_repository",
     )
 
     def __init__(
@@ -408,6 +615,7 @@ class CoordinatedRuntimeFactory:
         step_result_per_result_chars: int = 20_000,
         step_result_run_total_chars: int = 60_000,
         step_result_max_entries: int = 16,
+        execution_repository=None,
     ) -> None:
         if not isinstance(services, ApplicationRuntimeServices):
             raise TypeError("services must be ApplicationRuntimeServices")
@@ -453,6 +661,7 @@ class CoordinatedRuntimeFactory:
         self._step_result_per_result_chars = step_result_per_result_chars
         self._step_result_run_total_chars = step_result_run_total_chars
         self._step_result_max_entries = step_result_max_entries
+        self._execution_repository = execution_repository
         self._adapter_factory = AgentAdapterFactory(
             DEFAULT_AGENT_REGISTRY,
             (
@@ -560,6 +769,124 @@ class CoordinatedRuntimeFactory:
             static_plan=plan,
         )
 
+    async def create_rehydrated_run_scope(
+        self,
+        recovery_image: object,
+        *,
+        lease: object,
+        run_id: str | None = None,
+        query: str | None = None,
+        persist: bool = True,
+        fault_controller: FaultInjectionController | None = None,
+        project_identity: ProjectIdentity | None = None,
+        project_grants: tuple[ProjectMemoryGrant, ...] = (),
+    ) -> CoordinatedRunScope:
+        """Build a Run scope directly from the canonical durable aggregate."""
+        root = getattr(recovery_image, "root", None)
+        rows = tuple(getattr(recovery_image, "steps", ()))
+        if root is None:
+            raise TypeError("recovery_image.root is required")
+        durable_run_id = _required_text(getattr(root, "run_id", None), "run_id")
+        if run_id is not None:
+            if run_id != durable_run_id:
+                raise ValueError("recovery callback run_id mismatch")
+        run_id = durable_run_id
+        if getattr(lease, "run_id", run_id) != run_id:
+            raise ValueError("recovery lease run_id mismatch")
+        payload = getattr(root, "plan_payload", None)
+        plan = plan_from_payload(payload)
+        expected_fingerprint = getattr(root, "plan_fingerprint", None)
+        if expected_fingerprint and PlanFingerprinter.fingerprint(plan) != expected_fingerprint:
+            raise ValueError("durable Plan fingerprint mismatch")
+        resume_input = getattr(root, "resume_input", {})
+        if not isinstance(resume_input, Mapping):
+            raise TypeError("durable resume_input must be a mapping")
+        agent_id = str(
+            resume_input.get("entry_agent_id")
+            or (plan.steps[0].preferred_agent if plan.steps else "core_router")
+        )
+        session_id = str(resume_input.get("session_id") or DEFAULT_SESSION_ID)
+        trace_id = str(resume_input.get("trace_id") or run_id)
+        durable_query = query if query is not None else str(
+            resume_input.get("user_query") or resume_input.get("query") or ""
+        )
+        created_at = _as_utc(getattr(root, "created_at", None)) or datetime.now(UTC)
+        absolute_deadline = _as_utc(getattr(root, "absolute_deadline", None))
+        context, cancellation_source = create_rehydrated_run_context(
+            entry_agent_id=agent_id,
+            session_id=session_id,
+            trace_id=trace_id,
+            run_id=run_id,
+            created_at=created_at,
+            absolute_deadline=absolute_deadline,
+        )
+        # Preserve the durable Tool identity for approval/replay.  Recovery
+        # intentionally leaves approval-bound Steps replayable as PENDING;
+        # the existing controller will rebuild its local waiter from this row.
+        tool_rows = tuple(getattr(recovery_image, "tool_invocations", ()))
+        active_step_ids = {
+            getattr(row, "step_id", None)
+            for row in rows
+            if str(getattr(row, "status", "" )).rsplit(".", 1)[-1] == "RUNNING"
+        }
+        for invocation in tool_rows:
+            if getattr(invocation, "step_id", None) in active_step_ids:
+                context.attach_durable_tool_invocation(invocation)
+                break
+        else:
+            approvals = tuple(getattr(recovery_image, "approvals", ()))
+            claims_by_approval = {
+                getattr(claim, "approval_id", None): claim
+                for claim in tuple(
+                    getattr(recovery_image, "execution_claims", ())
+                )
+            }
+            for approval in approvals:
+                if getattr(approval, "step_id", None) not in active_step_ids:
+                    continue
+                claim = claims_by_approval.get(
+                    getattr(approval, "approval_id", None)
+                )
+                context.attach_durable_tool_invocation(
+                    SimpleNamespace(
+                        run_id=run_id,
+                        step_id=approval.step_id,
+                        invocation_id=approval.invocation_id,
+                        tool_name=approval.tool_name,
+                        arguments_digest=approval.arguments_digest,
+                        approval_id=approval.approval_id,
+                        execution_claim_id=(
+                            getattr(claim, "claim_id", None)
+                            if claim is not None
+                            else None
+                        ),
+                        invocation_binding_digest=(
+                            approval.invocation_binding_digest
+                        ),
+                    )
+                )
+                break
+        return await self._create_run_scope(
+            agent_id,
+            durable_query,
+            session_id=session_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            timeout_seconds=None,
+            budget=None,
+            persist=persist,
+            fault_controller=fault_controller,
+            episodic_evaluation_observer=None,
+            static_plan=plan,
+            project_identity=project_identity,
+            project_grants=project_grants,
+            existing_lease=lease,
+            existing_context=(context, cancellation_source),
+            rehydrated_steps=rows,
+            rehydrated_root=root,
+            rehydrated_ledger=_rehydrated_budget(root, context),
+        )
+
     async def _create_run_scope(
         self,
         agent_id: str,
@@ -577,6 +904,11 @@ class CoordinatedRuntimeFactory:
         evaluation_plan_resolver=None,
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
+        existing_lease=None,
+        existing_context=None,
+        rehydrated_steps=(),
+        rehydrated_root=None,
+        rehydrated_ledger=None,
     ) -> CoordinatedRunScope:
         """Create one identity set and clean up any partially built transport."""
         if self._services.lifecycle_state is not RuntimeLifecycleState.READY:
@@ -603,22 +935,32 @@ class CoordinatedRuntimeFactory:
         try:
             self._services.admission_gate.acquire()
             admission_acquired = True
-            run_context, cancellation_source = create_run_context(
-                entry_agent_id=agent_id,
-                session_id=session_id,
-                trace_id=trace_id,
-                run_id=run_id,
-                timeout_seconds=timeout_seconds,
-            )
+            if existing_context is not None:
+                run_context, cancellation_source = existing_context
+            else:
+                run_context, cancellation_source = create_run_context(
+                    entry_agent_id=agent_id,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                    run_id=run_id,
+                    timeout_seconds=timeout_seconds,
+                )
             durable_control = self._services.durable_run_control
-            durable_lease = await durable_control.claim(
+            durable_lease = existing_lease or await durable_control.claim(
                 run_context.run_id,
                 self._services.run_control_owner_id,
             )
+            if existing_lease is not None and getattr(existing_lease, "run_id", run_context.run_id) != run_context.run_id:
+                raise ValueError("durable lease run_id mismatch")
             run_context.attach_ownership_validator(
                 lambda: durable_control.assert_current(durable_lease)
             )
             run_context.attach_durable_lease(durable_lease)
+            repository = self._execution_repository or getattr(
+                self._services, "execution_repository", None
+            )
+            if repository is not None:
+                run_context.attach_execution_repository(repository)
             run_context.attach_project_memory_access(project_identity, project_grants)
             prepare_tool_snapshot = getattr(
                 self._router, "prepare_tool_resolution_snapshot", None
@@ -626,9 +968,8 @@ class CoordinatedRuntimeFactory:
             if callable(prepare_tool_snapshot):
                 # Snapshot 持久化/兼容校验完成后，才允许 PlanResolver 或模型运行。
                 await prepare_tool_snapshot(run_context, agent_id, query)
-            ledger = BudgetLedger(
-                budget or RunBudget(),
-                deadline_remaining=run_context.remaining_seconds,
+            ledger = rehydrated_ledger or BudgetLedger(
+                budget or RunBudget(), deadline_remaining=run_context.remaining_seconds
             )
             run_context.attach_budget_ledger(ledger)
             tracker = self._services.new_activity_tracker(run_context.run_id)
@@ -640,7 +981,13 @@ class CoordinatedRuntimeFactory:
                     fault_controller=fault_controller,
                     cancellation_token=run_context.cancellation_token,
                 )
-            agent_state = AgentState.for_run_context(run_context.run_id)
+            agent_state = (
+                _rehydrate_agent_state(
+                    rehydrated_root, rehydrated_steps, run_context.run_id, static_plan
+                )
+                if rehydrated_root is not None
+                else AgentState.for_run_context(run_context.run_id)
+            )
             machine = AgentStateMachine()
             policy = ParallelExecutionPolicy(max_concurrency=self._max_concurrency)
             client_event_feed = getattr(
@@ -662,11 +1009,22 @@ class CoordinatedRuntimeFactory:
                 run_id=run_context.run_id,
                 cancellation_token=run_context.cancellation_token,
                 journal=self._services.event_journal,
-                terminal_append=lambda event: durable_control.finalize_terminal(
-                    durable_lease,
-                    event,
-                    self._services.event_journal,
-                    atomic_client_event_feed,
+                terminal_append=(
+                    lambda event: (
+                        repository.finalize_terminal(
+                            durable_lease,
+                            event=event,
+                            journal=self._services.event_journal,
+                            client_event_feed=atomic_client_event_feed,
+                        )
+                        if repository is not None
+                        else durable_control.finalize_terminal(
+                            durable_lease,
+                            event,
+                            self._services.event_journal,
+                            atomic_client_event_feed,
+                        )
+                    )
                 ),
                 observability_dispatcher=self._services.observability_dispatcher,
                 fault_controller=fault_controller,
@@ -692,6 +1050,9 @@ class CoordinatedRuntimeFactory:
                         span_recorder=span_recorder,
                         blocking_executor=self._services.coordinated_step_executor,
                         fault_controller=fault_controller,
+                        durable_repository=repository,
+                        durable_lease=durable_lease,
+                        durable_journal=self._services.event_journal,
                     ),
                 )
             run_handle = ActiveRunControlHandle(
@@ -725,9 +1086,63 @@ class CoordinatedRuntimeFactory:
                     metrics_recorder=self._services.runtime_metrics_recorder,
                     durable_approval_service=self._services.durable_approval,
                     durable_lease=durable_lease,
+                    durable_repository=repository,
+                    durable_journal=self._services.event_journal,
+                    durable_initialized=rehydrated_root is not None,
                 )
+                rehydrated_store = None
+                rehydrated_gate = None
+                rehydrated_driver = None
+                if rehydrated_root is not None:
+                    rehydrated_store = StepResultStore(
+                        static_plan,
+                        run_id=run_context.run_id,
+                        per_result_chars=self._step_result_per_result_chars,
+                        run_total_chars=self._step_result_run_total_chars,
+                        max_entries=self._step_result_max_entries,
+                        fault_controller=fault_controller,
+                    )
+                    _rehydrate_store_entries(
+                        rehydrated_store, rehydrated_steps, static_plan, agent_state
+                    )
+                    rehydrated_gate = OutputGate(
+                        plan=static_plan,
+                        store=rehydrated_store,
+                        event_emitter=emitter,
+                        state_getter=lambda: agent_state,
+                        run_active=lambda: agent_state.status
+                        in {RunStatus.CREATED, RunStatus.RUNNING},
+                        span_recorder=span_recorder,
+                        metrics_recorder=self._services.runtime_metrics_recorder,
+                        fault_controller=fault_controller,
+                    )
+                    rehydrated_committer = StepResultCommitter(
+                        store=rehydrated_store,
+                        state_machine=machine,
+                        event_emitter=emitter,
+                        plan=static_plan,
+                        output_gate=rehydrated_gate,
+                        durable_repository=repository,
+                        durable_lease=durable_lease,
+                        durable_journal=self._services.event_journal,
+                    )
+                    rehydrated_bindings = _rehydrated_bindings(static_plan)
+                    rehydrated_driver = MultiAgentDriver(
+                        router=self._router,
+                        coordinator=coordinator,
+                        adapter_factory=self._adapter_factory,
+                        registry=DEFAULT_AGENT_REGISTRY,
+                        fault_controller=fault_controller,
+                    )
+                    coordinator.attach_rehydrated_typed_runtime(
+                        step_result_store=rehydrated_store,
+                        output_gate=rehydrated_gate,
+                        completion_owner=rehydrated_committer,
+                        multi_agent_driver=rehydrated_driver,
+                        invocation_bindings=rehydrated_bindings,
+                    )
                 approval_controller = coordinator._ensure_tool_approval_controller()
-                driver = CoordinatedSingleAgentDriver(
+                driver = rehydrated_driver or CoordinatedSingleAgentDriver(
                     self._router,
                     user_query=query,
                     agent_id=agent_id,
@@ -735,7 +1150,7 @@ class CoordinatedRuntimeFactory:
                     event_emitter=emitter.for_step("answer"),
                     fault_controller=fault_controller,
                     approval_controller=approval_controller,
-                    output_gate=coordinator.output_gate,
+                    output_gate=rehydrated_gate or coordinator.output_gate,
                 )
                 plan = static_plan
             else:
@@ -774,6 +1189,9 @@ class CoordinatedRuntimeFactory:
                     episodic_evaluation_observer=episodic_evaluation_observer,
                     durable_approval_service=self._services.durable_approval,
                     durable_lease=durable_lease,
+                    durable_repository=repository,
+                    durable_journal=self._services.event_journal,
+                    durable_initialized=rehydrated_root is not None,
                 )
                 multi_agent_driver = MultiAgentDriver(
                     router=self._router,

@@ -41,6 +41,7 @@ from core.runtime.trace_contract import (
     RUNTIME_STEP_SPAN,
     set_span_attributes,
 )
+from core.runtime.execution_aggregate import StepExecutionStatus
 
 
 class ParallelFailureMode(str, Enum):
@@ -142,6 +143,9 @@ class ParallelExecutor:
         span_recorder=None,
         blocking_executor: BoundedBlockingExecutor | None = None,
         completion_owner: StepResultCommitter | None = None,
+        durable_repository=None,
+        durable_lease=None,
+        durable_journal=None,
         fault_controller: FaultInjectionController | None = None,
     ) -> None:
         self._validate_positive(max_concurrency, "max_concurrency")
@@ -151,6 +155,9 @@ class ParallelExecutor:
         self._span_recorder = span_recorder
         self._blocking_executor = blocking_executor
         self._completion_owner = completion_owner
+        self._durable_repository = durable_repository
+        self._durable_lease = durable_lease
+        self._durable_journal = durable_journal
         if fault_controller is not None and not isinstance(
             fault_controller, FaultInjectionController
         ):
@@ -220,6 +227,7 @@ class ParallelExecutor:
 
         async def worker(claim: StepClaim) -> None:
             nonlocal was_token_cancelled
+            durable_attempt: int | None = None
             from core.runtime.tracing import (
                 NoopSpanRecorder,
                 activate_span,
@@ -253,7 +261,7 @@ class ParallelExecutor:
                 activity_tracker.increment("step_workers_active")
             try:  # 覆盖等待全局/资源许可、Driver、to_thread 等待及终态提交前的取消。
                 with activate_span(step_span):
-                    await self._emit_step_started(claim, plan=plan)
+                    durable_attempt = await self._emit_step_started(claim, plan=plan)
                     run_context.raise_if_inactive()
                     spec = specs.get(claim.step_id, StepConcurrencySpec())
                     async with global_semaphore, resource_semaphores[spec.resource_key]:
@@ -277,6 +285,7 @@ class ParallelExecutor:
                                 state,
                                 StepStatus.FAILED,
                                 "TOOL_APPROVAL_REJECTED",
+                                durable_attempt=durable_attempt,
                                 plan=plan,
                             )
                             if failure_mode == ParallelFailureMode.FAIL_FAST:
@@ -295,6 +304,7 @@ class ParallelExecutor:
                                 state,
                                 StepStatus.FAILED,
                                 code,
+                                durable_attempt=durable_attempt,
                                 plan=plan,
                             )
                             if failure_mode == ParallelFailureMode.FAIL_FAST:
@@ -304,7 +314,9 @@ class ParallelExecutor:
                         # Typed mode: the completion owner is the only writer of
                         # Store/Step state and emits STEP_COMPLETED. No
                         # OUTPUT_DELTA is ever produced for multi-step Steps.
-                        completion = await effective_completion_owner.commit(claim, result, state)
+                        completion = await effective_completion_owner.commit(
+                            claim, result, state, durable_attempt=durable_attempt
+                        )
                         completions[claim.step_id] = completion
                         set_span_attributes(
                             step_span,
@@ -350,6 +362,8 @@ class ParallelExecutor:
                             state,
                             StepStatus.SUCCEEDED,
                             None,
+                            durable_attempt=durable_attempt,
+                            durable_result=result,
                             plan=plan,
                         )
             except asyncio.CancelledError:
@@ -362,6 +376,7 @@ class ParallelExecutor:
                     state,
                     StepStatus.CANCELLED,
                     "STEP_CANCELLED",
+                    durable_attempt=durable_attempt,
                     plan=plan,
                 )
                 raise
@@ -376,6 +391,7 @@ class ParallelExecutor:
                     state,
                     StepStatus.CANCELLED,
                     "RUN_CANCELLED",
+                    durable_attempt=durable_attempt,
                     plan=plan,
                 )
             except (BudgetExceededError, RunDeadlineExceededError):
@@ -389,6 +405,7 @@ class ParallelExecutor:
                     state,
                     StepStatus.FAILED,
                     "TOOL_APPROVAL_REJECTED",
+                    durable_attempt=durable_attempt,
                     plan=plan,
                 )
                 if failure_mode == ParallelFailureMode.FAIL_FAST:
@@ -405,6 +422,7 @@ class ParallelExecutor:
                     state,
                     StepStatus.FAILED,
                     code,
+                    durable_attempt=durable_attempt,
                     plan=plan,
                 )
                 if failure_mode == ParallelFailureMode.FAIL_FAST:
@@ -458,16 +476,40 @@ class ParallelExecutor:
 
     async def _emit_step_started(
         self, claim: StepClaim, *, plan: Plan | None = None
-    ) -> None:
-        """Scheduler 已成功写入 RUNNING 后再发布事实。"""
-        if self._event_emitter is None:
-            return
+    ) -> int | None:
+        """Atomically persist durable RUNNING and its correctness event."""
+        if self._durable_repository is not None and self._durable_lease is None:
+            raise ParallelExecutionInfrastructureError(
+                "DURABLE_LEASE_MISSING", "durable Step 启动缺少 Run lease"
+            )
         plan_step = None
         if plan is not None:
             for candidate in plan.steps:
                 if candidate.step_id == claim.step_id:
                     plan_step = candidate
                     break
+        durable_attempt: int | None = None
+        atomic_mutation = None
+        if self._durable_repository is not None:
+            if self._event_emitter is None or self._durable_journal is None:
+                durable_attempt = await self._durable_repository.start_step(
+                    self._durable_lease,
+                    step_id=claim.step_id,
+                    plan_version=claim.plan_version,
+                )
+            else:
+                async def atomic_mutation(event):
+                    nonlocal durable_attempt
+                    durable_attempt = await self._durable_repository.start_step(
+                        self._durable_lease,
+                        step_id=claim.step_id,
+                        plan_version=claim.plan_version,
+                        journal_append=lambda session: self._durable_journal.append_in_transaction(
+                            session, event
+                        ),
+                    )
+        if self._event_emitter is None:
+            return durable_attempt
         try:
             await self._event_emitter.for_step(claim.step_id).emit(
                 RuntimeEventType.STEP_STARTED,
@@ -491,9 +533,13 @@ class ParallelExecutor:
                     ),
                 ),
                 component="scheduler",
+                atomic_mutation=atomic_mutation,
             )
         except (EventChannelClosedError, RuntimeError):
+            if self._durable_repository is not None:
+                raise
             return
+        return durable_attempt
 
     async def _emit_step_completed(
         self,
@@ -505,6 +551,8 @@ class ParallelExecutor:
         result_char_count: int = 0,
         delivery_status: str | None = None,
         delivery_duration_ms: int = 0,
+        durable_attempt: int | None = None,
+        durable_result: Any = None,
         plan: Plan | None = None,
     ) -> None:
         """State Machine 已提交终态后发布并关闭该 StepEmitter。"""
@@ -529,6 +577,33 @@ class ParallelExecutor:
                 if candidate.step_id == claim.step_id:
                     plan_step = candidate
                     break
+        atomic_mutation = None
+        if (
+            durable_attempt is not None
+            and self._durable_repository is not None
+            and self._durable_lease is not None
+            and self._durable_journal is not None
+        ):
+            payload = {
+                "content": str(durable_result) if durable_result is not None else "",
+                "complete": status is StepStatus.SUCCEEDED,
+            }
+            durable_status = StepExecutionStatus(status.value)
+
+            async def atomic_mutation(event):
+                await self._durable_repository.complete_step(
+                    self._durable_lease,
+                    step_id=claim.step_id,
+                    plan_version=claim.plan_version,
+                    attempt=durable_attempt,
+                    result=payload,
+                    status=durable_status,
+                    safe_error=safe_error_code,
+                    journal_append=lambda session: self._durable_journal.append_in_transaction(
+                        session, event
+                    ),
+                )
+
         try:
             await emitter.emit(
                 RuntimeEventType.STEP_COMPLETED,
@@ -553,6 +628,7 @@ class ParallelExecutor:
                 component="parallel_executor",
                 close=True,
                 ignore_run_cancellation=True,
+                atomic_mutation=atomic_mutation,
             )
         except (EventChannelClosedError, RuntimeError):
             return
