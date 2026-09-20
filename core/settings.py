@@ -796,6 +796,7 @@ class Settings:
     recovery_initial_backoff_seconds: int = 5
     recovery_max_backoff_seconds: int = 60
     recovery_shutdown_grace_seconds: float = 5.0
+    reconciliation_max_concurrency: int = 4
 
     @classmethod
     def load(cls) -> "Settings":
@@ -1495,5 +1496,8 @@ class Settings:
             recovery_max_backoff_seconds=recovery_max_backoff_seconds,
             recovery_shutdown_grace_seconds=_env_strict_float(
                 "LOCAL_AGENT_RECOVERY_SHUTDOWN_GRACE_SECONDS", 5.0, minimum=0.0
+            ),
+            reconciliation_max_concurrency=_env_strict_int(
+                "LOCAL_AGENT_RECONCILIATION_MAX_CONCURRENCY", 4, minimum=1, maximum=100
             ),
         )

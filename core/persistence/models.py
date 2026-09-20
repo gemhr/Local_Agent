@@ -661,6 +661,11 @@ class DurableToolInvocationRow(PersistenceBase):
     committed_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
     unknown_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
     reconciled_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    reconcile_attempt_count: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
+    last_reconcile_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    last_safe_error_code: Mapped[str | None] = mapped_column(String(128))
+    next_reconcile_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    manual_required: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
 
     __table_args__ = (
@@ -676,10 +681,48 @@ class DurableToolInvocationRow(PersistenceBase):
             name="ck_runtime_tool_invocation_state",
         ),
         CheckConstraint("version > 0", name="ck_runtime_tool_invocation_version"),
+        CheckConstraint("reconcile_attempt_count >= 0", name="ck_runtime_tool_invocation_reconcile_attempts"),
         Index("ix_runtime_tool_invocations_run_state", "run_id", "state"),
+        Index("ix_runtime_tool_invocations_reconcile", "state", "next_reconcile_at", "manual_required"),
         Index(
             "ix_runtime_tool_invocations_recovery_identity",
             "run_id", "step_id", "tool_name", "arguments_digest",
+        ),
+    )
+
+
+class ManualToolResolutionAuditRow(PersistenceBase):
+    """审计人工副作用收口；不保存 Tool 参数或 Provider 正文。"""
+
+    __tablename__ = "runtime_tool_manual_resolution_audit"
+
+    audit_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    step_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    invocation_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    resolution: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(String(512), nullable=False)
+    occurred_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "resolution IN ('COMMITTED', 'NOT_COMMITTED')",
+            name="ck_runtime_tool_manual_resolution_audit_resolution",
+        ),
+        Index(
+            "ix_runtime_tool_manual_resolution_audit_invocation",
+            "invocation_id",
+            "occurred_at",
+        ),
+        Index(
+            "ix_runtime_tool_manual_resolution_audit_run",
+            "run_id",
+            "occurred_at",
         ),
     )
 
@@ -1172,6 +1215,7 @@ CANONICAL_TABLES = (
     "runtime_tool_approvals",
     "runtime_tool_execution_claims",
     "runtime_tool_invocations",
+    "runtime_tool_manual_resolution_audit",
     "runtime_continuations",
     "runtime_run_executions",
     "runtime_step_executions",
@@ -1214,6 +1258,7 @@ __all__ = [
     "DurableApprovalRow",
     "DurableToolExecutionClaimRow",
     "DurableToolInvocationRow",
+    "ManualToolResolutionAuditRow",
     "DurableContinuationRow",
     "RuntimeSnapshotRow",
     "FeatureTestMissionRow",

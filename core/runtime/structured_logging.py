@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from types import MappingProxyType
 from typing import IO, Mapping, Protocol
+from uuid import uuid4
 
 from core.runtime.event_journal import JournalRecord
 from core.runtime.events import RuntimeEventType
@@ -66,6 +67,15 @@ class RuntimeLogRecord:
     retry_index: int | None
     duration_ms: int | None
     safe_fields: Mapping[str, object]
+    # Side-effect reconciliation identity/outcome fields.  These are all
+    # bounded safe metadata; raw arguments, credentials and provider payloads
+    # are intentionally not representable here.
+    invocation_id: str | None = None
+    tool_name: str | None = None
+    provider_identity: str | None = None
+    attempt: int | None = None
+    outcome: str | None = None
+    manual_actor_id: str | None = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -110,6 +120,12 @@ class RuntimeLogRecord:
             "retry_index": self.retry_index,
             "duration_ms": self.duration_ms,
             "safe_fields": dict(self.safe_fields),
+            "invocation_id": self.invocation_id,
+            "tool_name": self.tool_name,
+            "provider_identity": self.provider_identity,
+            "attempt": self.attempt,
+            "outcome": self.outcome,
+            "manual_actor_id": self.manual_actor_id,
         }
 
 
@@ -170,6 +186,74 @@ class NoopStructuredRuntimeLogger:
 
     def log(self, record: RuntimeLogRecord) -> None:
         self.write(record)
+
+
+def emit_reconciliation_log(
+    logger: StructuredRuntimeLogger | None,
+    *,
+    run_id: str,
+    step_id: str | None,
+    invocation_id: str | None,
+    tool_name: str | None,
+    provider_identity: str | None,
+    attempt: int | None,
+    outcome: str,
+    safe_error_code: str | None = None,
+    manual_actor_id: str | None = None,
+    duration_ms: int | None = None,
+) -> None:
+    """Emit one safe reconciliation record through the existing log owner.
+
+    The reconciliation lane supplies only durable identities and bounded
+    classifications.  This helper deliberately has no argument/payload
+    parameter, so a provider response or credential cannot leak into logs.
+    """
+    if logger is None:
+        return
+
+    def safe_text(value: str | None, *, limit: int = 255) -> str | None:
+        if value is None or not isinstance(value, str) or not value or len(value) > limit:
+            return None
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            return None
+        return value
+
+    safe_run_id = safe_text(run_id)
+    safe_outcome = safe_text(outcome, limit=64)
+    if safe_run_id is None or safe_outcome is None:
+        return
+    safe_attempt = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 0 else None
+    safe_duration = duration_ms if isinstance(duration_ms, int) and not isinstance(duration_ms, bool) and duration_ms >= 0 else None
+    now = datetime.now(UTC)
+    record = RuntimeLogRecord(
+        timestamp=now,
+        journaled_at=now,
+        level=(RuntimeLogLevel.ERROR if safe_outcome == "FAILED" else RuntimeLogLevel.INFO),
+        run_id=safe_run_id,
+        trace_id="reconciliation",
+        span_id=None,
+        parent_span_id=None,
+        step_id=safe_text(step_id),
+        component="recovery_coordinator",
+        event_id=uuid4().hex,
+        event_type="TOOL_RECONCILIATION",
+        status=safe_outcome,
+        error_code=safe_text(safe_error_code, limit=128),
+        retry_index=None,
+        duration_ms=safe_duration,
+        safe_fields={},
+        invocation_id=safe_text(invocation_id),
+        tool_name=safe_text(tool_name),
+        provider_identity=safe_text(provider_identity),
+        attempt=safe_attempt,
+        outcome=safe_outcome,
+        manual_actor_id=safe_text(manual_actor_id),
+    )
+    try:
+        logger.write(record)
+    except Exception:
+        # Logging is a best-effort projection and must not affect convergence.
+        return
 
 
 def _status(payload: Mapping[str, object]) -> str | None:

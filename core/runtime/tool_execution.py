@@ -73,7 +73,10 @@ from core.runtime.tool_contract import (
     retry_disposition_for,
     safe_key_digest,
 )
-from core.runtime.tool_idempotency import DurableToolInvocationService
+from core.runtime.tool_idempotency import (
+    DurableToolInvocationService,
+    ToolInvocationState,
+)
 from core.runtime.tracing import (
     NoopSpanRecorder,
     current_span_recorder,
@@ -947,6 +950,11 @@ class ToolAttemptExecutor:
         lease: ToolResourceLease,
         release_deferred: dict[str, bool],
     ) -> ToolAdapterResponse:
+        # The initial Run validation may have crossed the deadline while the
+        # resource lease/backend was being acquired.  Re-check immediately
+        # before crossing the provider boundary so expiry cannot start a new
+        # side effect.
+        context.raise_if_cancelled()
         if adapter.is_async:
             value = adapter.invoke_once(invocation, context)
             if not inspect.isawaitable(value):
@@ -1285,6 +1293,29 @@ class ToolExecutionService:
         if self.durable_invocation_service is not None and self.durable_invocation_service is not service:
             raise RuntimeError("ToolExecutionService 已绑定 durable invocation service")
         self.durable_invocation_service = service
+
+    @staticmethod
+    def reconciliation_retry_disposition(
+        *,
+        state: ToolInvocationState,
+        spec: ToolExecutionSpec,
+        invocation: ToolInvocation,
+    ) -> RetryDisposition:
+        """将 NOT_COMMITTED 交回既有 Tool retry/idempotency policy。
+
+        This is a classification-only handoff.  It never creates an
+        invocation or calls an adapter; RunCoordinator/Scheduler remains the
+        owner of any subsequent canonical execution attempt.
+        """
+        if state is not ToolInvocationState.NOT_COMMITTED:
+            return RetryDisposition.OUTCOME_UNKNOWN
+        return retry_disposition_for(
+            category=ToolErrorCategory.TRANSIENT,
+            idempotency=spec.idempotency,
+            idempotency_key=invocation.idempotency_key,
+            side_effect_state=ToolSideEffectState.NOT_STARTED,
+            supports_idempotency_replay=spec.supports_idempotency_replay,
+        )
 
     async def execute(
         self,

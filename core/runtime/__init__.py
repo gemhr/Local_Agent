@@ -359,6 +359,7 @@ from core.runtime.observability import (
     RuntimeInfrastructureMetricsHook,
 )
 from core.runtime.structured_logging import (
+    emit_reconciliation_log,
     InMemoryStructuredRuntimeLogger,
     JsonStructuredRuntimeLogger,
     NoopStructuredRuntimeLogger,
@@ -422,6 +423,7 @@ __all__ += [
     "RuntimeObservabilityDispatcher",
     "StructuredLogProjector",
     "StructuredRuntimeLogger",
+    "emit_reconciliation_log",
     "record_gauge_snapshot",
     "runtime_log_level",
 ]
@@ -568,6 +570,7 @@ from core.runtime.tool_execution import (
 from core.runtime.tool_idempotency import (
     DurableToolInvocation,
     DurableToolInvocationService,
+    ManualResolutionAudit,
     ProviderReconciliationResult,
     ToolInvocationState,
     tool_invocation_binding_digest,
@@ -633,6 +636,7 @@ __all__ += [
     "AttemptSideEffectTracker", "ToolAttemptExecutor", "ToolExecutionContext",
     "ToolExecutionFailed", "ToolExecutionService",
     "DurableToolInvocation", "DurableToolInvocationService",
+    "ManualResolutionAudit",
     "ProviderReconciliationResult", "ToolInvocationState",
     "tool_invocation_binding_digest",
     "DockerIsolatedExecutionBackend", "ToolExecutionBackendResolver",

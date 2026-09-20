@@ -8,16 +8,21 @@ remain in WP1, WP2, and the provider adapter respectively.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 import inspect
 from collections.abc import Mapping
 from typing import Protocol
+from uuid import uuid4
 
 from sqlalchemy import func, select
 
 from core.persistence.database import Database
-from core.persistence.models import DurableToolInvocationRow, RunControlRow
+from core.persistence.models import (
+    DurableToolInvocationRow,
+    ManualToolResolutionAuditRow,
+    RunControlRow,
+)
 from core.persistence.repositories import runtime as runtime_repository
 from core.runtime.run_control import OwnershipLost, RunLease
 from core.runtime.tool_contract import (
@@ -45,6 +50,10 @@ class ProviderReconciliationResult(str, Enum):
     NOT_COMMITTED = "NOT_COMMITTED"
     STILL_PENDING = "STILL_PENDING"
     UNKNOWN = "UNKNOWN"
+
+
+PROVIDER_RECONCILIATION_UNSUPPORTED = "PROVIDER_RECONCILIATION_UNSUPPORTED"
+RECONCILIATION_LOOKUP_FAILED = "RECONCILIATION_LOOKUP_FAILED"
 
 
 class ProviderReconciler(Protocol):
@@ -81,11 +90,48 @@ class DurableToolInvocation:
     reconciled_at: datetime | None
     committed_result: dict[str, object] | None
     digest: str | None
+    reconcile_attempt_count: int = 0
+    last_reconcile_at: datetime | None = None
+    last_safe_error_code: str | None = None
+    next_reconcile_at: datetime | None = None
+    manual_required: bool = False
 
     @property
     def result_digest(self) -> str | None:
         """兼容调用方使用更具描述性的 result_digest 名称。"""
         return self.digest
+
+
+@dataclass(frozen=True, slots=True)
+class ManualResolutionAudit:
+    """HTTP/operator-derived audit facts written with the state mutation."""
+
+    actor_id: str
+    tenant_id: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        for value, name, maximum in (
+            (self.actor_id, "actor_id", 255),
+            (self.tenant_id, "tenant_id", 255),
+            (self.reason, "reason", 512),
+        ):
+            if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+                raise ValueError(f"{name} 必须是 bounded non-empty text")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderReconciliationEvidence:
+    """Provider truth plus an optional replayable Tool result.
+
+    The existing enum-only provider contract remains valid for lookup callers.
+    Durable-record reconciliation may additionally return the provider-owned
+    result so the local aggregate can persist the exact result needed by the
+    canonical ToolExecutionService replay path.
+    """
+
+    outcome: ProviderReconciliationResult
+    result: ToolExecutionResult | Mapping[str, object] | None = None
 
 
 def tool_invocation_binding_digest(invocation: ToolInvocation) -> str:
@@ -283,15 +329,25 @@ class DurableToolInvocationService:
             return row
         if row.state != ToolInvocationState.UNKNOWN.value:
             return row
-        result = provider.reconcile_provider(
-            invocation, provider_operation_id=row.provider_operation_id
-        )
+        try:
+            result = provider.reconcile_provider(
+                invocation, provider_operation_id=row.provider_operation_id
+            )
+        except (TimeoutError, ConnectionError, OSError, ValueError, TypeError, RuntimeError):
+            return await self.record_reconciliation_unknown(
+                lease=lease, invocation_id=invocation.invocation_id,
+                error_code=RECONCILIATION_LOOKUP_FAILED,
+                max_attempts=5, initial_seconds=5, max_seconds=60,
+            )
         if inspect.isawaitable(result):
             result = await result
-        if not isinstance(result, ProviderReconciliationResult):
-            raise TypeError("provider reconciliation must return ProviderReconciliationResult")
+        result, committed_result = _normalize_reconciliation_evidence(result)
         if result in {ProviderReconciliationResult.STILL_PENDING, ProviderReconciliationResult.UNKNOWN}:
-            return await self.get(invocation.invocation_id)  # type: ignore[return-value]
+            return await self.record_reconciliation_unknown(
+                lease=lease, invocation_id=invocation.invocation_id,
+                error_code="RECONCILIATION_STILL_UNKNOWN",
+                max_attempts=5, initial_seconds=5, max_seconds=60,
+            )
         async with self.database.transaction() as session:
             await self._lock_current_lease(session, lease)
             current = await self._locked_row(session, invocation.invocation_id)
@@ -309,8 +365,200 @@ class DurableToolInvocationService:
             current.reconciled_at = datetime.now(UTC)
             if result is ProviderReconciliationResult.COMMITTED:
                 current.committed_at = current.committed_at or datetime.now(UTC)
+                if committed_result is not None:
+                    payload, digest = _committed_result_payload(committed_result)
+                    assert payload is not None and digest is not None
+                    _set_result_fields(current, payload, digest)
             current.version += 1
             return self._record(current)
+
+    async def reconcile_durable_record(self, *, lease: RunLease, provider: ProviderReconciler, invocation_id: str) -> DurableToolInvocation:
+        """对账 lane 的 durable identity 入口；不要求重新持久化原始 Tool 参数。"""
+        async with self.database.session() as session:
+            row = (await session.execute(select(DurableToolInvocationRow).where(DurableToolInvocationRow.invocation_id == invocation_id))).scalar_one_or_none()
+            if row is None:
+                raise ValueError("Tool invocation 不存在")
+            if row.run_id != lease.run_id:
+                raise ValueError("Tool invocation Run binding conflict")
+        current = await self._takeover_for_reconciliation_record(lease=lease, invocation_id=invocation_id)
+        if current.state in {ToolInvocationState.COMMITTED, ToolInvocationState.NOT_COMMITTED}:
+            return current
+        lookup = getattr(provider, "reconcile_durable", None)
+        if not callable(lookup):
+            return await self.record_reconciliation_unknown(
+                lease=lease, invocation_id=invocation_id,
+                error_code=PROVIDER_RECONCILIATION_UNSUPPORTED,
+                max_attempts=1, initial_seconds=5, max_seconds=60,
+            )
+        try:
+            result = lookup(current)
+            if inspect.isawaitable(result):
+                result = await result
+            result, committed_result = _normalize_reconciliation_evidence(result)
+        except Exception:
+            return await self.record_reconciliation_unknown(
+                lease=lease, invocation_id=invocation_id,
+                error_code=RECONCILIATION_LOOKUP_FAILED,
+                max_attempts=5, initial_seconds=5, max_seconds=60,
+            )
+        if result in {ProviderReconciliationResult.STILL_PENDING, ProviderReconciliationResult.UNKNOWN}:
+            return await self.record_reconciliation_unknown(
+                lease=lease, invocation_id=invocation_id,
+                error_code="RECONCILIATION_STILL_UNKNOWN",
+                max_attempts=5, initial_seconds=5, max_seconds=60,
+            )
+        if result is ProviderReconciliationResult.COMMITTED and current.committed_result is None and committed_result is None:
+            return await self.record_reconciliation_unknown(
+                lease=lease, invocation_id=invocation_id,
+                error_code="RECONCILIATION_RESULT_MISSING",
+                max_attempts=5, initial_seconds=5, max_seconds=60,
+            )
+        try:
+            payload, digest = _committed_result_payload(committed_result)
+        except (TypeError, ValueError):
+            return await self.record_reconciliation_unknown(
+                lease=lease, invocation_id=invocation_id,
+                error_code="RECONCILIATION_RESULT_INVALID",
+                max_attempts=5, initial_seconds=5, max_seconds=60,
+            )
+        async with self.database.transaction() as session:
+            await self._lock_current_lease(session, lease)
+            row = await self._locked_row(session, invocation_id)
+            self._assert_owner(row, lease)
+            if row.state in {ToolInvocationState.COMMITTED.value, ToolInvocationState.NOT_COMMITTED.value}:
+                return self._record(row)
+            if row.state != ToolInvocationState.UNKNOWN.value:
+                raise ValueError("reconciliation requires UNKNOWN")
+            row.state = result.value
+            row.reconciled_at = datetime.now(UTC)
+            row.manual_required = False
+            row.next_reconcile_at = None
+            row.last_safe_error_code = None
+            if result is ProviderReconciliationResult.COMMITTED:
+                row.committed_at = row.committed_at or datetime.now(UTC)
+                if payload is not None and digest is not None:
+                    _set_result_fields(row, payload, digest)
+            row.version += 1
+            return self._record(row)
+
+    async def _takeover_for_reconciliation_record(self, *, lease: RunLease, invocation_id: str) -> DurableToolInvocation:
+        async with self.database.transaction() as session:
+            await self._lock_current_lease(session, lease)
+            row = await self._locked_row(session, invocation_id)
+            self._assert_owner_run(row, lease)
+            if row.state == ToolInvocationState.STARTED.value:
+                row.state = ToolInvocationState.UNKNOWN.value
+                row.uncertainty_reason = "RECOVERY_AFTER_STARTED"
+                row.unknown_at = datetime.now(UTC)
+                row.version += 1
+            if row.state == ToolInvocationState.UNKNOWN.value and (row.owner_id != lease.owner_id or row.fencing_token != lease.fencing_token):
+                row.owner_id = lease.owner_id
+                row.fencing_token = lease.fencing_token
+                row.version += 1
+            return self._record(row)
+
+    async def record_reconciliation_unknown(
+        self, *, lease: RunLease, invocation_id: str, error_code: str,
+        max_attempts: int, initial_seconds: int, max_seconds: int,
+    ) -> DurableToolInvocation:
+        """保留 UNKNOWN，并以 durable bounded backoff 安排下一次查询。"""
+        if not error_code or len(error_code) > 128 or max_attempts <= 0 or initial_seconds <= 0 or max_seconds < initial_seconds:
+            raise ValueError("invalid reconciliation backoff configuration")
+        async with self.database.transaction() as session:
+            await self._lock_current_lease(session, lease)
+            row = await self._locked_row(session, invocation_id)
+            self._assert_owner(row, lease)
+            if row.state not in {ToolInvocationState.STARTED.value, ToolInvocationState.UNKNOWN.value}:
+                return self._record(row)
+            if row.state == ToolInvocationState.STARTED.value:
+                row.state = ToolInvocationState.UNKNOWN.value
+                row.unknown_at = datetime.now(UTC)
+            row.reconcile_attempt_count = int(getattr(row, "reconcile_attempt_count", 0)) + 1
+            row.last_reconcile_at = datetime.now(UTC)
+            row.last_safe_error_code = error_code
+            row.manual_required = row.reconcile_attempt_count >= max_attempts
+            row.next_reconcile_at = None if row.manual_required else datetime.now(UTC) + timedelta(seconds=min(max_seconds, initial_seconds * (2 ** (row.reconcile_attempt_count - 1))))
+            row.version += 1
+            return self._record(row)
+
+    async def resolve_unknown_committed(
+        self, *, lease: RunLease, invocation_id: str,
+        provider_operation_id: str | None = None,
+        result: ToolExecutionResult | Mapping[str, object] | None = None,
+        manual_audit: ManualResolutionAudit | None = None,
+    ) -> DurableToolInvocation:
+        return await self._resolve_unknown(
+            lease=lease, invocation_id=invocation_id,
+            state=ToolInvocationState.COMMITTED,
+            provider_operation_id=provider_operation_id,
+            result=result,
+            manual_audit=manual_audit,
+        )
+
+    async def resolve_unknown_not_committed(
+        self, *, lease: RunLease, invocation_id: str,
+        manual_audit: ManualResolutionAudit | None = None,
+    ) -> DurableToolInvocation:
+        return await self._resolve_unknown(
+            lease=lease, invocation_id=invocation_id,
+            state=ToolInvocationState.NOT_COMMITTED,
+            manual_audit=manual_audit,
+        )
+
+    async def _resolve_unknown(
+        self, *, lease: RunLease, invocation_id: str, state: ToolInvocationState,
+        provider_operation_id: str | None = None,
+        result: ToolExecutionResult | Mapping[str, object] | None = None,
+        manual_audit: ManualResolutionAudit | None = None,
+    ) -> DurableToolInvocation:
+        if state not in {ToolInvocationState.COMMITTED, ToolInvocationState.NOT_COMMITTED}:
+            raise ValueError("manual resolution must be terminal")
+        payload, digest = _committed_result_payload(result)
+        async with self.database.transaction() as session:
+            await self._lock_current_lease(session, lease)
+            row = await self._locked_row(session, invocation_id)
+            if row.state in {ToolInvocationState.COMMITTED.value, ToolInvocationState.NOT_COMMITTED.value}:
+                return self._record(row)
+            if row.state != ToolInvocationState.UNKNOWN.value:
+                raise ValueError("manual resolution requires UNKNOWN")
+            # An expired worker may leave UNKNOWN owned by its old fence.  The
+            # current fenced operator lease can take over only this UNKNOWN
+            # aggregate; PREPARED/STARTED never receive this shortcut.
+            if row.state == ToolInvocationState.UNKNOWN.value and (
+                row.owner_id != lease.owner_id or row.fencing_token != lease.fencing_token
+            ):
+                row.owner_id = lease.owner_id
+                row.fencing_token = lease.fencing_token
+                row.version += 1
+            self._assert_owner(row, lease)
+            if manual_audit is not None:
+                if manual_audit.reason == "" or row.run_id != lease.run_id:
+                    raise ValueError("manual audit binding invalid")
+                session.add(
+                    ManualToolResolutionAuditRow(
+                        audit_id=uuid4().hex,
+                        actor_id=manual_audit.actor_id,
+                        tenant_id=manual_audit.tenant_id,
+                        run_id=row.run_id,
+                        step_id=row.step_id,
+                        invocation_id=row.invocation_id,
+                        tool_name=row.tool_name,
+                        resolution=state.value,
+                        reason=manual_audit.reason,
+                    )
+                )
+            row.state = state.value
+            row.provider_operation_id = provider_operation_id or row.provider_operation_id
+            row.reconciled_at = datetime.now(UTC)
+            row.manual_required = False
+            row.next_reconcile_at = None
+            row.last_safe_error_code = "MANUAL_RESOLUTION"
+            if state is ToolInvocationState.COMMITTED:
+                if payload is not None:
+                    _set_result_fields(row, payload, digest)
+                row.committed_at = row.committed_at or datetime.now(UTC)
+            row.version += 1
+            return self._record(row)
 
     async def _takeover_for_reconciliation(
         self,
@@ -371,6 +619,11 @@ class DurableToolInvocationService:
     def _assert_owner(row: DurableToolInvocationRow, lease: RunLease) -> None:
         if row.run_id != lease.run_id or row.owner_id != lease.owner_id or row.fencing_token != lease.fencing_token:
             raise OwnershipLost("Tool invocation 不属于 current fenced executor")
+
+    @staticmethod
+    def _assert_owner_run(row: DurableToolInvocationRow, lease: RunLease) -> None:
+        if row.run_id != lease.run_id:
+            raise OwnershipLost("Tool invocation 不属于 current Run")
 
     @staticmethod
     def _assert_identity(
@@ -463,6 +716,11 @@ class DurableToolInvocationService:
             reconciled_at=row.reconciled_at,
             committed_result=committed_result,
             digest=digest,
+            reconcile_attempt_count=int(getattr(row, "reconcile_attempt_count", 0)),
+            last_reconcile_at=getattr(row, "last_reconcile_at", None),
+            last_safe_error_code=getattr(row, "last_safe_error_code", None),
+            next_reconcile_at=getattr(row, "next_reconcile_at", None),
+            manual_required=bool(getattr(row, "manual_required", False)),
         )
 
     @staticmethod
@@ -481,10 +739,14 @@ class DurableToolInvocationService:
 __all__ = [
     "DurableToolInvocation",
     "DurableToolInvocationService",
+    "ManualResolutionAudit",
+    "ProviderReconciliationEvidence",
     "ProviderReconciliationResult",
     "ProviderReconciler",
     "ToolInvocationState",
     "tool_invocation_binding_digest",
+    "PROVIDER_RECONCILIATION_UNSUPPORTED",
+    "RECONCILIATION_LOOKUP_FAILED",
 ]
 
 
@@ -501,6 +763,20 @@ def _committed_result_payload(
         raise TypeError("committed result 必须是 ToolExecutionResult 或 JSON object")
     digest = canonical_json_digest(payload)
     return payload, digest
+
+
+def _normalize_reconciliation_evidence(
+    value: ProviderReconciliationResult | ProviderReconciliationEvidence,
+) -> tuple[ProviderReconciliationResult, ToolExecutionResult | Mapping[str, object] | None]:
+    if isinstance(value, ProviderReconciliationResult):
+        return value, None
+    if isinstance(value, ProviderReconciliationEvidence):
+        if not isinstance(value.outcome, ProviderReconciliationResult):
+            raise TypeError("provider reconciliation outcome must be ProviderReconciliationResult")
+        if value.outcome is not ProviderReconciliationResult.COMMITTED and value.result is not None:
+            raise ValueError("only COMMITTED reconciliation may carry a result")
+        return value.outcome, value.result
+    raise TypeError("provider reconciliation must return ProviderReconciliationResult or ProviderReconciliationEvidence")
 
 
 def _set_result_fields(

@@ -135,6 +135,28 @@ class DurableExecutionRepository:
             )
             return tuple(result.scalars().all())
 
+    async def reconciliation_candidates(self, *, limit: int = 20) -> tuple[DurableToolInvocationRow, ...]:
+        """返回到期且未人工接管的 STARTED/UNKNOWN Tool invocation。"""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be positive")
+        async with self.database.session() as session:
+            result = await session.execute(
+                select(DurableToolInvocationRow)
+                .join(RunControlRow, RunControlRow.run_id == DurableToolInvocationRow.run_id)
+                .join(RuntimeRunExecutionRow, RuntimeRunExecutionRow.run_id == DurableToolInvocationRow.run_id)
+                .where(
+                    DurableToolInvocationRow.state.in_(("STARTED", "UNKNOWN")),
+                    DurableToolInvocationRow.manual_required.is_(False),
+                    or_(DurableToolInvocationRow.next_reconcile_at.is_(None), DurableToolInvocationRow.next_reconcile_at <= func.now()),
+                    RunControlRow.state == "ACTIVE",
+                    RuntimeRunExecutionRow.status.notin_(("SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED")),
+                    or_(RunControlRow.lease_until.is_(None), RunControlRow.lease_until <= func.now()),
+                )
+                .order_by(DurableToolInvocationRow.created_at)
+                .limit(limit)
+            )
+            return tuple(result.scalars().all())
+
     async def start_step(self, lease: RunLease, *, step_id: str, plan_version: int, attempt: int | None = None, journal_append: JournalAppend | None = None) -> int:
         """Fenced ``PENDING -> RUNNING`` transition with RUNNING replay."""
         if attempt is not None and (isinstance(attempt, bool) or not isinstance(attempt, int) or attempt <= 0):

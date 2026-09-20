@@ -65,9 +65,14 @@ from core.persistence import (
     check_schema_readiness,
 )
 from core.persistence.repositories.execution import DurableExecutionRepository
-from core.runtime.run_control import DurableRunControlService
+from core.runtime.run_control import (
+    DurableRunControlService,
+    OwnershipLost,
+    RunControlConflict,
+)
 from core.runtime.durable_approval import DurableApprovalService
 from core.runtime.tool_idempotency import DurableToolInvocationService
+from core.runtime.tool_idempotency import ManualResolutionAudit, ToolInvocationState
 from core.runtime.tool_snapshot_store import PostgresToolResolutionSnapshotStore
 from core.observability import HttpObservabilityMiddleware, ObservabilityService
 from core.redis_service import (
@@ -185,6 +190,7 @@ from core.runtime.project_memory import (
     ProjectSemanticMemoryService, ProjectSemanticMemoryStore,
 )
 from core.runtime.structured_logging import (
+    emit_reconciliation_log,
     JsonStructuredRuntimeLogger,
     StructuredLogProjector,
 )
@@ -238,6 +244,7 @@ AGENTEVALOPS_TRACE_EXPORT_QUEUE_CAPACITY = 256
 STAGE8_RESULT_CALLBACK_SCOPE = "localagent:stage8:result-callback"
 STAGE8_PROCESS_SCOPE = "localagent:stage8:process"
 RUNTIME_CANCEL_SCOPE = "localagent:runtime:cancel"
+MANUAL_TOOL_RESOLUTION_SCOPE = "localagent:runtime:tool-reconcile"
 
 
 class _RequestOwnedStreamingResponse(StreamingResponse):
@@ -1364,8 +1371,31 @@ async def lifespan(app: FastAPI):
             initial_backoff_seconds=settings.recovery_initial_backoff_seconds,
             max_backoff_seconds=settings.recovery_max_backoff_seconds,
             shutdown_grace_seconds=settings.recovery_shutdown_grace_seconds,
+            reconciliation_max_concurrency=settings.reconciliation_max_concurrency,
         ),
+        metrics_recorder=runtime_metrics,
+        structured_logger=structured_logger,
     )
+
+    async def reconcile_tool_candidate(candidate):
+        """生产对账 lane：claim Run 后仅调用 adapter 的只读 provider lookup。"""
+        lease = await durable_run_control.claim(candidate.run_id, app.state.application_metadata.instance_id)
+        registration = router.tool_registry.resolve(candidate.tool_name)
+        adapter = registration.adapter if registration is not None else None
+        if adapter is None:
+            return await durable_tool_invocation.record_reconciliation_unknown(
+                lease=lease,
+                invocation_id=candidate.invocation_id,
+                error_code="PROVIDER_RECONCILIATION_UNSUPPORTED",
+                max_attempts=1,
+                initial_seconds=settings.recovery_initial_backoff_seconds,
+                max_seconds=settings.recovery_max_backoff_seconds,
+            )
+        return await durable_tool_invocation.reconcile_durable_record(
+            lease=lease, provider=adapter, invocation_id=candidate.invocation_id
+        )
+
+    recovery_coordinator.configure_reconciliation(reconcile_tool_candidate)
     chat_service = await initialization_stack.create(
         "chat_service",
         lambda: ChatService(
@@ -2012,6 +2042,16 @@ async def request_id_and_auth_middleware(request: Request, call_next):
             elif request.state.principal.principal_kind == "SERVICE" and not (
                 (request.url.path.startswith("/api/runtime/runs/") and request.url.path.endswith("/cancel"))
                 or (request.url.path.startswith("/api/v1/runs/") and request.url.path.endswith("/cancel"))
+                or (
+                    request.url.path.startswith("/api/runtime/runs/")
+                    and "/tool-invocations/" in request.url.path
+                    and request.url.path.endswith("/resolve")
+                )
+                or (
+                    request.url.path.startswith("/api/v1/runs/")
+                    and "/tool-invocations/" in request.url.path
+                    and request.url.path.endswith("/resolve")
+                )
                 or request.url.path == "/api/stage8/ticket-continuations/process-ready"
             ):
                 raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
@@ -2175,6 +2215,25 @@ class ToolApprovalDecisionResponse(BaseModel):
     idempotent: bool
     error_code: StrictStr | None
     decided_at: StrictStr | None
+
+
+class ManualToolResolutionRequest(BaseModel):
+    """Operator resolution input; no raw Tool args/result are accepted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution: Literal["COMMITTED", "NOT_COMMITTED"]
+    reason: Annotated[StrictStr, Field(min_length=1, max_length=512)]
+    provider_operation_id: Annotated[StrictStr, Field(min_length=1, max_length=255)] | None = None
+
+
+class ManualToolResolutionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: StrictStr
+    invocation_id: StrictStr
+    state: Literal["COMMITTED", "NOT_COMMITTED"]
+    idempotent: bool = False
 
 
 class RuntimeEvaluationExecuteV2Response(BaseModel):
@@ -2527,15 +2586,12 @@ async def _bind_new_run_and_conversation(
 
 
 async def _authorize_run(
-    request: Request, run_id: str, action: AuthorizationAction
+    request: Request, run_id: str, action: AuthorizationAction,
+    *, required_scope: str | None = None,
 ) -> None:
     principal = request.state.principal
-    required_scope = (
-        RUNTIME_CANCEL_SCOPE
-        if principal.principal_kind == "SERVICE"
-        and action is AuthorizationAction.CANCEL
-        else None
-    )
+    if required_scope is None and principal.principal_kind == "SERVICE" and action is AuthorizationAction.CANCEL:
+        required_scope = RUNTIME_CANCEL_SCOPE
     await _authorization_service(request).authorize(
         principal, "RUN", run_id, action, required_scope=required_scope
     )
@@ -3544,6 +3600,136 @@ async def _handle_tool_approval_decision(
     return JSONResponse(
         status_code=status_code, content=response.model_dump(mode="json")
     )
+
+
+async def _handle_manual_tool_resolution(
+    run_id: str,
+    invocation_id: str,
+    payload: ManualToolResolutionRequest,
+    request: Request,
+) -> ManualToolResolutionResponse:
+    """受保护的 operator 收口面；状态写入仍只由 durable Tool service 完成。"""
+    _validate_uuid_path_value(run_id, "run_id")
+    principal = request.state.principal
+    required_scope = (
+        MANUAL_TOOL_RESOLUTION_SCOPE
+        if principal.principal_kind == "SERVICE"
+        else None
+    )
+    await _authorize_run(
+        request,
+        run_id,
+        AuthorizationAction.MUTATE,
+        required_scope=required_scope,
+    )
+
+    runtime_services = _require_runtime_services()
+    durable = runtime_services.durable_tool_invocation
+    record = await durable.get(invocation_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="TOOL_INVOCATION_NOT_FOUND")
+    if record.run_id != run_id:
+        # Run authorization has already established the caller's tenant/object
+        # boundary; a mismatched invocation is a binding conflict, not a new
+        # object lookup path.
+        raise HTTPException(status_code=409, detail="TOOL_INVOCATION_BINDING_MISMATCH")
+    if record.state is not ToolInvocationState.UNKNOWN:
+        raise HTTPException(status_code=409, detail="TOOL_INVOCATION_STATE_CONFLICT")
+
+    owner_id = f"{runtime_services.run_control_owner_id}:manual"
+    try:
+        lease = await runtime_services.durable_run_control.claim(run_id, owner_id)
+        audit = ManualResolutionAudit(
+            actor_id=str(principal.user_id),
+            tenant_id=principal.tenant_id,
+            reason=payload.reason,
+        )
+        if payload.resolution == "COMMITTED":
+            resolved = await durable.resolve_unknown_committed(
+                lease=lease,
+                invocation_id=invocation_id,
+                provider_operation_id=payload.provider_operation_id,
+                manual_audit=audit,
+            )
+        else:
+            resolved = await durable.resolve_unknown_not_committed(
+                lease=lease,
+                invocation_id=invocation_id,
+                manual_audit=audit,
+            )
+    except (OwnershipLost, RunControlConflict):
+        raise HTTPException(
+            status_code=409, detail="TOOL_INVOCATION_FENCE_CONFLICT"
+        ) from None
+    except ValueError as exc:
+        # Domain state/binding failures are projected to a stable transport
+        # code; internal exception text never reaches the operator.
+        if "不存在" in str(exc):
+            raise HTTPException(
+                status_code=404, detail="TOOL_INVOCATION_NOT_FOUND"
+            ) from None
+        raise HTTPException(
+            status_code=409, detail="TOOL_INVOCATION_STATE_CONFLICT"
+        ) from None
+
+    # Metrics are a best-effort projection; a recorder failure must never
+    # change the already fenced durable resolution result.
+    recorder = getattr(app.state, "runtime_metrics", None)
+    increment = getattr(recorder, "increment_counter", None)
+    if callable(increment):
+        try:
+            increment("runtime_reconciliation_manual_resolved_total")
+        except Exception:
+            pass
+    emit_reconciliation_log(
+        getattr(runtime_services, "structured_logger", None),
+        run_id=run_id,
+        step_id=record.step_id,
+        invocation_id=invocation_id,
+        tool_name=record.tool_name,
+        provider_identity=None,
+        attempt=record.reconcile_attempt_count,
+        outcome=resolved.state.value,
+        manual_actor_id=str(principal.user_id),
+    )
+
+    return ManualToolResolutionResponse(
+        run_id=run_id,
+        invocation_id=invocation_id,
+        state=resolved.state.value,
+    )
+
+
+@app.post(
+    "/api/runtime/runs/{run_id}/tool-invocations/{invocation_id}/resolve",
+    response_model=ManualToolResolutionResponse,
+)
+@v1_router.post(
+    "/runs/{run_id}/tool-invocations/{invocation_id}/resolve",
+    response_model=ManualToolResolutionResponse,
+)
+async def manual_tool_resolution_endpoint(
+    run_id: Annotated[
+        str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)
+    ],
+    invocation_id: Annotated[str, Path(min_length=1, max_length=255)],
+    payload: ManualToolResolutionRequest,
+    request: Request,
+) -> ManualToolResolutionResponse:
+    return await _handle_manual_tool_resolution(
+        run_id, invocation_id, payload, request
+    )
+
+
+# ``v1_router`` is included above the WP2 command handlers for historical
+# ordering reasons; register this route explicitly so the versioned alias is
+# part of the same real FastAPI application.
+app.add_api_route(
+    "/api/v1/runs/{run_id}/tool-invocations/{invocation_id}/resolve",
+    manual_tool_resolution_endpoint,
+    methods=["POST"],
+    response_model=ManualToolResolutionResponse,
+)
 
 
 @app.post(
