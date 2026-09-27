@@ -23,7 +23,7 @@ from core.runtime.fault_injection_contract import (
     InjectedFaultError,
 )
 
-_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _OPERATION = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 SAFE_SPAN_ATTRIBUTES = frozenset({
     "component", "operation", "status", "error_code", "retry_index",
@@ -40,7 +40,10 @@ SAFE_SPAN_ATTRIBUTES = frozenset({
     "step_count", "selected_entry_agent_id", "runtime_mode",
     "runtime_version", "prompt_version", "model_config_hash",
     "toolset_hash", "kb_version", "final_status", "stop_reason",
-    "session_id", "schema_version", "planner_model_invoked",
+    "session_id", "agent_version", "resolved_agent_id", "workflow_id", "workflow_version",
+    "toolset_identity", "resolved_model_profile_id", "resolved_retrieval_profile_id",
+    "resolved_memory_profile_id",
+    "schema_version", "planner_model_invoked",
     "planner_attempt_count", "planner_timeout_source", "compiled_shape",
     "specialist_count", "synthesis_required", "preferred_agent",
     "execution_kind", "output_policy", "invocation_role",

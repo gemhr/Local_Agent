@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
+from collections.abc import Mapping
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -16,6 +17,7 @@ from core.runtime.events import (
     CancellationPayload, ErrorPayload, OutputDeltaPayload, RunCompletedPayload,
     RuntimeEvent, RuntimeEventType, ToolApprovalRequestedPayload,
 )
+from core.runtime.business_output_schema import schema_matches
 
 
 CLIENT_EVENT_SCHEMA_VERSION = 1
@@ -90,23 +92,111 @@ def project_client_event(event: RuntimeEvent) -> ClientDeliveryEvent | None:
     )
 
 
+def _register_structured_output(feed, run_id: str, schema: Mapping[str, object]) -> None:
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("structured delivery run_id is required")
+    if not isinstance(schema, Mapping) or not schema:
+        raise ValueError("structured delivery schema is required")
+    existing = feed._structured_schemas.get(run_id)
+    normalized = dict(schema)
+    if existing is not None and existing != normalized:
+        raise ValueError("structured delivery schema conflict")
+    feed._structured_schemas[run_id] = normalized
+
+
+def _prepare_delivery(
+    feed, event: RuntimeEvent
+) -> tuple[list[ClientDeliveryEvent], bool]:
+    """Delay schema-bound output until the same business contract validates it."""
+    prepared = feed._prepared_structured_terminals.get(event.run_id)
+    if prepared is not None and event.event_type is RuntimeEventType.OUTPUT_DELTA:
+        # 已准备/提交的结构化 Run 也不能把重试 delta 当普通文本持久化。
+        return [], True
+    if (
+        prepared is not None
+        and event.event_type is RuntimeEventType.RUN_COMPLETED
+    ):
+        if prepared.event_id != event.event_id:
+            raise ValueError("Structured terminal event identity conflict")
+        # Prepared 不表示已 commit；每次事务尝试仍写同一幂等投影。
+        return [prepared], True
+    schema = feed._structured_schemas.get(event.run_id)
+    if schema is not None and event.event_type is RuntimeEventType.OUTPUT_DELTA:
+        projected = project_client_event(event)
+        if projected is not None:
+            pending = feed._pending_structured_output.setdefault(event.run_id, {})
+            existing = pending.get(projected.cursor)
+            if existing is not None and existing != projected:
+                raise ValueError("Structured delta event identity conflict")
+            pending[projected.cursor] = projected
+        return [], True
+
+    if schema is not None and event.event_type is RuntimeEventType.RUN_COMPLETED:
+        candidates = feed._pending_structured_output.get(event.run_id, {})
+        pending = [candidates[key] for key in sorted(candidates)]
+        terminal = project_client_event(event)
+        if terminal is None:
+            return [], True
+        if event.payload.status != "SUCCEEDED":
+            projected_events = [terminal]
+            feed._prepared_structured_terminals[event.run_id] = terminal
+            return projected_events, True
+        candidate = "".join(str(item.payload.get("text", "")) for item in pending)
+        try:
+            valid = schema_matches(schema, json.loads(candidate))
+        except (TypeError, ValueError):
+            valid = False
+        payload = dict(terminal.payload)
+        payload["business_output_valid"] = valid
+        if valid:
+            payload["output_disposition"] = "ACCEPTED"
+            payload["output"] = candidate
+            projected_events = [replace(terminal, payload=payload)]
+            feed._prepared_structured_terminals[event.run_id] = projected_events[0]
+            return projected_events, True
+        payload["business_error_code"] = "BUSINESS_OUTPUT_INVALID"
+        payload["error_code"] = "BUSINESS_OUTPUT_INVALID"
+        payload["output_disposition"] = "REJECTED"
+        projected_events = [replace(terminal, payload=payload)]
+        feed._prepared_structured_terminals[event.run_id] = projected_events[0]
+        return projected_events, True
+
+    projected = project_client_event(event)
+    return ([projected] if projected is not None else []), projected is not None
+
+
+def _projection_committed(feed, event: RuntimeEvent) -> None:
+    """原事务 Owner 确认 commit 后才清理候选；保留稳定 terminal 供重复写。"""
+    prepared = feed._prepared_structured_terminals.get(event.run_id)
+    if prepared is not None and prepared.event_id == event.event_id:
+        feed._structured_schemas.pop(event.run_id, None)
+        feed._pending_structured_output.pop(event.run_id, None)
+
+
 class InMemoryClientEventFeed:
     def __init__(self, metrics: object | None = None) -> None:
         self._events: dict[str, dict[int, ClientDeliveryEvent]] = {}
         self._lock = asyncio.Lock()
         self._metrics = metrics
+        self._structured_schemas: dict[str, Mapping[str, object]] = {}
+        self._pending_structured_output: dict[str, dict[int, ClientDeliveryEvent]] = {}
+        self._prepared_structured_terminals: dict[str, ClientDeliveryEvent] = {}
+
+    def register_structured_output(self, run_id: str, schema: Mapping[str, object]) -> None:
+        _register_structured_output(self, run_id, schema)
 
     async def append_event(self, event: RuntimeEvent) -> None:
-        projected = project_client_event(event)
-        if projected is None:
-            return
         async with self._lock:
-            run = self._events.setdefault(projected.run_id, {})
-            existing = run.get(projected.cursor)
-            if existing is not None and existing != projected:
-                raise ValueError("Client Feed cursor conflict")
-            run[projected.cursor] = projected
-        _counter(self._metrics, "runtime_client_event_feed_write_total")
+            projecteds, handled = _prepare_delivery(self, event)
+            for projected in projecteds:
+                run = self._events.setdefault(projected.run_id, {})
+                existing = run.get(projected.cursor)
+                if existing is not None and existing != projected:
+                    raise ValueError("Client Feed cursor conflict")
+                run[projected.cursor] = projected
+            _projection_committed(self, event)
+        if projecteds:
+            _counter(self._metrics, "runtime_client_event_feed_write_total")
 
     async def read_after(self, run_id: str, cursor: int, limit: int = 100):
         async with self._lock:
@@ -119,30 +209,39 @@ class PostgresClientEventFeed:
     def __init__(self, database: Database, metrics: object | None = None) -> None:
         self._database = database
         self._metrics = metrics
+        self._structured_schemas: dict[str, Mapping[str, object]] = {}
+        self._pending_structured_output: dict[str, dict[int, ClientDeliveryEvent]] = {}
+        self._prepared_structured_terminals: dict[str, ClientDeliveryEvent] = {}
+
+    def register_structured_output(self, run_id: str, schema: Mapping[str, object]) -> None:
+        _register_structured_output(self, run_id, schema)
 
     async def append_event(self, event: RuntimeEvent) -> None:
-        projected = project_client_event(event)
-        if projected is None:
-            return
         try:
             async with self._database.transaction() as session:
-                await self._append_projected_in_transaction(session, projected)
-            self.record_write_succeeded()
+                projecteds, _handled = _prepare_delivery(self, event)
+                for projected in projecteds:
+                    await self._append_projected_in_transaction(session, projected)
+            if projecteds:
+                self.projection_committed(event)
+                self.record_write_succeeded()
         except Exception:
             self.record_write_failed()
             raise
 
     async def append_event_in_transaction(self, session, event: RuntimeEvent) -> bool:
         """在 Journal Owner 的 transaction 内写投影；返回事件是否 client-visible。"""
-        projected = project_client_event(event)
-        if projected is None:
-            return False
+        projecteds, handled = _prepare_delivery(self, event)
         try:
-            await self._append_projected_in_transaction(session, projected)
+            for projected in projecteds:
+                await self._append_projected_in_transaction(session, projected)
         except Exception:
             self.record_write_failed()
             raise
-        return True
+        return handled
+
+    def projection_committed(self, event: RuntimeEvent) -> None:
+        _projection_committed(self, event)
 
     async def _append_projected_in_transaction(self, session, projected) -> None:
         result = await session.execute(

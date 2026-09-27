@@ -281,13 +281,17 @@ def test_worker_config_rejects_incomplete_sasl_credentials() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_executor_uses_fresh_run_id_for_each_claim_attempt() -> None:
-    class _ChatService:
+    class _ApplicationService:
         def __init__(self) -> None:
             self.run_ids = []
 
-        async def run_coordinated_agent(self, _agent_id, _query, **kwargs):
-            self.run_ids.append(kwargs["run_id"])
-            return "ok", SimpleNamespace(status=SimpleNamespace(value="SUCCEEDED"))
+        async def execute(self, request):
+            self.run_ids.append(request.run_id)
+            return SimpleNamespace(
+                run_id=request.run_id,
+                status=SimpleNamespace(value="SUCCEEDED"),
+                output="ok",
+            )
 
     payload = {
         "schema_version": EVALUATION_JOB_REQUEST_SCHEMA,
@@ -302,9 +306,37 @@ async def test_runtime_executor_uses_fresh_run_id_for_each_claim_attempt() -> No
         request_payload=payload,
         request_digest=canonical_json_digest(payload),
     )
-    chat_service = _ChatService()
-    executor = RuntimeEvaluationExecutor(chat_service)
+    application_service = _ApplicationService()
+    executor = RuntimeEvaluationExecutor(application_service)
     await executor.execute(job)
     await executor.execute(job)
-    assert len(set(chat_service.run_ids)) == 2
-    assert payload["run_id"] not in chat_service.run_ids
+    assert len(set(application_service.run_ids)) == 2
+    assert payload["run_id"] not in application_service.run_ids
+
+
+@pytest.mark.asyncio
+async def test_runtime_executor_rejects_business_invalid_without_successful_empty_output():
+    payload = {
+        "schema_version": EVALUATION_JOB_REQUEST_SCHEMA,
+        "agent_id": "feature_understanding",
+        "query": "evaluate",
+        "timeout_seconds": 30,
+    }
+
+    class Application:
+        async def execute(self, _request):
+            return SimpleNamespace(
+                status=SimpleNamespace(value="SUCCEEDED"),
+                business_output_valid=False,
+                output_disposition="REJECTED",
+                output=None,
+            )
+
+    job = SimpleNamespace(
+        evaluator_kind="RUNTIME_EVALUATION_V1",
+        request_payload=payload,
+        request_digest=canonical_json_digest(payload),
+        job_id=uuid.uuid4(),
+    )
+    with pytest.raises(PermanentEvaluationError, match="business output validation failed"):
+        await RuntimeEvaluationExecutor(Application()).execute(job)

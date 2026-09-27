@@ -11,7 +11,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Callable, Generator, Mapping, Optional
 
 from core.memory_manager import MemoryManager
-from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
+from core.runtime.agent_registry import AgentRegistry
 from core.runtime.tool_registry import ToolRegistry, ToolRegistryError, ToolRegistryErrorCode
 from core.runtime.tool_discovery import (
     ToolCatalog,
@@ -106,6 +106,7 @@ class AgentRouter:
         memory_manager: MemoryManager,
         db_manager: Optional["VectorDBManager"] = None,
         *,
+        agent_registry: AgentRegistry,
         history_window_size: int = 8,
         summary_trigger_messages: int = 16,
         summary_keep_recent: int = 8,
@@ -142,6 +143,9 @@ class AgentRouter:
         self.llm = llm_engine
         self.memory_manager = memory_manager
         self.db_manager = db_manager
+        if not isinstance(agent_registry, AgentRegistry):
+            raise TypeError("agent_registry must be the compiled AgentRegistry")
+        self.agent_registry = agent_registry
         self.history_window_size = history_window_size
         self.summary_trigger_messages = summary_trigger_messages
         self.summary_keep_recent = summary_keep_recent
@@ -297,7 +301,7 @@ class AgentRouter:
         # 不隐含 allow-all，无 module-global mutable authority）。任何 Tool 执行
         # 都必须经过此 Authority。
         if tool_governance_service is None:
-            tool_governance_service = self._default_governance_service()
+            tool_governance_service = self._default_governance_service(agent_registry)
         elif not isinstance(tool_governance_service, ToolGovernanceService):
             raise TypeError("tool_governance_service 必须是 ToolGovernanceService")
         self.tool_governance_service = tool_governance_service
@@ -319,11 +323,11 @@ class AgentRouter:
         self.summary_plan_max_tokens = 256
         self.knowledge_rewrite_max_tokens = 128
         # 展示配置和委派 ID 从同一静态 Registry 派生。
-        self.agents_config = DEFAULT_AGENT_REGISTRY.display_config()
-        self.delegate_agent_ids = list(DEFAULT_AGENT_REGISTRY.delegated_specialist_ids())
+        self.agents_config = agent_registry.display_config()
+        self.delegate_agent_ids = list(agent_registry.delegated_specialist_ids())
 
     @staticmethod
-    def _default_governance_service() -> ToolGovernanceService:
+    def _default_governance_service(agent_registry: AgentRegistry) -> ToolGovernanceService:
         """无注入时的 deterministic deny-all 兼容 Service（测试/无 Tool 装配 seam）。
 
         冻结空 ToolPolicyCatalog（0 Tool / 0 policy 通过 coverage 校验）；任何
@@ -334,10 +338,10 @@ class AgentRouter:
         empty_registry.freeze()
         catalog = ToolPolicyCatalog(
             tool_registry=empty_registry,
-            agent_registry=DEFAULT_AGENT_REGISTRY,
+            agent_registry=agent_registry,
         )
         catalog.freeze()
-        return ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
+        return ToolGovernanceService(catalog, agent_registry)
 
     @staticmethod
     def _default_resource_authorization_service(
@@ -386,16 +390,31 @@ class AgentRouter:
         agent_id: str,
         *,
         allow_delegation: bool = False,
+        business_definition=None,
     ) -> str:
         """为指定智能体构造回答提示词。"""
-        config = self.agents_config.get(agent_id, self.agents_config["core_router"])
+        if business_definition is not None:
+            if getattr(business_definition, "agent_id", None) != agent_id:
+                raise ValueError("业务定义与 Agent 不一致")
+            name, role = business_definition.display_name, business_definition.role
+        else:
+            config = self.agents_config.get(agent_id)
+            if config is None:
+                raise ValueError("Agent 未注册")
+            name, role = config["name"], config["role"]
         lines = [
-            f"你是 {config['name']}。",
-            f"你的职责：{config['role']}",
+            f"你是 {name}。",
+            f"你的职责：{role}",
             "除非用户另有要求，否则请用中文清晰、简洁地回答。",
-            CANONICAL_SECURITY_INSTRUCTION,
         ]
-        if agent_id == "knowledge_expert":
+        if business_definition is not None and business_definition.instructions.strip():
+            lines.append(business_definition.instructions)
+        lines.append(CANONICAL_SECURITY_INSTRUCTION)
+        if (
+            "rag" in business_definition.capabilities
+            if business_definition is not None
+            else agent_id == "knowledge_expert"
+        ):
             lines.extend(
                 [
                     "你必须优先依据本地知识库信源回答。",
@@ -427,10 +446,15 @@ class AgentRouter:
         return "\n".join(lines)
 
     def _build_tool_planner_prompt(
-        self, agent_id: str, registrations=None
+        self, agent_id: str, registrations=None, business_definition=None
     ) -> str:
         """构造工具规划提示词。"""
-        config = self.agents_config.get(agent_id, self.agents_config["core_router"])
+        if business_definition is not None:
+            config = {"name": business_definition.display_name}
+        else:
+            config = self.agents_config.get(agent_id)
+            if config is None:
+                raise ValueError("Agent 未注册")
         lines = [
             f"你正在判断 {config['name']} 在回答前是否需要使用本地工具。",
             "只能输出一行。",
@@ -1115,6 +1139,7 @@ class AgentRouter:
         memory_injection_report_out: list | None = None,
         prompt_identity_out: list[PromptIdentity] | None = None,
         context_selection_records_out: list[ContextSelectionRecord] | None = None,
+        business_definition=None,
     ) -> list[dict[str, str]]:
         """构建一次推理所需的完整消息序列。
 
@@ -1142,7 +1167,8 @@ class AgentRouter:
             history_groups = self._group_history(history)
 
         system_prompt = self._build_system_prompt(
-            agent_id, allow_delegation=allow_delegation
+            agent_id, allow_delegation=allow_delegation,
+            business_definition=business_definition,
         )
         if prompt_identity_out is not None:
             prompt_identity_out.append(
@@ -1178,7 +1204,11 @@ class AgentRouter:
             context_items.append(record.to_context_item())
             memory_supplied += 1
 
-        if agent_id == "knowledge_expert":
+        if (
+            "rag" in business_definition.capabilities
+            if business_definition is not None
+            else agent_id == "knowledge_expert"
+        ):
             retrieval_result = self._execute_knowledge_retrieval(
                 user_query,
                 run_context=run_context,
@@ -1310,7 +1340,11 @@ class AgentRouter:
                 )
             )
 
-        if agent_id != "knowledge_expert":
+        if not (
+            "rag" in business_definition.capabilities
+            if business_definition is not None
+            else agent_id == "knowledge_expert"
+        ):
             context_result = self.context_builder.build(
                 ContextBuildRequest(
                     run_id=(
@@ -1362,11 +1396,12 @@ class AgentRouter:
 
     def _capability_requirements(self, agent_id: str, user_query: str) -> TaskCapabilityRequirements:
         """从既有确定性路由信息生成最小能力需求，不保存用户正文。"""
+        capabilities = self.agent_registry.resolve(agent_id).capabilities
         return TaskCapabilityRequirements(
-            requires_rag=agent_id == "knowledge_expert",
+            requires_rag="rag" in capabilities,
             requires_tools=self._tool_intent_likely(user_query),
             requires_multi_agent=False,
-            requires_code_reasoning=agent_id == "code_expert",
+            requires_code_reasoning="code_reasoning" in capabilities,
             risk_level=RiskLevel.LOW,
             estimated_steps=1,
         )
@@ -1385,6 +1420,7 @@ class AgentRouter:
         context_requirements: ModelContextRequirements | None = None,
         run_context: RunContext | None = None,
         capability_requirements: TaskCapabilityRequirements | None = None,
+        business_definition=None,
     ) -> tuple[object, ModelProfile]:
         """使用完整消息的近似上下文特征选择并解析一次首选模型。"""
         decision, profile, _requirements = self._select_model_decision(
@@ -1394,6 +1430,7 @@ class AgentRouter:
             context_requirements,
             run_context,
             capability_requirements,
+            business_definition,
         )
         return self.model_resolver.resolve(decision.selected_profile), profile
 
@@ -1405,6 +1442,7 @@ class AgentRouter:
         context_requirements: ModelContextRequirements | None = None,
         run_context: RunContext | None = None,
         capability_requirements: TaskCapabilityRequirements | None = None,
+        business_definition=None,
     ):
         """返回 Selection Decision、首次 Profile 与最终上下文需求。"""
         estimated = self._estimate_messages_tokens(messages)
@@ -1416,7 +1454,16 @@ class AgentRouter:
             capabilities = self.build_single_agent_plan(
                 agent_id, user_query
             ).steps[0].capability_requirements
-        decision = self.model_selection_policy.select(ModelSelectionRequest(agent_id, capabilities, requirements, ModelPreference.AUTO, self.model_profiles, run_context.budget_ledger.snapshot() if run_context is not None and run_context.budget_ledger is not None else None))
+        available_profiles = self.model_profiles
+        requested_profile = getattr(business_definition, "model_profile_id", "default")
+        if requested_profile != "default":
+            available_profiles = tuple(
+                profile for profile in self.model_profiles
+                if profile.profile_id.value == requested_profile
+            )
+            if not available_profiles:
+                raise ValueError("Agent 引用了不可用的 Model profile")
+        decision = self.model_selection_policy.select(ModelSelectionRequest(agent_id, capabilities, requirements, ModelPreference.AUTO, available_profiles, run_context.budget_ledger.snapshot() if run_context is not None and run_context.budget_ledger is not None else None))
         profile = next(profile for profile in self.model_profiles if profile.profile_id == decision.selected_profile)
         final_required = self.model_selection_policy.required_context_window(requirements.minimum_context_window)
         if profile.context_window < final_required:
@@ -1431,6 +1478,7 @@ class AgentRouter:
         context_requirements: ModelContextRequirements | None,
         run_context: RunContext,
         capability_requirements: TaskCapabilityRequirements,
+        business_definition=None,
     ) -> bool:
         """native tools 只在选中 Profile 的 Adapter 显式声明支持时启用。"""
         if not hasattr(self, "model_adapter_resolver"):
@@ -1444,6 +1492,7 @@ class AgentRouter:
             context_requirements,
             run_context,
             capability_requirements,
+            business_definition,
         )
         profile = next(
             profile
@@ -1595,6 +1644,7 @@ class AgentRouter:
         messages: list[dict[str, str]],
         agent_id: str,
         run_context: RunContext | None = None,
+        business_definition=None,
     ) -> Optional[tuple[str, str]]:
         """决定当前回答前是否需要调用工具。"""
         registrations = self._tool_registrations_for_run(
@@ -1613,7 +1663,7 @@ class AgentRouter:
         planner_messages = list(messages)
         planner_messages[0] = {
             "role": "system",
-            "content": self._build_tool_planner_prompt(agent_id, registrations),
+            "content": self._build_tool_planner_prompt(agent_id, registrations, business_definition),
         }
         planner_response = self._collect_model_response(
             planner_messages,
@@ -1701,13 +1751,16 @@ class AgentRouter:
         tool_name: str,
         registration,
         safe_error_code: str,
+        business_definition=None,
     ) -> str | None:
         """对 planner 参数只提供一次、仅限 validation 前的修复机会。"""
         repair_messages = list(messages)
         repair_messages[0] = {
             "role": "system",
             "content": (
-                self._build_tool_planner_prompt(agent_id, (registration,))
+                self._build_tool_planner_prompt(
+                    agent_id, (registration,), business_definition
+                )
                 + f"\n上一份 {tool_name} 参数未通过校验（{safe_error_code}）。"
                 "请检查必填业务字段、字段类型和 enum 值；不要补写运行时或测试字段。"
                 "请仅根据用户业务意图重新输出该工具的一行 CALL；无法确定则输出 NO_TOOL。"
@@ -1738,6 +1791,7 @@ class AgentRouter:
         agent_id: str,
         registration=None,
         allow_repair: bool = True,
+        business_definition=None,
     ) -> ToolInvocation:
         """在进入 invocation governance 前最多修复一次 planner 参数。"""
         current_args = tool_args
@@ -1755,6 +1809,7 @@ class AgentRouter:
                         registration or self.tool_registry.require(tool_name)
                     ),
                     safe_error_code=exc.safe_error_code,
+                    business_definition=business_definition,
                 )
                 if repaired_args is None:
                     raise
@@ -1881,6 +1936,7 @@ class AgentRouter:
         validated_invocation: ToolInvocation | None = None,
         prompt_identity_out: list[PromptIdentity] | None = None,
         context_selection_records_out: list[ContextSelectionRecord] | None = None,
+        business_definition=None,
     ) -> list[dict[str, str]]:
         """构建回答消息，并在需要时注入工具观察结果。"""
         if run_context is not None:
@@ -1899,13 +1955,14 @@ class AgentRouter:
             memory_injection_report_out=memory_injection_report_out,
             prompt_identity_out=prompt_identity_out,
             context_selection_records_out=context_selection_records_out,
+            business_definition=business_definition,
         )
         if native_selection:
             return messages
         if run_context is not None and run_context.tool_resolution_snapshot is None:
             self._tool_registrations_for_run(agent_id, user_query, run_context)
         tool_call = tool_call if tool_call is not None else self._plan_tool_call(
-            messages, agent_id, run_context
+            messages, agent_id, run_context, business_definition
         )
         if not tool_call:
             return messages
@@ -1919,9 +1976,11 @@ class AgentRouter:
             and run_context.tool_resolution_snapshot is not None
             else self.tool_registry.require(tool_name)
         )
-        if registration is None and (
-            run_context is None or run_context.tool_resolution_snapshot is None
-        ):
+        snapshot_excluded = registration is None
+        # A known Tool excluded from the run snapshot may still need a typed
+        # Governance denial. Resolve it from the frozen platform registry only
+        # for that denial path; ALLOW 也不得越过冻结 snapshot 的执行边界。
+        if registration is None:
             registration = self.tool_registry.resolve(tool_name)
         if registration is None:
             raise ToolRegistryError(ToolRegistryErrorCode.NOT_REGISTERED, "Tool 未注册")
@@ -1941,7 +2000,7 @@ class AgentRouter:
         )
         # 保持 legacy 静态权限 gate 的既有顺序；native 路径已经在此之前
         # 完成参数校验/repair，因而只会对最终 immutable invocation 授权。
-        if validated_invocation is None:
+        if validated_invocation is None or snapshot_excluded:
             auth_decision = self.tool_governance_service.authorize_tool(
                 governance_context, registration
             )
@@ -1950,12 +2009,15 @@ class AgentRouter:
                     ToolGovernanceErrorCode(auth_decision.safe_error_code),
                     governance_denial_message(auth_decision.safe_error_code),
                 )
+        if snapshot_excluded:
+            raise ToolRegistryError(ToolRegistryErrorCode.NOT_REGISTERED, "Tool 不在当前 Run 的冻结目录中")
         try:
             invocation = validated_invocation or self._build_valid_tool_invocation(
                 adapter=adapter, registration=registration,
                 tool_name=tool_name, tool_args=tool_args,
                 messages=messages, agent_id=agent_id,
                 allow_repair=native_assistant_message is None,
+                business_definition=business_definition,
             )
         except ToolAdapterInvocationError as exc:
             raise self._tool_validation_failure(tool_name, exc) from None
@@ -2197,6 +2259,7 @@ class AgentRouter:
         memory_injection_report_out: list | None = None,
         approval_controller: ToolApprovalController | None = None,
         final_output_sink=None,
+        business_definition=None,
     ) -> str:
         """同步生成最终回答文本。"""
         context_requirements_out: list[ModelContextRequirements] = []
@@ -2219,6 +2282,7 @@ class AgentRouter:
                 native_selection=native_selection,
                 prompt_identity_out=prompt_identity_out,
                 context_selection_records_out=context_selection_records,
+                business_definition=business_definition,
             )
         except (ToolGovernanceError, ResourceAuthorizationError) as denied:
             # WP2-B：governance non-ALLOW 直接返回固定 safe denial 作为本步业务
@@ -2248,6 +2312,7 @@ class AgentRouter:
                 context_requirements_out[0] if context_requirements_out else None,
                 run_context,
                 capability_requirements,
+                business_definition,
             )
             if not native_selection:
                 # 不支持 native 的 Engine 绝不能收到 tools；复用既有 planner 与
@@ -2263,6 +2328,7 @@ class AgentRouter:
                     approval_controller=approval_controller,
                     base_messages=messages,
                     context_selection_records_out=context_selection_records,
+                    business_definition=business_definition,
                 )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -2292,6 +2358,7 @@ class AgentRouter:
                     prompt_identity=answer_prompt_identity,
                     context_selection_records=tuple(context_selection_records),
                     final_output_sink=final_output_sink,
+                    business_definition=business_definition,
                 )
                 if invocation_result_out is not None:
                     invocation_result_out.append(invocation_result)
@@ -2317,6 +2384,7 @@ class AgentRouter:
                 fault_controller=fault_controller,
                 prompt_identity=answer_prompt_identity,
                 context_selection_records=tuple(context_selection_records),
+                business_definition=business_definition,
             )
             native_call = invocation_result.response.native_tool_call
             if native_call is not None:
@@ -2378,6 +2446,7 @@ class AgentRouter:
                             PROMPT_ID_NATIVE_TOOL_REPAIR, "1",
                             f"{messages[0]['content']}\n{native_repair_instruction}",
                         ),
+                        business_definition=business_definition,
                     )
                     repaired = repair_result.response.native_tool_call
                     if (
@@ -2413,6 +2482,7 @@ class AgentRouter:
                     native_assistant_message=final_assistant_message,
                     validated_invocation=validated_invocation,
                     context_selection_records_out=context_selection_records,
+                    business_definition=business_definition,
                 )
                 # 仅重试 Phase C：此处不再回到 selection 或 Tool execution。
                 invocation_result = self._invoke_model_contract(
@@ -2424,6 +2494,7 @@ class AgentRouter:
                     prompt_identity=answer_prompt_identity,
                     context_selection_records=tuple(context_selection_records),
                     final_output_sink=final_output_sink,
+                    business_definition=business_definition,
                 )
             if invocation_result_out is not None:
                 invocation_result_out.append(invocation_result)
@@ -2477,6 +2548,7 @@ class AgentRouter:
         context_selection_records: tuple[ContextSelectionRecord, ...] = (),
         structured_repair_count: int = 0,
         final_output_sink=None,
+        business_definition=None,
     ) -> ModelInvocationResult:
         """Model Adapter 的唯一同步入口；复用既有 Budget/Circuit/Retry/Event。"""
         if run_context.budget_ledger is None:
@@ -2517,6 +2589,7 @@ class AgentRouter:
             final_context_requirements,
             run_context,
             capability_requirements,
+            business_definition,
         )
         final_budget = self.context_builder.prepare_final_provider_messages(
             messages,
@@ -2608,6 +2681,7 @@ class AgentRouter:
         memory_injection_report_out: list | None = None,
         approval_controller: ToolApprovalController | None = None,
         final_output_sink=None,
+        business_definition=None,
     ) -> str:
         """执行一次非流式智能体调用。"""
         if run_context is not None:
@@ -2635,6 +2709,7 @@ class AgentRouter:
             memory_injection_report_out=memory_injection_report_out,
             approval_controller=approval_controller,
             final_output_sink=final_output_sink,
+            business_definition=business_definition,
         )
         if run_context is not None:
             run_context.raise_if_inactive()
@@ -2664,6 +2739,7 @@ class AgentRouter:
         memory_injection_report_out: list | None = None,
         approval_controller: ToolApprovalController | None = None,
         final_output_sink=None,
+        business_definition=None,
     ) -> str:
         """供 RunCoordinator Driver 使用的真实单 Agent 非流式业务入口。
 
@@ -2690,6 +2766,7 @@ class AgentRouter:
             memory_injection_report_out=memory_injection_report_out,
             approval_controller=approval_controller,
             final_output_sink=final_output_sink,
+            business_definition=business_definition,
         )
 
     def complete_context_items(
@@ -2749,6 +2826,9 @@ class AgentRouter:
         self,
         user_request: str,
         *,
+        planner_agent_id: str = "core_router",
+        planner_definition=None,
+        allowed_agent_catalog=(),
         run_context: RunContext,
         event_emitter: RunEventEmitter | StepEventEmitter | None = None,
         fault_controller: FaultInjectionController | None = None,
@@ -2762,6 +2842,23 @@ class AgentRouter:
         ``USER_CONTENT`` 数据 section 注入；不得在 Planner 内直接拼 Memory
         prompt。bundle 为空或未提供时保持原有最小消息结构。
         """
+        planner_registration = self.agent_registry.require_entry(planner_agent_id)
+        if planner_definition is None:
+            planner_definition = planner_registration.definition
+        if not allowed_agent_catalog:
+            allowed_agent_catalog = tuple(
+                self.agent_registry.resolve(agent_id)
+                for agent_id in self.agent_registry.delegated_specialist_ids()
+            )
+        catalog_json = json.dumps([
+            {
+                "agent_id": item.agent_id,
+                "display_name": item.display_name,
+                "capabilities": sorted(item.capabilities),
+                "accepted_input_types": sorted(item.accepted_input_types),
+            }
+            for item in allowed_agent_catalog
+        ], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         system_prompt = (
             "你是 LocalAgent Planner。只输出一个 JSON 对象，不得输出 Markdown。"
             "schema_version 必须为 1。decision 只能为 DIRECT_ANSWER 或 DELEGATE。"
@@ -2770,17 +2867,15 @@ class AgentRouter:
             "synthesis_required；task 只允许 task_id,agent_id,instruction,input_type,"
             "capabilities。不得声明 output_policy、execution_kind、depends_on、"
             "optional dependency、driver、callable、provider、runtime status 或 result type。"
-            "DIRECT_ANSWER 的 agent_id 只能是 core_router。"
-            "DELEGATE task 的 agent_id 只能是 knowledge_expert、code_expert 或 data_analyst。"
-            "文档检索与知识库问题交给 knowledge_expert，代码问题交给 code_expert，"
-            "数据分析问题交给 data_analyst。task.capabilities 只能为空数组，或与 "
-            "agent 对应：knowledge_expert→rag，code_expert→code_reasoning，"
-            "data_analyst→data_analysis；不确定时不要声明 capabilities。"
+            f"DIRECT_ANSWER 的 agent_id 必须是当前 planner entry {planner_agent_id}。"
+            f"DELEGATE 只能选择以下 compiled catalog 中的 Agent：{catalog_json}。"
+            "task.capabilities 必须是所选 Agent catalog capabilities 的子集。"
             "task.input_type 可省略；如填写只能是 text。它表示 specialist 接收"
             "instruction 的固定文本合同，用户请求中包含 JSON 时也绝不填写 json、object 或其他值。"
-            "只有单个 knowledge_expert task 可以设置 "
-            "synthesis_required=false；其他专业任务必须设置 synthesis_required=true。"
+            "委派任务必须设置 synthesis_required=true；不要生成不支持的 passthrough shape。"
         )
+        if planner_definition is not None and planner_definition.instructions:
+            system_prompt += "\n业务 Planner 指令：\n" + planner_definition.instructions
         system_prompt = self._with_canonical_security(system_prompt)
         planner_identity = build_prompt_identity(
             PROMPT_ID_PLANNER, "1", system_prompt
@@ -2795,7 +2890,7 @@ class AgentRouter:
             now = datetime.now(timezone.utc)
             context_items = [
                 ContextItem(
-                    "core_router-planner-system-instruction",
+                    f"{planner_agent_id}-planner-system-instruction",
                     ContextSourceType.SYSTEM_INSTRUCTION,
                     ContextTrustLevel.TRUSTED_INSTRUCTION,
                     system_prompt,
@@ -2803,7 +2898,7 @@ class AgentRouter:
                     now,
                 ),
                 ContextItem(
-                    "core_router-planner-user-request",
+                    f"{planner_agent_id}-planner-user-request",
                     ContextSourceType.CURRENT_USER_REQUEST,
                     ContextTrustLevel.USER_CONTENT,
                     user_request,
@@ -2817,7 +2912,7 @@ class AgentRouter:
             context_result = self.context_builder.build(
                 ContextBuildRequest(
                     run_id=run_context.run_id,
-                    agent_id="core_router",
+                    agent_id=planner_agent_id,
                     items=tuple(context_items),
                     max_input_tokens=self.model_context_window,
                     reserved_output_tokens=self.max_tokens,
@@ -2860,7 +2955,7 @@ class AgentRouter:
             estimated_steps=1,
         )
         result = self._invoke_model_contract(
-            agent_id="core_router",
+            agent_id=planner_agent_id,
             user_query=user_request,
             messages=messages,
             context_requirements=None,
@@ -2871,6 +2966,7 @@ class AgentRouter:
             generation_options={"enable_thinking": False, "temperature": 0.2},
             fault_controller=fault_controller,
             prompt_identity=planner_identity,
+            business_definition=planner_definition,
             context_selection_records=(
                 context_result.selection_records if context_result is not None else ()
             ),
@@ -2898,7 +2994,7 @@ class AgentRouter:
                 f"{system_prompt}\n{repair_instruction}",
             )
             repaired = self._invoke_model_contract(
-                agent_id="core_router",
+                agent_id=planner_agent_id,
                 user_query=user_request,
                 messages=repair_messages,
                 context_requirements=None,
@@ -2910,6 +3006,7 @@ class AgentRouter:
                 fault_controller=fault_controller,
                 prompt_identity=repair_identity,
                 structured_repair_count=1,
+                business_definition=planner_definition,
             )
             try:
                 StrictPlanningDecisionParser.parse(repaired.output)
@@ -3157,5 +3254,7 @@ class AgentRouter:
 
     def get_agent_meta(self, agent_id: str) -> tuple[str, str]:
         """返回智能体的显示名称与头像文件名。"""
-        config = self.agents_config.get(agent_id, self.agents_config["core_router"])
+        config = self.agents_config.get(agent_id)
+        if config is None:
+            raise ValueError("Agent 未注册")
         return str(config["name"]), str(config["avatar"])

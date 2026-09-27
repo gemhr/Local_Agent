@@ -249,9 +249,31 @@ class ParallelExecutor:
                         plan_step = candidate
                         break
             if plan_step is not None:
+                definition = None
+                registry = getattr(driver, "_registry", None)
+                if registry is not None:
+                    try:
+                        definition = registry.resolve(plan_step.preferred_agent).definition
+                    except Exception:
+                        definition = None
                 set_span_attributes(
                     step_span,
                     preferred_agent=plan_step.preferred_agent,
+                    agent_version=getattr(definition, "agent_version", None),
+                    workflow_id=(
+                        definition.execution_binding.reference
+                        if definition is not None and definition.execution_binding.kind == "workflow"
+                        else None
+                    ),
+                    workflow_version=(
+                        getattr(
+                            getattr(registry.resolve(plan_step.preferred_agent), "workflow", None),
+                            "workflow_version", None,
+                        )
+                        if registry is not None and definition is not None
+                        and definition.execution_binding.kind == "workflow"
+                        else None
+                    ),
                     execution_kind=plan_step.execution_kind.value,
                     output_policy=plan_step.output_policy.value,
                     dependency_count=len(plan_step.depends_on),

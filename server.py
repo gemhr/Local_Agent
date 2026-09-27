@@ -4,6 +4,7 @@
 
 from contextlib import asynccontextmanager
 import asyncio
+import dataclasses
 import inspect
 import json
 import logging
@@ -199,9 +200,17 @@ from core.runtime.tool_registry import ToolRegistry
 from core.runtime.tool_governance import (
     ToolGovernanceService,
     ToolPolicyCatalog,
+    builtin_tool_permission_seed,
     register_default_tool_policies,
 )
 from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
+from core.agent_platform.application import (
+    AgentApplicationError,
+    AgentApplicationService,
+    ExecutionRequest,
+)
+from core.agent_platform.registry import compile_agent_catalog
+from core.agent_platform.registrations import BUSINESS_REGISTRATION_BUNDLE
 from core.runtime.agent_evalops_trace_exporter import AgentEvalOpsTraceExporter
 from core.runtime.trace_export_dispatcher import TraceExportDispatcher
 from core.settings import (
@@ -443,6 +452,8 @@ def _populate_tool_registry(
     mcp_registrations: tuple = (),
     *,
     stage8_platform: DeterministicMockPlatform | None = None,
+    business_tool_definitions: tuple = (),
+    freeze: bool = True,
 ) -> ToolRegistry:
     """构造并冻结生产 ToolRegistry；非法/重复注册在此 fail closed。
 
@@ -452,14 +463,22 @@ def _populate_tool_registry(
     """
     registry = ToolRegistry()
     register_all_tools(registry, stage8_platform=stage8_platform)
+    from core.agent_platform.business_tool_adapter import compile_business_tool_registration
+    for definition in business_tool_definitions:
+        registry.register(compile_business_tool_registration(definition))
     for registration in mcp_registrations:
         registry.register(registration)
-    registry.freeze()
+    if freeze:
+        registry.freeze()
     return registry
 
 
 def _build_tool_governance(
     tool_registry: ToolRegistry,
+    agent_registry,
+    *,
+    tool_grants=None,
+    business_tool_definitions: tuple = (),
     mcp_policies: tuple = (),
 ) -> ToolGovernanceService:
     """构造/校验/冻结 ToolPolicyCatalog 并创建唯一 ToolGovernanceService。
@@ -471,13 +490,20 @@ def _build_tool_governance(
     """
     catalog = ToolPolicyCatalog(
         tool_registry=tool_registry,
-        agent_registry=DEFAULT_AGENT_REGISTRY,
+        agent_registry=agent_registry,
     )
-    register_default_tool_policies(catalog)
+    register_default_tool_policies(
+        catalog,
+        tool_grants=tool_grants,
+        business_tool_definitions=business_tool_definitions,
+    )
     for policy in mcp_policies:
-        catalog.register(policy)
+        catalog.register(dataclasses.replace(policy, allowed_agent_ids=frozenset(
+            agent_id for agent_id in agent_registry.agent_ids
+            if policy.tool_name in agent_registry.resolve(agent_id).actual_allowed_tools
+        )))
     catalog.freeze()
-    return ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
+    return ToolGovernanceService(catalog, agent_registry)
 
 
 def _build_resource_authorization(
@@ -1176,13 +1202,56 @@ async def lifespan(app: FastAPI):
         lambda: _populate_tool_registry(
             mcp_registrations,
             stage8_platform=stage8_platform,
+            business_tool_definitions=BUSINESS_REGISTRATION_BUNDLE.tools,
+            freeze=False,
         ),
         component="tool_registry",
     )
+    registered_agent_ids = frozenset(DEFAULT_AGENT_REGISTRY.agent_ids) | frozenset(
+        item.definition.agent_id for item in BUSINESS_REGISTRATION_BUNDLE.registrations
+    )
+    permission_seed = dict(builtin_tool_permission_seed(
+        tool_registry.registered_names, registered_agent_ids
+    ))
+    permission_limits = {
+        name: agents for name, agents in permission_seed.items() if name.startswith("stage8_")
+    }
+    for policy in mcp_policies:
+        permission_seed[policy.tool_name] = policy.allowed_agent_ids & registered_agent_ids
+        permission_limits[policy.tool_name] = permission_seed[policy.tool_name]
+    compiled_agent_catalog = await initialization_stack.run(
+        lambda: compile_agent_catalog(
+            BUSINESS_REGISTRATION_BUNDLE,
+            builtin_registrations=tuple(
+                DEFAULT_AGENT_REGISTRY.resolve(agent_id)
+                for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+            ),
+            actual_model_profile_ids=frozenset(
+                {"default", *(profile.profile_id.value for profile in profiles)}
+            ),
+            actual_tool_names=tool_registry.registered_names,
+            actual_tool_registrations={
+                item.descriptor.name: item for item in tool_registry.startup_registrations
+            },
+            platform_tool_permission_seed=permission_seed,
+            tool_permission_limits=permission_limits,
+        ),
+        component="agent_catalog",
+    )
+    agent_registry = compiled_agent_catalog.agent_registry
+    tool_registry.freeze()
+    app.state.agent_catalog = compiled_agent_catalog
+    app.state.agent_registry = agent_registry
     # WP2-B Tool Governance：Registry freeze 后构造/校验/冻结 ToolPolicyCatalog
     # 并创建唯一 Service；任一 policy 校验失败 -> startup fail（never READY）。
     tool_governance_service = await initialization_stack.run(
-        lambda: _build_tool_governance(tool_registry, mcp_policies),
+        lambda: _build_tool_governance(
+            tool_registry,
+            agent_registry,
+            tool_grants=compiled_agent_catalog.tool_grants,
+            business_tool_definitions=BUSINESS_REGISTRATION_BUNDLE.tools,
+            mcp_policies=mcp_policies,
+        ),
         component="tool_governance",
     )
     resource_authorization_service = await initialization_stack.run(
@@ -1225,6 +1294,7 @@ async def lifespan(app: FastAPI):
                 if settings.evaluation_mode
                 else None
             ),
+            agent_registry=agent_registry,
         ),
     )
     router.tool_execution_service.attach_durable_invocation_service(
@@ -1382,6 +1452,7 @@ async def lifespan(app: FastAPI):
         lambda: CoordinatedRuntimeFactory(
             router,
             runtime_services,
+            agent_registry=agent_registry,
             event_channel_capacity=settings.event_channel_capacity,
             planning_timeout_seconds=settings.planning_timeout_seconds,
             step_result_per_result_chars=settings.step_result_per_result_chars,
@@ -1481,11 +1552,16 @@ async def lifespan(app: FastAPI):
         ),
     )
     app.state.chat_service = chat_service
+    agent_application_service = AgentApplicationService(
+        chat_service,
+        agent_registry,
+    )
+    app.state.agent_application_service = agent_application_service
     app.state.runtime_services = runtime_services
     app.state.coordinated_runtime_factory = coordinated_runtime_factory
     app.state.recovery_coordinator = recovery_coordinator
     app.state.stage8_specialist_service = SpecialistAgentApplicationService(
-        coordinated_runtime_factory,
+        agent_application_service,
         mission_service=app.state.stage8_mission_service,
         review_service=app.state.stage8_review_service,
         test_plan_repository=TestPlanRepository(persistence_database),
@@ -1567,6 +1643,9 @@ async def lifespan(app: FastAPI):
                 },
             )
         app.state.chat_service = None
+        app.state.agent_application_service = None
+        app.state.agent_registry = None
+        app.state.agent_catalog = None
         app.state.stage8_mission_service = None
         app.state.stage8_review_service = None
         app.state.stage8_specialist_service = None
@@ -2204,6 +2283,9 @@ class RuntimeExecuteResponse(BaseModel):
     stop_reason: StrictStr
     error_code: StrictStr | None
     safe_message: StrictStr | None
+    business_output_valid: bool | None = None
+    business_error_code: StrictStr | None = None
+    output_disposition: StrictStr
 
 
 class EvaluationJobSubmitRequest(BaseModel):
@@ -2580,6 +2662,13 @@ def require_service() -> ChatService:
     return service
 
 
+def require_agent_application_service() -> AgentApplicationService:
+    service = getattr(app.state, "agent_application_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    return service
+
+
 def _authorization_service(request: Request) -> AuthorizationService:
     service = getattr(request.app.state, "authorization_service", None)
     if not isinstance(service, AuthorizationService):
@@ -2790,9 +2879,10 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     Returns:
         StreamingResponse: 纯文本增量响应流。
     """
-    service = require_service()
-    run_registry = _run_registry_for(service)
-    admission_gate = getattr(service, "admission_gate", None)
+    service = require_agent_application_service()
+    runtime_service = require_service()
+    run_registry = _run_registry_for(runtime_service)
+    admission_gate = getattr(runtime_service, "admission_gate", None)
     if (
         admission_gate is not None
         and not admission_gate.accepts_new_runs
@@ -2815,10 +2905,12 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
         coordinated_query += (
             f"\n\nPlease analyze this file path: '{payload.file_path}'"
         )
-    stream = service.stream_coordinated_agent_text(
-        agent_id=payload.agent_id,
-        query=coordinated_query,
-        run_id=run_id,
+    stream = service.stream(
+        ExecutionRequest(
+            agent_id=payload.agent_id,
+            input=coordinated_query,
+            run_id=run_id,
+        ),
         retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
     )
 
@@ -2836,10 +2928,17 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
             )
         )
         try:
-            async for chunk in stream:
+            async for event in stream:
                 if disconnected.is_set():
                     return
-                yield chunk
+                if event.kind == "output_delta" and event.output_delta:
+                    yield event.output_delta
+                elif event.kind == "control_delta" and event.control_delta:
+                    yield event.control_delta
+                elif event.kind == "terminal" and event.business_output_valid is False:
+                    yield "[business-error] BUSINESS_OUTPUT_INVALID\n"
+                elif event.kind == "terminal" and event.status is not RunStatus.SUCCEEDED:
+                    yield f"[runtime-error] {event.error_code or 'RUNTIME_EXECUTION_FAILED'}\n"
         except asyncio.CancelledError:
             run_registry.cancel(
                 run_id, CancellationReason.CLIENT_DISCONNECTED
@@ -2866,7 +2965,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
 @v1_router.post("/chat")
 async def v1_chat_endpoint(payload: V1ChatRequest, request: Request):
     """启动 Run；订阅生命周期由独立 SSE endpoint 管理。"""
-    service = require_service()
+    service = require_agent_application_service()
     run_id = payload.run_id or uuid.uuid4().hex
     try:
         uuid.UUID(run_id)
@@ -2887,8 +2986,12 @@ async def v1_chat_endpoint(payload: V1ChatRequest, request: Request):
         query = payload.query
         if payload.file_path:
             query += f"\n\nPlease analyze this file path: '{payload.file_path}'"
-        stream = service.stream_coordinated_agent_events(
-            payload.agent_id, query, run_id=run_id,
+        stream = service.stream(
+            ExecutionRequest(
+                agent_id=payload.agent_id,
+                input=query,
+                run_id=run_id,
+            ),
             retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
         )
         supervisor.spawn(run_id, stream, reserved_slot=reserved_slot)
@@ -2962,8 +3065,9 @@ async def v1_run_events_endpoint(
 async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Request):
     """同步执行一条严格校验的 Coordinated Runtime 请求。"""
 
-    service = require_service()
-    admission_gate = getattr(service, "admission_gate", None)
+    service = require_agent_application_service()
+    runtime_service = require_service()
+    admission_gate = getattr(runtime_service, "admission_gate", None)
     if (
         admission_gate is not None
         and not admission_gate.accepts_new_runs
@@ -2981,15 +3085,20 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Requ
     )
 
     try:
-        _output, result = await service.run_coordinated_agent(
-            agent_id=payload.agent_id,
-            query=payload.query,
-            run_id=payload.run_id,
-            timeout_seconds=payload.timeout_seconds,
+        result = await service.execute(
+            ExecutionRequest(
+                agent_id=payload.agent_id,
+                input=payload.query,
+                run_id=payload.run_id,
+                timeout_seconds=payload.timeout_seconds,
+            ),
             retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
         )
     except ChatRuntimeTransportError as exc:
         raise HTTPException(status_code=503, detail=exc.error_code) from None
+    except AgentApplicationError as exc:
+        status_code = 409 if exc.error_code.endswith("VERSION_MISMATCH") else 422
+        raise HTTPException(status_code=status_code, detail=exc.error_code) from None
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -3003,6 +3112,9 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Requ
         stop_reason=result.stop_reason.value,
         error_code=result.error_code,
         safe_message=result.safe_message,
+        business_output_valid=result.business_output_valid,
+        business_error_code=result.business_error_code,
+        output_disposition=result.output_disposition,
     )
     return JSONResponse(content=response.model_dump(mode="json"))
 
@@ -3038,8 +3150,9 @@ async def runtime_evaluation_execute_v2_endpoint(
     payload: RuntimeExecuteRequest, request: Request
 ):
     """返回 v2 RAG 与独立 delivered final answer evaluation evidence。"""
-    service = require_service()
-    admission_gate = getattr(service, "admission_gate", None)
+    service = require_agent_application_service()
+    runtime_service = require_service()
+    admission_gate = getattr(runtime_service, "admission_gate", None)
     if admission_gate is not None and not admission_gate.accepts_new_runs:
         raise HTTPException(status_code=503, detail="RUNTIME_SHUTTING_DOWN")
     try:
@@ -3054,14 +3167,20 @@ async def runtime_evaluation_execute_v2_endpoint(
     token = install_retrieval_evaluation_collector(collector)
     try:
         try:
-            output, result = await service.run_coordinated_agent(
-                agent_id=payload.agent_id,
-                query=payload.query,
-                run_id=payload.run_id,
-                timeout_seconds=payload.timeout_seconds,
+            result = await service.execute(
+                ExecutionRequest(
+                    agent_id=payload.agent_id,
+                    input=payload.query,
+                    run_id=payload.run_id,
+                    timeout_seconds=payload.timeout_seconds,
+                )
             )
+            output = result.output
         except ChatRuntimeTransportError as exc:
             raise HTTPException(status_code=503, detail=exc.error_code) from None
+        except AgentApplicationError as exc:
+            status_code = 409 if exc.error_code.endswith("VERSION_MISMATCH") else 422
+            raise HTTPException(status_code=status_code, detail=exc.error_code) from None
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -3220,6 +3339,7 @@ async def runtime_evaluation_execute_v4_endpoint(
     caller plan, or a model identity.  It is deliberately separate from v3.
     """
     service = require_service()
+    application_service = require_agent_application_service()
     try:
         uuid.UUID(payload.run_id)
         project, grants = payload.evaluation_control.project_access()
@@ -3322,14 +3442,26 @@ async def runtime_evaluation_execute_v4_endpoint(
             promotion = {"source_private_memory_ref": operation.source_memory_id, "source_owner_safe_identity": operation.target_owner_agent_id, "promoter_safe_identity": requester.agent_id, "target_project_safe_identity": project.project_id if project else None, "decision": "ALLOW" if result.authorization.allowed else "DENY", "outcome": result.outcome, "provenance_complete": bool(result.record and result.record.source_memory_id and result.record.source_owner_agent_id and result.record.promoted_by_agent_id), "resulting_project_memory_ref": result.record.memory_id if result.record else None}
 
     try:
-        _output, result = await service.run_coordinated_agent_evaluation(
-            agent_id=payload.agent_id, query=payload.query, run_id=payload.run_id,
-            timeout_seconds=payload.timeout_seconds, project_identity=project,
+        result = await application_service.execute_evaluation(
+            ExecutionRequest(
+                agent_id=payload.agent_id,
+                input=payload.query,
+                run_id=payload.run_id,
+                timeout_seconds=payload.timeout_seconds,
+            ),
+            project_identity=project,
             project_grants=grants,
-            evaluation_plan_resolver=(deterministic_episodic_success_resolver() if control.deterministic_multi_agent else None),
+            evaluation_plan_resolver=(
+                deterministic_episodic_success_resolver(app.state.agent_registry)
+                if control.deterministic_multi_agent
+                else None
+            ),
         )
     except ChatRuntimeTransportError as exc:
         raise HTTPException(status_code=503, detail=exc.error_code) from None
+    except AgentApplicationError as exc:
+        status_code = 409 if exc.error_code.endswith("VERSION_MISMATCH") else 422
+        raise HTTPException(status_code=status_code, detail=exc.error_code) from None
     specialist_formation: list[dict[str, object]] = []
     invocation_visibility: list[dict[str, object]] = []
     if control.deterministic_multi_agent:
@@ -3369,6 +3501,7 @@ async def runtime_evaluation_execute_v3_endpoint(
     production API/event/ranking/context/persistence behavior is unchanged.
     """
     service = require_service()
+    application_service = require_agent_application_service()
     admission_gate = getattr(service, "admission_gate", None)
     if admission_gate is not None and not admission_gate.accepts_new_runs:
         raise HTTPException(status_code=503, detail="RUNTIME_SHUTTING_DOWN")
@@ -3444,15 +3577,17 @@ async def runtime_evaluation_execute_v3_endpoint(
     )
     try:
         try:
-            _output, result = await service.run_coordinated_agent_evaluation(
-                agent_id=payload.agent_id,
-                query=payload.query,
-                run_id=run_id,
-                timeout_seconds=payload.timeout_seconds,
+            result = await application_service.execute_evaluation(
+                ExecutionRequest(
+                    agent_id=payload.agent_id,
+                    input=payload.query,
+                    run_id=run_id,
+                    timeout_seconds=payload.timeout_seconds,
+                ),
                 fault_controller=fault_controller,
                 episodic_evaluation_observer=retainer,
                 evaluation_plan_resolver=(
-                    deterministic_episodic_success_resolver()
+                    deterministic_episodic_success_resolver(app.state.agent_registry)
                     if has_deterministic_success else None
                 ),
             )

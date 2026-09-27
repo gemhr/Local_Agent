@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 import server
+from tests.test_runtime_execute_endpoint import _install_chat_service
 from core.advanced_memory import AdvancedMemoryStore
 from core.chat_service import ChatService
 from core.memory_manager import MemoryManager
@@ -24,7 +25,12 @@ def _service(tmp_path):
     memory = MemoryManager(db_path=str(db_path))
     services = make_services(snapshot_enabled=False)
     router = make_real_router(memory, model=EpisodicEvalFakeModel(direct_json()))
-    factory = CoordinatedRuntimeFactory(router, services, event_channel_capacity=32)
+    factory = CoordinatedRuntimeFactory(
+        router,
+        services,
+        agent_registry=router.agent_registry,
+        event_channel_capacity=32,
+    )
     return ChatService(router, coordinated_runtime_factory=factory, run_registry=services.run_registry), AdvancedMemoryStore(str(db_path))
 
 
@@ -50,7 +56,7 @@ def test_v4_schema_rejects_untyped_project_inputs() -> None:
 @pytest.mark.asyncio
 async def test_v4_foreign_private_read_is_denied_and_safe(tmp_path, monkeypatch) -> None:
     service, _ = _service(tmp_path)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     monkeypatch.setattr(server, "_bind_new_run_and_conversation", _skip_bind)
     secret = "api_key=do-not-return"
     response = await server.runtime_evaluation_execute_v4_endpoint(_payload(uuid.uuid4().hex, {
@@ -69,7 +75,7 @@ async def test_v4_foreign_private_read_is_denied_and_safe(tmp_path, monkeypatch)
 @pytest.mark.asyncio
 async def test_v4_project_grant_and_promotion_return_safe_facts(tmp_path, monkeypatch) -> None:
     service, store = _service(tmp_path)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     monkeypatch.setattr(server, "_bind_new_run_and_conversation", _skip_bind)
     run_id = uuid.uuid4().hex
     promoted = await server.runtime_evaluation_execute_v4_endpoint(_payload(run_id, {
@@ -98,7 +104,7 @@ async def test_v4_project_grant_and_promotion_return_safe_facts(tmp_path, monkey
 @pytest.mark.asyncio
 async def test_v4_deterministic_multi_agent_reports_step_owner_and_visibility(tmp_path, monkeypatch) -> None:
     service, _ = _service(tmp_path)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     monkeypatch.setattr(server, "_bind_new_run_and_conversation", _skip_bind)
     response = await server.runtime_evaluation_execute_v4_endpoint(_payload(uuid.uuid4().hex, {
         "requester_agent_id": "core_router", "deterministic_multi_agent": True,

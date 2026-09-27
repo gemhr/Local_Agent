@@ -49,6 +49,88 @@ from tools.complex_workflow_simulator import InMemoryWorkflowStateStore
 from tools.registry import register_all_tools
 
 
+def test_business_tool_runs_through_tool_execution_service_with_narrow_context():
+    from core.agent_platform.business_tool_adapter import compile_business_tool_registration
+    from core.agent_platform.contracts import AgentDefinition, AgentRegistration, BusinessToolDefinition
+    from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
+    from core.runtime.tool_discovery import ToolCatalog, ToolDiscovery
+    from core.runtime.tool_governance import ToolGovernanceService
+
+    observed = {}
+
+    def handler(arguments, context):
+        observed.update({
+            "operation_id": context.operation_id,
+            "remaining_seconds": context.remaining_seconds,
+            "has_lease": hasattr(context, "lease"),
+            "has_approval": hasattr(context, "approval_state"),
+            "has_worker_tracker": hasattr(context, "worker_tracker"),
+        })
+        context.raise_if_cancelled()
+        return {"answer": arguments["query"]}
+
+    definition = BusinessToolDefinition(
+        name="business_lookup", description="Look up business data.",
+        input_schema={"type": "object", "properties": {"query": {"type": "string"}},
+                      "required": ["query"], "additionalProperties": False},
+        handler=handler, handler_binding_id="tests.business_lookup.v1",
+        granted_agent_ids=frozenset({"custom_agent"}),
+        side_effect_kind="READ_ONLY", idempotency="IDEMPOTENT",
+    )
+    agent = AgentDefinition(
+        agent_id="custom_agent", agent_version="1", display_name="Custom",
+        role="custom", instructions="Use the business lookup.",
+        allowed_tools=frozenset({"business_lookup"}),
+    )
+    registration = compile_business_tool_registration(definition)
+    compiled = compile_agent_catalog(AgentRegistrationBundle(
+        registrations=(AgentRegistration(agent),), tools=(definition,),
+        tool_grants={"business_lookup": frozenset({"custom_agent"})},
+    ), actual_tool_names=frozenset({"business_lookup"}),
+       actual_tool_registrations={"business_lookup": registration})
+    runtime_registry = ToolRegistry()
+    runtime_registry.register(registration)
+    runtime_registry.freeze()
+    policy_catalog = ToolPolicyCatalog(
+        tool_registry=runtime_registry, agent_registry=compiled.agent_registry
+    )
+    policy_catalog.register(ToolPolicy(
+        tool_name="business_lookup",
+        allowed_agent_ids=compiled.agent_registry.resolve("custom_agent").actual_allowed_tools and frozenset({"custom_agent"}),
+    ))
+    policy_catalog.freeze()
+    governance = ToolGovernanceService(policy_catalog, compiled.agent_registry)
+    exposed = ToolDiscovery(ToolCatalog(runtime_registry), governance=governance).discover_tools(
+        "business lookup", "custom_agent"
+    )
+    assert {item.descriptor.name for item in exposed} == {"business_lookup"}
+
+    result = __import__("asyncio").run(ToolExecutionService().execute(
+        invocation=registration.adapter.build_invocation('{"query":"invoice"}'),
+        adapter=registration.adapter, run_context=make_context(), step_id="step",
+    ))
+    assert result.status is ToolExecutionStatus.SUCCEEDED
+    assert json.loads(result.output.content) == {"answer": "invoice"}
+    assert observed["operation_id"]
+    assert observed["remaining_seconds"] > 0
+    assert observed["has_lease"] is False
+    assert observed["has_approval"] is False
+    assert observed["has_worker_tracker"] is False
+
+
+def test_business_tool_rejects_unsupported_side_effect_and_resource_binding():
+    from core.agent_platform.business_tool_adapter import compile_business_tool_registration
+    from core.agent_platform.contracts import BusinessToolDefinition
+
+    definition = BusinessToolDefinition(
+        name="business_mutation", description="Not supported.",
+        input_schema={"type": "object"}, handler=lambda args, context: None,
+        side_effect_kind="NON_IDEMPOTENT",
+    )
+    with pytest.raises(ValueError, match="仅支持 READ_ONLY"):
+        compile_business_tool_registration(definition)
+
+
 def make_context():
     context, _ = create_run_context(
         entry_agent_id="integration", timeout_seconds=2
@@ -287,7 +369,7 @@ async def test_read_only_legacy_adapter_validates_error_string_and_output_limit(
     assert result.safe_error_code == "LEGACY_TOOL_REPORTED_ERROR"
 
 
-def test_registry_registers_exactly_seven_production_tools_all_adapter_backed():
+def test_registry_registers_all_production_tools_adapter_backed():
     registry = ToolRegistry()
     register_all_tools(registry)
     registry.freeze()
@@ -302,8 +384,22 @@ def test_registry_registers_exactly_seven_production_tools_all_adapter_backed():
         "analyze_excel",
         "get_system_status",
         "complex_workflow_simulator",
+        "stage8_get_feature_document",
+        "stage8_get_code_diff",
+        "stage8_get_meeting_summary",
+        "stage8_get_case",
+        "stage8_get_environment",
+        "stage8_search_environments",
+        "stage8_get_executor",
+        "stage8_get_execution_status",
+        "stage8_get_execution_result",
+        "stage8_get_logs",
+        "stage8_search_tickets",
+        "stage8_start_execution",
+        "stage8_generate_case",
+        "stage8_create_ticket",
     )
-    # 全部七个 Tool 都是 adapter-backed，且 Descriptor/Adapter Tool identity 一致
+    # 全部 Tool 都是 adapter-backed，且 Descriptor/Adapter Tool identity 一致
     for registration in registrations:
         assert registration.adapter.spec.tool_name == registration.descriptor.name
 
@@ -351,9 +447,17 @@ def make_router_for_tool_path(
     registry.freeze()
     # WP2-B：测试桩注入确定性 governance（5 个 production Agent 对该测试 Tool
     # explicit ALLOW），使测试 Tool 走与生产一致的两级 Gate。
+    from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
+    agent_registry = compile_agent_catalog(
+        AgentRegistrationBundle(registrations=()),
+        builtin_registrations=tuple(DEFAULT_AGENT_REGISTRY.resolve(name) for name in DEFAULT_AGENT_REGISTRY.agent_ids),
+        actual_tool_names=registry.registered_names,
+        actual_tool_registrations={safe_name: registry.require(safe_name)},
+        platform_tool_permission_seed={safe_name: frozenset(PRODUCTION_AGENT_IDS)},
+    ).agent_registry
     catalog = ToolPolicyCatalog(
         tool_registry=registry,
-        agent_registry=DEFAULT_AGENT_REGISTRY,
+        agent_registry=agent_registry,
     )
     catalog.register(
         ToolPolicy(
@@ -363,16 +467,18 @@ def make_router_for_tool_path(
         )
     )
     catalog.freeze()
-    governance_service = ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
+    governance_service = ToolGovernanceService(catalog, agent_registry)
     router = AgentRouter.__new__(AgentRouter)
     router.tool_registry = registry
     router.tool_governance_service = governance_service
     router.tool_execution_service = service or ToolExecutionService()
-    router._build_messages = lambda **_: [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": "query"},
-    ]
-    router._plan_tool_call = lambda _messages, _agent_id: (safe_name, tool_args)
+    def build_messages(**kwargs):
+        active = kwargs.get("run_context")
+        if active is not None and active.tool_resolution_snapshot is None:
+            active.attach_tool_resolution_snapshot(create_tool_snapshot(active.run_id, registry.registrations()))
+        return [{"role": "system", "content": "system"}, {"role": "user", "content": "query"}]
+    router._build_messages = build_messages
+    router._plan_tool_call = lambda *_args: (safe_name, tool_args)
     return router
 
 
@@ -1064,6 +1170,13 @@ def test_bounded_validation_repair_revalidates_once():
         tool_args='{"resource_key":"demo-resource","execution_mode":"INVALID","items":[]}',
         messages=[{"role": "system", "content": "ignored"}, {"role": "user", "content": "预演增加 1"}],
         agent_id="core_router",
+        business_definition=SimpleNamespace(
+            agent_id="core_router",
+            display_name="Core Router",
+            role="处理通用问题",
+            instructions="遵循业务定义",
+            capabilities=frozenset(),
+        ),
     )
     assert invocation.resource_key == "demo-resource"
     assert invocation.arguments["execution_mode"] == "DRY_RUN"

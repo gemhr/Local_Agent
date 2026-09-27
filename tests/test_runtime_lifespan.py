@@ -8,6 +8,9 @@ import pytest
 
 import server
 from core.runtime import RunRegistry, RuntimeLifecycleState
+from core.runtime.events import OutputDeltaPayload
+from core.runtime.state import RunStatus, StopReason
+from tests.test_runtime_execute_endpoint import _install_chat_service, _result
 
 
 class ConnectedRequest:
@@ -25,9 +28,12 @@ class RoutingService:
         self.coordinated_calls = 0
         self.run_registry = RunRegistry()
 
-    async def stream_coordinated_agent_text(self, **kwargs):
+    async def stream_coordinated_agent_events(self, *args, _result_out=None, **kwargs):
         self.coordinated_calls += 1
-        yield "coordinated"
+        _result_out.append(
+            _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=kwargs["run_id"])
+        )
+        yield SimpleNamespace(payload=OutputDeltaPayload("coordinated"))
 
 
 @pytest.mark.asyncio
@@ -35,7 +41,7 @@ async def test_chat_endpoint_routes_only_through_coordinated_runtime(
     monkeypatch,
 ) -> None:
     service = RoutingService()
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
 
     async def bind_for_routing_test(_request, *, run_id: str, agent_id: str) -> None:
         return None

@@ -73,7 +73,7 @@ from core.runtime.project_memory import (
 from core.runtime.planning import ExecutionKind, OutputPolicy, Plan, PlanSource, PlanStep, PlanValidator, RiskLevel, TaskCapabilityRequirements, create_single_step_plan
 from core.runtime.plan_graph import PlanGraph, PlanGraphValidationError, PlanGraphValidator
 from core.runtime.agent_registry import (
-    AgentRegistration, AgentRegistry, AgentRegistryError, AgentRegistryErrorCode,
+    CompiledAgentRegistration, AgentRegistry, AgentRegistryError, AgentRegistryErrorCode,
     DEFAULT_AGENT_REGISTRY, ResultContentType,
 )
 from core.runtime.invocation_bindings import (
@@ -238,7 +238,7 @@ __all__ = [
     "ProjectSemanticMemoryService", "ProjectSemanticMemoryStore", "ProjectSemanticRecord",
     "ExecutionKind", "OutputPolicy", "Plan", "PlanSource", "PlanStep", "PlanValidator", "RiskLevel", "TaskCapabilityRequirements", "create_single_step_plan",
     "PlanGraph", "PlanGraphValidationError", "PlanGraphValidator",
-    "AgentRegistration", "AgentRegistry", "AgentRegistryError", "AgentRegistryErrorCode", "DEFAULT_AGENT_REGISTRY", "ResultContentType",
+    "CompiledAgentRegistration", "AgentRegistry", "AgentRegistryError", "AgentRegistryErrorCode", "DEFAULT_AGENT_REGISTRY", "ResultContentType",
     "AgentInvocationSpec", "InvocationBindingError", "InvocationBindingErrorCode", "StepInvocationBindings",
     "DelegatedPlanDecision", "DelegatedTaskDecision", "DirectAnswerDecision", "PLANNER_SCHEMA_VERSION", "PlanResolver", "PlanningDecision", "PlanningError", "PlanningErrorCode", "PlanningModel", "PlanningRequest", "PlanningSource", "ResolvedPlan", "StrictPlanningDecisionParser",
     "PlanCompileConfig", "PlanCompileError", "PlanCompileErrorCode", "PlanCompiler",

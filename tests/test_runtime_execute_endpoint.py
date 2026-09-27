@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from starlette.requests import Request
 
 import server
 from core.chat_service import ChatService
+from core.agent_platform.application import AgentApplicationService
+from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
 from core.request_payload import REQUEST_PAYLOAD_POLICY
 from core.runtime import (
     BudgetLedger,
@@ -20,7 +24,30 @@ from core.runtime import (
     StopReason,
 )
 from core.runtime.state import AgentState
+from core.runtime.events import (
+    OutputDeltaPayload, RuntimeEvent, RuntimeEventDraft, RuntimeEventType,
+    RunStartedPayload, ToolApprovalRequestedPayload, RunCompletedPayload,
+)
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from tests._runtime_assembly_fixtures import FakeRouter, make_services
+
+_TEST_AGENT_REGISTRY = compile_agent_catalog(
+    AgentRegistrationBundle(registrations=()),
+    builtin_registrations=tuple(
+        DEFAULT_AGENT_REGISTRY.resolve(agent_id)
+        for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+    ),
+).agent_registry
+
+
+def _install_chat_service(monkeypatch, service):
+    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    monkeypatch.setattr(
+        server.app.state,
+        "agent_application_service",
+        AgentApplicationService(service, _TEST_AGENT_REGISTRY),
+        raising=False,
+    )
 
 
 class _ConnectedRequest:
@@ -28,6 +55,10 @@ class _ConnectedRequest:
 
     async def is_disconnected(self) -> bool:
         return False
+
+    state = SimpleNamespace(
+        principal=SimpleNamespace(authz_domain_id="test-domain")
+    )
 
 
 class _EmptyChannel:
@@ -50,6 +81,9 @@ class _StubScope:
         self._result = result
         self.agent_state = AgentState.for_run_context(result.run_id)
         self._channel = _EmptyChannel()
+        self.run_context = SimpleNamespace(
+            attach_retrieval_cache_access=lambda _domain: None
+        )
 
     @property
     def run_id(self) -> str:
@@ -86,6 +120,7 @@ class _ScriptedFactory(CoordinatedRuntimeFactory):
     """记录调用并把 create_run_scope 替换为脚本化 stub scope 的 factory。"""
 
     def __init__(self, router, services, result, **kwargs) -> None:
+        kwargs.setdefault("agent_registry", _TEST_AGENT_REGISTRY)
         super().__init__(router, services, **kwargs)
         self._result = result
         self.create_count = 0
@@ -101,6 +136,7 @@ class _ExplodingFactory(CoordinatedRuntimeFactory):
     """任何 create_run_scope 调用都失败的 factory，用于证明未进入 Runtime。"""
 
     def __init__(self, router, services, **kwargs) -> None:
+        kwargs.setdefault("agent_registry", _TEST_AGENT_REGISTRY)
         super().__init__(router, services, **kwargs)
         self.create_count = 0
 
@@ -166,7 +202,26 @@ def _payload(
 
 
 async def _execute(request: server.RuntimeExecuteRequest):
-    return await server.runtime_execute_endpoint(request)
+    return await server.runtime_execute_endpoint(request, _test_request())
+
+
+def _test_request() -> Request:
+    request = Request({
+        "type": "http", "method": "POST", "path": "/api/runtime/execute",
+        "raw_path": b"/api/runtime/execute", "query_string": b"", "headers": [],
+        "scheme": "http", "server": ("test", 80), "client": ("test", 1),
+        "root_path": "",
+    })
+    request.state.principal = SimpleNamespace(authz_domain_id="test-domain")
+    return request
+
+
+@pytest.fixture(autouse=True)
+def _bypass_http_ownership_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _noop(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(server, "_bind_new_run_and_conversation", _noop)
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +271,7 @@ async def test_invalid_run_id_rejected_before_runtime(monkeypatch):
     service, factory, registry = _scripted_service(
         _result(RunStatus.SUCCEEDED, StopReason.COMPLETED)
     )
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     with pytest.raises(HTTPException) as exc_info:
         await _execute(
             server.RuntimeExecuteRequest(
@@ -298,7 +353,7 @@ async def test_coordinated_mode_routes_through_structured_helper(monkeypatch):
         safe_message="运行已成功完成",
     )
     service, factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
 
     response = await _execute(_payload(run_id=run_id))
 
@@ -316,7 +371,7 @@ async def test_closed_admission_rejects_without_creating_run(monkeypatch):
         _result(RunStatus.SUCCEEDED, StopReason.COMPLETED)
     )
     service.admission_gate.close_admission()
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
 
     with pytest.raises(HTTPException) as exc_info:
         await _execute(_payload())
@@ -341,7 +396,7 @@ async def test_succeeded_result_projected_verbatim(monkeypatch):
         safe_message="运行已成功完成",
     )
     service, _factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
 
     response = await _execute(_payload(run_id=run_id))
 
@@ -352,6 +407,9 @@ async def test_succeeded_result_projected_verbatim(monkeypatch):
         "stop_reason": "COMPLETED",
         "error_code": None,
         "safe_message": "运行已成功完成",
+        "business_output_valid": None,
+        "business_error_code": None,
+        "output_disposition": "NOT_REQUIRED",
     }
 
 
@@ -366,7 +424,7 @@ async def test_failed_result_is_http_200_projection(monkeypatch):
         safe_message="运行未能完成",
     )
     service, _factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
 
     response = await _execute(_payload(run_id=run_id))
 
@@ -378,6 +436,9 @@ async def test_failed_result_is_http_200_projection(monkeypatch):
         "stop_reason": "UNHANDLED_ERROR",
         "error_code": "RUNTIME_AGENT_FAILURE",
         "safe_message": "运行未能完成",
+        "business_output_valid": None,
+        "business_error_code": None,
+        "output_disposition": "NOT_EVALUATED",
     }
 
 
@@ -394,7 +455,7 @@ async def test_cancelled_result_projected_without_route_reinterpretation(
         safe_message="运行已由用户取消",
     )
     service, _factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
 
     response = await _execute(_payload(run_id=run_id))
 
@@ -405,6 +466,9 @@ async def test_cancelled_result_projected_without_route_reinterpretation(
         "stop_reason": "USER_CANCELLED",
         "error_code": "RUN_CANCELLED",
         "safe_message": "运行已由用户取消",
+        "business_output_valid": None,
+        "business_error_code": None,
+        "output_disposition": "NOT_EVALUATED",
     }
 
 
@@ -423,7 +487,7 @@ async def test_response_is_content_free_terminal_fact(monkeypatch):
         safe_message="运行已成功完成",
     )
     service, _factory, _registry = _scripted_service(result)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
 
     response = await _execute(_payload(run_id=run_id))
     body = json.loads(response.body)
@@ -434,6 +498,9 @@ async def test_response_is_content_free_terminal_fact(monkeypatch):
         "stop_reason",
         "error_code",
         "safe_message",
+        "business_output_valid",
+        "business_error_code",
+        "output_disposition",
     }
     for forbidden in (
         "final_answer",
@@ -456,12 +523,19 @@ async def test_response_is_content_free_terminal_fact(monkeypatch):
 @pytest.mark.asyncio
 async def test_api_chat_still_text_stream_with_run_id_header(monkeypatch):
     class _ChatServiceSpy:
-        async def stream_coordinated_agent_text(self, **kwargs):
-            yield "coordinated"
+        run_registry = RunRegistry()
 
-    monkeypatch.setattr(
-        server.app.state, "chat_service", _ChatServiceSpy(), raising=False
-    )
+        async def stream_coordinated_agent_events(self, *args, _result_out=None, **kwargs):
+            _result_out.append(
+                _result(
+                    RunStatus.SUCCEEDED,
+                    StopReason.COMPLETED,
+                    run_id=kwargs["run_id"],
+                )
+            )
+            yield type("Event", (), {"payload": OutputDeltaPayload("coordinated")})()
+
+    _install_chat_service(monkeypatch, _ChatServiceSpy())
     run_id = "49796282cdb643c7b8850942f7b66bd1"
     response = await server.chat_endpoint(
         server.ChatRequest(
@@ -475,3 +549,53 @@ async def test_api_chat_still_text_stream_with_run_id_header(monkeypatch):
     assert response.media_type == "text/plain"
     assert response.headers["X-Run-Id"] == run_id
     assert [chunk async for chunk in response.body_iterator] == ["coordinated"]
+
+
+@pytest.mark.asyncio
+async def test_api_chat_projects_real_approval_event_once_with_original_orch_wire(monkeypatch):
+    run_id = "49796282cdb643c7b8850942f7b66bd1"
+    trace_id = "trace-control"
+    digest = "a" * 64
+
+    def event(sequence, event_type, payload):
+        return RuntimeEvent.from_draft(RuntimeEventDraft(
+            run_id=run_id, trace_id=trace_id, event_type=event_type,
+            component="test", payload=payload,
+        ), sequence)
+
+    approval = event(2, RuntimeEventType.TOOL_APPROVAL_REQUESTED,
+        ToolApprovalRequestedPayload(
+            approval_id="approval-1", tool_name="read_file",
+            invocation_identity_digest=digest, arguments_digest=digest,
+            invocation_binding_digest=digest, risk_level="MEDIUM",
+        ))
+
+    class _RuntimeEventChat:
+        run_registry = RunRegistry()
+        calls = 0
+
+        async def stream_coordinated_agent_events(self, *args, _result_out=None, **kwargs):
+            self.calls += 1
+            _result_out.append(_result(
+                RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id,
+            ))
+            yield event(1, RuntimeEventType.RUN_STARTED, RunStartedPayload("RUNNING"))
+            yield approval
+            yield event(3, RuntimeEventType.RUN_COMPLETED,
+                RunCompletedPayload("SUCCEEDED", "COMPLETED"))
+
+    chat = _RuntimeEventChat()
+    _install_chat_service(monkeypatch, chat)
+    response = await server.chat_endpoint(
+        server.ChatRequest(agent_id="core_router", query="approve", run_id=run_id),
+        _ConnectedRequest(),
+    )
+    chunks = [chunk async for chunk in response.body_iterator]
+    approval_chunks = [chunk for chunk in chunks if '"event_type":"TOOL_APPROVAL_REQUESTED"' in chunk]
+
+    assert response.headers["X-Run-Id"] == run_id
+    assert chat.calls == 1
+    assert len(approval_chunks) == 1
+    assert approval_chunks[0].startswith("[[ORCH]]")
+    assert f'"run_id":"{run_id}"' in approval_chunks[0]
+    assert '"approval_id":"approval-1"' in approval_chunks[0]

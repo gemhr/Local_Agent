@@ -28,11 +28,11 @@ from core.runtime.event_channel import RuntimeEventChannel
 from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
 from core.runtime.fault_injection import FaultInjectionController
 from core.runtime.model_invocation import ModelInvocationResult
-from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from core.runtime.agent_adapter_factory import (
     AgentAdapterFactory,
     AgentRouterSingleAgentAdapter,
 )
+from core.runtime.agent_registry import AgentRegistry
 from core.runtime.multi_agent_planning import PlanResolver, PlanningRequest
 from core.runtime.multi_agent_driver import MultiAgentDriver
 from core.runtime.plan_compiler import PlanCompiler
@@ -602,6 +602,7 @@ class CoordinatedRuntimeFactory:
         "_step_result_run_total_chars",
         "_step_result_max_entries",
         "_execution_repository",
+        "_agent_registry",
     )
 
     def __init__(
@@ -609,6 +610,7 @@ class CoordinatedRuntimeFactory:
         router,
         services: ApplicationRuntimeServices,
         *,
+        agent_registry: AgentRegistry,
         event_channel_capacity: int = 32,
         planning_timeout_seconds: float = 15.0,
         max_concurrency: int = 2,
@@ -619,6 +621,8 @@ class CoordinatedRuntimeFactory:
     ) -> None:
         if not isinstance(services, ApplicationRuntimeServices):
             raise TypeError("services must be ApplicationRuntimeServices")
+        if not isinstance(agent_registry, AgentRegistry):
+            raise TypeError("agent_registry must be the compiled AgentRegistry")
         if (
             isinstance(event_channel_capacity, bool)
             or not isinstance(event_channel_capacity, int)
@@ -662,24 +666,11 @@ class CoordinatedRuntimeFactory:
         self._step_result_run_total_chars = step_result_run_total_chars
         self._step_result_max_entries = step_result_max_entries
         self._execution_repository = execution_repository
+        self._agent_registry = agent_registry
         self._adapter_factory = AgentAdapterFactory(
-            DEFAULT_AGENT_REGISTRY,
+            agent_registry,
             (
-                ("core_router_adapter", AgentRouterSingleAgentAdapter(router)),
-                ("data_analyst_adapter", AgentRouterSingleAgentAdapter(router)),
-                ("code_expert_adapter", AgentRouterSingleAgentAdapter(router)),
-                (
-                    "knowledge_expert_adapter",
-                    AgentRouterSingleAgentAdapter(router),
-                ),
-                (
-                    "feature_understanding_adapter",
-                    AgentRouterSingleAgentAdapter(router),
-                ),
-                ("risk_analysis_adapter", AgentRouterSingleAgentAdapter(router)),
-                ("test_planning_adapter", AgentRouterSingleAgentAdapter(router)),
-                ("failure_triage_adapter", AgentRouterSingleAgentAdapter(router)),
-                ("ci_guardian_adapter", AgentRouterSingleAgentAdapter(router)),
+                ("agent_router_adapter", AgentRouterSingleAgentAdapter(router)),
                 ("synthesis_agent_adapter", SynthesisAgentAdapter(router)),
             ),
         )
@@ -704,6 +695,9 @@ class CoordinatedRuntimeFactory:
         evaluation_plan_resolver=None,
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
     ) -> CoordinatedRunScope:
         """默认 Coordinated 入口：始终经过动态 PlanResolver。"""
         return await self._create_run_scope(
@@ -720,6 +714,9 @@ class CoordinatedRuntimeFactory:
             evaluation_plan_resolver=evaluation_plan_resolver,
             project_identity=project_identity,
             project_grants=project_grants,
+            agent_version=agent_version,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
             static_plan=None,
         )
 
@@ -805,6 +802,55 @@ class CoordinatedRuntimeFactory:
             resume_input.get("entry_agent_id")
             or (plan.steps[0].preferred_agent if plan.steps else "core_router")
         )
+        if resume_input.get("resolved_agent_id") != agent_id:
+            raise ValueError("Recovery resolved Agent identity mismatch")
+        registration = self._agent_registry.require_entry(agent_id)
+        definition = registration.definition
+        if definition is None or resume_input.get("agent_version") != definition.agent_version:
+            raise ValueError("Recovery Agent identity/version mismatch")
+        recorded_performers = resume_input.get("performer_versions")
+        if not isinstance(recorded_performers, Mapping):
+            raise ValueError("Recovery performer identity/version missing")
+        current_performers = {
+            step.preferred_agent for step in plan.steps
+        } | {agent_id}
+        if set(recorded_performers) != current_performers:
+            raise ValueError("Recovery performer identity set mismatch")
+        for performer_id, recorded_version in recorded_performers.items():
+            current = self._agent_registry.resolve(performer_id).definition
+            if current is None or recorded_version != current.agent_version:
+                raise ValueError("Recovery performer identity/version mismatch")
+        expected_workflow = registration.workflow
+        actual_workflow_id = (
+            expected_workflow.workflow_id if expected_workflow is not None else None
+        )
+        actual_workflow_version = (
+            expected_workflow.workflow_version if expected_workflow is not None else None
+        )
+        if (
+            resume_input.get("workflow_id") != actual_workflow_id
+            or resume_input.get("workflow_version") != actual_workflow_version
+        ):
+            raise ValueError("Recovery Workflow identity/version mismatch")
+        expected_provider_identity = {
+            "toolset_identity": registration.toolset_identity,
+            "resolved_model_profile_id": definition.model_profile_id,
+            "resolved_retrieval_profile_id": definition.retrieval_profile_id or "NONE",
+            "resolved_memory_profile_id": definition.memory_profile_id or "NONE",
+        }
+        for key, actual in expected_provider_identity.items():
+            if resume_input.get(key) != actual:
+                raise ValueError(f"Recovery {key} mismatch")
+        recorded_identities = resume_input.get("performer_identities")
+        if not isinstance(recorded_identities, Mapping) or set(recorded_identities) != current_performers:
+            raise ValueError("Recovery performer binding identity set mismatch")
+        for performer_id, identity in recorded_identities.items():
+            if identity != self._agent_registry.resolve(performer_id).binding_identity():
+                raise ValueError("Recovery performer binding identity mismatch")
+        client_event_feed = getattr(self._services, "client_event_feed", None)
+        register_delivery = getattr(client_event_feed, "register_structured_output", None)
+        if definition.output_schema is not None and callable(register_delivery):
+            register_delivery(run_id, definition.output_schema)
         session_id = str(resume_input.get("session_id") or DEFAULT_SESSION_ID)
         trace_id = str(resume_input.get("trace_id") or run_id)
         durable_query = query if query is not None else str(
@@ -819,6 +865,15 @@ class CoordinatedRuntimeFactory:
             run_id=run_id,
             created_at=created_at,
             absolute_deadline=absolute_deadline,
+            agent_version=resume_input.get("agent_version"),
+            workflow_id=resume_input.get("workflow_id"),
+            workflow_version=resume_input.get("workflow_version"),
+            toolset_identity=resume_input.get("toolset_identity"),
+            resolved_model_profile_id=resume_input.get("resolved_model_profile_id"),
+            resolved_retrieval_profile_id=resume_input.get("resolved_retrieval_profile_id"),
+            resolved_memory_profile_id=resume_input.get("resolved_memory_profile_id"),
+            performer_binding_versions=recorded_performers,
+            performer_binding_identities=recorded_identities,
         )
         # Preserve the durable Tool identity for approval/replay.  Recovery
         # intentionally leaves approval-bound Steps replayable as PENDING;
@@ -904,6 +959,9 @@ class CoordinatedRuntimeFactory:
         evaluation_plan_resolver=None,
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
         existing_lease=None,
         existing_context=None,
         rehydrated_steps=(),
@@ -938,13 +996,39 @@ class CoordinatedRuntimeFactory:
             if existing_context is not None:
                 run_context, cancellation_source = existing_context
             else:
+                registration = self._agent_registry.resolve(agent_id)
+                definition = registration.definition
+                if definition is None:
+                    raise ValueError("resolved Agent definition is required for Run identity")
+                if agent_version is not None and agent_version != definition.agent_version:
+                    raise ValueError("resolved Agent version mismatch")
+                registered_workflow = registration.workflow
+                resolved_workflow_id = (
+                    registered_workflow.workflow_id if registered_workflow is not None else None
+                )
+                resolved_workflow_version = (
+                    registered_workflow.workflow_version if registered_workflow is not None else None
+                )
+                if workflow_id not in {None, resolved_workflow_id} or workflow_version not in {None, resolved_workflow_version}:
+                    raise ValueError("resolved Workflow identity mismatch")
                 run_context, cancellation_source = create_run_context(
                     entry_agent_id=agent_id,
                     session_id=session_id,
                     trace_id=trace_id,
                     run_id=run_id,
                     timeout_seconds=timeout_seconds,
+                    agent_version=definition.agent_version,
+                    workflow_id=resolved_workflow_id,
+                    workflow_version=resolved_workflow_version,
+                    toolset_identity=registration.toolset_identity,
+                    resolved_model_profile_id=definition.model_profile_id,
+                    resolved_retrieval_profile_id=definition.retrieval_profile_id or "NONE",
+                    resolved_memory_profile_id=definition.memory_profile_id or "NONE",
                 )
+                client_event_feed = getattr(self._services, "client_event_feed", None)
+                register_delivery = getattr(client_event_feed, "register_structured_output", None)
+                if definition.output_schema is not None and callable(register_delivery):
+                    register_delivery(run_context.run_id, definition.output_schema)
             durable_control = self._services.durable_run_control
             durable_lease = existing_lease or await durable_control.claim(
                 run_context.run_id,
@@ -1104,6 +1188,13 @@ class CoordinatedRuntimeFactory:
                     durable_journal=self._services.event_journal,
                     durable_initialized=rehydrated_root is not None,
                 )
+                if rehydrated_root is None:
+                    performer_ids = {agent_id, *(step.preferred_agent for step in static_plan.steps)}
+                    performer_identities = {
+                        performer_id: self._agent_registry.resolve(performer_id).binding_identity()
+                        for performer_id in performer_ids
+                    }
+                    run_context.bind_performer_identities(performer_identities)
                 rehydrated_store = None
                 rehydrated_gate = None
                 rehydrated_driver = None
@@ -1145,7 +1236,7 @@ class CoordinatedRuntimeFactory:
                         router=self._router,
                         coordinator=coordinator,
                         adapter_factory=self._adapter_factory,
-                        registry=DEFAULT_AGENT_REGISTRY,
+                        registry=self._agent_registry,
                         fault_controller=fault_controller,
                     )
                     coordinator.attach_rehydrated_typed_runtime(
@@ -1175,8 +1266,8 @@ class CoordinatedRuntimeFactory:
                     fault_controller=fault_controller,
                 )
                 resolver = evaluation_plan_resolver or PlanResolver(
-                    DEFAULT_AGENT_REGISTRY,
-                    PlanCompiler(DEFAULT_AGENT_REGISTRY),
+                    self._agent_registry,
+                    PlanCompiler(self._agent_registry),
                     planning_model,
                 )
                 coordinator = RunCoordinator.for_dynamic_resolver(
@@ -1211,7 +1302,7 @@ class CoordinatedRuntimeFactory:
                     router=self._router,
                     coordinator=coordinator,
                     adapter_factory=self._adapter_factory,
-                    registry=DEFAULT_AGENT_REGISTRY,
+                    registry=self._agent_registry,
                     fault_controller=fault_controller,
                 )
                 coordinator.attach_multi_agent_runtime(multi_agent_driver)

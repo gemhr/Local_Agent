@@ -223,6 +223,12 @@ class RunCoordinatorResult:
     cleanup_error_codes: tuple[str, ...]
     error_code: str | None = None
     safe_message: str = ""
+    trace_id: str | None = None
+    session_id: str | None = None
+    agent_id: str | None = None
+    agent_version: str | None = None
+    workflow_id: str | None = None
+    workflow_version: str | None = None
 
 
 CleanupCallback = Callable[[], Any]
@@ -820,6 +826,11 @@ class RunCoordinator:
         self._invocation_bindings = resolved.invocation_bindings
         self.scheduler = scheduler
         self.executor = executor
+        self.run_context.bind_performer_identities(
+            self._plan_resolver.performer_identities(
+                resolved.plan, entry_agent_id=self._planning_request.selected_agent_id
+            )
+        )
         self._register_plan_steps_and_checkpoint()
         self._initialize_typed_runtime()
         self._dynamic_plan_state = DynamicPlanState.FROZEN
@@ -1253,11 +1264,36 @@ class RunCoordinator:
             for name in budget_fields
             if getattr(self.budget_ledger.budget, name) is not None
         }
+        performer_versions = dict(self.run_context.data.performer_binding_versions)
+        if not performer_versions:
+            if self._plan_resolver is None:
+                raise RunCoordinatorError(
+                    "PERFORMER_IDENTITY_MISSING", "Plan performer identity is unavailable"
+                )
+            performer_identities = self._plan_resolver.performer_identities(
+                self.plan,
+                entry_agent_id=getattr(self._planning_request, "selected_agent_id", self.run_context.data.entry_agent_id),
+            )
+            self.run_context.bind_performer_identities(performer_identities)
+            performer_versions = dict(self.run_context.data.performer_binding_versions)
+        performer_versions = dict(sorted(performer_versions.items()))
         resume_input = {
             "entry_agent_id": getattr(self._planning_request, "selected_agent_id", self.run_context.data.entry_agent_id),
+            "resolved_agent_id": self.run_context.data.resolved_agent_id,
+            "agent_version": self.run_context.data.agent_version,
+            "workflow_id": self.run_context.data.workflow_id,
+            "workflow_version": self.run_context.data.workflow_version,
+            "toolset_identity": self.run_context.data.toolset_identity,
+            "resolved_model_profile_id": self.run_context.data.resolved_model_profile_id,
+            "resolved_retrieval_profile_id": self.run_context.data.resolved_retrieval_profile_id,
+            "resolved_memory_profile_id": self.run_context.data.resolved_memory_profile_id,
             "session_id": self.run_context.session_id,
             "trace_id": self.run_context.trace_id,
             "user_query": getattr(self._planning_request, "user_request", ""),
+            "performer_versions": performer_versions,
+            "performer_identities": {
+                key: dict(value) for key, value in self.run_context.data.performer_binding_identities.items()
+            },
         }
         root = ExecutionRootInput(
             run_id=self.run_context.run_id,
@@ -1718,13 +1754,21 @@ class RunCoordinator:
             ),
             step_count=len(plan.steps) if plan is not None else None,
             selected_entry_agent_id=selected_agent_id,
+            resolved_agent_id=self.run_context.data.resolved_agent_id,
+            agent_version=self.run_context.data.agent_version,
+            workflow_id=self.run_context.data.workflow_id,
+            workflow_version=self.run_context.data.workflow_version,
+            toolset_identity=self.run_context.data.toolset_identity,
+            resolved_model_profile_id=self.run_context.data.resolved_model_profile_id,
+            resolved_retrieval_profile_id=self.run_context.data.resolved_retrieval_profile_id,
+            resolved_memory_profile_id=self.run_context.data.resolved_memory_profile_id,
             runtime_mode=runtime_mode,
             runtime_version="not_configured",
             # Run root 是聚合 span；真实 prompt identity 由每次 Model Invocation
             # evidence 记录（prompt_id/version/digest），不在 root 上虚构单一版本。
             prompt_version=None,
             model_config_hash="not_configured",
-            toolset_hash="not_configured",
+            toolset_hash=self.run_context.data.toolset_identity,
             kb_version="not_configured",
             final_status=result.status.value,
             stop_reason=result.stop_reason.value,
@@ -2441,6 +2485,12 @@ class RunCoordinator:
             cleanup_error_codes=tuple(cleanup_error_codes),
             error_code=self.agent_state.error_code,
             safe_message=decision.safe_message,
+            trace_id=self.run_context.trace_id,
+            session_id=self.run_context.session_id,
+            agent_id=self.run_context.data.entry_agent_id,
+            agent_version=self.run_context.data.agent_version,
+            workflow_id=self.run_context.data.workflow_id,
+            workflow_version=self.run_context.data.workflow_version,
         )
 
     def _event_time(self) -> datetime:

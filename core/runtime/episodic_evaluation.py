@@ -73,7 +73,7 @@ from core.runtime.fault_injection_contract import (
     InjectedFaultCode,
 )
 from core.runtime.memory_retrieval import MemoryContextBundle
-from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
+from core.runtime.agent_registry import AgentRegistry
 from core.runtime.multi_agent_planning import (
     DelegatedPlanDecision,
     DelegatedTaskDecision,
@@ -386,8 +386,10 @@ _E08_PLAN_GOAL = "整理项目生产环境的发布清单并记录部署方式�
 class DeterministicEpisodicSuccessResolver(PlanResolver):
     """Target-owned E08 plan profile; it accepts no caller plan or prompt."""
 
-    def __init__(self) -> None:
-        super().__init__(DEFAULT_AGENT_REGISTRY, PlanCompiler(DEFAULT_AGENT_REGISTRY))
+    def __init__(self, agent_registry: AgentRegistry) -> None:
+        if not isinstance(agent_registry, AgentRegistry):
+            raise TypeError("agent_registry must be the compiled AgentRegistry")
+        super().__init__(agent_registry, PlanCompiler(agent_registry))
 
     async def resolve(self, request: PlanningRequest, run_context, **_kwargs):
         if request.selected_agent_id != "core_router":
@@ -407,8 +409,8 @@ class DeterministicEpisodicSuccessResolver(PlanResolver):
         return ResolvedPlan(plan, resolved.invocation_bindings, resolved.planning_source)
 
 
-def deterministic_episodic_success_resolver() -> DeterministicEpisodicSuccessResolver:
-    return DeterministicEpisodicSuccessResolver()
+def deterministic_episodic_success_resolver(agent_registry: AgentRegistry) -> DeterministicEpisodicSuccessResolver:
+    return DeterministicEpisodicSuccessResolver(agent_registry)
 
 
 # ---------------------------------------------------------------------------

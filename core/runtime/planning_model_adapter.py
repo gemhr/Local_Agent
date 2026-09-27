@@ -33,6 +33,9 @@ class UnifiedPlanningModelAdapter:
         *,
         memory_context_bundle=None,
         memory_injection_report_out=None,
+        planner_agent_id="core_router",
+        planner_definition=None,
+        allowed_agent_catalog=(),
     ) -> str:
         run_context.raise_if_inactive()
 
@@ -53,6 +56,9 @@ class UnifiedPlanningModelAdapter:
                 fault_controller=self._fault_controller,
                 memory_context_bundle=memory_context_bundle,
                 memory_injection_report_out=memory_injection_report_out,
+                planner_agent_id=planner_agent_id,
+                planner_definition=planner_definition,
+                allowed_agent_catalog=allowed_agent_catalog,
             ),
             kind=BlockingTaskKind.PLANNING_MODEL,
             run_id=run_context.run_id,

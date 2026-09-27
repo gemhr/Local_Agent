@@ -36,10 +36,10 @@ class EvaluationExecutor(Protocol):
 
 
 class RuntimeEvaluationExecutor:
-    """Production adapter to the existing ChatService coordinated boundary."""
+    """Production adapter to the shared AgentApplicationService boundary."""
 
-    def __init__(self, chat_service: Any) -> None:
-        self._chat_service = chat_service
+    def __init__(self, application_service: Any) -> None:
+        self._application_service = application_service
         self._max_output_chars = 20_000
 
     async def execute(self, job: Any) -> dict[str, object]:
@@ -62,24 +62,35 @@ class RuntimeEvaluationExecutor:
             or not 0 < float(timeout_seconds) <= EVALUATION_JOB_TIMEOUT_MAX_SECONDS
         ):
             raise PermanentEvaluationError("invalid evaluation timeout")
-        output, result = await self._chat_service.run_coordinated_agent(
-            agent_id,
-            query,
-            # Each claim gets a fresh execution identity.  Reusing the job's
-            # submission run_id would collide with a terminal Journal after a
-            # lease reclaim.
-            run_id=str(uuid.uuid4()),
-            timeout_seconds=float(timeout_seconds),
-            persist=True,
+        from core.agent_platform.application import (
+            AgentApplicationError,
+            ExecutionRequest,
         )
+
+        try:
+            result = await self._application_service.execute(
+                ExecutionRequest(
+                    agent_id=agent_id,
+                    input=query,
+                    # Each claim gets a fresh execution identity. Reusing the
+                    # submission run_id collides with a terminal Journal after
+                    # a lease reclaim.
+                    run_id=str(uuid.uuid4()),
+                    timeout_seconds=float(timeout_seconds),
+                )
+            )
+        except AgentApplicationError as exc:
+            raise PermanentEvaluationError(exc.error_code) from None
         status = getattr(result.status, "value", str(result.status))
         if status != "SUCCEEDED":
             raise PermanentEvaluationError(f"evaluation runtime returned {status}")
+        if getattr(result, "business_output_valid", None) is False:
+            raise PermanentEvaluationError("evaluation business output validation failed")
         return {
             "schema_version": "evaluation-result.v1",
             "job_id": str(job.job_id),
             "status": status,
-            "output": (output or "")[: self._max_output_chars],
+            "output": (result.output or "")[: self._max_output_chars],
         }
 
 

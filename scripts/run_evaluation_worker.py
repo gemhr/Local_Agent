@@ -62,7 +62,7 @@ async def _run(args: argparse.Namespace) -> None:
         database = job_service.database
         worker = KafkaEvaluationWorker(
             database,
-            RuntimeEvaluationExecutor(server.app.state.chat_service),
+            RuntimeEvaluationExecutor(server.app.state.agent_application_service),
             KafkaWorkerConfig(
                 bootstrap_servers=settings.kafka_bootstrap_servers,
                 client_id=settings.kafka_client_id,

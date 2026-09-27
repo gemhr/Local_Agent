@@ -40,7 +40,7 @@ class AgentRegistryError(LookupError):
 
 
 @dataclass(frozen=True, slots=True)
-class AgentRegistration:
+class CompiledAgentRegistration:
     agent_id: str
     execution_adapter_id: str
     display_name: str
@@ -59,6 +59,10 @@ class AgentRegistration:
     produced_result_types: frozenset[ResultContentType]
     capabilities: frozenset[str]
     deterministic_aliases: tuple[str, ...] = ()
+    definition: object | None = None
+    workflow: object | None = None
+    actual_allowed_tools: frozenset[str] = frozenset()
+    toolset_identity: str = ""
 
     def __post_init__(self) -> None:
         if _SAFE_AGENT_ID.fullmatch(self.agent_id) is None:
@@ -105,20 +109,32 @@ class AgentRegistration:
     def execution_kind(self) -> ExecutionKind:
         return ExecutionKind.SYNTHESIS if self.synthesis_only else ExecutionKind.AGENT
 
+    def binding_identity(self) -> dict[str, str]:
+        """返回编译 performer 的安全绑定事实，不携带 Provider 实例。"""
+        if self.definition is None:
+            raise ValueError("compiled performer definition is required")
+        return {
+            "agent_version": self.definition.agent_version,
+            "toolset_identity": self.toolset_identity,
+            "resolved_model_profile_id": self.definition.model_profile_id,
+            "resolved_retrieval_profile_id": self.definition.retrieval_profile_id or "NONE",
+            "resolved_memory_profile_id": self.definition.memory_profile_id or "NONE",
+        }
+
 
 class AgentRegistry:
     """进程级只读 Registry；不保存任何 Run 或用户数据。"""
 
     __slots__ = ("_registrations", "_ordered_ids", "_locked")
 
-    def __init__(self, registrations: Iterable[AgentRegistration]) -> None:
+    def __init__(self, registrations: Iterable[CompiledAgentRegistration]) -> None:
         ordered = tuple(registrations)
-        mapping: dict[str, AgentRegistration] = {}
+        mapping: dict[str, CompiledAgentRegistration] = {}
         for registration in ordered:
-            if not isinstance(registration, AgentRegistration):
+            if not isinstance(registration, CompiledAgentRegistration):
                 raise AgentRegistryError(
                     AgentRegistryErrorCode.INVALID_REGISTRATION,
-                    "Registry 只能包含合法 AgentRegistration",
+                    "Registry 只能包含合法 CompiledAgentRegistration",
                 )
             if registration.agent_id in mapping:
                 raise AgentRegistryError(
@@ -147,7 +163,7 @@ class AgentRegistry:
     def agent_ids(self) -> tuple[str, ...]:
         return self._ordered_ids
 
-    def resolve(self, agent_id: str) -> AgentRegistration:
+    def resolve(self, agent_id: str) -> CompiledAgentRegistration:
         registration = self._registrations.get(agent_id)
         if registration is None:
             raise AgentRegistryError(AgentRegistryErrorCode.UNKNOWN_AGENT, "Agent 未注册")
@@ -155,7 +171,7 @@ class AgentRegistry:
             raise AgentRegistryError(AgentRegistryErrorCode.AGENT_DISABLED, "Agent 当前不可用")
         return registration
 
-    def require_entry(self, agent_id: str) -> AgentRegistration:
+    def require_entry(self, agent_id: str) -> CompiledAgentRegistration:
         registration = self.resolve(agent_id)
         if not registration.entry_allowed:
             raise AgentRegistryError(
@@ -164,7 +180,7 @@ class AgentRegistry:
             )
         return registration
 
-    def require_delegated(self, agent_id: str) -> AgentRegistration:
+    def require_delegated(self, agent_id: str) -> CompiledAgentRegistration:
         registration = self.resolve(agent_id)
         if not registration.delegation_allowed or registration.synthesis_only:
             raise AgentRegistryError(
@@ -173,7 +189,7 @@ class AgentRegistry:
             )
         return registration
 
-    def synthesis_registration(self) -> AgentRegistration:
+    def synthesis_registration(self) -> CompiledAgentRegistration:
         matches = tuple(
             registration
             for registration in self._registrations.values()
@@ -208,6 +224,11 @@ class AgentRegistry:
         }
 
 
+# 仅供未迁移的 Runtime 内部模块过渡；业务注册类型位于
+# core.agent_platform.contracts.AgentRegistration，且本别名不公开导出。
+AgentRegistration = CompiledAgentRegistration
+
+
 def _registration(
     agent_id: str,
     execution_adapter_id: str,
@@ -223,8 +244,8 @@ def _registration(
     aliases: tuple[str, ...],
     single_passthrough: bool = False,
     synthesis_only: bool = False,
-) -> AgentRegistration:
-    return AgentRegistration(
+) -> CompiledAgentRegistration:
+    return CompiledAgentRegistration(
         agent_id=agent_id,
         execution_adapter_id=execution_adapter_id,
         display_name=display_name,
@@ -328,7 +349,7 @@ DEFAULT_AGENT_REGISTRY = AgentRegistry(
 
 
 __all__ = [
-    "AgentRegistration",
+    "CompiledAgentRegistration",
     "AgentRegistry",
     "AgentRegistryError",
     "AgentRegistryErrorCode",

@@ -14,6 +14,7 @@ import pytest
 
 from core.advanced_memory import AdvancedMemoryStore
 from core.agent_router import AgentRouter
+from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
 from core.memory_manager import MemoryManager
 from core.runtime import (
     BudgetLedger,
@@ -39,6 +40,7 @@ from core.runtime import (
 )
 from core.runtime.retrieval_contract import RetrievalBudgetUsage
 from core.runtime.project_memory import ProjectSemanticMemoryStore
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from tests._wp3_fixtures import delegated_json, direct_json
 from tests.test_step_result_security import (
     make_security_services,
@@ -130,10 +132,18 @@ def make_real_router(
             estimated_latency_ms=1,
         ),
     )
+    agent_registry = compile_agent_catalog(
+        AgentRegistrationBundle(registrations=()),
+        builtin_registrations=tuple(
+            DEFAULT_AGENT_REGISTRY.resolve(agent_id)
+            for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+        ),
+    ).agent_registry
     return AgentRouter(
         llm_engine=model or FakeModel(),
         memory_manager=memory,
         db_manager=db_manager,
+        agent_registry=agent_registry,
         orchestration_enabled=False,
         model_profiles=(profile,),
         retrieval_execution_service=retrieval_service,

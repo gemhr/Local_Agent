@@ -263,11 +263,20 @@ def test_tool_outside_snapshot_is_rejected_before_execution() -> None:
     context.attach_tool_resolution_snapshot(
         create_tool_snapshot(context.run_id, (tool_a,))
     )
-    router = _execution_boundary_router(
-        registry,
-        SimpleNamespace(),
-        "tool_b",
-    )
+    from core.agent_platform.contracts import AgentDefinition, AgentRegistration
+    from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
+    from core.runtime.tool_governance import ToolPolicy, ToolPolicyCatalog, ToolGovernanceService
+    agents = compile_agent_catalog(AgentRegistrationBundle(registrations=(AgentRegistration(AgentDefinition(
+        agent_id="core_router", agent_version="1", display_name="Router", role="router", instructions="Answer.",
+        allowed_tools=registry.registered_names,
+    )),)), actual_tool_names=registry.registered_names,
+        actual_tool_registrations={item.descriptor.name: item for item in registry.startup_registrations},
+        platform_tool_permission_seed={name: frozenset({"core_router"}) for name in registry.registered_names}).agent_registry
+    policies = ToolPolicyCatalog(tool_registry=registry, agent_registry=agents)
+    for name in registry.registered_names:
+        policies.register(ToolPolicy(name, frozenset({"core_router"})))
+    policies.freeze()
+    router = _execution_boundary_router(registry, ToolGovernanceService(policies, agents), "tool_b")
 
     with pytest.raises(ToolRegistryError):
         router._prepare_answer_messages("core_router", "query", run_context=context)

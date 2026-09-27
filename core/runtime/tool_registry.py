@@ -210,6 +210,16 @@ class ToolRegistry:
         self._require_frozen()
         return self._ordered
 
+    @property
+    def registered_names(self) -> frozenset[str]:
+        """启动编译阶段读取已登记符号；不暴露或返回可变注册表。"""
+        return frozenset(item.descriptor.name for item in self._ordered)
+
+    @property
+    def startup_registrations(self) -> tuple[ToolRegistration, ...]:
+        """返回 freeze 前 startup compiler 使用的不可变注册快照。"""
+        return tuple(self._ordered)
+
     def descriptors(self) -> tuple[ToolDescriptor, ...]:
         self._require_frozen()
         return tuple(item.descriptor for item in self._ordered)

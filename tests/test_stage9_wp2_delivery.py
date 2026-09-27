@@ -19,6 +19,7 @@ from core.runtime.client_event_feed import (
 )
 from core.runtime.event_journal_store import PostgresRunEventJournal
 from core.runtime.event_journal import JournalError
+from tests.test_runtime_execute_endpoint import _install_chat_service, _result
 from core.runtime.events import (
     ErrorPayload,
     OutputDeltaPayload,
@@ -27,6 +28,7 @@ from core.runtime.events import (
     RuntimeEventType,
     ToolApprovalRequestedPayload,
 )
+from core.runtime.state import RunStatus, StopReason
 
 pytest_plugins = ("tests._pg_fixtures",)
 
@@ -253,6 +255,150 @@ async def test_subscription_authorizes_before_read_and_supports_independent_curs
         assert exc_info.value.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_structured_invalid_output_is_suppressed_from_durable_sse_and_replay(clean_database):
+    owner_id = await _create_user(clean_database)
+    principal = _principal(owner_id)
+    run_id = uuid.uuid4().hex
+    await AuthorizationService(clean_database).bind_new(principal, "RUN", run_id)
+    feed = PostgresClientEventFeed(clean_database)
+    feed.register_structured_output(run_id, {
+        "type": "object", "required": ["answer"],
+        "properties": {"answer": {"type": "string"}},
+    })
+    invalid_body = '{"unexpected":"private-invalid-body"}'
+    await feed.append_event(_event(
+        1, RuntimeEventType.OUTPUT_DELTA, OutputDeltaPayload(invalid_body), run_id=run_id,
+    ))
+    assert await PostgresClientEventFeed(clean_database).read_after(run_id, 0) == ()
+    completed_event = _event(
+        2, RuntimeEventType.RUN_COMPLETED,
+        RunCompletedPayload("SUCCEEDED", "COMPLETED"), run_id=run_id,
+    )
+    await feed.append_event(completed_event)
+    await feed.append_event(completed_event)
+    replay = await PostgresClientEventFeed(clean_database).read_after(run_id, 0)
+    assert len(replay) == 1
+    assert replay[0].event_type == "run.completed"
+    assert replay[0].payload["status"] == "succeeded"
+    assert replay[0].payload["business_output_valid"] is False
+    assert replay[0].payload["business_error_code"] == "BUSINESS_OUTPUT_INVALID"
+    assert replay[0].payload["output_disposition"] == "REJECTED"
+    assert invalid_body not in json.dumps(replay[0].payload)
+
+    response = await server.v1_run_events_endpoint(
+        run_id, _request(principal, clean_database, feed=PostgresClientEventFeed(clean_database)), after_cursor=0,
+    )
+    frames = [frame async for frame in response.body_iterator]
+    assert len(frames) == 1
+    assert "event: run.completed" in frames[0]
+    assert "BUSINESS_OUTPUT_INVALID" in frames[0]
+    assert invalid_body not in frames[0]
+
+
+@pytest.mark.asyncio
+async def test_structured_valid_output_is_delivered_with_terminal_but_text_stays_incremental():
+    feed = InMemoryClientEventFeed()
+    valid_run = uuid.uuid4().hex
+    feed.register_structured_output(valid_run, {
+        "type": "object", "required": ["answer"],
+        "properties": {"answer": {"type": "string"}},
+    })
+    await feed.append_event(_event(
+        1, RuntimeEventType.OUTPUT_DELTA, OutputDeltaPayload('{"answer":'), run_id=valid_run,
+    ))
+    assert await feed.read_after(valid_run, 0) == ()
+    digest = "d" * 64
+    await feed.append_event(_event(
+        2, RuntimeEventType.TOOL_APPROVAL_REQUESTED,
+        ToolApprovalRequestedPayload(
+            approval_id="approval-structured", tool_name="read_tool",
+            invocation_identity_digest=digest, arguments_digest=digest,
+            invocation_binding_digest=digest,
+        ), run_id=valid_run,
+    ))
+    await feed.append_event(_event(
+        3, RuntimeEventType.OUTPUT_DELTA, OutputDeltaPayload('"ok"}'), run_id=valid_run,
+    ))
+    await feed.append_event(_event(
+        4, RuntimeEventType.RUN_COMPLETED,
+        RunCompletedPayload("SUCCEEDED", "COMPLETED"), run_id=valid_run,
+    ))
+    replay = await feed.read_after(valid_run, 0)
+    assert [(item.cursor, item.event_type) for item in replay] == [
+        (2, "approval.required"), (4, "run.completed"),
+    ]
+    assert replay[-1].payload["business_output_valid"] is True
+    assert replay[-1].payload["output_disposition"] == "ACCEPTED"
+    assert replay[-1].payload["output"] == '{"answer":"ok"}'
+
+    text_run = uuid.uuid4().hex
+    await feed.append_event(_event(
+        1, RuntimeEventType.OUTPUT_DELTA, OutputDeltaPayload("incremental"), run_id=text_run,
+    ))
+    text_replay = await feed.read_after(text_run, 0)
+    assert [(item.event_type, item.payload) for item in text_replay] == [
+        ("output.delta", {"text": "incremental"}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid", [False, True], ids=["invalid", "valid"])
+async def test_structured_journal_transaction_rollback_retry_and_delta_dedup(clean_database, monkeypatch, valid):
+    owner = await _create_user(clean_database)
+    principal = _principal(owner)
+    run_id = uuid.uuid4().hex
+    await AuthorizationService(clean_database).bind_new(principal, "RUN", run_id)
+    feed = PostgresClientEventFeed(clean_database)
+    journal = PostgresRunEventJournal(clean_database)
+    feed.register_structured_output(run_id, {"type": "object", "required": ["answer"],
+                                          "properties": {"answer": {"type": "string"}}})
+    body = '{"answer":"valid-body"}' if valid else '{"bad":"private-invalid-body"}'
+    delta = _event(1, RuntimeEventType.OUTPUT_DELTA, OutputDeltaPayload(body), run_id=run_id)
+    await journal.append_with_client_projection(delta, feed)
+    await journal.append_with_client_projection(delta, feed)
+    assert len(feed._pending_structured_output[run_id]) == 1
+    reader = PostgresClientEventFeed(clean_database)
+    assert await reader.read_after(run_id, 0) == ()
+
+    terminal = _event(2, RuntimeEventType.RUN_COMPLETED, RunCompletedPayload("SUCCEEDED", "COMPLETED"), run_id=run_id)
+    original = feed.append_event_in_transaction
+
+    async def fail_after_sql(session, event):
+        await original(session, event)
+        # 真正 Journal Owner 的 transaction：SQL 已执行但尚未 commit。
+        assert await reader.read_after(run_id, 0) == ()
+        raise RuntimeError("force rollback after projection SQL")
+
+    monkeypatch.setattr(feed, "append_event_in_transaction", fail_after_sql)
+    with pytest.raises(JournalError):
+        await journal.append_with_client_projection(terminal, feed)
+    assert await reader.read_after(run_id, 0) == ()
+    assert [item.event_type for item in await journal.read_after(run_id, 0, 10)] == [RuntimeEventType.OUTPUT_DELTA]
+    assert run_id in feed._structured_schemas
+    assert len(feed._pending_structured_output[run_id]) == 1
+
+    monkeypatch.setattr(feed, "append_event_in_transaction", original)
+    await journal.append_with_client_projection(terminal, feed)
+    await journal.append_with_client_projection(terminal, feed)
+    await journal.append_with_client_projection(delta, feed)
+    events = await reader.read_after(run_id, 0)
+    assert len(events) == 1
+    assert events[0].payload["status"] == "succeeded"
+    assert events[0].payload["business_output_valid"] is valid
+    if valid:
+        assert events[0].payload["output"] == body
+    else:
+        assert events[0].payload["business_error_code"] == "BUSINESS_OUTPUT_INVALID"
+        assert body not in json.dumps(events[0].payload)
+    assert run_id not in feed._structured_schemas
+    response = await server.v1_run_events_endpoint(run_id, _request(principal, clean_database, feed=reader), 0)
+    frames = [frame async for frame in response.body_iterator]
+    assert len(frames) == 1
+    assert ("valid-body" in frames[0]) is valid
+    assert "private-invalid-body" not in frames[0]
+
+
 def test_resume_cursor_header_query_and_validation_contract():
     def request(header=None):
         return SimpleNamespace(headers={} if header is None else {"Last-Event-ID": header})
@@ -288,7 +434,9 @@ async def test_v1_subscription_disconnect_does_not_cancel_supervised_producer(
     producer_finished = asyncio.Event()
 
     class Service:
-        def stream_coordinated_agent_events(self, *args, **kwargs):
+        run_registry = SimpleNamespace()
+
+        def stream_coordinated_agent_events(self, *args, _result_out=None, **kwargs):
             async def events():
                 producer_started.set()
                 try:
@@ -299,6 +447,13 @@ async def test_v1_subscription_disconnect_does_not_cancel_supervised_producer(
                         OutputDeltaPayload("done"),
                         run_id=run_id,
                     )
+                    _result_out.append(
+                        _result(
+                            RunStatus.SUCCEEDED,
+                            StopReason.COMPLETED,
+                            run_id=run_id,
+                        )
+                    )
                 finally:
                     producer_finished.set()
 
@@ -308,7 +463,7 @@ async def test_v1_subscription_disconnect_does_not_cancel_supervised_producer(
     request = _request(
         principal, clean_database, feed=feed, supervisor=supervisor
     )
-    monkeypatch.setattr(server.app.state, "chat_service", Service(), raising=False)
+    _install_chat_service(monkeypatch, Service())
     started = await server.v1_chat_endpoint(
         server.V1ChatRequest(agent_id="core_router", query="hello", run_id=run_id),
         request,
@@ -408,10 +563,10 @@ async def test_legacy_disconnect_still_requests_client_disconnected_cancel(monke
     class Service:
         run_registry = registry
 
-        async def stream_coordinated_agent_text(self, **kwargs):
+        async def stream_coordinated_agent_events(self, *args, **kwargs):
             await cancelled.wait()
             if False:
-                yield "unused"
+                yield None
 
     class Request:
         state = SimpleNamespace(
@@ -424,7 +579,7 @@ async def test_legacy_disconnect_still_requests_client_disconnected_cancel(monke
     async def no_bind(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(server.app.state, "chat_service", Service(), raising=False)
+    _install_chat_service(monkeypatch, Service())
     monkeypatch.setattr(server, "_bind_new_run_and_conversation", no_bind)
     response = await server.chat_endpoint(
         server.ChatRequest(

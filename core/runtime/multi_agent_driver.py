@@ -188,6 +188,7 @@ class MultiAgentDriver:
                 if getattr(self._coordinator, "output_gate", None) is not None
                 else None
             ),
+            business_definition=registration.definition,
         )
         if (
             plan_step.execution_kind is ExecutionKind.SYNTHESIS

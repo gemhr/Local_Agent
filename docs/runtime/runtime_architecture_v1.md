@@ -4,6 +4,25 @@
 
 ## 1. Composition Root
 
+### Stage11 WP2 业务接入与绑定事实
+
+生产业务入口为 `AgentApplicationService`；HTTP、Evaluation execution 和 Stage8
+共享其解析路径。startup 汇集 builtin、BusinessTool、MCP registrations 与可信
+permission seeds，编译单一 AgentRegistry 后 freeze ToolRegistry。
+`actual_allowed_tools` 同时约束 Governance、Discovery 和 toolset identity；MCP policy
+不能在 compile 后扩权，当前 Run 的冻结 Tool snapshot 仍是额外执行限制。
+
+公开 `delegation_allowed` 不依赖静态 Workflow 是否引用该 Agent。Plan 确定后、执行前，
+RunContext 与 durable `resume_input.performer_identities` 固定 entry、delegated、synthesis
+performers 的版本、toolset 和 Model/Retrieval/Memory binding；任一当前绑定漂移拒绝恢复。
+BusinessTool 自动绑定身份限稳定函数的 module/qualname，其它 callable 必须声明安全
+`handler_binding_id`，更换绑定时同步更换该标识。这不是完整代码 provenance。
+
+结构化 ClientEventFeed 暂存候选，terminal 验证后准备稳定投影，原 PostgreSQL 事务 Owner
+提交后才清理候选。回滚时同事件仍能幂等重写；delta 按事件 identity 去重。
+普通文本仍增量交付，Runtime 内部 OUTPUT_DELTA、Journal 和 terminal Authority 不变。
+缺失当前 performer binding metadata 的旧恢复输入 fail closed，不提供猜测迁移。
+
 API 进程的生产 Composition Root 是 `server.py` 的 FastAPI `lifespan()`；独立
 Publisher/Worker 进程分别拥有自己的最小 Composition Root（见 WP5 三进程边界）：
 

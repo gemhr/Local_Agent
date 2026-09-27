@@ -15,10 +15,12 @@ def test_agent_router_planner_uses_unified_model_contract_and_strict_prompt() ->
 
     from core.agent_router import AgentRouter
     from core.runtime import BudgetLedger, RunBudget
+    from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 
     captured = {}
     router = object.__new__(AgentRouter)
     router.max_tokens = 1536
+    router.agent_registry = DEFAULT_AGENT_REGISTRY
 
     def invoke(**kwargs):
         captured.update(kwargs)
@@ -44,6 +46,7 @@ def test_agent_router_planner_uses_unified_model_contract_and_strict_prompt() ->
     assert "DELEGATE" in system_prompt
     assert "不得包含 instruction" in system_prompt
     assert "output_policy" in system_prompt
+    assert "knowledge_expert" in system_prompt
     assert captured["messages"][1]["content"] == "private request"
 
 

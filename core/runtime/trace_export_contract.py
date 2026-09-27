@@ -50,7 +50,7 @@ TRACE_EXPORT_CONTRACT_VERSION = 1
 # not derived from Python float range or sys.float_info at runtime.
 MAX_V1_DURATION_INT = 2**1024 - 2**970 - 1
 
-_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _OPERATION = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
@@ -117,6 +117,14 @@ RUN_EXPORT_SCHEMA = MappingProxyType(
         "planning_source": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
         "step_count": (ExportAttributeType.NON_NEGATIVE_INT, ExportAttributePresence.OPTIONAL),
         "selected_entry_agent_id": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "agent_version": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "resolved_agent_id": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "workflow_id": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "workflow_version": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "toolset_identity": (ExportAttributeType.DIGEST, ExportAttributePresence.OPTIONAL),
+        "resolved_model_profile_id": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "resolved_retrieval_profile_id": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "resolved_memory_profile_id": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
         "runtime_mode": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
         "final_status": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.CONDITIONAL),
         "stop_reason": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.CONDITIONAL),
@@ -148,6 +156,9 @@ PLANNING_EXPORT_SCHEMA = MappingProxyType(
 STEP_EXPORT_SCHEMA = MappingProxyType(
     {
         "preferred_agent": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "agent_version": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "workflow_id": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
+        "workflow_version": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
         "execution_kind": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
         "output_policy": (ExportAttributeType.SAFE_IDENTIFIER, ExportAttributePresence.OPTIONAL),
         "dependency_count": (ExportAttributeType.NON_NEGATIVE_INT, ExportAttributePresence.OPTIONAL),

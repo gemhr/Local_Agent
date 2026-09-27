@@ -33,6 +33,8 @@ from core.settings import (
 from tools.local_tools import analyze_excel_data, list_files_in_dir, parse_filesystem_argument
 from tools.registry import register_all_tools
 import server
+from tests.test_tool_governance import production_agent_registry
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 
 
 def _registry() -> ToolRegistry:
@@ -164,11 +166,18 @@ def test_router_outside_denial_never_calls_execution_or_business(
 
     router = AgentRouter.__new__(AgentRouter)
     router.tool_registry = registry
-    router.tool_governance_service = server._build_tool_governance(registry)
+    router.tool_governance_service = server._build_tool_governance(
+        registry, production_agent_registry(registry)
+    )
     router.resource_authorization_service = _service(allowed)
     execution = _ExecutionOracle()
     router.tool_execution_service = execution
-    router._build_messages = lambda **_: [{"role": "system", "content": "base"}]
+    def build_messages(**kwargs):
+        from core.runtime.tool_discovery import create_tool_snapshot
+        active = kwargs["run_context"]
+        active.attach_tool_resolution_snapshot(create_tool_snapshot(active.run_id, registry.registrations()))
+        return [{"role": "system", "content": "base"}]
+    router._build_messages = build_messages
     router._plan_tool_call = lambda *_args, **_kwargs: (tool_name, str(target.resolve()))
     context = RunContext.create(entry_agent_id="core_router")
     context.attach_budget_ledger(BudgetLedger(RunBudget()))

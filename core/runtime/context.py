@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from types import MappingProxyType
 from typing import Protocol
 import math
 import time
@@ -70,6 +71,15 @@ class RunContextData:
     created_at: datetime
     deadline_at: datetime | None
     entry_agent_id: str
+    agent_version: str | None = None
+    workflow_id: str | None = None
+    workflow_version: str | None = None
+    toolset_identity: str | None = None
+    resolved_model_profile_id: str | None = None
+    resolved_retrieval_profile_id: str | None = None
+    resolved_memory_profile_id: str | None = None
+    performer_binding_versions: Mapping[str, str] = field(default_factory=dict)
+    performer_binding_identities: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """校验可序列化运行数据的不变量。"""
@@ -78,8 +88,38 @@ class RunContextData:
             _ensure_utc_datetime(self.deadline_at, "deadline_at")
         if not self.entry_agent_id:
             raise ValueError("entry_agent_id must not be empty")
+        if (self.workflow_id is None) != (self.workflow_version is None):
+            raise ValueError("workflow identity requires both id and version")
+        for value, name in (
+            (self.agent_version, "agent_version"), (self.workflow_id, "workflow_id"),
+            (self.workflow_version, "workflow_version"), (self.toolset_identity, "toolset_identity"),
+            (self.resolved_model_profile_id, "resolved_model_profile_id"),
+            (self.resolved_retrieval_profile_id, "resolved_retrieval_profile_id"),
+            (self.resolved_memory_profile_id, "resolved_memory_profile_id"),
+        ):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{name} must be a non-empty string when provided")
+        bindings = dict(self.performer_binding_versions)
+        if any(not isinstance(agent_id, str) or not agent_id.strip() or not isinstance(version, str) or not version.strip()
+               for agent_id, version in bindings.items()):
+            raise ValueError("performer_binding_versions must map non-empty identities")
+        object.__setattr__(self, "performer_binding_versions", MappingProxyType(dict(sorted(bindings.items()))))
+        identities = {}
+        required = {"agent_version", "toolset_identity", "resolved_model_profile_id",
+                    "resolved_retrieval_profile_id", "resolved_memory_profile_id"}
+        for agent_id, identity in self.performer_binding_identities.items():
+            if agent_id not in bindings or set(identity) != required or any(
+                not isinstance(value, str) or not value for value in identity.values()
+            ) or identity["agent_version"] != bindings[agent_id]:
+                raise ValueError("performer binding identity is incomplete or inconsistent")
+            identities[agent_id] = MappingProxyType(dict(identity))
+        object.__setattr__(self, "performer_binding_identities", MappingProxyType(dict(sorted(identities.items()))))
 
-    def to_dict(self) -> dict[str, str | None]:
+    @property
+    def resolved_agent_id(self) -> str:
+        return self.entry_agent_id
+
+    def to_dict(self) -> dict[str, object]:
         """仅序列化显式数据字段，绝不序列化进程本地依赖。"""
         return {
             "run_id": self.identifiers.run_id,
@@ -88,6 +128,18 @@ class RunContextData:
             "created_at": self.created_at.isoformat(),
             "deadline_at": self.deadline_at.isoformat() if self.deadline_at else None,
             "entry_agent_id": self.entry_agent_id,
+            "resolved_agent_id": self.resolved_agent_id,
+            "agent_version": self.agent_version,
+            "workflow_id": self.workflow_id,
+            "workflow_version": self.workflow_version,
+            "toolset_identity": self.toolset_identity,
+            "resolved_model_profile_id": self.resolved_model_profile_id,
+            "resolved_retrieval_profile_id": self.resolved_retrieval_profile_id,
+            "resolved_memory_profile_id": self.resolved_memory_profile_id,
+            "performer_binding_versions": dict(self.performer_binding_versions),
+            "performer_binding_identities": {
+                key: dict(value) for key, value in self.performer_binding_identities.items()
+            },
         }
 
 
@@ -293,6 +345,24 @@ class RunContext:
         """明确 durable 语义的兼容命名；仍绑定同一个 repository。"""
         self.attach_execution_repository(repository)
 
+    def bind_performer_versions(self, versions: Mapping[str, str]) -> None:
+        """Freeze the compiled Plan performer versions into this Run's metadata."""
+        normalized = dict(sorted(versions.items()))
+        existing = dict(self.data.performer_binding_versions)
+        if existing and existing != normalized:
+            raise ValueError("performer binding versions conflict")
+        if normalized.get(self.data.entry_agent_id) != self.data.agent_version:
+            raise ValueError("entry performer binding does not match Run identity")
+        self.data = replace(self.data, performer_binding_versions=normalized)
+
+    def bind_performer_identities(self, identities: Mapping[str, Mapping[str, str]]) -> None:
+        """执行前固定各 performer 的实际版本及 Tool/Provider 绑定。"""
+        normalized = {key: dict(value) for key, value in identities.items()}
+        if self.data.performer_binding_identities and dict(self.data.performer_binding_identities) != normalized:
+            raise ValueError("performer binding identities conflict")
+        self.bind_performer_versions({key: value["agent_version"] for key, value in normalized.items()})
+        self.data = replace(self.data, performer_binding_identities=normalized)
+
     @property
     def durable_tool_invocation(self):
         """恢复时已存在的 durable Tool invocation；仅作为执行绑定输入。"""
@@ -319,6 +389,13 @@ class RunContext:
         timeout_seconds: float | None = None,
         cancellation_source: CancellationSource | None = None,
         clock: Clock | None = None,
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
+        toolset_identity: str | None = None,
+        resolved_model_profile_id: str | None = None,
+        resolved_retrieval_profile_id: str | None = None,
+        resolved_memory_profile_id: str | None = None,
     ) -> "RunContext":
         """仅创建上下文；取消源归属重要时，应优先使用 create_run_context。"""
         context, _source = create_run_context(
@@ -329,6 +406,13 @@ class RunContext:
             timeout_seconds=timeout_seconds,
             cancellation_source=cancellation_source,
             clock=clock,
+            agent_version=agent_version,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
+            toolset_identity=toolset_identity,
+            resolved_model_profile_id=resolved_model_profile_id,
+            resolved_retrieval_profile_id=resolved_retrieval_profile_id,
+            resolved_memory_profile_id=resolved_memory_profile_id,
         )
         return context
 
@@ -381,6 +465,13 @@ def create_run_context(
     timeout_seconds: float | None = None,
     cancellation_source: CancellationSource | None = None,
     clock: Clock | None = None,
+    agent_version: str | None = None,
+    workflow_id: str | None = None,
+    workflow_version: str | None = None,
+    toolset_identity: str | None = None,
+    resolved_model_profile_id: str | None = None,
+    resolved_retrieval_profile_id: str | None = None,
+    resolved_memory_profile_id: str | None = None,
 ) -> tuple[RunContext, CancellationSource]:
     """创建 RunContext，并将其 CancellationSource 返回给调用方所有者。"""
     if not entry_agent_id:
@@ -402,6 +493,13 @@ def create_run_context(
         created_at=active_clock.utc_now(),
         deadline_at=deadline.deadline_at,
         entry_agent_id=entry_agent_id,
+        agent_version=agent_version,
+        workflow_id=workflow_id,
+        workflow_version=workflow_version,
+        toolset_identity=toolset_identity,
+        resolved_model_profile_id=resolved_model_profile_id,
+        resolved_retrieval_profile_id=resolved_retrieval_profile_id,
+        resolved_memory_profile_id=resolved_memory_profile_id,
     )
     return (
         RunContext(data=data, deadline=deadline, cancellation_token=source.token, clock=active_clock),
@@ -419,6 +517,15 @@ def create_rehydrated_run_context(
     absolute_deadline: datetime | None,
     cancellation_source: CancellationSource | None = None,
     clock: Clock | None = None,
+    agent_version: str | None = None,
+    workflow_id: str | None = None,
+    workflow_version: str | None = None,
+    toolset_identity: str | None = None,
+    resolved_model_profile_id: str | None = None,
+    resolved_retrieval_profile_id: str | None = None,
+    resolved_memory_profile_id: str | None = None,
+    performer_binding_versions: Mapping[str, str] | None = None,
+    performer_binding_identities: Mapping[str, Mapping[str, str]] | None = None,
 ) -> tuple[RunContext, CancellationSource]:
     """Rebuild a RunContext from durable identity and deadline facts."""
     if not entry_agent_id or not session_id or not trace_id or not run_id:
@@ -431,6 +538,15 @@ def create_rehydrated_run_context(
         created_at=created_at,
         deadline_at=absolute_deadline,
         entry_agent_id=entry_agent_id,
+        agent_version=agent_version,
+        workflow_id=workflow_id,
+        workflow_version=workflow_version,
+        toolset_identity=toolset_identity,
+        resolved_model_profile_id=resolved_model_profile_id,
+        resolved_retrieval_profile_id=resolved_retrieval_profile_id,
+        resolved_memory_profile_id=resolved_memory_profile_id,
+        performer_binding_versions=performer_binding_versions or {},
+        performer_binding_identities=performer_binding_identities or {},
     )
     return (
         RunContext(

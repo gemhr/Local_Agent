@@ -20,6 +20,7 @@ raw arguments / path / prompt / output / policy allowlist。
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 import re
@@ -196,10 +197,10 @@ class ToolPolicy:
                 ToolGovernanceErrorCode.INVALID,
                 "Tool policy 必须引用合法 Tool name",
             )
-        if not isinstance(self.allowed_agent_ids, frozenset) or not self.allowed_agent_ids:
+        if not isinstance(self.allowed_agent_ids, frozenset):
             raise ToolGovernanceError(
                 ToolGovernanceErrorCode.INVALID,
-                "Tool policy 的 allowed_agent_ids 必须是非空集合",
+                "Tool policy 的 allowed_agent_ids 必须是 frozenset；空集合表示 deny-all",
             )
         if any(
             not isinstance(agent_id, str) or not agent_id.strip()
@@ -515,7 +516,12 @@ class ToolGovernanceService:
                 risk_facts=policy.risk_facts,
                 safe_error_code=ToolGovernanceErrorCode.UNKNOWN_PRINCIPAL,
             )
-        if context.principal_agent_id not in policy.allowed_agent_ids:
+        if (
+            context.principal_agent_id not in policy.allowed_agent_ids
+            or registration.descriptor.name not in self._agent_registry.resolve(
+                context.principal_agent_id
+            ).actual_allowed_tools
+        ):
             return _decision(
                 ToolGovernanceOutcome.DENY,
                 risk_facts=policy.risk_facts,
@@ -588,7 +594,12 @@ class ToolGovernanceService:
             return False
 
 
-def register_default_tool_policies(catalog: ToolPolicyCatalog) -> None:
+def register_default_tool_policies(
+    catalog: ToolPolicyCatalog,
+    *,
+    tool_grants: Mapping[str, frozenset[str]] | None = None,
+    business_tool_definitions: tuple = (),
+) -> None:
     """注册生产 Tool policy（每条 explicit ALLOW，无 implicit default allow）。
 
     risk facts / approval rule 严格按 Architecture Decision §31 / §33 / §43 冻结；
@@ -634,19 +645,16 @@ def register_default_tool_policies(catalog: ToolPolicyCatalog) -> None:
         ("stage8_get_execution_result", ()),
         ("stage8_get_logs", ()),
         ("stage8_search_tickets", ()),
-        ("stage8_start_execution", ()),
         ("stage8_generate_case", ()),
+        ("stage8_start_execution", ()),
         ("stage8_create_ticket", ()),
     )
+    registered_agent_ids = frozenset(catalog._agent_registry.agent_ids)
     for tool_name, risk_facts in policies:
-        if tool_name == "stage8_start_execution":
-            allowed_agent_ids = _STAGE8_START_AGENT_IDS
-        elif tool_name == "stage8_create_ticket":
-            allowed_agent_ids = _STAGE8_TICKET_AGENT_IDS
-        elif tool_name.startswith("stage8_"):
-            allowed_agent_ids = _STAGE8_QUERY_AGENT_IDS
-        else:
-            allowed_agent_ids = PRODUCTION_AGENT_IDS
+        allowed_agent_ids = frozenset(
+            agent_id for agent_id in registered_agent_ids
+            if tool_name in catalog._agent_registry.resolve(agent_id).actual_allowed_tools
+        )
         catalog.register(
             ToolPolicy(
                 tool_name=tool_name,
@@ -659,6 +667,42 @@ def register_default_tool_policies(catalog: ToolPolicyCatalog) -> None:
                 ),
             )
         )
+
+    for definition in business_tool_definitions:
+        try:
+            risk_facts = tuple(ToolRiskFact(item.upper()) for item in definition.risk_facts)
+        except ValueError:
+            raise ValueError("Business Tool risk fact unsupported") from None
+        catalog.register(ToolPolicy(
+            tool_name=definition.name,
+            allowed_agent_ids=frozenset(
+                agent_id for agent_id in registered_agent_ids
+                if definition.name in catalog._agent_registry.resolve(agent_id).actual_allowed_tools
+            ),
+            risk_facts=risk_facts,
+            approval_required_threshold=ToolRiskLevel.HIGH,
+        ))
+
+
+def builtin_tool_permission_seed(tool_names: frozenset[str], registered_agent_ids: frozenset[str]) -> Mapping[str, frozenset[str]]:
+    """将现有平台 builtin permission seeds 输入 startup catalog compiler。"""
+    result = {}
+    for name in tool_names:
+        if name == "stage8_start_execution":
+            allowed = _STAGE8_START_AGENT_IDS
+        elif name == "stage8_create_ticket":
+            allowed = _STAGE8_TICKET_AGENT_IDS
+        elif name.startswith("stage8_"):
+            allowed = _STAGE8_QUERY_AGENT_IDS
+        elif name in {
+            "sandbox_execution_demo", "workspace_read_file", "workspace_write_file",
+            "list_files", "analyze_excel", "get_system_status", "complex_workflow_simulator",
+        }:
+            allowed = PRODUCTION_AGENT_IDS
+        else:
+            continue
+        result[name] = frozenset(allowed & registered_agent_ids)
+    return result
 
 
 __all__ = [
@@ -674,6 +718,7 @@ __all__ = [
     "ToolRiskFact",
     "ToolRiskLevel",
     "classify_full_risk_combination",
+    "builtin_tool_permission_seed",
     "governance_denial_message",
     "register_default_tool_policies",
 ]

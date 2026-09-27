@@ -127,13 +127,31 @@ class RunContextTests(unittest.TestCase):
         payload = context.to_dict()
         self.assertEqual(
             set(payload),
-            {"run_id", "session_id", "trace_id", "created_at", "deadline_at", "entry_agent_id"},
+            {"run_id", "session_id", "trace_id", "created_at", "deadline_at", "entry_agent_id", "resolved_agent_id", "agent_version", "workflow_id", "workflow_version", "toolset_identity", "resolved_model_profile_id", "resolved_retrieval_profile_id", "resolved_memory_profile_id", "performer_binding_versions", "performer_binding_identities"},
         )
         serialized_text = repr(payload).lower()
         self.assertNotIn("clock", serialized_text)
         self.assertNotIn("token", serialized_text)
         self.assertNotIn("event", serialized_text)
         self.assertNotIn("lock", serialized_text)
+
+    def test_business_identity_is_persisted_as_run_metadata(self) -> None:
+        context = RunContext.create(
+            entry_agent_id="review_agent",
+            agent_version="2026.09",
+            workflow_id="review_flow",
+            workflow_version="v2",
+            clock=FakeClock(),
+        )
+        self.assertEqual(context.to_dict()["agent_version"], "2026.09")
+        self.assertEqual(context.to_dict()["workflow_id"], "review_flow")
+        self.assertEqual(context.to_dict()["workflow_version"], "v2")
+        with self.assertRaises(ValueError):
+            RunContext.create(
+                entry_agent_id="review_agent",
+                workflow_id="review_flow",
+                clock=FakeClock(),
+            )
 
 if __name__ == "__main__":
     unittest.main()

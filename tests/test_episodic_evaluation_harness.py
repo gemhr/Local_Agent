@@ -15,8 +15,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from starlette.requests import Request
+from types import SimpleNamespace
 
 import server
+from tests.test_runtime_execute_endpoint import _install_chat_service, _TEST_AGENT_REGISTRY
 from core.advanced_memory import (
     AdvancedMemoryStore,
     EpisodeGoal,
@@ -59,6 +62,25 @@ from core.runtime.model_context import (
 from tests._runtime_assembly_fixtures import make_services
 from tests.test_wp3_history_boundary import FakeModel, make_real_router
 from tests._wp3_fixtures import direct_json
+
+
+def _v3_request() -> Request:
+    request = Request({
+        "type": "http", "method": "POST", "path": "/api/runtime/evaluation-execute/v3",
+        "raw_path": b"/api/runtime/evaluation-execute/v3", "query_string": b"",
+        "headers": [], "scheme": "http", "server": ("test", 80), "client": ("test", 1),
+        "root_path": "", "app": server.app,
+    })
+    request.state.principal = SimpleNamespace(authz_domain_id="test-domain")
+    server.app.state.agent_registry = _TEST_AGENT_REGISTRY
+    return request
+
+
+@pytest.fixture(autouse=True)
+def _bypass_v3_ownership_binding(monkeypatch):
+    async def noop(*_args, **_kwargs):
+        return None
+    monkeypatch.setattr(server, "_bind_new_run_and_conversation", noop)
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +132,12 @@ def _episode(memory_id: str, run_id: str, text: str, *, scope: str = "direct", s
 
 
 def _harness_factory(router, services):
-    return CoordinatedRuntimeFactory(router, services, event_channel_capacity=32)
+    return CoordinatedRuntimeFactory(
+        router,
+        services,
+        agent_registry=router.agent_registry,
+        event_channel_capacity=32,
+    )
 
 
 async def _run_scope(factory, agent_id: str, query: str, *, controller=None, observer=None):
@@ -503,7 +530,7 @@ async def test_replay_run_id_mismatch_rejected_by_endpoint(tmp_path, monkeypatch
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     run_id = uuid.uuid4().hex
     payload = server.RuntimeEvaluationExecuteV3Request(
         agent_id="core_router",
@@ -516,7 +543,7 @@ async def test_replay_run_id_mismatch_rejected_by_endpoint(tmp_path, monkeypatch
         ),
     )
     with pytest.raises(HTTPException) as exc:
-        await server.runtime_evaluation_execute_v3_endpoint(payload)
+        await server.runtime_evaluation_execute_v3_endpoint(payload, _v3_request())
     assert exc.value.status_code == 422
     assert exc.value.detail == "EPISODIC_EVALUATION_REPLAY_RUN_ID_MISMATCH"
 
@@ -551,7 +578,7 @@ async def test_v3_failed_run_forms_failed_episode_and_returns_receipts(tmp_path,
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     run_id = uuid.uuid4().hex
     response = await server.runtime_evaluation_execute_v3_endpoint(
         _v3_payload(
@@ -560,8 +587,7 @@ async def test_v3_failed_run_forms_failed_episode_and_returns_receipts(tmp_path,
             control={
                 "capabilities": ["DETERMINISTIC_FAILED_RUN", "CAPTURE_EPISODIC_PIPELINE"]
             },
-        )
-    )
+        ), _v3_request())
     body = json.loads(response.body)
     assert body["protocol_version"] == "localagent-episodic-evaluation-execute.v1"
     assert body["status"] == "FAILED"
@@ -591,7 +617,7 @@ async def test_v3_replay_returns_created_then_reused(tmp_path, monkeypatch) -> N
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     run_id = uuid.uuid4().hex
     response = await server.runtime_evaluation_execute_v3_endpoint(
         _v3_payload(
@@ -601,8 +627,7 @@ async def test_v3_replay_returns_created_then_reused(tmp_path, monkeypatch) -> N
                 "capabilities": ["REPLAY_EPISODIC_FORMATION_OBSERVER"],
                 "replay_run_id": run_id,
             },
-        )
-    )
+        ), _v3_request())
     body = json.loads(response.body)
     assert body["status"] == "SUCCEEDED"
     assert len(body["formation_receipts"]) == 1
@@ -625,7 +650,7 @@ async def test_v3_fixture_install_receipt(tmp_path, monkeypatch) -> None:
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     run_id = uuid.uuid4().hex
     response = await server.runtime_evaluation_execute_v3_endpoint(
         _v3_payload(
@@ -650,8 +675,7 @@ async def test_v3_fixture_install_receipt(tmp_path, monkeypatch) -> None:
                     },
                 },
             },
-        )
-    )
+        ), _v3_request())
     body = json.loads(response.body)
     assert body["evaluation_control_status"] == "EXECUTED"
     assert len(body["fixture_receipts"]) == 1
@@ -682,15 +706,14 @@ async def test_v3_capture_integration_run_b(tmp_path, monkeypatch) -> None:
         coordinated_runtime_factory=factory,
         run_registry=services.run_registry,
     )
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     run_b = uuid.uuid4().hex
     response = await server.runtime_evaluation_execute_v3_endpoint(
         _v3_payload(
             run_id=run_b,
             query="Excel 日志解析失败",
             control={"capabilities": ["CAPTURE_EPISODIC_PIPELINE"]},
-        )
-    )
+        ), _v3_request())
     body = json.loads(response.body)
     assert body["status"] == "SUCCEEDED"
     capture = body["episodic_capture"]
@@ -728,13 +751,13 @@ async def test_e08_profile_forms_then_captures_actual_zero_score(tmp_path, monke
     memory, store = _memory(tmp_path)
     router = make_real_router(memory, model=EpisodicEvalFakeModel(direct_json()))
     service = ChatService(router, coordinated_runtime_factory=_harness_factory(router, services), run_registry=services.run_registry)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     run_a = uuid.uuid4().hex
     response_a = await server.runtime_evaluation_execute_v3_endpoint(_v3_payload(
         run_id=run_a,
         query="请整理项目生产环境的发布清单并记录部署方式与回滚步骤",
         control={"capabilities": ["DETERMINISTIC_EPISODIC_SUCCESS_RUN"]},
-    ))
+    ), _v3_request())
     body_a = json.loads(response_a.body)
     assert body_a["status"] == "SUCCEEDED"
     assert body_a["formation_receipts"][0]["outcome"] == "CREATED"
@@ -745,7 +768,7 @@ async def test_e08_profile_forms_then_captures_actual_zero_score(tmp_path, monke
         run_id=run_b,
         query="请检查数据库连接串的加密配置是否启用",
         control={"capabilities": ["CAPTURE_EPISODIC_PIPELINE"]},
-    ))
+    ), _v3_request())
     capture = json.loads(response_b.body)["episodic_capture"]
     selected = next(item for item in capture["selection"]["selected"] if item["memory_id"] == formed.memory_id)
     assert selected["lexical_match_score"] == 0
@@ -753,3 +776,24 @@ async def test_e08_profile_forms_then_captures_actual_zero_score(tmp_path, monke
     assert selected["drop_reason"] == "NO_LEXICAL_MATCH"
     assert capture["supplied"]["episodic_memory_ids"] == []
     assert capture["injected"] == []
+
+
+@pytest.mark.asyncio
+async def test_e08_resolver_uses_only_the_injected_agent_registry():
+    from core.runtime.agent_registry import AgentRegistry, DEFAULT_AGENT_REGISTRY
+    from core.runtime.episodic_evaluation import DeterministicEpisodicSuccessResolver
+    from core.runtime.multi_agent_planning import PlanningRequest
+    from core.runtime.plan_compiler import PlanCompileError, PlanCompileErrorCode
+    from core.runtime.context import create_run_context
+
+    registry = AgentRegistry(tuple(
+        DEFAULT_AGENT_REGISTRY.resolve(agent_id)
+        for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+        if agent_id != "data_analyst"
+    ))
+    resolver = DeterministicEpisodicSuccessResolver(registry)
+    assert resolver._registry is registry
+    context, _ = create_run_context(entry_agent_id="core_router", timeout_seconds=30)
+    with pytest.raises(PlanCompileError) as exc:
+        await resolver.resolve(PlanningRequest("core_router", "fixed E08 intent"), context)
+    assert exc.value.error_code is PlanCompileErrorCode.UNKNOWN_AGENT

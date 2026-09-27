@@ -19,6 +19,7 @@ from core.runtime.context import RunDeadlineExceededError
 from core.runtime.invocation_bindings import InvocationBindingError, StepInvocationBindings
 from core.runtime.plan_graph import PlanGraphValidator
 from core.runtime.planning import Plan
+from core.agent_platform.contracts import BusinessPlanningDecision, WorkflowTask
 
 PLANNER_SCHEMA_VERSION = 1
 _SAFE_REASON = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -86,6 +87,14 @@ class PlanningRequest:
 
     def __repr__(self) -> str:
         return f"PlanningRequest(selected_agent_id={self.selected_agent_id!r}, user_request=<redacted>)"
+
+
+@dataclass(frozen=True, slots=True)
+class PlanningAgentCandidate:
+    agent_id: str
+    display_name: str
+    capabilities: frozenset[str]
+    accepted_input_types: frozenset[str]
 
 
 class DirectAnswerDecision:
@@ -229,6 +238,9 @@ class PlanningModel(Protocol):
         *,
         memory_context_bundle: object | None = None,
         memory_injection_report_out: list | None = None,
+        planner_agent_id: str = "core_router",
+        planner_definition: object | None = None,
+        allowed_agent_catalog: tuple[PlanningAgentCandidate, ...] = (),
     ) -> str:
         """通过统一模型服务 adapter 返回严格 JSON；实现负责预算/取消/超时。
 
@@ -378,6 +390,24 @@ class PlanResolver:
         self._compiler = compiler
         self._planning_model = planning_model
 
+    def performer_versions(self, plan: Plan, *, entry_agent_id: str) -> dict[str, str]:
+        """返回被冻结 Plan performer 与 entry 的当前 catalog version facts。"""
+        agent_ids = {entry_agent_id, *(step.preferred_agent for step in plan.steps)}
+        versions = {}
+        for agent_id in sorted(agent_ids):
+            registration = self._registry.resolve(agent_id)
+            definition = registration.definition
+            if definition is None or not isinstance(definition.agent_version, str):
+                raise PlanningError(PlanningErrorCode.INVALID_REQUEST, "Plan performer identity 缺少版本")
+            versions[agent_id] = definition.agent_version
+        return versions
+
+    def performer_identities(self, plan: Plan, *, entry_agent_id: str) -> dict[str, dict[str, str]]:
+        return {
+            agent_id: self._registry.resolve(agent_id).binding_identity()
+            for agent_id in sorted({entry_agent_id, *(step.preferred_agent for step in plan.steps)})
+        }
+
     async def resolve(
         self,
         request: PlanningRequest,
@@ -399,6 +429,45 @@ class PlanResolver:
             selected = self._registry.require_entry(request.selected_agent_id)
         except AgentRegistryError:
             raise
+        definition = selected.definition
+        if definition is not None and definition.execution_binding.kind == "workflow":
+            workflow = selected.workflow
+            if workflow is None:
+                raise PlanningError(PlanningErrorCode.INVALID_REQUEST, "绑定的 Workflow 不可用")
+            if not workflow.tasks:
+                return self._compiler.compile(
+                    DirectAnswerDecision(selected.agent_id, "REGISTERED_WORKFLOW_DIRECT"),
+                    planning_source=PlanningSource.EXPLICIT_ENTRY,
+                    direct_instruction=request.user_request,
+                )
+            tasks = tuple(
+                DelegatedTaskDecision(
+                    task.task_id,
+                    task.agent_id,
+                    f"{task.instruction}\n\n用户请求：{request.user_request}",
+                    input_type=task.input_type,
+                    required_capabilities=task.capabilities,
+                )
+                for task in workflow.tasks
+            )
+            if len(tasks) == 1 and tasks[0].agent_id == selected.agent_id and not workflow.synthesis_required:
+                return self._compiler.compile(
+                    DirectAnswerDecision(selected.agent_id, "REGISTERED_WORKFLOW_DIRECT"),
+                    planning_source=PlanningSource.EXPLICIT_ENTRY,
+                    direct_instruction=(
+                        f"{tasks[0].instruction}\n\n用户请求：{request.user_request}"
+                    ),
+                )
+            return self._compiler.compile(
+                DelegatedPlanDecision(tasks, workflow.synthesis_required),
+                planning_source=PlanningSource.EXPLICIT_ENTRY,
+            )
+        if definition is not None and definition.execution_binding.kind == "direct":
+            return self._compiler.compile(
+                DirectAnswerDecision(selected.agent_id, "REGISTERED_DIRECT"),
+                planning_source=PlanningSource.EXPLICIT_ENTRY,
+                direct_instruction=request.user_request,
+            )
         if not selected.model_direct_allowed:
             decision = DirectAnswerDecision(
                 selected.agent_id,
@@ -428,13 +497,19 @@ class PlanResolver:
             raise PlanningError(PlanningErrorCode.PLANNING_MODEL_REQUIRED, "请求需要 Planner model")
         try:
             if memory_context_bundle is None:
-                raw_output = await self._planning_model.generate_plan(request, run_context)
+                raw_output = await self._planning_model.generate_plan(
+                    request, run_context, planner_agent_id=selected.agent_id,
+                    planner_definition=definition, allowed_agent_catalog=self._planning_catalog(),
+                )
             else:
                 raw_output = await self._planning_model.generate_plan(
                     request,
                     run_context,
                     memory_context_bundle=memory_context_bundle,
                     memory_injection_report_out=memory_injection_report_out,
+                    planner_agent_id=selected.agent_id,
+                    planner_definition=definition,
+                    allowed_agent_catalog=self._planning_catalog(),
                 )
         except BaseException as exc:
             if isinstance(
@@ -453,6 +528,26 @@ class PlanResolver:
             raise PlanningError(PlanningErrorCode.PLANNING_MODEL_FAILED, "Planner model 调用失败") from None
         run_context.raise_if_inactive()
         decision = StrictPlanningDecisionParser.parse(raw_output)
+        if isinstance(decision, DirectAnswerDecision):
+            business_decision = BusinessPlanningDecision(direct_answer=True)
+            if business_decision.direct_answer and decision.agent_id == selected.agent_id:
+                decision = DirectAnswerDecision(selected.agent_id, decision.reason_code)
+        else:
+            business_decision = BusinessPlanningDecision(
+                tasks=tuple(WorkflowTask(
+                    task.task_id, task.agent_id, task.instruction,
+                    input_type=task.input_type, capabilities=frozenset(task.required_capabilities),
+                ) for task in decision.tasks),
+                direct_answer=False,
+                synthesis_required=decision.synthesis_required,
+            )
+            decision = DelegatedPlanDecision(
+                tuple(DelegatedTaskDecision(
+                    task.task_id, task.agent_id, task.instruction,
+                    input_type=task.input_type, required_capabilities=task.capabilities,
+                ) for task in business_decision.tasks),
+                synthesis_required=business_decision.synthesis_required,
+            )
         return self._compiler.compile(
             decision,
             planning_source=PlanningSource.MODEL,
@@ -461,6 +556,20 @@ class PlanResolver:
                 if isinstance(decision, DirectAnswerDecision)
                 else None
             ),
+        )
+
+    def _planning_catalog(self) -> tuple[PlanningAgentCandidate, ...]:
+        return tuple(
+            PlanningAgentCandidate(
+                agent_id=(record.definition.agent_id if record.definition is not None else record.agent_id),
+                display_name=record.display_name,
+                capabilities=record.capabilities,
+                accepted_input_types=record.accepted_input_types,
+            )
+            for record in (
+                self._registry.resolve(agent_id)
+                for agent_id in self._registry.delegated_specialist_ids()
+            )
         )
 
     def _deterministic_core_decision(

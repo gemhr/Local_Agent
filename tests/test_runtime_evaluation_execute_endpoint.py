@@ -29,7 +29,11 @@ from core.runtime.retrieval_evaluation import (
     current_retrieval_evaluation_collector,
 )
 from tests._runtime_assembly_fixtures import FakeRouter, make_services
-from tests.test_runtime_execute_endpoint import _ExplodingFactory, _result
+from tests.test_runtime_execute_endpoint import (
+    _ExplodingFactory,
+    _install_chat_service,
+    _result,
+)
 
 
 def _context_for_run(run_id: str):
@@ -57,7 +61,7 @@ class _EvalService:
         self.output = output
         self.seen_collector = None
 
-    async def run_coordinated_agent(self, **kwargs):
+    async def run_coordinated_agent(self, _agent_id=None, _query=None, **kwargs):
         self.seen_collector = current_retrieval_evaluation_collector()
         return self.output, self.result
 
@@ -126,7 +130,7 @@ class _LargeEvalService:
         self.run_id = run_id
         self.count = count
 
-    async def run_coordinated_agent(self, **kwargs):
+    async def run_coordinated_agent(self, _agent_id=None, _query=None, **kwargs):
         run_id = kwargs["run_id"]
         service = RetrievalExecutionService(
             _LargeTextAdapter(32_768),
@@ -154,7 +158,7 @@ class _LargeEvalService:
 class _RagAndAnswerEvalService:
     admission_gate = SimpleNamespace(accepts_new_runs=True)
 
-    async def run_coordinated_agent(self, **kwargs):
+    async def run_coordinated_agent(self, _agent_id=None, _query=None, **kwargs):
         run_id = kwargs["run_id"]
         invocation = RetrievalInvocation.create(
             "query",
@@ -237,7 +241,7 @@ async def test_evaluation_response_exact_keys_protocol_and_run_id(monkeypatch):
     run_id = uuid.uuid4().hex
     result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
     service = _EvalService(result)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     response = await _execute(_payload(run_id=run_id))
     body = json.loads(response.body)
     assert set(body) == {
@@ -266,7 +270,7 @@ async def test_evaluation_response_exact_keys_protocol_and_run_id(monkeypatch):
 async def test_runtime_succeeded_capture_complete_orthogonal(monkeypatch):
     run_id = uuid.uuid4().hex
     result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
-    monkeypatch.setattr(server.app.state, "chat_service", _EvalService(result), raising=False)
+    _install_chat_service(monkeypatch, _EvalService(result))
     body = json.loads((await _execute(_payload(run_id=run_id))).body)
     assert body["status"] == "SUCCEEDED"
     assert body["capture_status"] == "COMPLETE"
@@ -282,7 +286,7 @@ async def test_runtime_failed_capture_complete_keeps_failed_terminal(monkeypatch
         run_id=run_id,
         error_code="RUNTIME_AGENT_FAILURE",
     )
-    monkeypatch.setattr(server.app.state, "chat_service", _EvalService(result), raising=False)
+    _install_chat_service(monkeypatch, _EvalService(result))
     body = json.loads((await _execute(_payload(run_id=run_id))).body)
     assert body["status"] == "FAILED"
     assert body["stop_reason"] == "UNHANDLED_ERROR"
@@ -301,7 +305,7 @@ async def test_v2_captures_exact_delivered_final_answer(monkeypatch):
     run_id = uuid.uuid4().hex
     answer = "answer-v2\n原样保留"
     result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
-    monkeypatch.setattr(server.app.state, "chat_service", _EvalService(result, answer), raising=False)
+    _install_chat_service(monkeypatch, _EvalService(result, answer))
 
     body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
 
@@ -334,9 +338,7 @@ async def test_v2_failed_runtime_never_captures_incidental_output(monkeypatch):
         run_id=run_id,
         error_code="RUNTIME_AGENT_FAILURE",
     )
-    monkeypatch.setattr(
-        server.app.state, "chat_service", _EvalService(result, "must-not-be-captured"), raising=False
-    )
+    _install_chat_service(monkeypatch, _EvalService(result, "must-not-be-captured"))
 
     body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
 
@@ -351,7 +353,7 @@ async def test_v2_final_answer_over_utf8_bound_fails_without_partial_content(mon
     run_id = uuid.uuid4().hex
     answer = "中" * 21_846  # 65,538 UTF-8 bytes, not 21,846 bytes.
     result = _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id)
-    monkeypatch.setattr(server.app.state, "chat_service", _EvalService(result, answer), raising=False)
+    _install_chat_service(monkeypatch, _EvalService(result, answer))
 
     body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
 
@@ -365,7 +367,7 @@ async def test_v2_final_answer_over_utf8_bound_fails_without_partial_content(mon
 @pytest.mark.asyncio
 async def test_v2_keeps_rag_and_final_answer_evidence_independent(monkeypatch):
     run_id = uuid.uuid4().hex
-    monkeypatch.setattr(server.app.state, "chat_service", _RagAndAnswerEvalService(), raising=False)
+    _install_chat_service(monkeypatch, _RagAndAnswerEvalService())
 
     body = json.loads((await _execute_v2(_payload(run_id=run_id))).body)
 
@@ -384,7 +386,7 @@ async def test_v2_keeps_rag_and_final_answer_evidence_independent(monkeypatch):
 async def test_evaluation_response_over_1mib_fails_closed_keeps_terminal(monkeypatch):
     run_id = uuid.uuid4().hex
     service = _LargeEvalService(run_id, count=16)
-    monkeypatch.setattr(server.app.state, "chat_service", service, raising=False)
+    _install_chat_service(monkeypatch, service)
     response = await _execute(_payload(run_id=run_id))
     body = json.loads(response.body)
     assert body["status"] == "SUCCEEDED"

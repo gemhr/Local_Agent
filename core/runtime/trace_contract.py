@@ -40,6 +40,14 @@ RUN_ATTRIBUTE_KEYS = frozenset(
         "final_status",
         "stop_reason",
         "session_id",
+        "agent_version",
+        "resolved_agent_id",
+        "workflow_id",
+        "workflow_version",
+        "toolset_identity",
+        "resolved_model_profile_id",
+        "resolved_retrieval_profile_id",
+        "resolved_memory_profile_id",
     }
 )
 PLANNING_ATTRIBUTE_KEYS = frozenset(
@@ -57,6 +65,9 @@ PLANNING_ATTRIBUTE_KEYS = frozenset(
 STEP_ATTRIBUTE_KEYS = frozenset(
     {
         "preferred_agent",
+        "agent_version",
+        "workflow_id",
+        "workflow_version",
         "execution_kind",
         "output_policy",
         "invocation_role",

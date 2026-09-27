@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 import pytest
 
 import server
+from tests.test_tool_governance import production_agent_registry
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 from core.agent_router import AgentRouter
 from core.runtime import (
     AgentAdapterResult,
@@ -68,10 +70,13 @@ def _base_router(registry, governance, tool_name: str, tool_args: str):
     router.tool_registry = registry
     router.tool_governance_service = governance
     router.tool_execution_service = _ExecutionOracle()
-    router._build_messages = lambda **_: [
-        {"role": "system", "content": "control"},
-        {"role": "user", "content": "request"},
-    ]
+    def build_messages(**kwargs):
+        from core.runtime.tool_discovery import create_tool_snapshot
+        active = kwargs["run_context"]
+        if active.tool_resolution_snapshot is None:
+            active.attach_tool_resolution_snapshot(create_tool_snapshot(active.run_id, registry.registrations()))
+        return [{"role": "system", "content": "control"}, {"role": "user", "content": "request"}]
+    router._build_messages = build_messages
     router._plan_tool_call = lambda *_args: (tool_name, tool_args)
     return router
 
@@ -114,7 +119,7 @@ def _approval_router():
     )
     return _base_router(
         registry,
-        server._build_tool_governance(registry),
+        server._build_tool_governance(registry, production_agent_registry(registry)),
         "complex_workflow_simulator",
         payload,
     )
@@ -141,7 +146,7 @@ def _resource_router(tmp_path):
     catalog.freeze()
     router = _base_router(
         registry,
-        server._build_tool_governance(registry),
+        server._build_tool_governance(registry, production_agent_registry(registry)),
         "list_files",
         str(outside.resolve()),
     )
@@ -165,6 +170,8 @@ def _request() -> AgentExecutionRequest:
 def _execute(router) -> AgentAdapterResult:
     context, _ = create_run_context(entry_agent_id="core_router")
     context.attach_budget_ledger(BudgetLedger(RunBudget()))
+    from core.runtime.tool_discovery import create_tool_snapshot
+    context.attach_tool_resolution_snapshot(create_tool_snapshot(context.run_id, router.tool_registry.registrations()))
     result = AgentRouterSingleAgentAdapter(router).execute(_request(), context)
     assert router.tool_execution_service.calls == 0
     return result

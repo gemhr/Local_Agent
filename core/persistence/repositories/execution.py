@@ -402,6 +402,9 @@ class DurableExecutionRepository:
                 raise RuntimeError("unknown Run control row")
             await close(session, control, event.sequence)
         if projected and client_event_feed is not None:
+            committed = getattr(client_event_feed, "projection_committed", None)
+            if callable(committed):
+                committed(event)
             record_write_succeeded = getattr(client_event_feed, "record_write_succeeded", None)
             if callable(record_write_succeeded):
                 record_write_succeeded()

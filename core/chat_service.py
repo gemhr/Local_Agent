@@ -115,6 +115,10 @@ class ChatService:
         budget: RunBudget | None = None,
         persist: bool = True,
         retrieval_cache_authz_domain: str | None = None,
+        session_id: str | None = None,
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
     ) -> tuple[str | None, RunCoordinatorResult]:
         """通过 RunCoordinator 执行一条真实的非流式单 Agent 路径。
 
@@ -130,6 +134,10 @@ class ChatService:
             budget=budget,
             persist=persist,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain,
+            session_id=session_id,
+            agent_version=agent_version,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
             _result_out=results,
         ):
             events.append(event)
@@ -157,6 +165,10 @@ class ChatService:
         evaluation_plan_resolver=None,
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
+        session_id: str | None = None,
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
     ) -> tuple[str | None, RunCoordinatorResult]:
         """Isolated evaluation-only entry mirroring ``run_coordinated_agent``.
 
@@ -179,6 +191,10 @@ class ChatService:
             evaluation_plan_resolver=evaluation_plan_resolver,
             project_identity=project_identity,
             project_grants=project_grants,
+            session_id=session_id,
+            agent_version=agent_version,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
             _result_out=results,
         ):
             events.append(event)
@@ -206,6 +222,10 @@ class ChatService:
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
         retrieval_cache_authz_domain: str | None = None,
+        session_id: str | None = None,
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
         if self._coordinated_runtime_factory is None:
@@ -224,6 +244,10 @@ class ChatService:
             project_identity=project_identity,
             project_grants=project_grants,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain,
+            session_id=session_id,
+            agent_version=agent_version,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
         )
         try:
             async for event in events:
@@ -246,6 +270,10 @@ class ChatService:
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
         retrieval_cache_authz_domain: str | None = None,
+        session_id: str | None = None,
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
     ):
         factory = self._coordinated_runtime_factory
         if factory is None:
@@ -265,6 +293,10 @@ class ChatService:
                 evaluation_plan_resolver=evaluation_plan_resolver,
                 project_identity=project_identity,
                 project_grants=project_grants,
+                session_id=session_id or "default",
+                agent_version=agent_version,
+                workflow_id=workflow_id,
+                workflow_version=workflow_version,
             )
             scope.run_context.attach_retrieval_cache_access(
                 retrieval_cache_authz_domain
@@ -295,6 +327,10 @@ class ChatService:
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
         retrieval_cache_authz_domain: str | None = None,
+        session_id: str | None = None,
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Run the sole production coordinated event path through the factory.
 
@@ -312,6 +348,10 @@ class ChatService:
             project_identity=project_identity,
             project_grants=project_grants,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain,
+            session_id=session_id,
+            agent_version=agent_version,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
         )
         consumer = self._consume_scope_events(
             scope,
@@ -340,6 +380,10 @@ class ChatService:
         cancellation_intent: list[CancellationReason] | None,
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
+        session_id: str | None = None,
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Isolated evaluation-only factory path (strict typed control only)."""
         scope = await self._create_coordinated_scope(
@@ -354,6 +398,10 @@ class ChatService:
             evaluation_plan_resolver=evaluation_plan_resolver,
             project_identity=project_identity,
             project_grants=project_grants,
+            session_id=session_id or "default",
+            agent_version=agent_version,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
         )
         consumer = self._consume_scope_events(
             scope,
@@ -382,6 +430,10 @@ class ChatService:
         _cancellation_intent: list[CancellationReason] | None = None,
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
+        session_id: str | None = None,
+        agent_version: str | None = None,
+        workflow_id: str | None = None,
+        workflow_version: str | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Isolated evaluation-only event stream mirroring the production path."""
         events = self._stream_factory_coordinated_events_evaluation(
@@ -398,6 +450,10 @@ class ChatService:
             cancellation_intent=_cancellation_intent,
             project_identity=project_identity,
             project_grants=project_grants,
+            session_id=session_id,
+            agent_version=agent_version,
+            workflow_id=workflow_id,
+            workflow_version=workflow_version,
         )
         try:
             async for event in events:

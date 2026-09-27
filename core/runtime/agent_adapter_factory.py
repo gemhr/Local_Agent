@@ -82,6 +82,7 @@ class AgentExecutionRequest:
         "_memory_context_bundle",
         "_approval_controller",
         "_final_output_sink",
+        "_business_definition",
         "_locked",
     )
 
@@ -103,6 +104,7 @@ class AgentExecutionRequest:
         memory_context_bundle=None,
         approval_controller=None,
         final_output_sink=None,
+        business_definition=None,
     ) -> None:
         if not isinstance(step_id, str) or not step_id.strip():
             raise AgentAdapterError(
@@ -119,6 +121,8 @@ class AgentExecutionRequest:
                 AgentAdapterErrorCode.REQUEST_INVALID,
                 "instruction 不能为空",
             )
+        if business_definition is not None and getattr(business_definition, "agent_id", None) != agent_id:
+            raise AgentAdapterError(AgentAdapterErrorCode.REQUEST_INVALID, "业务定义与请求 Agent 不一致")
         if not isinstance(invocation_role, InvocationRole):
             raise AgentAdapterError(
                 AgentAdapterErrorCode.REQUEST_INVALID,
@@ -180,6 +184,7 @@ class AgentExecutionRequest:
         object.__setattr__(self, "_memory_context_bundle", memory_context_bundle)
         object.__setattr__(self, "_approval_controller", approval_controller)
         object.__setattr__(self, "_final_output_sink", final_output_sink)
+        object.__setattr__(self, "_business_definition", business_definition)
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name, value) -> None:
@@ -198,6 +203,11 @@ class AgentExecutionRequest:
     @property
     def instruction(self) -> str:
         return self._instruction
+
+    @property
+    def business_definition(self):
+        """仅内部 Adapter 使用的已编译业务定义，不属于业务请求面。"""
+        return self._business_definition
 
     @property
     def invocation_role(self) -> InvocationRole:
@@ -450,19 +460,24 @@ class AgentRouterSingleAgentAdapter:
                 "adapter 需要 AgentExecutionRequest",
             )
         try:
+            router_kwargs = {
+                "run_context": run_context,
+                "capability_requirements": request.capability_requirements,
+                "persist": False,
+                "history_policy": request.history_policy,
+                "raise_security_denial": True,
+                "event_emitter": request.event_emitter,
+                "fault_controller": request.fault_controller,
+                "memory_context_bundle": request.memory_context_bundle,
+                "approval_controller": request.approval_controller,
+                "final_output_sink": request.final_output_sink,
+            }
+            if request.business_definition is not None:
+                router_kwargs["business_definition"] = request.business_definition
             text = self._router.complete_single_agent(
                 request.agent_id,
                 request.instruction,
-                run_context=run_context,
-                capability_requirements=request.capability_requirements,
-                persist=False,
-                history_policy=request.history_policy,
-                raise_security_denial=True,
-                event_emitter=request.event_emitter,
-                fault_controller=request.fault_controller,
-                memory_context_bundle=request.memory_context_bundle,
-                approval_controller=request.approval_controller,
-                final_output_sink=request.final_output_sink,
+                **router_kwargs,
             )
         except (
             asyncio.CancelledError,

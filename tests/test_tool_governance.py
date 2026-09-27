@@ -75,15 +75,35 @@ def production_registry() -> ToolRegistry:
     return registry
 
 
+def production_agent_registry(registry: ToolRegistry):
+    from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
+    from core.runtime.tool_governance import builtin_tool_permission_seed
+    return compile_agent_catalog(
+        AgentRegistrationBundle(registrations=()),
+        builtin_registrations=tuple(
+            DEFAULT_AGENT_REGISTRY.resolve(agent_id)
+            for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+        ),
+        actual_tool_names=registry.registered_names,
+        actual_tool_registrations={
+            item.descriptor.name: item for item in registry.startup_registrations
+        },
+        platform_tool_permission_seed=builtin_tool_permission_seed(
+            registry.registered_names, frozenset(DEFAULT_AGENT_REGISTRY.agent_ids)
+        ),
+    ).agent_registry
+
+
 def production_service(registry: ToolRegistry | None = None) -> ToolGovernanceService:
     registry = registry or production_registry()
+    agent_registry = production_agent_registry(registry)
     catalog = ToolPolicyCatalog(
         tool_registry=registry,
-        agent_registry=DEFAULT_AGENT_REGISTRY,
+        agent_registry=agent_registry,
     )
     register_default_tool_policies(catalog)
     catalog.freeze()
-    return ToolGovernanceService(catalog, DEFAULT_AGENT_REGISTRY)
+    return ToolGovernanceService(catalog, agent_registry)
 
 
 def _registration(
@@ -533,9 +553,10 @@ def test_catalog_disabled_agent_reference_fails_freeze():
 
 def test_production_catalog_covers_all_builtin_tools():
     registry = production_registry()
+    agent_registry = production_agent_registry(registry)
     catalog = ToolPolicyCatalog(
         tool_registry=registry,
-        agent_registry=DEFAULT_AGENT_REGISTRY,
+        agent_registry=agent_registry,
     )
     register_default_tool_policies(catalog)
     catalog.freeze()
@@ -556,20 +577,25 @@ def test_production_catalog_covers_all_builtin_tools():
         "stage8_get_meeting_summary",
         "stage8_get_case",
         "stage8_get_environment",
+        "stage8_search_environments",
         "stage8_get_executor",
+        "stage8_get_execution_status",
+        "stage8_get_execution_result",
         "stage8_get_logs",
         "stage8_search_tickets",
+        "stage8_generate_case",
         "stage8_start_execution",
         "stage8_create_ticket",
     }
-    assert len(catalog_names) == 17
+    assert len(catalog_names) == 21
 
 
 def test_production_policies_use_explicit_agent_permissions():
     registry = production_registry()
+    agent_registry = production_agent_registry(registry)
     catalog = ToolPolicyCatalog(
         tool_registry=registry,
-        agent_registry=DEFAULT_AGENT_REGISTRY,
+        agent_registry=agent_registry,
     )
     register_default_tool_policies(catalog)
     catalog.freeze()
@@ -591,7 +617,6 @@ def test_production_policies_use_explicit_agent_permissions():
             assert policy.allowed_agent_ids == stage8_query_agents
         else:
             assert policy.allowed_agent_ids == PRODUCTION_AGENT_IDS
-            assert policy.allowed_agent_ids == frozenset(DEFAULT_AGENT_REGISTRY.agent_ids)
 
 
 def test_production_agents_follow_each_tool_policy_allowlist():
@@ -986,9 +1011,10 @@ def test_router_unclassified_risk_never_executes():
 
 def test_complex_workflow_has_no_duplicated_static_side_effect_fact():
     registry = production_registry()
+    agent_registry = production_agent_registry(registry)
     catalog = ToolPolicyCatalog(
         tool_registry=registry,
-        agent_registry=DEFAULT_AGENT_REGISTRY,
+        agent_registry=agent_registry,
     )
     register_default_tool_policies(catalog)
     catalog.freeze()

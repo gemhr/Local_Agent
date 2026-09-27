@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -24,6 +25,7 @@ from core.stage8 import (
     FeatureUnderstandingResult,
 )
 from core.persistence.models import Stage8TestPlanRow
+from core.runtime.state import RunStatus, StopReason
 
 
 def _context():
@@ -52,21 +54,16 @@ async def test_valid_output_is_typed_and_invalid_output_repairs_once():
 
 @pytest.mark.asyncio
 async def test_runtime_run_id_is_attached_to_mission_reference():
-    class Scope:
-        run_id = "run-specialist-1"
-        driver = type("Driver", (), {"output": '{"feature_id":"chat-1","summary":"ok","change_points":[],"affected_components":[],"clarifications":[],"known_constraints":[],"evidence":[]}'})()
-
-        async def execute(self):
-            return None
-
-        async def close(self):
-            return None
-
-    class Factory:
-        async def create_static_run_scope(self, agent_id, prompt, persist):
-            assert agent_id == "feature_understanding"
-            assert persist is False
-            return Scope()
+    class Application:
+        async def execute(self, request):
+            assert request.agent_id == "feature_understanding"
+            assert request.input
+            return SimpleNamespace(
+                run_id="run-specialist-1",
+                status=RunStatus.SUCCEEDED,
+                stop_reason=StopReason.COMPLETED,
+                output='{"feature_id":"chat-1","summary":"ok","change_points":[],"affected_components":[],"clarifications":[],"known_constraints":[],"evidence":[]}',
+            )
 
     class Missions:
         references = []
@@ -76,13 +73,65 @@ async def test_runtime_run_id_is_attached_to_mission_reference():
 
     missions = Missions()
     await SpecialistAgentApplicationService(
-        Factory(), mission_service=missions
+        Application(), mission_service=missions
     ).feature_understanding(FeatureUnderstandingRequest(
         mission_id="mission-1", context=_context()
     ))
     assert missions.references == [
         ("mission-1", "run-specialist-1", "feature_understanding")
     ]
+
+
+@pytest.mark.asyncio
+async def test_failed_runtime_output_is_not_repaired_or_parsed():
+    calls = []
+
+    class Application:
+        async def execute(self, request):
+            calls.append(request)
+            return SimpleNamespace(
+                run_id="run-failed-specialist",
+                status=RunStatus.FAILED,
+                stop_reason=StopReason.UNHANDLED_ERROR,
+                output=None,
+            )
+
+    with pytest.raises(RuntimeError, match="runtime did not succeed"):
+        await SpecialistAgentApplicationService(Application()).feature_understanding(
+            FeatureUnderstandingRequest(context=_context())
+        )
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_success_business_invalid_uses_only_bounded_business_repair():
+    calls = []
+
+    class Application:
+        async def execute(self, request):
+            calls.append(request)
+            if len(calls) == 1:
+                return SimpleNamespace(
+                    run_id="run-invalid-business-output", status=RunStatus.SUCCEEDED,
+                    stop_reason=StopReason.COMPLETED, output=None,
+                    business_output_valid=False,
+                    business_error_code="BUSINESS_OUTPUT_INVALID",
+                    output_disposition="REJECTED", rejected_output="not-json",
+                )
+            return SimpleNamespace(
+                run_id="run-repaired-business-output", status=RunStatus.SUCCEEDED,
+                stop_reason=StopReason.COMPLETED,
+                output='{"feature_id":"chat-1","summary":"fixed","change_points":[],"affected_components":[],"clarifications":[],"known_constraints":[],"evidence":[]}',
+                business_output_valid=True,
+            )
+
+    result = await SpecialistAgentApplicationService(Application()).feature_understanding(
+        FeatureUnderstandingRequest(context=_context())
+    )
+    assert isinstance(result, FeatureUnderstandingResult)
+    assert result.summary == "fixed"
+    assert len(calls) == 2
+    assert "specialist business output schema invalid" in calls[1].input
 
 
 @pytest.mark.asyncio

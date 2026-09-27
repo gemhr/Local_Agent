@@ -369,6 +369,9 @@ class PostgresRunEventJournal:
                 pass
             raise
         if projected:
+            committed = getattr(client_event_feed, "projection_committed", None)
+            if callable(committed):
+                committed(event)
             client_event_feed.record_write_succeeded()
         try:
             self._metrics_hook.journal_append_succeeded(

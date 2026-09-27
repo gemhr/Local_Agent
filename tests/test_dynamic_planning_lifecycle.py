@@ -17,12 +17,28 @@ from core.runtime.model_context import ContextBuilder
 from core.runtime.parallel_execution import StepExecutionMode
 from core.runtime.run_coordinator import DynamicPlanState, RunCoordinatorError
 from core.runtime.multi_agent_planning import PlanningError, PlanningErrorCode
+from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
+from core.runtime.agent_registry import AgentRegistryError, DEFAULT_AGENT_REGISTRY
+from core.runtime.tracing import InMemorySpanRecorder
 from core.runtime.recovery_contract import RecoveryReason, RecoveryStatus
 from tests._runtime_assembly_fixtures import (
     FakeDurableRunControl,
     FakeRouter,
     make_services,
 )
+
+
+def _test_runtime_factory(router, services, **kwargs):
+    registry = compile_agent_catalog(
+        AgentRegistrationBundle(registrations=()),
+        builtin_registrations=tuple(
+            DEFAULT_AGENT_REGISTRY.resolve(agent_id)
+            for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+        ),
+    ).agent_registry
+    return CoordinatedRuntimeFactory(
+        router, services, agent_registry=registry, **kwargs
+    )
 
 
 def direct_json(agent_id: str = "core_router") -> str:
@@ -93,6 +109,48 @@ class RecordingRouter(FakeRouter):
         return self.complete_single_agent(agent_id, rendered, **kwargs)
 
 
+@pytest.mark.asyncio
+async def test_custom_dynamic_delegates_execute_without_static_workflow():
+    from core.agent_platform.contracts import AgentDefinition, AgentRegistration, ExecutionBinding
+
+    definitions = (
+        AgentDefinition(agent_id="review_entry", agent_version="1", display_name="Review",
+                        role="review", instructions="Plan a review.",
+                        execution_binding=ExecutionBinding(kind="dynamic")),
+        *(AgentDefinition(agent_id=name, agent_version="1", display_name=name,
+                          role="review", instructions="Review this task.",
+                          entry_allowed=False, delegation_allowed=True)
+          for name in ("review_a", "review_b")),
+    )
+    registry = compile_agent_catalog(AgentRegistrationBundle(
+        registrations=tuple(AgentRegistration(item) for item in definitions),
+    ), builtin_registrations=tuple(DEFAULT_AGENT_REGISTRY.resolve(name)
+                                  for name in DEFAULT_AGENT_REGISTRY.agent_ids)).agent_registry
+
+    class CustomRouter(RecordingRouter):
+        def complete_planning_decision(self, user_request, **kwargs):
+            assert kwargs["planner_agent_id"] == "review_entry"
+            assert {item.agent_id for item in kwargs["allowed_agent_catalog"]} >= {"review_a", "review_b"}
+            return super().complete_planning_decision(user_request, **kwargs)
+
+    router = CustomRouter(json.dumps({"schema_version": 1, "decision": "DELEGATE",
+        "tasks": [{"task_id": name, "agent_id": name, "instruction": "Review."}
+                  for name in ("review_a", "review_b")], "synthesis_required": True}))
+    scope = await CoordinatedRuntimeFactory(router, make_services(), agent_registry=registry).create_run_scope(
+        "review_entry", "Coordinate two independent reviews."
+    )
+    try:
+        result = await scope.execute()
+        assert result.status is RunStatus.SUCCEEDED
+        assert router.planning_calls == 1
+        assert {name for name, _ in router.agent_calls} == {"review_a", "review_b", "synthesis_agent"}
+        assert set(scope.run_context.data.performer_binding_identities) == {
+            "review_entry", "review_a", "review_b", "synthesis_agent"
+        }
+    finally:
+        await scope.close()
+
+
 def event_records(services, run_id: str):
     return services.event_journal.read_after(run_id, 0, 1000)
 
@@ -138,7 +196,7 @@ async def test_dynamic_planning_failure_uses_run_control_terminal_before_aggrega
     control = RecordingDurableRunControl()
     services = replace(make_services(snapshot_enabled=False), durable_run_control=control)
     repository = RecordingExecutionRepository()
-    scope = await CoordinatedRuntimeFactory(
+    scope = await _test_runtime_factory(
         FailingPlannerRouter(),
         services,
         execution_repository=repository,
@@ -161,7 +219,7 @@ async def test_dynamic_planning_failure_uses_run_control_terminal_before_aggrega
 async def test_dynamic_scope_delays_plan_bound_components_and_freezes_once() -> None:
     services = make_services()
     router = RecordingRouter()
-    scope = await CoordinatedRuntimeFactory(router, services).create_run_scope(
+    scope = await _test_runtime_factory(router, services).create_run_scope(
         "core_router", "original user request"
     )
 
@@ -212,7 +270,7 @@ async def test_dynamic_scope_delays_plan_bound_components_and_freezes_once() -> 
 @pytest.mark.asyncio
 async def test_execution_before_dynamic_plan_freeze_fails_explicitly() -> None:
     services = make_services(snapshot_enabled=False)
-    scope = await CoordinatedRuntimeFactory(
+    scope = await _test_runtime_factory(
         RecordingRouter(), services
     ).create_run_scope("core_router", "request")
 
@@ -229,7 +287,7 @@ async def test_execution_before_dynamic_plan_freeze_fails_explicitly() -> None:
 async def test_static_scope_has_no_planning_events() -> None:
     services = make_services(snapshot_enabled=False)
     router = RecordingRouter()
-    scope = await CoordinatedRuntimeFactory(router, services).create_static_run_scope(
+    scope = await _test_runtime_factory(router, services).create_static_run_scope(
         "core_router", "static request"
     )
     result = await scope.execute()
@@ -253,7 +311,7 @@ async def test_explicit_specialist_is_deterministic_and_uses_original_binding(
     services = make_services(snapshot_enabled=False)
     router = RecordingRouter()
     request = f"explicit request for {agent_id}"
-    scope = await CoordinatedRuntimeFactory(router, services).create_run_scope(
+    scope = await _test_runtime_factory(router, services).create_run_scope(
         agent_id, request
     )
 
@@ -274,7 +332,7 @@ async def test_deterministic_planning_records_safe_source_and_duration_metrics()
         snapshot_enabled=False,
         runtime_metrics_recorder=metrics,
     )
-    scope = await CoordinatedRuntimeFactory(
+    scope = await _test_runtime_factory(
         RecordingRouter(), services
     ).create_run_scope("knowledge_expert", "metric request")
 
@@ -296,7 +354,7 @@ async def test_delegated_knowledge_direct_uses_binding_instruction() -> None:
     services = make_services(snapshot_enabled=False)
     router = RecordingRouter()
     request = "调用知识专家，总结 cdt_field_mapping.md"
-    scope = await CoordinatedRuntimeFactory(router, services).create_run_scope(
+    scope = await _test_runtime_factory(router, services).create_run_scope(
         "core_router", request
     )
 
@@ -310,9 +368,10 @@ async def test_delegated_knowledge_direct_uses_binding_instruction() -> None:
 
 @pytest.mark.asyncio
 async def test_multi_step_plan_runs_and_delivers_unique_final() -> None:
-    services = make_services()
+    recorder = InMemorySpanRecorder()
+    services = make_services(span_recorder=recorder)
     router = RecordingRouter(delegated_json(multi_step=True))
-    scope = await CoordinatedRuntimeFactory(router, services).create_run_scope(
+    scope = await _test_runtime_factory(router, services).create_run_scope(
         "core_router", "coordinate two professional reviews"
     )
 
@@ -328,6 +387,26 @@ async def test_multi_step_plan_runs_and_delivers_unique_final() -> None:
         "synthesis_agent",
     ]
     assert scope.coordinator.invocation_bindings is None
+    assert dict(scope.run_context.data.performer_binding_versions) == {
+        "core_router": "builtin-1",
+        "code_expert": "builtin-1",
+        "data_analyst": "builtin-1",
+        "synthesis_agent": "builtin-1",
+    }
+    assert scope.run_context.data.performer_binding_identities["synthesis_agent"]["agent_version"] == "builtin-1"
+    root_span = next(span for span in recorder.snapshot() if span.operation == "runtime.run")
+    assert root_span.attributes["resolved_agent_id"] == "core_router"
+    assert root_span.attributes["toolset_identity"] == scope.run_context.data.toolset_identity
+    performer_spans = {
+        span.attributes.get("preferred_agent"): span.attributes.get("agent_version")
+        for span in recorder.snapshot()
+        if span.attributes.get("preferred_agent") is not None
+    }
+    assert performer_spans == {
+        "code_expert": "builtin-1",
+        "data_analyst": "builtin-1",
+        "synthesis_agent": "builtin-1",
+    }
     types = event_types(services, scope.run_id)
     assert RuntimeEventType.PLAN_CREATED in types
     assert types.count(RuntimeEventType.STEP_STARTED) == 3
@@ -373,7 +452,14 @@ async def test_planning_failures_have_no_plan_checkpoint_step_or_raw_output(
 ) -> None:
     services = make_services()
     router = RecordingRouter(planning_output)
-    scope = await CoordinatedRuntimeFactory(router, services).create_run_scope(
+    if selected_agent == "missing_agent":
+        with pytest.raises(AgentRegistryError):
+            await _test_runtime_factory(router, services).create_run_scope(
+                selected_agent, "sensitive request /private/path.md"
+            )
+        assert router.planning_calls == 0
+        return
+    scope = await _test_runtime_factory(router, services).create_run_scope(
         selected_agent, "sensitive request /private/path.md"
     )
 
@@ -405,7 +491,7 @@ async def test_independent_planner_timeout_maps_to_planning_failed() -> None:
             return super().complete_planning_decision(user_request, **kwargs)
 
     services = make_services(snapshot_enabled=False)
-    scope = await CoordinatedRuntimeFactory(
+    scope = await _test_runtime_factory(
         SlowRouter(), services, planning_timeout_seconds=0.01
     ).create_run_scope("core_router", "slow planning")
 
@@ -430,7 +516,7 @@ async def test_total_deadline_is_not_reclassified_as_planning_failure() -> None:
             return super().complete_planning_decision(user_request, **kwargs)
 
     services = make_services(snapshot_enabled=False)
-    scope = await CoordinatedRuntimeFactory(
+    scope = await _test_runtime_factory(
         SlowRouter(), services, planning_timeout_seconds=1
     ).create_run_scope("core_router", "deadline planning", timeout_seconds=0.01)
 
@@ -452,7 +538,7 @@ async def test_planning_budget_exhaustion_keeps_existing_budget_mapping() -> Non
             )
 
     services = make_services(snapshot_enabled=False)
-    scope = await CoordinatedRuntimeFactory(
+    scope = await _test_runtime_factory(
         BudgetRouter(), services
     ).create_run_scope("core_router", "budget planning")
 
@@ -481,7 +567,7 @@ async def test_user_cancellation_during_planning_is_not_planning_failed() -> Non
                 time.sleep(0.001)
 
     services = make_services(snapshot_enabled=False)
-    scope = await CoordinatedRuntimeFactory(
+    scope = await _test_runtime_factory(
         CancellableRouter(), services
     ).create_run_scope("core_router", "cancel planning")
     execution = asyncio.create_task(scope.execute())
@@ -509,7 +595,7 @@ async def test_dynamic_bindings_close_and_clear_is_called_on_terminal(monkeypatc
 
     monkeypatch.setattr(StepInvocationBindings, "close_and_clear", record_close)
     services = make_services(snapshot_enabled=False)
-    scope = await CoordinatedRuntimeFactory(
+    scope = await _test_runtime_factory(
         RecordingRouter(), services
     ).create_run_scope("core_router", "binding cleanup")
 

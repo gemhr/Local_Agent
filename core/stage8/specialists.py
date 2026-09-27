@@ -186,25 +186,30 @@ class SpecialistAgentApplicationService:
         "ci_guardian": (None, None),
     }
 
-    def __init__(self, runtime_factory=None, *, runner: Callable[[str, str], Awaitable[str]] | None = None,
+    def __init__(self, application_service=None, *, runner: Callable[[str, str], Awaitable[str]] | None = None,
                  mission_service=None, review_service=None, test_plan_repository=None):
-        self.runtime_factory = runtime_factory
+        self.application_service = application_service
         self.runner = runner
         self.mission_service = mission_service
         self.review_service = review_service
         self.test_plan_repository = test_plan_repository
 
-    async def _run_model(self, agent_id: str, prompt: str) -> tuple[str, str | None]:
+    async def _run_model(self, agent_id: str, prompt: str) -> tuple[str | None, str | None, bool, bool]:
         if self.runner is not None:
-            return await self.runner(agent_id, prompt), None
-        if self.runtime_factory is None:
+            return await self.runner(agent_id, prompt), None, True, False
+        if self.application_service is None:
             raise Stage8ValidationError("specialist runtime is not ready")
-        scope = await self.runtime_factory.create_static_run_scope(agent_id, prompt, persist=False)
-        try:
-            await scope.execute()
-            return scope.driver.output or "", scope.run_id
-        finally:
-            await scope.close()
+        from core.agent_platform.application import ExecutionRequest
+        result = await self.application_service.execute(
+            ExecutionRequest(agent_id=agent_id, input=prompt)
+        )
+        from core.runtime.state import RunStatus
+        runtime_succeeded = result.status is RunStatus.SUCCEEDED
+        output = (
+            getattr(result, "output", None) if getattr(result, "business_output_valid", None) is not False
+            else getattr(result, "rejected_output", None)
+        ) if runtime_succeeded else None
+        return output, result.run_id, runtime_succeeded, getattr(result, "business_output_valid", None) is False
 
     async def _invoke(
         self,
@@ -224,22 +229,28 @@ class SpecialistAgentApplicationService:
             ]
         prompt = json.dumps(prompt_payload, ensure_ascii=False, sort_keys=True)
 
-        async def run_once(current_prompt: str) -> str:
-            output, run_id = await self._run_model(agent_id, current_prompt)
+        async def run_once(current_prompt: str) -> tuple[str, bool]:
+            output, run_id, runtime_succeeded, business_invalid = await self._run_model(agent_id, current_prompt)
             mission_id = getattr(request, "mission_id", None)
             if run_id and mission_id and self.mission_service is not None:
                 await self.mission_service.attach_run_reference(
                     mission_id, run_id, agent_id
                 )
-            return output
+            if not runtime_succeeded:
+                raise RuntimeError("specialist runtime did not succeed")
+            if output is None:
+                raise RuntimeError("specialist runtime returned no repair candidate")
+            return output, business_invalid
 
-        output = await run_once(prompt)
+        output, business_invalid = await run_once(prompt)
 
         def parse_and_validate(raw: str) -> BaseModel:
             result = parse_json_output(raw, result_type)
             return validator(result) if validator is not None else result
 
         try:
+            if business_invalid:
+                raise Stage8ValidationError("specialist business output schema invalid")
             return parse_and_validate(output)
         except Stage8ValidationError as first:
             repair_data = json.dumps({
@@ -253,7 +264,10 @@ class SpecialistAgentApplicationService:
                 "只输出一个 JSON 对象，不要输出 Markdown 或解释。\n"
                 f"REPAIR_DATA={repair_data}"
             )
-            return parse_and_validate(await run_once(prompt + "\n\n" + repair))
+            repaired_output, repaired_business_invalid = await run_once(prompt + "\n\n" + repair)
+            if repaired_business_invalid:
+                raise Stage8ValidationError("specialist repaired output schema invalid")
+            return parse_and_validate(repaired_output)
 
     async def feature_understanding(self, request: FeatureUnderstandingRequest) -> FeatureUnderstandingResult:
         authoritative = _context_evidence_map(request.context)

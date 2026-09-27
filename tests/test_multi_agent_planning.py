@@ -57,6 +57,9 @@ class FakePlanningModel:
         *,
         memory_context_bundle=None,
         memory_injection_report_out=None,
+        planner_agent_id="core_router",
+        planner_definition=None,
+        allowed_agent_catalog=(),
     ) -> str:
         self.calls += 1
         if self.error is not None:
@@ -352,3 +355,51 @@ def test_sensitive_planning_objects_are_immutable_repr_and_asdict_safe() -> None
         asdict(request)
     with pytest.raises(TypeError):
         asdict(decision)
+
+@pytest.mark.asyncio
+async def test_custom_dynamic_entry_plans_from_compiled_catalog_without_router_branch():
+    from core.agent_platform.contracts import AgentDefinition, AgentRegistration, ExecutionBinding
+    from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
+
+    definition = AgentDefinition(
+        agent_id="custom_planner", agent_version="2", display_name="Custom Planner",
+        role="planner", instructions="Plan using registered specialists.",
+        execution_binding=ExecutionBinding(kind="dynamic"),
+    )
+    compiled = compile_agent_catalog(
+        AgentRegistrationBundle(registrations=(AgentRegistration(definition),)),
+        builtin_registrations=tuple(
+            DEFAULT_AGENT_REGISTRY.resolve(agent_id)
+            for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+        ),
+    )
+
+    class CatalogPlanningModel:
+        captured = None
+
+        async def generate_plan(self, request, run_context, **kwargs):
+            self.captured = kwargs
+            return delegate_json([
+                {"task_id": "code", "agent_id": "code_expert", "instruction": "Review code."},
+                {"task_id": "data", "agent_id": "data_analyst", "instruction": "Review metrics."},
+            ], True)
+
+    model = CatalogPlanningModel()
+    resolver = PlanResolver(
+        compiled.agent_registry, PlanCompiler(compiled.agent_registry), model
+    )
+    resolved = await resolver.resolve(
+        PlanningRequest("custom_planner", "Please coordinate code and data."),
+        RunContext.create(entry_agent_id="custom_planner"),
+    )
+    assert model.captured["planner_agent_id"] == "custom_planner"
+    assert {item.agent_id for item in model.captured["allowed_agent_catalog"]} >= {
+        "code_expert", "data_analyst"
+    }
+    assert len(resolved.plan.steps) == 3
+    assert {
+        resolved.invocation_bindings.resolve_for_step(step.step_id).agent_id
+        for step in resolved.plan.steps
+    } == {
+        "code_expert", "data_analyst", "synthesis_agent"
+    }
