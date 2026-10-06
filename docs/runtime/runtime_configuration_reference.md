@@ -311,3 +311,22 @@ producer 锁。Consumer 的 `socket.timeout.ms=10000`，并禁用 topic auto-cre
 未提交消息处理失败时 worker 关闭 consumer 后抛错退出，供 supervisor 重启；不会继续
 poll 更高 offset。DLQ 仅保留 UUID identity、安全定位字段和有界协议版本
 （`evaluation-job-queued.v<1..6 位数字>` 或非负 32 位整数），不复制任意 schema 字符串。
+
+## Stage13 Guardian（显式启用）
+
+`uv run --no-sync python -m core.stage13.guardian_worker` 是独立业务 worker composition。
+`STAGE13_GUARDIAN_ENABLED` 默认 `false`；未显式设为 `true` 时拒绝启动。
+数据库仍使用 `Settings` 的 `LOCAL_AGENT_DATABASE_URL`，启动前由 operator 执行 Alembic
+`upgrade head`；worker 不执行 DDL。默认 `server.py` 不创建 Guardian 或 nightly workload。
+
+必须配置 `STAGE13_PROVIDER_CONFIG_PATH`（WP01 `WorkloadConfig` UTF-8 JSON）、
+`STAGE13_GUARDIAN_PLAN_PATH`（JSON 数组，每项包含 `environment_id`、`channel_group`、
+三个 `expected_cases`）、`STAGE13_PROVIDER_BASE_URL` 和安全环境变量
+`STAGE13_PROVIDER_AGENT_TOKEN`。版本计划从 Provider 配置读取；同日更改返回
+`PLAN_CONFLICT`，不会覆盖已冻结计划。计划文件不得包含 hidden GT 或 secret。
+
+worker 固定 bounded concurrency≤20，claim batch≤100；fleet submit≤10 starts/s、
+read≤20 starts/s 由 PostgreSQL 业务 admission 约束。业务日期固定 Asia/Shanghai，
+durable instant 为 UTC，lease 使用真实 DB 时间。退出停止 claim 并 drain 当前 batch；
+未完成 due 与过期 lease 供重启接手。逻辑时钟仅由 controlled harness 显式初始化，
+不能将逻辑模拟视为 wall-clock SLO 或生产容量验证。
