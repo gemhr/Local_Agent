@@ -22,13 +22,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.persistence.models import PersistenceBase  # noqa: E402
+from core.stage13.store import ProviderBase  # noqa: E402
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = PersistenceBase.metadata
+target_metadata = [PersistenceBase.metadata, ProviderBase.metadata]
 
 
 def _database_url() -> str:

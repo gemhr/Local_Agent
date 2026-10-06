@@ -35,6 +35,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from core.persistence.database import Database, DatabaseConfig  # noqa: E402
 from core.persistence.models import CANONICAL_TABLES  # noqa: E402
+from core.stage13.store import PROVIDER_TABLES  # noqa: E402
 
 _TEST_DB_SUFFIX = "_test"
 
@@ -71,12 +72,14 @@ def _alembic(*args: str) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["LOCAL_AGENT_DATABASE_URL"] = test_database_url()
     env["LOCAL_AGENT_ENVIRONMENT_PROFILE"] = "TEST"
+    env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=str(PROJECT_ROOT),
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 
@@ -95,13 +98,14 @@ async def _drop_all(database: Database) -> None:
             await connection.execute(
                 text(
                     "DROP TABLE IF EXISTS "
-                    + ", ".join(f'"{name}"' for name in CANONICAL_TABLES)
+                    + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES))
                     + " CASCADE"
                 )
             )
             await connection.execute(
                 text('DROP TABLE IF EXISTS "alembic_version"')
             )
+            await connection.execute(text("DROP FUNCTION IF EXISTS stage13_provider_key_guard()"))
     finally:
         # 必须清空 pool：这些连接绑定在 asyncio.run 的临时 loop 上，
         # 复用它们会让后续测试拿到已死 loop 的连接。
@@ -117,7 +121,7 @@ def _truncate_all(database: Database) -> None:
                 await connection.execute(
                     text(
                         "TRUNCATE TABLE "
-                        + ", ".join(f'"{name}"' for name in CANONICAL_TABLES)
+                        + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES))
                         + " RESTART IDENTITY CASCADE"
                     )
                 )
