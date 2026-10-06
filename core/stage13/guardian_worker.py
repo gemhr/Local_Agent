@@ -38,7 +38,9 @@ from core.stage13.contracts import WorkloadConfig
 from core.stage13.guardian import GuardianScheduleService, StaleClaim
 
 
-def build_guardian_invoker(database, client, config, *, owner_id):
+def build_guardian_invoker(
+    database, client, config, *, owner_id, failure_details=False
+):
     """为后台业务主体显式编译局部 grants；不更改默认 Agent Registry。"""
     admission = GuardianScheduleService(database, config.owner_scope_id)
 
@@ -63,6 +65,7 @@ def build_guardian_invoker(database, client, config, *, owner_id):
     registrations = build_controlled_ci_tool_registrations(client, config)
     allowed = frozenset(
         {"stage13_ci_submit", "stage13_ci_lookup", "stage13_ci_summary"}
+        | ({"stage13_ci_failure_detail"} if failure_details else set())
     )
     for registration in registrations:
         if registration.descriptor.name in allowed:

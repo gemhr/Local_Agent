@@ -330,3 +330,17 @@ read≤20 starts/s 由 PostgreSQL 业务 admission 约束。业务日期固定 A
 durable instant 为 UTC，lease 使用真实 DB 时间。退出停止 claim 并 drain 当前 batch；
 未完成 due 与过期 lease 供重启接手。逻辑时钟仅由 controlled harness 显式初始化，
 不能将逻辑模拟视为 wall-clock SLO 或生产容量验证。
+
+## Stage13 Failure Aggregation（显式启用）
+
+`uv run --no-sync python -m core.stage13.incident_worker` 消费同一 WP02 数据库中的
+terminal summary/poll 证据，并经既有 governed tools 读取失败详情。
+`STAGE13_AGGREGATION_ENABLED` 默认 `false`；启用时复用上述 Provider config、base URL、
+agent token 和 `LOCAL_AGENT_DATABASE_URL`，启动前先 `alembic upgrade head`。
+不需要 Guardian plan 文件，不启动模型或旧 Stage8 triage。
+
+默认取证并发 8，最多 4 页/版本，失败最多 3 个取证 attempts 后明确 missing。
+代表失败/环境各最多 8、EvidenceRefs 最多 32、准备输入最多 128KiB；artifact 仅保留 ref。
+初始准入窗口为 600 秒；每 incident/subject 最多一次、间隔至少 1800 秒的 material
+re-analysis，nightly 原子 hard budget 为 60（失败/未知不退款）。WP03 仅使用明确版本化的
+controlled placeholder subject，Job 停在 `READY`；WP04 必须显式绑定真实 subject。

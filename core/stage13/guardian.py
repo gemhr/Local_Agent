@@ -30,6 +30,7 @@ from core.stage13.guardian_models import (
     SchedulerRow,
     VersionRow,
 )
+from core.stage13.incident_models import CollectionRow
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 CYCLE_TERMINAL = frozenset(
@@ -539,6 +540,24 @@ class GuardianScheduleService:
                         )
                     )
                 ).scalar_one()
+                if not is_submit:
+                    busy += (
+                        await session.execute(
+                            select(func.count())
+                            .select_from(CollectionRow)
+                            .join(
+                                VersionRow,
+                                CollectionRow.version_id
+                                == VersionRow.version_execution_id,
+                            )
+                            .where(
+                                VersionRow.request["owner_scope_id"].as_string()
+                                == self.scope,
+                                CollectionRow.state == "CLAIMED",
+                                CollectionRow.lease_until > db_now,
+                            )
+                        )
+                    ).scalar_one()
                 if len(recent) >= maximum or busy >= maximum:
                     work.state, work.claim_token, work.lease_until = "READY", None, None
                     work.next_available_at = now + timedelta(seconds=1)
