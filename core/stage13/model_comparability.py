@@ -255,7 +255,9 @@ def compare_receipts(
                     equivalent_tools = capabilities[0] == capabilities[1]
             if not equivalent_tools:
                 result["reasons"].append(key.upper() + "_MISMATCH")
-    if baseline["input_digest"] != candidate["input_digest"]:
+    if baseline.get("semantic_input_digest", baseline["input_digest"]) != candidate.get(
+        "semantic_input_digest", candidate["input_digest"]
+    ):
         result["reasons"].append("INPUT_BINDING_MISMATCH")
     differences = [
         key

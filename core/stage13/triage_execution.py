@@ -113,6 +113,7 @@ class TriageExecutionService:
         job_id=None,
         attempt_id=None,
         lane="CONTRACT_TEST",
+        execution_policy=None,
     ):
         UUID(run_id)
         check_manifest(manifest, self.manifests.get(manifest.get("agent_id")))
@@ -156,6 +157,7 @@ class TriageExecutionService:
             subject_digest=manifest["subject_manifest_digest"],
             query=query,
             input_digest=sha256(canonical_bytes(payload)),
+            execution_policy=execution_policy,
             deadline_at=deadline,
         )
         async with self.database.transaction() as session:
@@ -375,6 +377,15 @@ class TriageExecutionService:
                     else "UNKNOWN"
                 ),
             }
+            if row.execution_policy is not None:
+                policy = row.execution_policy["policy"]
+                receipt.update(
+                    semantic_input_digest=policy["semantic_input_digest"],
+                    execution_policy=policy,
+                    execution_request_digest=row.execution_policy[
+                        "execution_request_digest"
+                    ],
+                )
             receipt["receipt_digest"] = digest(receipt)
             row.receipt, row.raw_answer, row.validation = receipt, raw, validation
             row.runtime_status, row.stop_reason = root.status, root.stop_reason
@@ -406,6 +417,7 @@ class TriageExecutionService:
                 job_id=initial.analysis_job_id,
                 attempt_id=initial.evaluation_attempt_id,
                 lane=initial.lane,
+                execution_policy=initial.execution_policy,
             )
             if initial.analysis_job_id:
                 async with self.database.transaction() as session:
@@ -493,16 +505,51 @@ class TriageExecutionService:
             await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def evaluation_execute(
-        self, *, run_id, agent_id, query, timeout_seconds, expected_subject_manifest
+        self,
+        *,
+        run_id,
+        agent_id,
+        query,
+        timeout_seconds,
+        expected_subject_manifest,
+        execution_policy=None,
     ):
         if (
             expected_subject_manifest.get("agent_id") != agent_id
             or not 0 < timeout_seconds <= 180
         ):
             raise ValueError("IDENTITY_MISMATCH")
+        binding = None
+        if execution_policy is not None:
+            from core.stage13.execution_policy import bind_execution_policy
+
+            binding = bind_execution_policy(
+                dict(
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    query=query,
+                    timeout_seconds=int(timeout_seconds),
+                    expected_subject_manifest=expected_subject_manifest,
+                    execution_policy=execution_policy,
+                )
+            )
         await self.reserve_run(
-            run_id, query, expected_subject_manifest, attempt_id=run_id
+            run_id,
+            query,
+            expected_subject_manifest,
+            attempt_id=run_id,
+            lane="OFFLINE" if binding is not None else "CONTRACT_TEST",
+            execution_policy=binding,
         )
+        if binding is not None:
+            deadline = datetime.fromisoformat(execution_policy["execution_deadline_at"])
+            async with self.database.session() as session:
+                saved = await session.get(TriageRunRow, run_id)
+                if saved.receipt is None:
+                    timeout_seconds = min(
+                        timeout_seconds,
+                        (deadline - datetime.now(timezone.utc)).total_seconds(),
+                    )
         async with asyncio.timeout(timeout_seconds):
             initial, final = await self.execute_analysis(
                 run_id, expected_subject_manifest

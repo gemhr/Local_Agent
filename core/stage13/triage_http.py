@@ -21,6 +21,7 @@ class EvaluationRequest(BaseModel):
     query: str
     timeout_seconds: float = Field(gt=0, le=180)
     expected_subject_manifest: dict
+    execution_policy: dict | None = None
 
 
 def configured_model(settings):
