@@ -1232,7 +1232,7 @@ class Settings:
                 os.path.join(project_root, "data", "models", "qwen2.5-7b-instruct-q4_k_m.gguf"),
             ),
             remote_model_name=os.getenv(
-                "LOCAL_AGENT_REMOTE_MODEL_NAME", "deepseek-v4-flash"
+                "LOCAL_AGENT_REMOTE_MODEL_NAME", "deepseek-flash"
             ),
             remote_provider_kind=os.getenv(
                 "LOCAL_AGENT_REMOTE_PROVIDER_KIND", "deepseek"

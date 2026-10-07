@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 from uuid import uuid4
 
 
@@ -64,6 +65,7 @@ from core.runtime.tool_registry import ToolDescriptor, ToolRegistration, ToolReg
 from core.runtime.tracing import NoopSpanRecorder
 from core.stage13.triage_models import TriageRunRow
 from core.stage13.triage_subject import definitions, manifest_for, digest
+from core.stage13.model_comparability import project_receipt
 
 
 class TriageModelAdapter(GeneratorModelAdapter):
@@ -81,6 +83,11 @@ class TriageModelAdapter(GeneratorModelAdapter):
                 raise ValueError("UNBOUND_STAGE13_MODEL_CALL")
             if row.model_call is not None:
                 raise ValueError("MODEL_CALL_ALREADY_DISPATCHED")
+            manifest = next(
+                m
+                for m in self.service.manifests.values()
+                if m["subject_manifest_digest"] == row.subject_digest
+            )
             call = {
                 "call_id": str(uuid4()),
                 "run_id": run_id,
@@ -95,6 +102,20 @@ class TriageModelAdapter(GeneratorModelAdapter):
                 "reported_model": None,
                 "reported_revision": None,
                 "actual_revision": None,
+                "resolved_provider": self._engine.provider_kind,
+                "resolved_provider_source": "CONFIGURED_TRANSPORT",
+                "resolved_endpoint": self._engine.api_base_url,
+                "resolved_model_config": {
+                    **self.model_config,
+                    "provider": self._engine.provider_kind,
+                    "model": self._engine.model_name,
+                    "endpoint_digest": hashlib.sha256(
+                        self._engine.api_base_url.encode()
+                    ).hexdigest(),
+                },
+                "system_fingerprint": None,
+                "reported_artifact_digest": None,
+                "reported_deployment_id": None,
                 "dispatch_certainty": "MAY_HAVE_DISPATCHED",
                 "verification_status": "UNKNOWN",
                 "input_tokens": None,
@@ -113,6 +134,9 @@ class TriageModelAdapter(GeneratorModelAdapter):
             for source, target in (
                 ("model", "reported_model"),
                 ("model_revision", "reported_revision"),
+                ("system_fingerprint", "system_fingerprint"),
+                ("model_artifact_sha256", "reported_artifact_digest"),
+                ("deployment_id", "reported_deployment_id"),
             ):
                 if isinstance(value.get(source), str):
                     prior = reported.get(target)
@@ -130,8 +154,7 @@ class TriageModelAdapter(GeneratorModelAdapter):
         finally:
             provider_response_observer.reset(token)
             call.update(reported)
-            if reported:
-                call["reported_provider"] = self.model_config["provider"]
+            # reported_provider 只来自响应；resolved_provider 明示实际 transport 来源。
             if response is not None:
                 call["dispatch_certainty"] = "PROVIDER_RESPONDED"
                 call["state"] = "COMPLETED"
@@ -140,7 +163,7 @@ class TriageModelAdapter(GeneratorModelAdapter):
                     call["output_tokens"] = response.actual_usage.output_tokens
                 if (
                     call["reported_model"] == call["requested_model"]
-                    and call["reported_revision"] is not None
+                    and bool((call["reported_revision"] or "").strip())
                     and (
                         call["requested_revision"] is None
                         or call["reported_revision"] == call["requested_revision"]
@@ -150,6 +173,17 @@ class TriageModelAdapter(GeneratorModelAdapter):
                     call["verification_status"] = "VERIFIED_BY_PROVIDER_RESPONSE"
             else:
                 call["state"] = "UNKNOWN"
+            receipt = {
+                "actual_subject_manifest": manifest,
+                "resolved_toolset_identity": manifest["tool_profile_digest"],
+                "run_id": run_id,
+                "role": row.role,
+                "model_call_receipts": [call],
+            }
+            receipt["receipt_digest"] = digest(receipt)
+            call["verification_status"] = project_receipt(manifest, receipt)[
+                "identity_level"
+            ]
             async with self.service.database.transaction() as session:
                 row = await session.get(TriageRunRow, run_id, with_for_update=True)
                 row.model_call = call

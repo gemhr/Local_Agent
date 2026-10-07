@@ -520,8 +520,13 @@ class TriageExecutionService:
                 .scalars()
                 .all()
             )
+        from core.stage13.model_comparability import project_receipt
+
         return {
             "protocol_version": PROTOCOL,
+            "model_comparability_decision": project_receipt(
+                expected_subject_manifest, final.receipt
+            ),
             "run_id": run_id,
             "status": initial.runtime_status,
             "anchor_run_id": run_id,

@@ -86,7 +86,7 @@ uv sync
 $env:LOCAL_AGENT_LLM_BACKEND="remote"
 $env:LOCAL_AGENT_REMOTE_PROVIDER_KIND="deepseek"
 $env:LOCAL_AGENT_REMOTE_API_BASE_URL="https://api.deepseek.com"
-$env:LOCAL_AGENT_REMOTE_MODEL_NAME="deepseek-v4-flash"
+$env:LOCAL_AGENT_REMOTE_MODEL_NAME="deepseek-flash"
 $env:LOCAL_AGENT_REMOTE_CONTEXT_WINDOW="1000000"
 $env:LOCAL_AGENT_MODEL_MAX_TOKENS="4096"
 $env:LOCAL_AGENT_REMOTE_ENABLE_THINKING="0"
@@ -98,7 +98,7 @@ $env:LOCAL_AGENT_REMOTE_VERIFY_TLS="1"
 uv run python server.py
 ```
 
-默认远端按 `deepseek-v4-flash` 配置。`LOCAL_AGENT_REMOTE_PROVIDER_KIND=deepseek`
+默认远端按 `deepseek-flash` 配置。`LOCAL_AGENT_REMOTE_PROVIDER_KIND=deepseek`
 会使用 DeepSeek 官方 `thinking.type=enabled/disabled` payload；使用其他
 OpenAI-compatible Provider 时必须显式改为 `openai_compatible`，不要根据 URL
 或模型名隐式判断 Provider。默认关闭 thinking，Planning 也会显式关闭并使用
@@ -171,7 +171,7 @@ uv run uvicorn server:app --host 127.0.0.1 --port 8000
 | `LOCAL_AGENT_API_BASE_URL` | 由 host/port 派生 | 桌面端访问后端的根地址（client-only） |
 | `LOCAL_AGENT_REMOTE_API_BASE_URL` | 空 | `remote` / `hybrid` 的 SERVER role 必填；PRODUCTION 必须 HTTPS |
 | `LOCAL_AGENT_REMOTE_API_KEY` | 空 | 仅在非空时发送 Bearer Authorization |
-| `LOCAL_AGENT_REMOTE_MODEL_NAME` | `deepseek-v4-flash` | Provider model identifier；其他 Provider 必须显式覆盖 |
+| `LOCAL_AGENT_REMOTE_MODEL_NAME` | `deepseek-flash` | Provider model identifier；其他 Provider 必须显式覆盖 |
 | `LOCAL_AGENT_REMOTE_PROVIDER_KIND` | `deepseek` | 显式选择远程 payload 合同；其他 OpenAI-compatible Provider 设置为 `openai_compatible` |
 | `LOCAL_AGENT_REMOTE_CONTEXT_WINDOW` | `1000000` | 远端 Profile context capacity；应与真实 Provider 能力一致 |
 | `LOCAL_AGENT_REMOTE_ENABLE_THINKING` | `false` | DeepSeek thinking 默认关闭；Planning 始终显式关闭 |

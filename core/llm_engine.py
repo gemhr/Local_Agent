@@ -686,7 +686,10 @@ class RemoteLLMEngine:
         observer = provider_response_observer.get()
         if observer is not None:
             # 仅采集 Provider 原始响应的身份/usage；不复制 requested identity。
-            observer({key: payload.get(key) for key in ("model", "model_revision", "usage")})
+            observer({key: payload.get(key) for key in (
+                "model", "model_revision", "system_fingerprint",
+                "model_artifact_sha256", "deployment_id", "usage",
+            )})
         choices = payload.get("choices")
         if isinstance(choices, list) and choices:
             choice = choices[0]

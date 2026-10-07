@@ -81,7 +81,7 @@ def definitions():
     return tuple(
         AgentDefinition(
             agent_id=f"ci_triage_{name}",
-            agent_version=f"wp04-{name}-1",
+            agent_version=f"wp04b-flash-{name}-1",
             display_name=f"CI Failure Triage {name.title()}",
             role="CI 故障分析",
             instructions=instructions

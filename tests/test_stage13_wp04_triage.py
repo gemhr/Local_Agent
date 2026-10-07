@@ -35,6 +35,7 @@ from core.stage13.aggregation import (
 )
 from core.stage13.contracts import business_key
 from core.stage13.triage_subject import validate_output, digest, SCHEMA_DIGEST
+from core.persistence.errors import PersistenceError
 
 
 def payload():
@@ -167,6 +168,7 @@ async def assembly(
     revision="test-revision-1",
     native_call=False,
     dispatch_crash=0,
+    response_identity=None,
 ):
     calls = []
 
@@ -197,6 +199,8 @@ async def assembly(
             "model_revision": revision,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
+        if response_identity is not None:
+            chunk.update(response_identity)
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
@@ -220,6 +224,7 @@ async def assembly(
         "temperature": 0,
         "thinking": False,
         "retry_attempts": 1,
+        "endpoint_digest": sha256(b"http://controlled-unit"),
     }
     service = await compose(database, engine, model, "wp04-test")
     return service, calls, client
@@ -246,11 +251,13 @@ def test_runtime_repair_receipt_replay_and_identity(clean_database):
             assert len(response["child_runs"]) == 1
             assert response["selected_final_run_id"] != run_id
             receipt = response["actual_subject_receipt"]
-            assert (
-                receipt["model_identity_verification"]
-                == "VERIFIED_BY_PROVIDER_RESPONSE"
-            )
+            assert receipt["model_identity_verification"] == "PROVIDER_MODEL_MATCH"
             assert receipt["actual_subject_manifest"] == manifest
+            assert (
+                response["model_comparability_decision"]["identity_level"]
+                == "PROVIDER_MODEL_MATCH"
+            )
+            assert receipt["model_call_receipts"][0]["reported_provider"] is None
             assert receipt["receipt_digest"] == digest(
                 {k: v for k, v in receipt.items() if k != "receipt_digest"}
             )
@@ -309,6 +316,107 @@ def test_runtime_repair_receipt_replay_and_identity(clean_database):
                         ).decode(),
                     }
                 )
+        finally:
+            await service.services.close(10)
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "response_identity",
+    [
+        {"model_revision": None},
+        {"model_revision": ""},
+        {"model": "provider-alias", "model_revision": None},
+    ],
+)
+def test_requested_identity_never_fills_missing_actual_revision(
+    clean_database, response_identity
+):
+    async def run():
+        p = payload()
+        requested_revision = (
+            None if response_identity["model_revision"] == "" else "requested-revision"
+        )
+        service, calls, client = await assembly(
+            clean_database,
+            [json.dumps(output(p))],
+            revision=requested_revision,
+            response_identity=response_identity,
+        )
+        try:
+            manifest = service.manifests["ci_triage_candidate"]
+            response = await service.evaluation_execute(
+                run_id=str(uuid4()),
+                agent_id=manifest["agent_id"],
+                query=canonical_bytes(p).decode(),
+                timeout_seconds=180.0,
+                expected_subject_manifest=manifest,
+            )
+            receipt = response["actual_subject_receipt"]
+            call = receipt["model_call_receipts"][0]
+            assert len(calls) == 1
+            assert call["requested_revision"] == requested_revision
+            assert call["reported_provider"] is None
+            assert call["reported_model"] == response_identity.get(
+                "model", "controlled-model"
+            )
+            assert call["reported_revision"] == response_identity["model_revision"]
+            assert call["actual_revision"] is None
+            expected_level = (
+                "MODEL_IDENTITY_MISMATCH"
+                if response_identity.get("model") == "provider-alias"
+                else "PROVIDER_MODEL_MATCH"
+            )
+            assert call["verification_status"] == expected_level
+            assert receipt["model_identity_verification"] == expected_level
+        finally:
+            await service.services.close(10)
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_provider_artifact_deployment_metadata_is_bound_to_call(clean_database):
+    async def run():
+        p = payload()
+        service, calls, client = await assembly(
+            clean_database,
+            [json.dumps(output(p))],
+            response_identity={
+                "system_fingerprint": "backend-A",
+                "model_artifact_sha256": "6" * 64,
+                "deployment_id": "deployment-A",
+            },
+        )
+        try:
+            manifest = service.manifests["ci_triage_candidate"]
+            response = await service.evaluation_execute(
+                run_id=str(uuid4()),
+                agent_id=manifest["agent_id"],
+                query=canonical_bytes(p).decode(),
+                timeout_seconds=180.0,
+                expected_subject_manifest=manifest,
+            )
+            call = response["actual_subject_receipt"]["model_call_receipts"][0]
+            assert call["system_fingerprint"] == "backend-A"
+            assert call["reported_artifact_digest"] == "6" * 64
+            assert call["reported_deployment_id"] == "deployment-A"
+            assert call["reported_provider"] is None
+            assert call["resolved_provider"] == "deepseek"
+            assert (
+                response["model_comparability_decision"]["identity_level"]
+                == "EXACT_DEPLOYMENT_VERIFIED"
+            )
+            assert len(calls) == 1
+            with pytest.raises(PersistenceError):
+                async with clean_database.transaction() as session:
+                    frozen = await session.get(TriageRunRow, response["run_id"])
+                    frozen.model_call = {
+                        **frozen.model_call,
+                        "system_fingerprint": "changed-after-receipt",
+                    }
         finally:
             await service.services.close(10)
             await client.aclose()
@@ -662,7 +770,9 @@ def test_unverified_model_and_native_side_effect_denial(clean_database):
             )
             initial = await service.execute_run(run_id)
             assert initial.runtime_status == "FAILED"
-            assert initial.receipt["model_identity_verification"] == "UNKNOWN"
+            assert (
+                initial.receipt["model_identity_verification"] == "PROVIDER_MODEL_MATCH"
+            )
             assert initial.receipt["model_call_receipts"][0]["actual_revision"] is None
             assert len(calls) == 1
             messages = json.dumps(calls[0]["messages"])

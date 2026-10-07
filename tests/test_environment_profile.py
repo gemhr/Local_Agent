@@ -84,7 +84,7 @@ def test_default_profile_is_local(monkeypatch) -> None:
     assert settings.environment_profile is EnvironmentProfile.LOCAL
 
 
-def test_remote_only_defaults_target_deepseek_v4_without_changing_local_budget(
+def test_remote_only_defaults_target_deepseek_flash_without_changing_local_budget(
     monkeypatch,
 ) -> None:
     remote = _load(
@@ -98,7 +98,7 @@ def test_remote_only_defaults_target_deepseek_v4_without_changing_local_budget(
         LOCAL_AGENT_REMOTE_ENABLE_THINKING=None,
     )
     assert remote.llm_backend == "remote"
-    assert remote.remote_model_name == "deepseek-v4-flash"
+    assert remote.remote_model_name == "deepseek-flash"
     assert remote.remote_provider_kind == "deepseek"
     assert remote.remote_context_window == 1_000_000
     assert remote.remote_enable_thinking is False

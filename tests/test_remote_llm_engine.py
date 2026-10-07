@@ -50,7 +50,7 @@ def test_deepseek_thinking_enabled_is_explicit() -> None:
     captured, client = _capture_client()
     engine = RemoteLLMEngine(
         "https://api.deepseek.com",
-        "deepseek-v4-flash",
+        "deepseek-flash",
         enable_thinking=True,
         provider_kind="deepseek",
         client=client,
@@ -68,7 +68,7 @@ def test_deepseek_thinking_disabled_is_explicit() -> None:
     captured, client = _capture_client()
     engine = RemoteLLMEngine(
         "https://api.deepseek.com/v1",
-        "deepseek-v4-flash",
+        "deepseek-flash",
         enable_thinking=False,
         provider_kind="deepseek",
         client=client,
@@ -77,6 +77,7 @@ def test_deepseek_thinking_disabled_is_explicit() -> None:
     try:
         list(engine.generate([{"role": "user", "content": "hi"}]))
         assert captured["url"].endswith("/v1/chat/completions")
+        assert captured["json"]["model"] == "deepseek-flash"
         assert captured["json"]["thinking"] == {"type": "disabled"}
         assert "reasoning_effort" not in captured["json"]
     finally:
@@ -85,7 +86,7 @@ def test_deepseek_thinking_disabled_is_explicit() -> None:
 
 def test_deepseek_native_tool_call_sends_wire_and_normalizes() -> None:
     captured, client = _capture_client({"choices": [{"message": {"content": None, "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "get_system_status", "arguments": "{}"}}]}}]})
-    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek", client=client)
+    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-flash", provider_kind="deepseek", client=client)
 
     try:
         assert engine.supports_native_tool_calling() is True
@@ -140,7 +141,7 @@ def test_permissive_fake_without_native_capability_cannot_silently_ignore_tools(
 
 def test_deepseek_native_multiple_tool_calls_fail_closed() -> None:
     _captured, client = _capture_client({"choices": [{"message": {"tool_calls": [{"id": "one", "function": {"name": "a", "arguments": "{}"}}, {"id": "two", "function": {"name": "b", "arguments": "{}"}}]}}]})
-    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-v4-flash", provider_kind="deepseek", client=client)
+    engine = RemoteLLMEngine("https://api.deepseek.com", "deepseek-flash", provider_kind="deepseek", client=client)
 
     try:
         with pytest.raises(RuntimeError) as captured:
