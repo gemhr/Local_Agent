@@ -2262,6 +2262,45 @@ class AgentRouter:
         business_definition=None,
     ) -> str:
         """同步生成最终回答文本。"""
+        if business_definition is not None and business_definition.business_options.get("stage13_single_call") is True:
+            # Stage13 的固定 direct profile：一次统一 Model Invocation；
+            # 不进入 planner、参数 repair、reflection 或额外 continuation。
+            from core.stage13.triage_subject import strict_json
+            payload = strict_json(user_query)
+            original = payload.get("original_authorized_input", payload)
+            messages = [{"role": "system", "content": self._build_system_prompt(agent_id, business_definition=business_definition)},
+                        {"role": "user", "content": user_query}]
+            refs = [e for e in original.get("visible_evidence", []) if e.get("availability") == "AVAILABLE"]
+            if refs:
+                messages = self._prepare_answer_messages(
+                    agent_id=agent_id, user_query=user_query, base_messages=messages,
+                    run_context=run_context, event_emitter=event_emitter,
+                    approval_controller=approval_controller,
+                    tool_call=("stage13_evidence_lookup", json.dumps({"evidence_id": refs[0]["evidence_id"]})),
+                    business_definition=business_definition,
+                )
+            registrations = self._tool_registrations_for_run(agent_id, user_query, run_context)
+            result = self._invoke_model_contract(
+                agent_id=agent_id, user_query=user_query, messages=messages, context_requirements=None,
+                run_context=run_context, capability_requirements=capability_requirements,
+                max_tokens=self.max_tokens, event_emitter=event_emitter,
+                generation_options={"tools": [r.native_function_definition() for r in registrations],
+                                    "tool_choice": "auto", "enable_thinking": False, "temperature": 0},
+                business_definition=business_definition,
+            )
+            if result.response.native_tool_call is not None:
+                call = result.response.native_tool_call
+                self._prepare_answer_messages(
+                    agent_id=agent_id, user_query=user_query, base_messages=messages,
+                    run_context=run_context, event_emitter=event_emitter, approval_controller=approval_controller,
+                    tool_call=(call.tool_name, call.arguments_json), business_definition=business_definition,
+                    validated_invocation=self.tool_registry.require(call.tool_name).adapter.build_invocation(call.arguments_json),
+                )
+                # 新证据不授权第二次模型调用；结构不满足时只交给业务的一次 repair。
+                return json.dumps({"tool_call": call.tool_name})
+            if invocation_result_out is not None:
+                invocation_result_out.append(result)
+            return result.output
         context_requirements_out: list[ModelContextRequirements] = []
         prompt_identity_out: list[PromptIdentity] = []
         context_selection_records: list[ContextSelectionRecord] = []

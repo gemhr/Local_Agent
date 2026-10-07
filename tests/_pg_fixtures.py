@@ -38,6 +38,7 @@ from core.persistence.models import CANONICAL_TABLES  # noqa: E402
 from core.stage13.store import PROVIDER_TABLES  # noqa: E402
 from core.stage13.guardian_models import GUARDIAN_TABLES  # noqa: E402
 from core.stage13.incident_models import INCIDENT_TABLES  # noqa: E402
+from core.stage13.triage_models import TRIAGE_TABLES  # noqa: E402
 
 _TEST_DB_SUFFIX = "_test"
 
@@ -100,7 +101,7 @@ async def _drop_all(database: Database) -> None:
             await connection.execute(
                 text(
                     "DROP TABLE IF EXISTS "
-                    + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES, *GUARDIAN_TABLES, *INCIDENT_TABLES))
+                    + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES, *GUARDIAN_TABLES, *INCIDENT_TABLES, *TRIAGE_TABLES))
                     + " CASCADE"
                 )
             )
@@ -125,7 +126,7 @@ def _truncate_all(database: Database) -> None:
                 await connection.execute(
                     text(
                         "TRUNCATE TABLE "
-                        + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES, *GUARDIAN_TABLES, *INCIDENT_TABLES))
+                        + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES, *GUARDIAN_TABLES, *INCIDENT_TABLES, *TRIAGE_TABLES))
                         + " RESTART IDENTITY CASCADE"
                     )
                 )

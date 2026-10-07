@@ -301,6 +301,14 @@ class AgentApplicationService:
         retrieval_cache_authz_domain: str | None = None,
     ) -> ExecutionResult:
         registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
+        runtime_options = {}
+        if definition.business_options.get("stage13_single_call") is True:
+            from core.runtime.budget import RunBudget
+            runtime_options = {"persist": False, "budget": RunBudget(
+                max_model_calls=1, max_remote_model_calls=1, max_retries=0,
+                max_step_starts=1, max_tool_calls=8, max_concurrency=1,
+                max_elapsed_seconds=min(90, request.timeout_seconds or 90),
+            )}
         output, runtime_result = await self._chat_service.run_coordinated_agent(
             request.agent_id,
             effective_input,
@@ -311,6 +319,7 @@ class AgentApplicationService:
             workflow_id=workflow_id,
             workflow_version=workflow_version,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain,
+            **runtime_options,
         )
         # Output is available only on Runtime success; status and stop reason
         # are copied from the Runtime result without a second terminal model.

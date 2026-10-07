@@ -8,6 +8,7 @@ import logging
 import os
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Generator, List
 
@@ -17,6 +18,7 @@ from core.runtime.model_invocation import ModelAdapterResponse, NativeToolCall
 
 
 logger = logging.getLogger(__name__)
+provider_response_observer = ContextVar("provider_response_observer", default=None)
 
 
 class RemoteLLMError(RuntimeError):
@@ -681,6 +683,10 @@ class RemoteLLMEngine:
                 provider_responded=True,
             )
         deltas: list[ProviderDelta] = []
+        observer = provider_response_observer.get()
+        if observer is not None:
+            # 仅采集 Provider 原始响应的身份/usage；不复制 requested identity。
+            observer({key: payload.get(key) for key in ("model", "model_revision", "usage")})
         choices = payload.get("choices")
         if isinstance(choices, list) and choices:
             choice = choices[0]

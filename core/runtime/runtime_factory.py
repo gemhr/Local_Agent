@@ -35,7 +35,7 @@ from core.runtime.agent_adapter_factory import (
 from core.runtime.agent_registry import AgentRegistry
 from core.runtime.multi_agent_planning import PlanResolver, PlanningRequest
 from core.runtime.multi_agent_driver import MultiAgentDriver
-from core.runtime.plan_compiler import PlanCompiler
+from core.runtime.plan_compiler import PlanCompiler, PlanCompileConfig
 from core.runtime.planning import ExecutionKind, OutputPolicy, Plan
 from core.runtime.planning_model_adapter import UnifiedPlanningModelAdapter
 from core.runtime.synthesis import SynthesisAgentAdapter
@@ -1265,9 +1265,13 @@ class CoordinatedRuntimeFactory:
                     event_emitter=emitter,
                     fault_controller=fault_controller,
                 )
+                entry_definition = self._agent_registry.resolve(agent_id).definition
+                compile_config = (PlanCompileConfig(max_agents=1, max_steps=1,
+                    max_instruction_chars=262144, max_total_instruction_chars=262144)
+                    if entry_definition.business_options.get("stage13_single_call") is True else None)
                 resolver = evaluation_plan_resolver or PlanResolver(
                     self._agent_registry,
-                    PlanCompiler(self._agent_registry),
+                    PlanCompiler(self._agent_registry, compile_config),
                     planning_model,
                 )
                 coordinator = RunCoordinator.for_dynamic_resolver(

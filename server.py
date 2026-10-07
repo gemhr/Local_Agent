@@ -1614,8 +1614,21 @@ async def lifespan(app: FastAPI):
     initialization_stack.release()
     await recovery_coordinator.start()
     try:
+        if os.getenv("LOCAL_AGENT_STAGE13_ENABLED") == "1":
+            from core.stage13.triage_http import configured_model
+            from core.stage13.triage_runtime import compose as compose_triage
+            if ModelProfileId.REMOTE_ADVANCED not in engines:
+                raise RuntimeError("STAGE13_REMOTE_PROFILE_REQUIRED")
+            app.state.stage13_service = await compose_triage(
+                persistence_database, engines[ModelProfileId.REMOTE_ADVANCED],
+                configured_model(settings), os.environ["LOCAL_AGENT_STAGE13_SCOPE"],
+            )
         yield
     finally:
+        triage_service = getattr(app.state, "stage13_service", None)
+        if triage_service is not None:
+            await triage_service.services.close(timeout=20, close_models=False)
+            app.state.stage13_service = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.SHUTTING_DOWN
         await recovery_coordinator.stop()
         shutdown_report = await shutdown_coordinator.shutdown()
@@ -1661,6 +1674,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
+from core.stage13.triage_http import router as stage13_router
+app.include_router(stage13_router)
 v1_router = APIRouter(prefix="/api/v1")
 
 # Stage8-WP5：演示层只提供静态资源和页面入口；业务动作继续走下方
