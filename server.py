@@ -1613,7 +1613,15 @@ async def lifespan(app: FastAPI):
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
     initialization_stack.release()
     await recovery_coordinator.start()
+    stage13_delivery_client = None
     try:
+        if os.getenv("LOCAL_AGENT_STAGE13_DELIVERY_ENABLED") == "1":
+            from core.stage13.delivery_http import compose_delivery
+            import httpx
+            stage13_delivery_client = httpx.AsyncClient(trust_env=False)
+            app.state.stage13_delivery_service = compose_delivery(
+                persistence_database, stage13_delivery_client
+            )
         if os.getenv("LOCAL_AGENT_STAGE13_ENABLED") == "1":
             from core.stage13.triage_http import configured_model
             from core.stage13.triage_runtime import compose as compose_triage
@@ -1625,6 +1633,9 @@ async def lifespan(app: FastAPI):
             )
         yield
     finally:
+        if stage13_delivery_client is not None:
+            await stage13_delivery_client.aclose()
+            app.state.stage13_delivery_service = None
         triage_service = getattr(app.state, "stage13_service", None)
         if triage_service is not None:
             await triage_service.services.close(timeout=20, close_models=False)
@@ -1676,6 +1687,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
 from core.stage13.triage_http import router as stage13_router
 app.include_router(stage13_router)
+from core.stage13.delivery_http import router as stage13_delivery_router
+app.include_router(stage13_delivery_router)
 v1_router = APIRouter(prefix="/api/v1")
 
 # Stage8-WP5：演示层只提供静态资源和页面入口；业务动作继续走下方

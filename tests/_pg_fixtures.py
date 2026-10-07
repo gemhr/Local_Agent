@@ -39,6 +39,7 @@ from core.stage13.store import PROVIDER_TABLES  # noqa: E402
 from core.stage13.guardian_models import GUARDIAN_TABLES  # noqa: E402
 from core.stage13.incident_models import INCIDENT_TABLES  # noqa: E402
 from core.stage13.triage_models import TRIAGE_TABLES  # noqa: E402
+from core.stage13.delivery_models import DELIVERY_TABLES  # noqa: E402
 
 _TEST_DB_SUFFIX = "_test"
 
@@ -101,7 +102,7 @@ async def _drop_all(database: Database) -> None:
             await connection.execute(
                 text(
                     "DROP TABLE IF EXISTS "
-                    + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES, *GUARDIAN_TABLES, *INCIDENT_TABLES, *TRIAGE_TABLES))
+                    + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES, *GUARDIAN_TABLES, *INCIDENT_TABLES, *TRIAGE_TABLES, *DELIVERY_TABLES))
                     + " CASCADE"
                 )
             )
@@ -111,6 +112,7 @@ async def _drop_all(database: Database) -> None:
             await connection.execute(text("DROP FUNCTION IF EXISTS stage13_provider_key_guard()"))
             await connection.execute(text("DROP FUNCTION IF EXISTS stage13_guardian_frozen_guard()"))
             await connection.execute(text("DROP FUNCTION IF EXISTS stage13_incident_immutable_guard()"))
+            await connection.execute(text("DROP FUNCTION IF EXISTS stage13_delivery_guard()"))
     finally:
         # 必须清空 pool：这些连接绑定在 asyncio.run 的临时 loop 上，
         # 复用它们会让后续测试拿到已死 loop 的连接。
@@ -126,7 +128,7 @@ def _truncate_all(database: Database) -> None:
                 await connection.execute(
                     text(
                         "TRUNCATE TABLE "
-                        + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES, *GUARDIAN_TABLES, *INCIDENT_TABLES, *TRIAGE_TABLES))
+                        + ", ".join(f'"{name}"' for name in (*CANONICAL_TABLES, *PROVIDER_TABLES, *GUARDIAN_TABLES, *INCIDENT_TABLES, *TRIAGE_TABLES, *DELIVERY_TABLES))
                         + " RESTART IDENTITY CASCADE"
                     )
                 )

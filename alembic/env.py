@@ -26,6 +26,7 @@ from core.stage13.store import ProviderBase  # noqa: E402
 from core.stage13.guardian_models import GuardianBase  # noqa: E402
 from core.stage13 import incident_models  # noqa: E402,F401
 from core.stage13 import triage_models  # noqa: E402,F401
+from core.stage13 import delivery_models  # noqa: E402,F401
 
 config = context.config
 
