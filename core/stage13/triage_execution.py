@@ -169,7 +169,9 @@ class TriageExecutionService:
             if payload.get("schema_version") != "stage13.triage-input.v1":
                 raise ValueError("INPUT_SCHEMA_MISMATCH")
             for evidence in payload["visible_evidence"]:
-                if evidence.get("owner_scope_id") != self.scope:
+                if evidence.get("owner_scope_id") != self.scope and not (
+                    "owner_scope_id" not in evidence and execution_policy is not None
+                ):
                     raise ValueError("EVIDENCE_SCOPE_DENIED")
                 if evidence.get("availability") == "AVAILABLE":
                     content = evidence["content"]
@@ -237,7 +239,13 @@ class TriageExecutionService:
             )
             size = len(content_bytes(source.get("content"))) if available else 0
             if available and (
-                source.get("owner_scope_id") != self.scope
+                (
+                    source.get("owner_scope_id") != self.scope
+                    and not (
+                        "owner_scope_id" not in source
+                        and run.execution_policy is not None
+                    )
+                )
                 or source["digest"]
                 != sha256(
                     source["content"].encode("utf-8")

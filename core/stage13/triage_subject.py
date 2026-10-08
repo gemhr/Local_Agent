@@ -108,7 +108,9 @@ def manifest_for(registration, model_config, system_prompt):
         "agent_id": d.agent_id,
         "agent_definition_version": d.agent_version,
         "agent_definition_digest": definition_digest(d),
-        "prompt_version": "stage13.triage-prompt.v1",
+        "prompt_version": d.business_options.get(
+            "stage13_prompt_version", "stage13.triage-prompt.v1"
+        ),
         "prompt_digest": digest(prompt),
         "model_profile_id": d.model_profile_id,
         "model_profile_digest": digest(model_config),

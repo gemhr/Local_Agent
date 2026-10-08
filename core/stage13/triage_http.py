@@ -78,6 +78,20 @@ app = FastAPI(lifespan=lifespan)
 router = APIRouter()
 
 
+@router.get("/api/runtime/evaluation-subjects/stage13/v1")
+async def evaluation_subjects(request: Request):
+    """向已认证评测方提供实际注册的冻结主体，不导出输入或 GT。"""
+    expected_token = os.getenv("LOCAL_AGENT_STAGE13_SERVICE_TOKEN", "")
+    if not expected_token or not hmac.compare_digest(
+        request.headers.get("authorization", ""), "Bearer " + expected_token
+    ):
+        raise HTTPException(401, "SERVICE_CREDENTIAL_REQUIRED")
+    service = getattr(request.app.state, "stage13_service", None)
+    if service is None:
+        raise HTTPException(503, "STAGE13_OPT_IN_REQUIRED")
+    return {"subjects": list(service.manifests.values())}
+
+
 @router.post("/api/runtime/evaluation-execute/stage13/v1")
 async def evaluation_execute(body: EvaluationRequest, request: Request):
     expected_token = os.getenv("LOCAL_AGENT_STAGE13_SERVICE_TOKEN", "")
