@@ -225,9 +225,14 @@ async def compose(database, engine, model_config, scope):
     agents = definitions()
     candidate_version = os.getenv("LOCAL_AGENT_STAGE13_CANDIDATE_VERSION")
     if candidate_version:
-        from core.stage13.triage_candidate_vnext import candidate_definitions
+        from core.stage13.triage_candidate_v3 import VERSION, candidate_v3_definitions
 
-        agents = candidate_definitions(agents, candidate_version)
+        if candidate_version == VERSION:
+            agents = candidate_v3_definitions(agents)
+        else:
+            from core.stage13.triage_candidate_vnext import candidate_definitions
+
+            agents = candidate_definitions(agents, candidate_version)
     tool_definition = BusinessToolDefinition(
         name="stage13_evidence_lookup",
         description="读取本次 Run 授权的 Evidence（只读）",
