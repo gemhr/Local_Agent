@@ -123,18 +123,51 @@ class TriageExecutionService:
             if role == "SCHEMA_REPAIR"
             else parsed
         )
-        if not isinstance(payload, dict) or set(payload) - {
-            "schema_version",
-            "scope",
-            "EvidenceRefs",
-            "incident_ref",
-            "failure_summary",
-            "environment_samples",
-            "version_samples",
-            "visible_change_inventory",
-            "visible_evidence",
-            "evidence_policy",
-        }:
+        from core.stage13.input_contract_v2 import (
+            INPUT_V2,
+            EXECUTION_V2,
+            IDENTITIES,
+            validate_input_v2,
+        )
+
+        v2 = isinstance(payload, dict) and payload.get("schema_version") == INPUT_V2
+        if v2:
+            validate_input_v2(payload, scope_id=self.scope)
+            from core.stage13.input_contract_v2 import (
+                validate_contract_identity,
+                receipt_contract_fields,
+            )
+
+            validate_contract_identity(manifest)
+            if (
+                execution_policy is None
+                or execution_policy["policy"]["version"] != EXECUTION_V2
+            ):
+                raise ValueError("EXECUTION_POLICY_VERSION_MISMATCH")
+            receipt_contract_fields(manifest, execution_policy["policy"])
+            from core.stage13.execution_policy import semantic_input
+
+            if execution_policy["policy"]["semantic_input_digest"] != digest(
+                semantic_input(payload)
+            ):
+                raise ValueError("EXECUTION_POLICY_BINDING_MISMATCH")
+        elif set(manifest) & set(IDENTITIES):
+            raise ValueError("INPUT_CONTRACT_VERSION_MISMATCH")
+        if not isinstance(payload, dict) or set(payload) - (
+            {
+                "schema_version",
+                "scope",
+                "EvidenceRefs",
+                "incident_ref",
+                "failure_summary",
+                "environment_samples",
+                "version_samples",
+                "visible_change_inventory",
+                "visible_evidence",
+                "evidence_policy",
+            }
+            | ({"responsibility_semantics", "business_context"} if v2 else set())
+        ):
             raise ValueError("UNAUTHORIZED_INPUT_FIELDS")
         if (
             len(query.encode("utf-8")) > 256 * 1024
@@ -166,7 +199,9 @@ class TriageExecutionService:
                 now = await session.scalar(select(func.clock_timestamp()))
                 if deadline > now + timedelta(seconds=180):
                     raise ValueError("ANALYSIS_DEADLINE_INVALID")
-            if payload.get("schema_version") != "stage13.triage-input.v1":
+            if payload.get("schema_version") != (
+                INPUT_V2 if v2 else "stage13.triage-input.v1"
+            ):
                 raise ValueError("INPUT_SCHEMA_MISMATCH")
             for evidence in payload["visible_evidence"]:
                 if evidence.get("owner_scope_id") != self.scope and not (
@@ -395,6 +430,21 @@ class TriageExecutionService:
                     ],
                 )
             receipt["receipt_digest"] = digest(receipt)
+            if payload.get("schema_version") == "stage13.triage-input.v2":
+                from core.stage13.input_contract_v2 import (
+                    receipt_contract_fields,
+                    validate_receipt_v2,
+                )
+
+                if row.execution_policy is None:
+                    raise ValueError("EXECUTION_POLICY_VERSION_MISMATCH")
+                receipt.update(
+                    receipt_contract_fields(manifest, row.execution_policy["policy"])
+                )
+                receipt["receipt_digest"] = digest(
+                    {k: v for k, v in receipt.items() if k != "receipt_digest"}
+                )
+                validate_receipt_v2(receipt)
             row.receipt, row.raw_answer, row.validation = receipt, raw, validation
             row.runtime_status, row.stop_reason = root.status, root.stop_reason
         return row

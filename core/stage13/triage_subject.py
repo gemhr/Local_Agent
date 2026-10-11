@@ -124,12 +124,28 @@ def manifest_for(registration, model_config, system_prompt):
         "execution_enabled": True,
     }
     m["subject_manifest_digest"] = digest(m)
+    input_version = d.business_options.get("stage13_input_contract_version")
+    if input_version is not None:
+        from core.stage13.input_contract_v2 import INPUT_V2, contract_identities
+
+        if input_version != INPUT_V2:
+            raise ValueError("INPUT_CONTRACT_VERSION_UNSUPPORTED")
+        m.update(contract_identities(), output_schema_digest=digest(SCHEMA))
+        m["subject_manifest_digest"] = digest(
+            {k: v for k, v in m.items() if k != "subject_manifest_digest"}
+        )
     return m
 
 
 def check_manifest(manifest, registered):
     if not isinstance(manifest, dict) or manifest.get("execution_enabled") is not True:
         raise ValueError("NON_EXECUTABLE_SUBJECT")
+    from core.stage13.input_contract_v2 import IDENTITIES, validate_contract_identity
+
+    if set(manifest) & set(IDENTITIES):
+        validate_contract_identity(manifest)
+        if manifest.get("output_schema_digest") != digest(SCHEMA):
+            raise ValueError("OUTPUT_SCHEMA_IDENTITY_MISMATCH")
     body = {k: v for k, v in manifest.items() if k != "subject_manifest_digest"}
     if (
         digest(body) != manifest.get("subject_manifest_digest")

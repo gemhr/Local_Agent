@@ -3,6 +3,12 @@
 import hashlib
 
 from core.stage13.triage_subject import digest, check_manifest, strict_json
+from core.stage13.input_contract_v2 import (
+    INPUT_V2,
+    COMPARABILITY_V3,
+    comparison_domain,
+    validate_receipt_v2,
+)
 
 POLICY_VERSION = "stage13.model-comparability.v2"
 AGENT_REGRESSION = "AGENT_REGRESSION"
@@ -32,6 +38,11 @@ def project_receipt(
         "warnings": [],
         "reasons": [],
     }
+    if expected.get("input_contract_version") == INPUT_V2:
+        result.update(
+            policy_version=COMPARABILITY_V3,
+            evaluated_under_policy_version=COMPARABILITY_V3,
+        )
 
     def reject(reason, *, mismatch=False):
         result["identity_level"] = (
@@ -44,6 +55,8 @@ def project_receipt(
         return reject("EVALUATION_MODE_UNSUPPORTED", mismatch=True)
     try:
         check_manifest(expected, expected)
+        if expected.get("input_contract_version") == INPUT_V2:
+            validate_receipt_v2(receipt)
         if (
             receipt["actual_subject_manifest"] != expected
             or receipt["receipt_digest"]
@@ -207,9 +220,14 @@ def compare_receipts(
 ):
     """比较同输入的两侧身份；模型升级差异须由评测计划明确声明。"""
     left, right = baseline["projection"], candidate["projection"]
+    v2 = any(
+        side["manifest"].get("input_contract_version") == INPUT_V2
+        for side in (baseline, candidate)
+    )
+    policy_version = COMPARABILITY_V3 if v2 else POLICY_VERSION
     result = {
-        "policy_version": POLICY_VERSION,
-        "evaluated_under_policy_version": POLICY_VERSION,
+        "policy_version": policy_version,
+        "evaluated_under_policy_version": policy_version,
         "evaluation_mode": evaluation_mode,
         "baseline": left,
         "candidate": right,
@@ -220,8 +238,30 @@ def compare_receipts(
         "warnings": [],
         "reasons": [],
     }
+    if v2:
+        if any(
+            side["manifest"].get("input_contract_version") != INPUT_V2
+            or side.get("receipt", {}).get("comparison_domain_digest")
+            != digest(comparison_domain())
+            for side in (baseline, candidate)
+        ):
+            result["reasons"].append("DOMAIN_MISMATCH")
+            return result
+        try:
+            for side in (baseline, candidate):
+                validate_receipt_v2(side["receipt"])
+                if (
+                    side["receipt"]["actual_subject_manifest"] != side["manifest"]
+                    or side["input_digest"] != side["receipt"]["actual_input_digest"]
+                    or side.get("semantic_input_digest")
+                    != side["receipt"]["semantic_input_digest"]
+                ):
+                    raise ValueError("RECEIPT_SIDE_BINDING_MISMATCH")
+        except (ValueError, KeyError, TypeError):
+            result["reasons"].append("RECEIPT_CONTRACT_BINDING_MISMATCH")
+            return result
     if evaluation_mode not in (AGENT_REGRESSION, MODEL_UPGRADE) or any(
-        p["policy_version"] != POLICY_VERSION
+        p["policy_version"] != policy_version
         or p["evaluation_mode"] != evaluation_mode
         or not p["comparable"]
         for p in (left, right)

@@ -225,9 +225,21 @@ async def compose(database, engine, model_config, scope):
     agents = definitions()
     candidate_version = os.getenv("LOCAL_AGENT_STAGE13_CANDIDATE_VERSION")
     if candidate_version:
+        from core.stage13.triage_candidate_v4 import (
+            VERSION as V4_VERSION,
+            candidate_v4_definitions,
+        )
+        from core.stage13.triage_candidate_v4b import (
+            VERSION as V4B_VERSION,
+            candidate_v4b_definitions,
+        )
         from core.stage13.triage_candidate_v3 import VERSION, candidate_v3_definitions
 
-        if candidate_version == VERSION:
+        if candidate_version == V4B_VERSION:
+            agents = candidate_v4b_definitions(agents)
+        elif candidate_version == V4_VERSION:
+            agents = candidate_v4_definitions(agents)
+        elif candidate_version == VERSION:
             agents = candidate_v3_definitions(agents)
         else:
             from core.stage13.triage_candidate_vnext import candidate_definitions
