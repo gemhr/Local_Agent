@@ -125,12 +125,18 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED` | AgentEvalOpsTraceExporter | strict bool | `0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | public-safe flag | enabled 时缺 base_url/api_key/project_id、无效 timeout、deadline 不满足 close invariant 均 startup-fatal | `0` |
 | `LOCAL_AGENT_AGENTEVALOPS_BASE_URL` | AgentEvalOpsTraceExporter | http(s) origin URL | empty | http/https origin（无 path/query/fragment/userinfo） | when enabled | APPLICATION_SCOPE | yes | internal endpoint | enabled 时缺失/非法 startup-fatal；PRODUCTION 强制 https | `http://127.0.0.1:8001` |
 | `LOCAL_AGENT_AGENTEVALOPS_API_KEY` | AgentEvalOpsTraceExporter | string | empty | credential | when enabled | APPLICATION_SCOPE | yes | secret（`repr=False`） | enabled 时缺失 startup-fatal；不进日志/异常/health | `<secret-store-reference>` |
-| `LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID` | AgentEvalOpsTraceExporter | string | empty | non-empty identifier | when enabled | APPLICATION_SCOPE | yes | internal identifier | enabled 时缺失 startup-fatal | `project-1` |
+| `LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID` | AgentEvalOpsTraceExporter | canonical UUID | empty | lowercase hyphenated UUID | when enabled | APPLICATION_SCOPE | yes | internal identifier | enabled 时缺失或非 canonical UUID startup-fatal；作为 `/api/v1/projects/{project_id}/trace-envelopes` 路径的一部分 | `00000000-0000-4000-8000-000000000001` |
 | `LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS` | AgentEvalOpsTraceExporter | finite float | `0.5` | finite >0 且可转换为整数 ms | when enabled | APPLICATION_SCOPE | yes | internal config | 非正/非有限/小数毫秒/超过 total deadline 显式值 fail closed | `0.5` |
 | `LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS` | AgentEvalOpsTraceExporter | finite float | `3.0` | finite >0 且可转换为整数 ms | when enabled | APPLICATION_SCOPE | yes | internal config | 非正/非有限/小数毫秒 fail closed；total + 0.5s cleanup margin 必须 `< RUNTIME_COMPONENT_CLOSE_TIMEOUT_SECONDS` | `3.0` |
+
 | `LOCAL_AGENT_MCP_CONFIG_PATH` | mcp.config / lifespan MCP assembly | path（JSON 文件） | empty | operator 本地 JSON 文件，schema `localagent-mcp-config.v1`（server identity/command/arguments/environment/enabled + 可选 per-tool `tools` local mapping，fail-closed 校验） | no | APPLICATION_SCOPE | yes | sensitive local operator config（environment 值通常含 secret，文件不得提交） | 留空=默认关闭，不构造 MCP 集成组件、不启动子进程；文件缺失/非法/schema 不匹配/字段校验失败为 `MCP_CONFIG_INVALID` startup fatal | `<local-operator-path>` |
 | `LOCAL_AGENT_MCP_CONNECT_TIMEOUT_SECONDS` | mcp.client（stdio spawn + initialize） | finite float | `5.0` | finite >0 | no | APPLICATION_SCOPE | yes | internal config | 非正/非有限/非法显式值 fail closed；超时按 MCP transport 失败处理（单 server 降级，不重试/重连） | `5.0` |
 | `LOCAL_AGENT_MCP_REQUEST_TIMEOUT_SECONDS` | mcp.client（`tools/list` / `tools/call` 单请求上界） | finite float | `10.0` | finite >0 | no | APPLICATION_SCOPE | yes | internal config | 非正/非有限/非法显式值 fail closed；底层 bounded IO 机制，Runtime effective deadline（`ToolExecutionService`）为真正 authority，adapter 取两者较小值 | `10.0` |
+
+启用 v2 exporter 前，AgentEvalOps Go consumer 必须先部署并验证三种严格 Trace profile。
+Project ID 是 URL 中的授权对象；producer 仅发送 project-scoped `X-API-Key`，不发送
+`X-Project-ID`。升级失败时先将 `LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED` 设为
+`false` 并按应用既有生命周期重启/关闭 exporter；不要把 v2 envelope 降级重标为 v1。
 
 ## Environment Profile
 

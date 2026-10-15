@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.agent_router import AgentRouter
+from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
 from core.runtime.model_context import (
     CANONICAL_SECURITY_INSTRUCTION,
     ContextBudgetExceededError,
@@ -27,6 +28,8 @@ from core.runtime.model_selection import ModelProfile, ModelProfileId
 from core.runtime.planning import TaskCapabilityRequirements
 from core.runtime.trace_contract import set_span_attributes
 from core.runtime.tracing import InMemorySpanRecorder
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
+from core.runtime.context import create_run_context
 from tests._wp3_fixtures import direct_json
 
 
@@ -258,38 +261,49 @@ def test_prompt_identity_is_stable_and_code_owned():
 
 
 def _structured_stub(outputs):
-    router = object.__new__(AgentRouter)
-    router.context_builder = ContextBuilder()
-    router.model_context_window = 4096
-    router.max_tokens = 256
-    router.structured_invocation_repair_enabled = True
+    registry = compile_agent_catalog(
+        AgentRegistrationBundle(registrations=()),
+        builtin_registrations=tuple(
+            DEFAULT_AGENT_REGISTRY.resolve(agent_id)
+            for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+        ),
+    ).agent_registry
+    router = AgentRouter(None, None, agent_registry=registry)
     calls = {"count": 0}
+    invocation_contexts = []
 
-    def invoke(**_kwargs):
+    def invoke(**kwargs):
         calls["count"] += 1
+        invocation_contexts.append(kwargs["run_context"])
         return SimpleNamespace(output=outputs.pop(0))
 
     router._invoke_model_contract = invoke
-    return router, calls
+    return router, calls, invocation_contexts
 
 
 def test_structured_valid_output_succeeds_without_repair():
-    router, calls = _structured_stub([direct_json()])
-    assert router.complete_planning_decision("question", run_context=None)
+    router, calls, invocation_contexts = _structured_stub([direct_json()])
+    run_context, _ = create_run_context(entry_agent_id="core_router")
+    assert router.complete_planning_decision("question", run_context=run_context)
     assert calls["count"] == 1
+    assert invocation_contexts == [run_context]
 
 
 def test_structured_malformed_output_repairs_once_then_succeeds():
-    router, calls = _structured_stub(["not-json", direct_json()])
-    assert router.complete_planning_decision("question", run_context=None)
+    router, calls, invocation_contexts = _structured_stub(["not-json", direct_json()])
+    run_context, _ = create_run_context(entry_agent_id="core_router")
+    assert router.complete_planning_decision("question", run_context=run_context)
     assert calls["count"] == 2
+    assert invocation_contexts == [run_context, run_context]
 
 
 def test_structured_malformed_twice_typed_fail():
-    router, calls = _structured_stub(["not-json", "still-not-json"])
+    router, calls, invocation_contexts = _structured_stub(["not-json", "still-not-json"])
+    run_context, _ = create_run_context(entry_agent_id="core_router")
     with pytest.raises(PlanningError):
-        router.complete_planning_decision("question", run_context=None)
+        router.complete_planning_decision("question", run_context=run_context)
     assert calls["count"] == 2
+    assert invocation_contexts == [run_context, run_context]
 
 
 def test_benign_context_includes_system_request_rag_memory_and_history():

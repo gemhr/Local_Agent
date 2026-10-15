@@ -657,12 +657,25 @@ def test_agentevalops_enabled_valid_config(monkeypatch) -> None:
         LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
         LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
         LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
-        LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+        LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="00000000-0000-4000-8000-000000000001",
     )
     assert settings.agentevalops_trace_export_enabled is True
     assert settings.agentevalops_base_url == "http://127.0.0.1:8001"
     assert settings.agentevalops_api_key == "api-key-test-1"
-    assert settings.agentevalops_project_id == "project-test-1"
+    assert settings.agentevalops_project_id == "00000000-0000-4000-8000-000000000001"
+
+
+def test_agentevalops_project_id_requires_canonical_uuid(monkeypatch) -> None:
+    with pytest.raises(SettingsValidationError) as captured:
+        _load(
+            monkeypatch,
+            LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
+            LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
+            LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="PROJECT-1",
+        )
+    assert captured.value.field == "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID"
+    assert captured.value.reason_code == "invalid_canonical_uuid"
 
 
 def test_agentevalops_enabled_requires_base_url(monkeypatch) -> None:
@@ -671,7 +684,7 @@ def test_agentevalops_enabled_requires_base_url(monkeypatch) -> None:
             monkeypatch,
             LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
             LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
-            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="00000000-0000-4000-8000-000000000001",
         )
     assert captured.value.safe_error_code == STARTUP_CONFIGURATION_ERROR
     assert captured.value.field == "LOCAL_AGENT_AGENTEVALOPS_BASE_URL"
@@ -683,7 +696,7 @@ def test_agentevalops_enabled_requires_api_key_and_project(monkeypatch) -> None:
             "LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED": "true",
             "LOCAL_AGENT_AGENTEVALOPS_BASE_URL": "http://127.0.0.1:8001",
             "LOCAL_AGENT_AGENTEVALOPS_API_KEY": "api-key-test-1",
-            "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID": "project-test-1",
+            "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID": "00000000-0000-4000-8000-000000000001",
         }
         env[missing] = None
         with pytest.raises(SettingsValidationError) as captured:
@@ -698,7 +711,7 @@ def test_agentevalops_invalid_base_url_fails(monkeypatch) -> None:
             LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
             LOCAL_AGENT_AGENTEVALOPS_BASE_URL="ftp://agent-eval.example",
             LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
-            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="00000000-0000-4000-8000-000000000001",
         )
     assert captured.value.field == "LOCAL_AGENT_AGENTEVALOPS_BASE_URL"
     assert captured.value.reason_code == "invalid_url"
@@ -711,7 +724,7 @@ def test_agentevalops_connect_exceeds_total_deadline_fails(monkeypatch) -> None:
             LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
             LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
             LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
-            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="00000000-0000-4000-8000-000000000001",
             LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS="2.0",
             LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS="1.0",
         )
@@ -726,7 +739,7 @@ def test_agentevalops_fractional_millisecond_fails(monkeypatch) -> None:
             LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
             LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
             LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
-            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="00000000-0000-4000-8000-000000000001",
             LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS="0.0001",
         )
     assert captured.value.reason_code == "invalid_millisecond_conversion"
@@ -739,7 +752,7 @@ def test_agentevalops_deadline_invariant_against_close_timeout(monkeypatch) -> N
             LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
             LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
             LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
-            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="00000000-0000-4000-8000-000000000001",
             LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_TOTAL_DEADLINE_SECONDS="5.0",
         )
     assert captured.value.field == (
@@ -763,7 +776,7 @@ def test_agentevalops_production_requires_https(monkeypatch, tmp_path) -> None:
             LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
             LOCAL_AGENT_AGENTEVALOPS_BASE_URL="http://127.0.0.1:8001",
             LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
-            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+            LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="00000000-0000-4000-8000-000000000001",
         )
     assert captured.value.safe_error_code == SETTINGS_SECURITY_POLICY_ERROR
     assert captured.value.field == "LOCAL_AGENT_AGENTEVALOPS_BASE_URL"
@@ -779,7 +792,7 @@ def test_agentevalops_production_https_valid(monkeypatch, tmp_path) -> None:
         LOCAL_AGENT_AGENTEVALOPS_TRACE_EXPORT_ENABLED="true",
         LOCAL_AGENT_AGENTEVALOPS_BASE_URL="https://agent-eval.example",
         LOCAL_AGENT_AGENTEVALOPS_API_KEY="api-key-test-1",
-        LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="project-test-1",
+        LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID="00000000-0000-4000-8000-000000000001",
     )
     assert settings.agentevalops_trace_export_enabled is True
     assert settings.agentevalops_base_url == "https://agent-eval.example"

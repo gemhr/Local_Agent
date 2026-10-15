@@ -1,0 +1,525 @@
+{
+  "category_schemas": {
+    "delivery": {
+      "delivery_status": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "DELIVERED",
+            "FAILED",
+            "OUTCOME_UNKNOWN"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "final_step_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "gate_terminal_state": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "FAILED",
+            "OUTCOME_UNKNOWN",
+            "PUBLISHED"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "output_char_count": {
+        "presence": "OPTIONAL",
+        "type": "NON_NEGATIVE_INT"
+      },
+      "output_policy": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "FINAL_PASSTHROUGH",
+            "FINAL_SYNTHESIS",
+            "INTERNAL"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "partially_persisted": {
+        "presence": "OPTIONAL",
+        "type": "BOOL"
+      },
+      "publish_attempt_count": {
+        "domain": {
+          "kind": "range",
+          "maximum": 1,
+          "minimum": 0
+        },
+        "presence": "OPTIONAL",
+        "type": "NON_NEGATIVE_INT"
+      }
+    },
+    "memory": {
+      "assistant_write_status": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "FAILED",
+            "NOT_ATTEMPTED",
+            "WRITTEN"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "delivery_status": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "DELIVERED",
+            "FAILED",
+            "OUTCOME_UNKNOWN"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "entry_agent_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "memory_scope": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "direct"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "persist_enabled": {
+        "presence": "OPTIONAL",
+        "type": "BOOL"
+      },
+      "transaction_used": {
+        "presence": "OPTIONAL",
+        "type": "BOOL"
+      },
+      "user_write_status": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "FAILED",
+            "NOT_ATTEMPTED",
+            "WRITTEN"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      }
+    },
+    "planning": {
+      "compiled_shape": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "0",
+            "1",
+            "2",
+            "3",
+            "unknown"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "planner_attempt_count": {
+        "presence": "INTERNAL_ONLY",
+        "type": "NON_NEGATIVE_INT"
+      },
+      "planner_model_invoked": {
+        "presence": "OPTIONAL",
+        "type": "BOOL"
+      },
+      "planner_timeout_source": {
+        "presence": "INTERNAL_ONLY",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "planning_source": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "deterministic",
+            "legacy_adapter",
+            "model_generated",
+            "unknown"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "schema_version": {
+        "presence": "OPTIONAL",
+        "type": "NON_NEGATIVE_INT"
+      },
+      "specialist_count": {
+        "presence": "OPTIONAL",
+        "type": "NON_NEGATIVE_INT"
+      },
+      "synthesis_required": {
+        "presence": "OPTIONAL",
+        "type": "BOOL"
+      }
+    },
+    "run": {
+      "agent_version": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "final_status": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "CANCELLED",
+            "CREATED",
+            "FAILED",
+            "RUNNING",
+            "SUCCEEDED"
+          ]
+        },
+        "presence": "CONDITIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "kb_version": {
+        "presence": "INTERNAL_ONLY",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "model_config_hash": {
+        "presence": "INTERNAL_ONLY",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "plan_fingerprint": {
+        "presence": "OPTIONAL",
+        "type": "DIGEST"
+      },
+      "plan_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "plan_version": {
+        "presence": "OPTIONAL",
+        "type": "NON_NEGATIVE_INT"
+      },
+      "planning_source": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "deterministic",
+            "legacy_adapter",
+            "model_generated",
+            "unknown"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "prompt_version": {
+        "presence": "INTERNAL_ONLY",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "resolved_agent_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "resolved_memory_profile_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "resolved_model_profile_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "resolved_retrieval_profile_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "runtime_mode": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "runtime_version": {
+        "presence": "INTERNAL_ONLY",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "selected_entry_agent_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "session_id": {
+        "presence": "INTERNAL_ONLY",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "shape": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "0",
+            "1",
+            "2",
+            "3",
+            "unknown"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "step_count": {
+        "presence": "OPTIONAL",
+        "type": "NON_NEGATIVE_INT"
+      },
+      "stop_reason": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "BUDGET_EXHAUSTED",
+            "CLIENT_DISCONNECTED",
+            "COMPLETED",
+            "DEADLINE_EXCEEDED",
+            "MAX_STEPS_REACHED",
+            "NO_ACTION",
+            "PLANNING_FAILED",
+            "REPEATED_ACTION",
+            "SYSTEM_SHUTDOWN",
+            "UNHANDLED_ERROR",
+            "USER_CANCELLED"
+          ]
+        },
+        "presence": "CONDITIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "toolset_hash": {
+        "presence": "INTERNAL_ONLY",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "toolset_identity": {
+        "presence": "OPTIONAL",
+        "type": "DIGEST"
+      },
+      "workflow_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "workflow_version": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      }
+    },
+    "step": {
+      "agent_version": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "content_type": {
+        "presence": "INTERNAL_ONLY",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "dependency_count": {
+        "presence": "OPTIONAL",
+        "type": "NON_NEGATIVE_INT"
+      },
+      "execution_kind": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "AGENT",
+            "SYNTHESIS"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "invocation_role": {
+        "presence": "INTERNAL_ONLY",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "output_policy": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "FINAL_PASSTHROUGH",
+            "FINAL_SYNTHESIS",
+            "INTERNAL"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "preferred_agent": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "result_char_count": {
+        "presence": "CONDITIONAL",
+        "type": "NON_NEGATIVE_INT"
+      },
+      "state": {
+        "presence": "CONDITIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "workflow_id": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "workflow_version": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      }
+    },
+    "synthesis": {
+      "execution_kind": {
+        "domain": {
+          "kind": "vocabulary",
+          "values": [
+            "AGENT",
+            "SYNTHESIS"
+          ]
+        },
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      },
+      "state": {
+        "presence": "OPTIONAL",
+        "type": "SAFE_IDENTIFIER"
+      }
+    }
+  },
+  "common_field_rules": {
+    "attributes": {
+      "presence": "OPTIONAL",
+      "type": "STRICT_CATEGORY_ALLOWLIST_MAPPING"
+    },
+    "completed_at": {
+      "presence": "REQUIRED",
+      "rule": "not earlier than started_at",
+      "type": "UTC_WALL_CLOCK"
+    },
+    "component": {
+      "presence": "REQUIRED",
+      "type": "SAFE_IDENTIFIER"
+    },
+    "duration_ms": {
+      "presence": "REQUIRED",
+      "type": "FINITE_NON_NEGATIVE_NUMBER"
+    },
+    "error_code": {
+      "presence": "CONDITIONAL",
+      "rule": "absent for OK; required safe identifier otherwise",
+      "type": "SAFE_IDENTIFIER_OR_ABSENT"
+    },
+    "operation": {
+      "presence": "REQUIRED",
+      "type": "SAFE_OPERATION_IDENTIFIER"
+    },
+    "parent_span_id": {
+      "presence": "OPTIONAL",
+      "type": "SAFE_IDENTIFIER_OR_ABSENT"
+    },
+    "run_id": {
+      "presence": "REQUIRED",
+      "type": "SAFE_IDENTIFIER"
+    },
+    "span_id": {
+      "presence": "REQUIRED",
+      "type": "SAFE_IDENTIFIER"
+    },
+    "started_at": {
+      "presence": "REQUIRED",
+      "type": "UTC_WALL_CLOCK"
+    },
+    "status": {
+      "presence": "REQUIRED",
+      "type": "TERMINAL_SPAN_STATUS"
+    },
+    "step_id": {
+      "presence": "CONDITIONAL",
+      "rule": "required for step-bound operations; absent for run/planning",
+      "type": "SAFE_IDENTIFIER_OR_ABSENT"
+    },
+    "trace_id": {
+      "presence": "REQUIRED",
+      "type": "SAFE_IDENTIFIER"
+    }
+  },
+  "compatibility_behavior": {
+    "fingerprint_missing_or_malformed_or_unsupported": "REJECT",
+    "identity_missing_or_mismatch": "REJECT",
+    "known_identity_version_fingerprint_invalid_envelope_semantics": "REJECT_ENVELOPE_INVALID",
+    "known_identity_version_fingerprint_valid_semantics": "ACCEPT",
+    "version_unsupported": "REJECT"
+  },
+  "compatibility_reasons": [
+    "ACCEPTED",
+    "ENVELOPE_INVALID",
+    "FINGERPRINT_MALFORMED",
+    "FINGERPRINT_MISSING",
+    "FINGERPRINT_UNSUPPORTED",
+    "IDENTITY_MISMATCH",
+    "IDENTITY_MISSING",
+    "VERSION_UNSUPPORTED"
+  ],
+  "contract_identity": "localagent.runtime.trace_export",
+  "contract_version": 1,
+  "direct_constructor_policy": "strict semantic validation via shared path; no public construction bypass",
+  "extension_operation_policy": {
+    "classification": "INTERNAL_RC",
+    "projected": false,
+    "rule": "lower-level model/tool/retrieval operations rejected as UNSUPPORTED_OPERATION; never stable top-level operations"
+  },
+  "runtime_trace_contract_version": 1,
+  "security_policy": {
+    "boundary": "metadata_first_strict_allowlist",
+    "forbidden": "raw user/agent/model/tool/RAG/memory content, paths, URLs, secrets, raw exceptions never exported",
+    "placeholder_attribution": "runtime_version/prompt_version/model_config_hash/toolset_hash/kb_version not_configured; NOT_PART_OF_WP4A; never exported"
+  },
+  "stable_operations": {
+    "runtime.final_memory_commit": {
+      "category": "memory",
+      "step_bound": true
+    },
+    "runtime.output_delivery": {
+      "category": "delivery",
+      "step_bound": true
+    },
+    "runtime.planning": {
+      "category": "planning",
+      "step_bound": false
+    },
+    "runtime.run": {
+      "category": "run",
+      "step_bound": false
+    },
+    "runtime.step": {
+      "category": "step",
+      "step_bound": true
+    },
+    "runtime.synthesis": {
+      "category": "synthesis",
+      "step_bound": true
+    }
+  },
+  "status_error_rule": {
+    "non_ok": "safe_error_code_present",
+    "ok": "error_code_absent"
+  },
+  "terminal_statuses": {
+    "CANCELLED": {},
+    "ERROR": {},
+    "OK": {},
+    "TIMED_OUT": {}
+  },
+  "unknown_attribute_behavior": {
+    "direct_constructor_unknown_attribute": "INVALID",
+    "project_span_unknown_internal_attribute": "OMIT"
+  }
+}

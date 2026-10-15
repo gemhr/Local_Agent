@@ -451,3 +451,15 @@ Even then:
 - additional runs after fixes should normally target only the affected failures/subsystems.
 
 The goal of testing is to obtain sufficient evidence for the current change, not to maximize the number of tests executed.
+
+## 16. 代码组织与可维护性规范（跨阶段长期适用）
+
+**正式生产代码必须按稳定业务领域、技术职责和架构边界组织，而不是按 Stage、WP、Sprint 或开发日期组织。开发阶段是研发管理维度，不是生产代码的目录维度。**
+
+1. **禁止新增阶段式生产目录与标识符**：不得创建 `core/stage14/`、`core/wp2/`、`runtime/phaseXX/` 等新目录，也不得以 `stageXX` / `wpXX` 命名正式模块、类、接口、主要函数、测试或长期维护脚本。真实协议兼容版本（例如 `trace_export/v2/`、`TraceEnvelopeV2`）不受此限制。
+2. **新能力先找领域 Owner**：实现前检查现有调用链、持久化/安全 Owner 和依赖方向。优先在现有语义清晰的模块中扩展；仅当职责独立、内聚且具有稳定边界时才新建包。避免平行实现、重复状态源、循环依赖、无价值的 wrapper。
+3. **不要用大文件替代 Stage 目录**：不因为禁止 `stageXX/` 就无限扩张 `agent_router.py` 或其他巨型模块。必要时将上下文、压缩、循环、记忆等真正独立的职责拆为语义模块，但不要过度拆成单函数包装层。
+4. **测试与工程文件也按能力命名**：新增有效测试继续位于 `tests/`，优先使用 `test_agent_loop_recovery.py` 等行为名称，而非 `test_stage14_wp2.py`；脚本、配置和可维护辅助工具同样遵循。旧测试文件不因名称过时就自动视为无效，仍以有效 Contract 判定。
+5. **历史 Stage 代码按需迁移**：已有 `core/stageXX/` 等历史目录不是今后的模板。如果本任务涉及其中代码，评估原位兼容修改或渐进迁至语义模块，并处理真实调用方/测试；不得借局部 WP 做无关全库搬迁。
+6. **阶段命名仅用于研发过程材料**：`.ai/handoff/stageXX_.../`、审计、架构决策、实施报告、验收记录可以继续以 Stage/WP 命名，不得据此强制生产目录照搬。
+7. **交付审查**：新增文件应说明其职责和位置，检查跨层耦合、重复 Owner、单文件膨胀、循环导入、测试发现与阶段式命名。必要的重构限于已授权 Scope。

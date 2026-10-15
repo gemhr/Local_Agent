@@ -8,6 +8,7 @@ import tempfile
 import pytest
 
 from core.agent_router import AgentRouter
+from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
 from core.llm_engine import ScriptedEvaluationLLMEngine
 from core.memory_manager import MemoryManager
 from core.runtime.budget import BudgetLedger, RunBudget
@@ -25,8 +26,19 @@ from core.runtime.event_emitter import RunEventEmitter
 from core.runtime.model_routing import ModelFailureCategory
 from core.runtime.retry import RetryExecutor, RetryPolicy
 from core.runtime.context import create_run_context
+from core.runtime.agent_registry import DEFAULT_AGENT_REGISTRY
 
 from tests.test_model_invocation import LOCAL, RecordingAdapter, provider_error, routing
+
+
+def _compiled_agent_registry():
+    return compile_agent_catalog(
+        AgentRegistrationBundle(registrations=()),
+        builtin_registrations=tuple(
+            DEFAULT_AGENT_REGISTRY.resolve(agent_id)
+            for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
+        ),
+    ).agent_registry
 
 
 @dataclass
@@ -183,6 +195,7 @@ async def test_production_planner_run_emitter_executes_before_step_aggregate() -
         router = AgentRouter(
             ScriptedEvaluationLLMEngine(),
             MemoryManager(f"{directory}/memory.db"),
+            agent_registry=_compiled_agent_registry(),
             orchestration_enabled=False,
         )
         output = await asyncio.to_thread(

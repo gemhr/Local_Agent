@@ -53,7 +53,8 @@ from core.runtime.trace_export_serialization import (
     serialize_trace_export_envelope,
 )
 
-_TEST_FINGERPRINT = "6fc033bb4310c7671541d7dc9e7297fdf0d0bb32605651b840ccd0fd173390ab"
+_TEST_FINGERPRINT = "5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b"
+_PROJECT_ID = "00000000-0000-4000-8000-000000000001"
 _DEADLINE_TOLERANCE = 0.25
 
 # 冻结 reentry：默认 CONNECTTIMEOUT_MS=500、TIMEOUT_MS=3000。
@@ -90,7 +91,7 @@ def default_exporter(**overrides) -> AgentEvalOpsTraceExporter:
     values = dict(
         base_url="http://127.0.0.1:8001",
         api_key="API_KEY_TEST_1",
-        project_id="PROJECT_TEST_1",
+        project_id=_PROJECT_ID,
         connect_timeout_seconds=0.5,
         total_deadline_seconds=3.0,
     )
@@ -219,25 +220,32 @@ def curl_instances(fake_pycurl):
 def test_url_construction(fake_pycurl, curl_instances) -> None:
     exporter = default_exporter(base_url="https://agent-eval.example:8443/")
     assert exporter._url == (
-        "https://agent-eval.example:8443" + AGENTEVALOPS_TRACE_EXPORT_PATH
+        "https://agent-eval.example:8443"
+        + AGENTEVALOPS_TRACE_EXPORT_PATH.format(project_id=_PROJECT_ID)
     )
     exporter.send(make_envelope())
     assert curl_instances[0].options[fake_pycurl.URL] == (
-        "https://agent-eval.example:8443" + AGENTEVALOPS_TRACE_EXPORT_PATH
+        "https://agent-eval.example:8443"
+        + AGENTEVALOPS_TRACE_EXPORT_PATH.format(project_id=_PROJECT_ID)
     )
 
 
 def test_required_headers(fake_pycurl, curl_instances) -> None:
     exporter = default_exporter(
-        api_key="API_KEY_TEST_1", project_id="PROJECT_TEST_1"
+        api_key="API_KEY_TEST_1", project_id=_PROJECT_ID
     )
     exporter.send(make_envelope())
     headers = curl_instances[0].options[fake_pycurl.HTTPHEADER]
     assert "Content-Type: application/json" in headers
     assert "X-API-Key: API_KEY_TEST_1" in headers
-    assert "X-Project-ID: PROJECT_TEST_1" in headers
+    assert not any(header.lower().startswith("x-project-id:") for header in headers)
     # 禁用 Expect: 100-continue，避免 body/reset 场景的协商重发路径。
     assert "Expect:" in headers
+
+
+def test_project_id_must_be_canonical_uuid(fake_pycurl) -> None:
+    with pytest.raises(ValueError, match="canonical lowercase UUID"):
+        default_exporter(project_id="00000000-0000-4000-8000-00000000000A")
 
 
 def test_serializer_bytes_passed_unchanged(fake_pycurl, curl_instances) -> None:
@@ -334,12 +342,12 @@ def test_send_after_close_raises_closed(fake_pycurl, curl_instances) -> None:
 
 
 def test_error_is_content_free(fake_pycurl, curl_instances) -> None:
-    exporter = default_exporter(api_key="API_KEY_TEST_1", project_id="PROJECT_TEST_1")
+    exporter = default_exporter(api_key="API_KEY_TEST_1", project_id=_PROJECT_ID)
     curl_instances[0].status = 500
     with pytest.raises(AgentEvalOpsTraceExportError) as captured:
         exporter.send(make_envelope())
     error = captured.value
-    for secret in ("API_KEY_TEST_1", "PROJECT_TEST_1", "run-wp4c-test-1", "http://127.0.0.1"):
+    for secret in ("API_KEY_TEST_1", _PROJECT_ID, "run-wp4c-test-1", "http://127.0.0.1"):
         assert secret not in str(error)
         assert secret not in repr(error)
     assert "500" in repr(error)
@@ -484,10 +492,12 @@ def test_real_http_201_and_200(real_pycurl_module) -> None:
         exporter = default_exporter(base_url=f"http://127.0.0.1:{server.server_address[1]}")
         envelope = make_envelope()
         assert exporter.send(envelope) is None
-        assert requests[0]["path"] == AGENTEVALOPS_TRACE_EXPORT_PATH
+        assert requests[0]["path"] == AGENTEVALOPS_TRACE_EXPORT_PATH.format(
+            project_id=_PROJECT_ID
+        )
         assert requests[0]["headers"].get("Content-Type") == "application/json"
         assert requests[0]["headers"].get("X-API-Key") == "API_KEY_TEST_1"
-        assert requests[0]["headers"].get("X-Project-ID") == "PROJECT_TEST_1"
+        assert requests[0]["headers"].get("X-Project-ID") is None
         assert requests[0]["body"] == serialize_trace_export_envelope(envelope)
         exporter.close(1.0)
     finally:
@@ -606,7 +616,7 @@ def test_real_http_3xx_no_follow_single_post(real_pycurl_module) -> None:
 
     def redirect_behavior(handler, request_body: bytes) -> None:
         handler.send_response(302)
-        handler.send_header("Location", "http://127.0.0.1:1/integrations/localagent/v1/trace-envelopes")
+        handler.send_header("Location", "http://127.0.0.1:1/api/v1/projects/00000000-0000-4000-8000-000000000001/trace-envelopes")
         handler.send_header("Content-Length", "0")
         handler.end_headers()
 
@@ -632,7 +642,7 @@ def test_real_http_3xx_no_follow_single_post(real_pycurl_module) -> None:
         assert captured.value.error_code == AGENTEVALOPS_TRACE_EXPORT_FAILED
         assert captured.value.http_status == 302
         # redirect 目标（port 1，必然 refused）绝不被联系：恰一个 POST。
-        assert requests == [AGENTEVALOPS_TRACE_EXPORT_PATH]
+        assert requests == [AGENTEVALOPS_TRACE_EXPORT_PATH.format(project_id=_PROJECT_ID)]
     finally:
         exporter.close(1.0)
         server.shutdown()

@@ -16,6 +16,7 @@ import ntpath
 import os
 import re
 import tomllib
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -1087,6 +1088,16 @@ class Settings:
                     STARTUP_CONFIGURATION_ERROR,
                     "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID",
                     "required_when_enabled",
+                )
+            try:
+                canonical_project_id = str(uuid.UUID(agentevalops_project_id))
+            except (ValueError, AttributeError):
+                canonical_project_id = ""
+            if canonical_project_id != agentevalops_project_id:
+                raise SettingsValidationError(
+                    SETTINGS_VALIDATION_ERROR,
+                    "LOCAL_AGENT_AGENTEVALOPS_PROJECT_ID",
+                    "invalid_canonical_uuid",
                 )
             agentevalops_connect_timeout_seconds = _env_strict_float(
                 "LOCAL_AGENT_AGENTEVALOPS_CONNECT_TIMEOUT_SECONDS",

@@ -219,6 +219,28 @@ adapter 边界，并保持同样的 content-free 原则：
   AgentState、OutputGate/DeliveryStatus、Memory commit、Journal、Snapshot 或
   Recovery；Recovery 保持 validation-only，不读取 export queue。
 
+## Stage14 WP1 Trace Profile 与接收授权边界
+
+- AgentCore 只写 Trace Export v2；Go 按 `(contract_identity, contract_version,
+  contract_fingerprint)` 精确选择 v1-frozen、v1-drift-e2bd 或 v2 reader。各 profile
+  使用独立字段 allowlist；未知组合、跨 profile 字段和语义错误整包拒绝。内部
+  Runtime Trace Contract 仍为 v1。
+- exporter 只 POST 到
+  `/api/v1/projects/{canonical-project-uuid}/trace-envelopes`。服务端仅从 URL
+  project 和已认证的 project-scoped `X-API-Key` 建立授权 scope；请求正文和旧
+  `X-Project-ID` header 均不授予或更改 scope。producer 不发送旧 header 或 Bearer。
+- Go 仅在 machine credential 通过既有 project/org 授权且具备 `WRITE` 后执行
+  strict ingest；GET receipt 使用独立的 `READ` 权限。普通 Observation ingest
+  拒绝 `LOCALAGENT_TRACE_V1` 与 `LOCALAGENT_TRACE_V2` 两个保留 source，不能伪造
+  strict trust。
+- v1 receipt 继续使用 `trace-v1` / `LOCALAGENT_TRACE_V1`；v2 使用
+  `trace-v2` / `LOCALAGENT_TRACE_V2`。每个已提交 sidecar 保存实际 wire version；
+  Trace canonical digest、wire SHA-256 与 descriptor fingerprint 各自独立，不能
+  互换。历史 receipt、digest 和评分不重写。
+- 发布顺序为先部署并验证 Go reader，再启用 Python v2 writer。writer 故障时关闭
+  export；不把 v2 重标为 v1、不自动重试，也不回退到不支持 v2 的 v1-only Go
+  reader。旧 Python integration 路由不是 Go 失败 fallback。
+
 ## Sensitive Data Types
 
 Prompt、Model output、Tool arguments/output、RAG chunks、Memory 正文、本地路径、Provider error/endpoint、API key/token、idempotency/resource key 均为敏感数据。Run id、session id、trace id、Tool name 在特定输出面也可能形成高基数或关联风险。

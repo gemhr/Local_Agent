@@ -43,8 +43,8 @@ from core.runtime.state import RunStatus, StopReason
 # 显式、有限、code-owned 的 export contract identity（与 AgentEvalOps/transport
 # 无关；不是 module path、class repr、Git SHA 或 run identity）。
 TRACE_EXPORT_CONTRACT_IDENTITY = "localagent.runtime.trace_export"
-# 第一个 consumer-neutral Trace export contract。
-TRACE_EXPORT_CONTRACT_VERSION = 1
+# 当前唯一 writer 的 consumer-neutral Trace export contract 版本。
+TRACE_EXPORT_CONTRACT_VERSION = 2
 
 # Exact code-owned v1 duration upper bound.  This is a fixed contract constant,
 # not derived from Python float range or sys.float_info at runtime.

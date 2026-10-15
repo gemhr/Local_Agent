@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import math
 import time
+import uuid
 
 from core.runtime.trace_export_contract import TraceExportEnvelope
 from core.runtime.trace_export_serialization import (
@@ -38,7 +39,7 @@ from core.runtime.trace_export_serialization import (
 )
 
 # --- frozen transport constants（code-owned，不可配置） ----------------------
-AGENTEVALOPS_TRACE_EXPORT_PATH = "/integrations/localagent/v1/trace-envelopes"
+AGENTEVALOPS_TRACE_EXPORT_PATH = "/api/v1/projects/{project_id}/trace-envelopes"
 AGENTEVALOPS_MAX_RESPONSE_BODY_BYTES = 4096
 AGENTEVALOPS_NOSIGNAL = 1
 # libcurl CURLOPT_*_MS 是 long；Windows long 为 32-bit，显式封顶 fail closed。
@@ -170,6 +171,19 @@ def _require_http_url(base_url: str) -> None:
         raise ValueError("base_url must be an http(s) origin without path/query/fragment")
 
 
+def _require_project_uuid(project_id: str) -> str:
+    """只接受 canonical lowercase、hyphenated UUID。"""
+    if not isinstance(project_id, str):
+        raise TypeError("project_id must be a str")
+    try:
+        canonical = str(uuid.UUID(project_id))
+    except (ValueError, AttributeError):
+        raise ValueError("project_id must be a canonical lowercase UUID") from None
+    if canonical != project_id:
+        raise ValueError("project_id must be a canonical lowercase UUID")
+    return canonical
+
+
 class AgentEvalOpsTraceExporter:
     """Envelope-only、同步、单 easy-handle 的 AgentEvalOps HTTP exporter。
 
@@ -190,18 +204,19 @@ class AgentEvalOpsTraceExporter:
         connect_timeout_seconds: float,
         total_deadline_seconds: float,
     ) -> None:
-        pycurl = _get_pycurl()
         _require_http_url(base_url)
         if not isinstance(api_key, str):
             raise TypeError("api_key must be a str")
-        if not isinstance(project_id, str):
-            raise TypeError("project_id must be a str")
+        project_id = _require_project_uuid(project_id)
         connect_ms = _as_int_ms(connect_timeout_seconds)
         total_ms = _as_int_ms(total_deadline_seconds)
         if connect_ms > total_ms:
             raise ValueError("connect timeout must not exceed total deadline")
+        pycurl = _get_pycurl()
         self._assert_libcurl_capabilities(pycurl, base_url)
-        self._url = f"{base_url.rstrip('/')}{AGENTEVALOPS_TRACE_EXPORT_PATH}"
+        self._url = (
+            f"{base_url.rstrip('/')}{AGENTEVALOPS_TRACE_EXPORT_PATH.format(project_id=project_id)}"
+        )
         self._api_key = api_key
         self._project_id = project_id
         self._connect_timeout_ms = connect_ms
@@ -309,7 +324,6 @@ class AgentEvalOpsTraceExporter:
             [
                 "Content-Type: application/json",
                 f"X-API-Key: {self._api_key}",
-                f"X-Project-ID: {self._project_id}",
                 "Expect:",
             ],
         )

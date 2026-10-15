@@ -570,7 +570,7 @@ def test_two_instances_share_same_contract_fingerprint() -> None:
 def test_contract_version_and_identity_are_distinct_facts() -> None:
     from core.runtime.trace_contract import RUNTIME_TRACE_CONTRACT_VERSION
 
-    assert TRACE_EXPORT_CONTRACT_VERSION == 1
+    assert TRACE_EXPORT_CONTRACT_VERSION == 2
     assert RUNTIME_TRACE_CONTRACT_VERSION == 1
     # 两者独立：export version 属于新 export contract，不是复用 Runtime Trace v1。
     assert STABLE_OPERATION_SCHEMAS and CATEGORY_EXPORT_SCHEMAS

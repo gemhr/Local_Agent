@@ -1,0 +1,56 @@
+{
+  "contract_identity": "localagent.runtime.trace_export",
+  "contract_version": 2,
+  "descriptor_fingerprint": "5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b",
+  "producer_git_sha": "fa4e70fc3490005424a740b3e2c7439b42a1ed34",
+  "vectors": [
+    {
+      "canonical_payload_sha256": "603dfbd8fff8840bad9af94a012adc1cccfcf9ca39aefd841947387efd2e07d0",
+      "descriptor_fingerprint": "5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b",
+      "expected_canonical_utf8": "{\"attributes\":{\"agent_version\":\"v1\",\"resolved_agent_id\":\"core_router\",\"resolved_memory_profile_id\":\"default\",\"resolved_model_profile_id\":\"default\",\"resolved_retrieval_profile_id\":\"default\",\"runtime_mode\":\"COORDINATED\",\"selected_entry_agent_id\":\"core_router\",\"step_count\":1,\"toolset_identity\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"workflow_id\":\"default\",\"workflow_version\":\"v1\"},\"completed_at\":\"2026-10-15T00:00:00.001000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":\"1\",\"error_code\":null,\"operation\":\"runtime.run\",\"parent_span_id\":null,\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-1\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":null,\"trace_id\":\"trace-vector-1\"}",
+      "name": "runtime.run",
+      "raw_utf8": "{\"attributes\":{\"agent_version\":\"v1\",\"resolved_agent_id\":\"core_router\",\"resolved_memory_profile_id\":\"default\",\"resolved_model_profile_id\":\"default\",\"resolved_retrieval_profile_id\":\"default\",\"runtime_mode\":\"COORDINATED\",\"selected_entry_agent_id\":\"core_router\",\"step_count\":1,\"toolset_identity\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"workflow_id\":\"default\",\"workflow_version\":\"v1\"},\"completed_at\":\"2026-10-15T00:00:00.001000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":1.0,\"error_code\":null,\"operation\":\"runtime.run\",\"parent_span_id\":null,\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-1\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":null,\"trace_id\":\"trace-vector-1\"}",
+      "wire_sha256": "9f0e1b194b6c5e4a9f5698260f57cf226831f8cd9d2a98c64496068084635f7e"
+    },
+    {
+      "canonical_payload_sha256": "99a049b4c076a24ebd17482b78208fae286381729879e36e7a617b90121cee95",
+      "descriptor_fingerprint": "5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b",
+      "expected_canonical_utf8": "{\"attributes\":{\"planning_source\":\"deterministic\",\"schema_version\":1},\"completed_at\":\"2026-10-15T00:00:00.002000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":\"2\",\"error_code\":null,\"operation\":\"runtime.planning\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-2\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":null,\"trace_id\":\"trace-vector-1\"}",
+      "name": "runtime.planning",
+      "raw_utf8": "{\"attributes\":{\"planning_source\":\"deterministic\",\"schema_version\":1},\"completed_at\":\"2026-10-15T00:00:00.002000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":2.0,\"error_code\":null,\"operation\":\"runtime.planning\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-2\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":null,\"trace_id\":\"trace-vector-1\"}",
+      "wire_sha256": "8e05e8c0c2df87ea558ca9249a82b73f584da27aec5b34ec682d809d4bff7418"
+    },
+    {
+      "canonical_payload_sha256": "3b11cc1063cd5f3ea3a6835bb5a1317c3c170949df8b709be035f721ad532ea6",
+      "descriptor_fingerprint": "5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b",
+      "expected_canonical_utf8": "{\"attributes\":{\"agent_version\":\"v1\",\"dependency_count\":0,\"execution_kind\":\"AGENT\",\"preferred_agent\":\"core_router\",\"workflow_id\":\"default\",\"workflow_version\":\"v1\"},\"completed_at\":\"2026-10-15T00:00:00.003000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":\"3\",\"error_code\":null,\"operation\":\"runtime.step\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-3\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":\"step-1\",\"trace_id\":\"trace-vector-1\"}",
+      "name": "runtime.step",
+      "raw_utf8": "{\"attributes\":{\"agent_version\":\"v1\",\"dependency_count\":0,\"execution_kind\":\"AGENT\",\"preferred_agent\":\"core_router\",\"workflow_id\":\"default\",\"workflow_version\":\"v1\"},\"completed_at\":\"2026-10-15T00:00:00.003000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":3.0,\"error_code\":null,\"operation\":\"runtime.step\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-3\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":\"step-1\",\"trace_id\":\"trace-vector-1\"}",
+      "wire_sha256": "adb982e8e4de6648e55e75eb7fec60bb00897725fd1dd633efaaeb12334236c5"
+    },
+    {
+      "canonical_payload_sha256": "51be96d90639370ca89393d91f0f5e1d2ed83f69c2af5c620624c48fef2ea7c3",
+      "descriptor_fingerprint": "5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b",
+      "expected_canonical_utf8": "{\"attributes\":{\"execution_kind\":\"SYNTHESIS\"},\"completed_at\":\"2026-10-15T00:00:00.004000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":\"4\",\"error_code\":null,\"operation\":\"runtime.synthesis\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-4\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":\"step-2\",\"trace_id\":\"trace-vector-1\"}",
+      "name": "runtime.synthesis",
+      "raw_utf8": "{\"attributes\":{\"execution_kind\":\"SYNTHESIS\"},\"completed_at\":\"2026-10-15T00:00:00.004000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":4.0,\"error_code\":null,\"operation\":\"runtime.synthesis\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-4\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":\"step-2\",\"trace_id\":\"trace-vector-1\"}",
+      "wire_sha256": "fb6f29d669e293c5da40c81b340cbe2b96cc64455be2cd98213bd99c1d091f14"
+    },
+    {
+      "canonical_payload_sha256": "e0c2c84e8a80e5f0039c70293be5ae048226a12811e9d8912b421fdc14763d8d",
+      "descriptor_fingerprint": "5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b",
+      "expected_canonical_utf8": "{\"attributes\":{\"delivery_status\":\"DELIVERED\",\"publish_attempt_count\":1},\"completed_at\":\"2026-10-15T00:00:00.005000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":\"5\",\"error_code\":null,\"operation\":\"runtime.output_delivery\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-5\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":\"step-2\",\"trace_id\":\"trace-vector-1\"}",
+      "name": "runtime.output_delivery",
+      "raw_utf8": "{\"attributes\":{\"delivery_status\":\"DELIVERED\",\"publish_attempt_count\":1},\"completed_at\":\"2026-10-15T00:00:00.005000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":5.0,\"error_code\":null,\"operation\":\"runtime.output_delivery\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-5\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":\"step-2\",\"trace_id\":\"trace-vector-1\"}",
+      "wire_sha256": "45608988f57588c2df41023568cd11e8b30953e74969bcfd16f868520da1b243"
+    },
+    {
+      "canonical_payload_sha256": "dec439a1c9238c6c2dbe963ac3f961af0c261acf3174418b3bdbf59f0921c5d0",
+      "descriptor_fingerprint": "5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b",
+      "expected_canonical_utf8": "{\"attributes\":{\"memory_scope\":\"direct\",\"persist_enabled\":true},\"completed_at\":\"2026-10-15T00:00:00.006000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":\"6\",\"error_code\":null,\"operation\":\"runtime.final_memory_commit\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-6\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":\"step-2\",\"trace_id\":\"trace-vector-1\"}",
+      "name": "runtime.final_memory_commit",
+      "raw_utf8": "{\"attributes\":{\"memory_scope\":\"direct\",\"persist_enabled\":true},\"completed_at\":\"2026-10-15T00:00:00.006000+00:00\",\"component\":\"runtime\",\"contract_fingerprint\":\"5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b\",\"contract_identity\":\"localagent.runtime.trace_export\",\"contract_version\":2,\"duration_ms\":6.0,\"error_code\":null,\"operation\":\"runtime.final_memory_commit\",\"parent_span_id\":\"span-vector-1\",\"run_id\":\"run-vector-1\",\"span_id\":\"span-vector-6\",\"started_at\":\"2026-10-15T00:00:00+00:00\",\"status\":\"OK\",\"step_id\":\"step-2\",\"trace_id\":\"trace-vector-1\"}",
+      "wire_sha256": "20aa00c0b7a303d78c87d527fe4bd643325279650f8ab77e1a8bf0675a1ab72c"
+    }
+  ]
+}

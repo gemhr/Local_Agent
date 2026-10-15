@@ -283,7 +283,7 @@ final Step、Run terminal，也不触发再次交付。`MEMORY_FORMATION_COMPLET
 内新增的 content-minimized typed outcome；其 payload 自带 formation schema version 1，
 只保存 identity、count、safe outcome/reason、memory ID 和 latency。指标从该 Journal-first
 event 投影；`memory.formation` span 是 `INTERNAL_RC` extension operation，不是 Trace
-Contract v1 的第七个公共 operation，公共 trace export 对它保持 fail closed。
+Trace Export v2 的第七个内部 operation，公共 trace export 对它保持 fail closed。
 
 WP2 只保证同一 execution 内 prepared-record persistence retry 幂等；不实现跨进程
 replay、cross-Run dedup、Conflict Resolution、NO_CHANGE、supersede、forget、retrieval
@@ -456,7 +456,7 @@ project/thread Memory、Episodic/Shared Memory（Scope Guard）。
 | EventPublicationEvidence / SnapshotPublicationEvidence | INTERNAL_STABLE | 冻结安全事实，不保存正文或 live owner |
 | ToolCompletionGapFixture | TEST_ONLY | 仅存在于 `tests`；生产 RecoveryValidator 不接受 |
 | Test Fake / Test Mutator | TEST_ONLY | 只能由测试显式创建/注入 |
-| Trace Contract v1 | PUBLIC_VERSIONED | 六个稳定 operation 语义冻结；内部 Span 模型（`TraceContext`/`SpanHandle`/`SpanRecord`）为 INTERNAL，不是公共 exporter payload |
+| Trace Contract v1 | PUBLIC_VERSIONED | 内部 Span tracing 语义；六个稳定 operation 不等同于网络 export profile |
 | Consumer-neutral Trace export contract | PUBLIC_VERSIONED | `core/runtime/trace_export_contract.py`：identity/version、不可变 `TraceExportEnvelope`、严格 completed-only 投影、六类 category 导出 schema（type/presence/value-domain）、`TraceCompatibilityEvaluator`；同时是 Export Contract Semantic Owner，唯一构建权威规范语义描述符（`export_contract_semantic_descriptor()`）。消费者包括已实现的 `TraceExportDispatcher`（WP4-B） |
 | Trace Contract Fingerprint | PUBLIC_VERSIONED | `core/runtime/trace_contract_fingerprint.py`：`TraceContractFingerprinter` 只做 canonicalize+digest（sha256 + canonical_json_v1，lowercase 64-hex）；语义描述符由 export contract owner 消费，识别 schema+语义兼容性（含 value-domain 与 compatibility 行为），不识别 Trace 实例/Run/配置 |
 | TraceExporter protocol | INTERNAL_RC | `core/runtime/trace_exporter.py`：envelope-only transport-neutral Protocol（`send(TraceExportEnvelope)` + `close(timeout_seconds)`）；adapter 只接受公共 envelope，禁止 raw `SpanRecord`/dict/mapping |
@@ -477,7 +477,7 @@ project/thread Memory、Episodic/Shared Memory（Scope Guard）。
 | Recovery evidence | 无独立 schema | 复用 Journal/Snapshot digest | Journal tail reducer / RecoveryValidator | Event 1/2 + Snapshot 1 | 不独立写入 | 上游未知版本 fail closed | 缺失历史工具证据保持 Unknown/需协调 | 不写回、不从 Registry 回填 |
 | FaultPlan | 1 | semantic plan canonical JSON SHA-256（随 schema 1） | `FaultPlan.digest_source()` | 1 | 1 | fail closed | 规则字段由 dataclass 默认和严格校验处理 | 测试对象，不写回生产存储 |
 | ShutdownReport | 未版本化 | 无 | 不适用 | 进程内当前类型 | 不持久化 | 不适用 | 使用 `orchestration_completed` 与 `fully_closed` 的明确语义 | 不写回 |
-| Trace export contract | 1 | Trace Contract Fingerprint（canonical JSON SHA-256，lowercase 64-hex） | export semantic descriptor（`trace_export_contract.py`）→ canonicalize/digest（`trace_contract_fingerprint.py` + `snapshot_serialization`） | 1 | 1 | fail closed | 未知/缺失 identity/version/fingerprint 按合同 fail closed | 不写回 |
+| Trace export contract | 1 / 2 | Trace Contract Fingerprint（canonical JSON SHA-256，lowercase 64-hex） | export semantic descriptor（`trace_export_contract.py`）→ canonicalize/digest（`trace_contract_fingerprint.py` + `snapshot_serialization`） | `v1-frozen`, `v1-drift-e2bd`, 2 | 2 | fail closed | 未知/缺失或混用 identity/version/fingerprint profile 按合同 fail closed | 不写回 |
 
 冻结原则：不得使用 Python `repr` 计算持久 digest；不得虚构历史版本；不得在读取旧版本时升级写回；不得使用当前 Registry 或 live adapter 回填历史 evidence。
 
@@ -850,8 +850,8 @@ shutdown control（单 sentinel）→ `adapter.close(remaining)` → bounded joi
 - durable delivery = `NOT_IMPLEMENTED`（无 outbox/spool/ack log；进程崩溃可
   丢失 queue/in-flight；无 Trace/Journal/Snapshot replay）；
 - generic consumer-neutral wire serialization = `NOT_IMPLEMENTED / DEFERRED`
-  （保持 typed-envelope protocol；无 `to_json`/stable wire JSON/HTTP payload；
-  WP4-C 拥有 AgentEvalOps-specific mapping）。
+  （通用 wire/OTLP adapter 仍未实现；AgentEvalOps-specific TraceExportEnvelope
+  使用独立的 v2 wire contract 与严格 serializer，Go 保留两个已知 v1 reader）。
 
 ### 12.16 Disabled / Production Enable Boundary
 

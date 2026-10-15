@@ -12,7 +12,7 @@
 | Episodic formation factual evidence | `EpisodeEvidenceAssembler`（RUN_SCOPE） | `EpisodicMemoryFormation` | 只读 `PlanningRequest`、frozen Plan、AgentState、terminal decision与OutputGate delivery事实；bounded/sanitized projection | `long_term_memory` typed EPISODIC row | model/self-report/raw journal reconstruction、CoT、raw tool result、改变 terminal | INTERNAL_RC |
 | Episodic formation orchestration | `RunCoordinator`（terminal freeze 后、cleanup 前） | `EpisodicMemoryFormation` | best-effort observer；不重试 execution/output，不变更 AgentState/terminal | safe `EPISODIC_MEMORY_FORMATION_COMPLETED` event | second terminal、prompt injection、retrieval/context injection | INTERNAL_RC |
 
-`memory.formation` span 是 INTERNAL_RC extension operation，不属于 Trace Contract v1
+`memory.formation` span 是 INTERNAL_RC extension operation，不属于 Trace Export v2
 六个 PUBLIC_VERSIONED operation；`SAFE_SPAN_ATTRIBUTES` 的新增安全键不会自动进入
 consumer-neutral trace export。
 

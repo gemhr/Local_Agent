@@ -46,6 +46,10 @@ def base_descriptor() -> dict[str, object]:
 
 def test_fingerprint_format_and_algorithm_facts() -> None:
     assert _HEX64.fullmatch(TRACE_CONTRACT_FINGERPRINT)
+    assert (
+        TRACE_CONTRACT_FINGERPRINT
+        == "5a47ddcdda048e82712ea8f7155b9d98c0f08fb4380734d6318e90b66b3dc96b"
+    )
     assert TRACE_CONTRACT_FINGERPRINT_ALGORITHM == "sha256"
     assert TRACE_CONTRACT_FINGERPRINT_CANONICAL_ENCODING == "canonical_json_v1"
     assert (
@@ -532,8 +536,8 @@ def test_old_fingerprint_rejected() -> None:
 def test_export_and_runtime_versions_unchanged() -> None:
     from core.runtime.trace_contract import RUNTIME_TRACE_CONTRACT_VERSION
 
-    assert TRACE_EXPORT_CONTRACT_VERSION == 1
+    assert TRACE_EXPORT_CONTRACT_VERSION == 2
     assert RUNTIME_TRACE_CONTRACT_VERSION == 1
-    # 指纹改变来自语义覆盖修正，不是版本 bump。
+    # Runtime Trace 仍为 v1；公共 export contract 通过独立版本升至 v2。
     assert TRACE_CONTRACT_FINGERPRINT != OLD_FINGERPRINT
     assert _HEX64.fullmatch(TRACE_CONTRACT_FINGERPRINT)
