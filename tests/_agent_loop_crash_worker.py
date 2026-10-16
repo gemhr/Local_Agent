@@ -109,6 +109,10 @@ class RepeatObservationTool(ObservationTool):
 
 
 async def main():
+    if sys.argv[1].startswith("context-"):
+        from tests.test_context_compaction import context_crash_worker
+        await context_crash_worker(*sys.argv[1:])
+        return
     from core.runtime.agent_loop.driver import AgentLoopDriver
     original = AgentLoopDriver.execute
     def diagnose(self, *args, **kwargs):

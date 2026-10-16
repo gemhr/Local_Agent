@@ -36,6 +36,7 @@ class StepExecutionStatus(StrEnum):
 
 
 class ModelAttemptState(StrEnum):
+    REJECTED = "REJECTED"
     NOT_STARTED = "NOT_STARTED"
     STARTED = "STARTED"
     COMPLETED = "COMPLETED"

@@ -40,6 +40,7 @@ def build_loop_evidence(image) -> dict:
         model = models.get((row.accepted_model_attempt, row.accepted_model_attempt_number))
         aborted = row.decision_id is None and row.state == "OPEN"
         if row.decision_id and (model is None or model.state != "COMPLETED"
+                               or model.purpose != "DECISION"
                                or model.loop_frame_id != frame.frame_id
                                or model.loop_iteration_no != row.iteration_no):
             gaps.append("LOOP_MODEL_BINDING_MISSING")

@@ -1443,6 +1443,7 @@ class AgentRouter:
         run_context: RunContext | None = None,
         capability_requirements: TaskCapabilityRequirements | None = None,
         business_definition=None,
+        available_profiles=None,
     ):
         """返回 Selection Decision、首次 Profile 与最终上下文需求。"""
         estimated = self._estimate_messages_tokens(messages)
@@ -1454,11 +1455,11 @@ class AgentRouter:
             capabilities = self.build_single_agent_plan(
                 agent_id, user_query
             ).steps[0].capability_requirements
-        available_profiles = self.model_profiles
+        available_profiles = self.model_profiles if available_profiles is None else available_profiles
         requested_profile = getattr(business_definition, "model_profile_id", "default")
         if requested_profile != "default":
             available_profiles = tuple(
-                profile for profile in self.model_profiles
+                profile for profile in available_profiles
                 if profile.profile_id.value == requested_profile
             )
             if not available_profiles:
@@ -2592,6 +2593,10 @@ class AgentRouter:
         """Model Adapter 的唯一同步入口；复用既有 Budget/Circuit/Retry/Event。"""
         if run_context.budget_ledger is None:
             raise RuntimeError("统一 Model Invocation 需要 BudgetLedger")
+        if getattr(run_context, "loop_request_assessments", None) is not None:
+            from core.runtime.agent_loop.compaction import invoke_context_model
+            return invoke_context_model(self, agent_id, messages, run_context, capability_requirements,
+                max_tokens, event_emitter, generation_options or {}, business_definition)
         final_budget = self.context_builder.prepare_final_provider_messages(
             messages,
             max_input_tokens=self.model_context_window,

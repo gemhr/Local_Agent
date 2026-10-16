@@ -324,3 +324,9 @@ read-only，Kafka metadata lookup 不以 missing topic 为参数，因此不得�
 后轮只能使用冻结 seed 与已提交 Observation，不能重新读当前 Memory 或知识库替换历史输入。模型文本不能选择 Runtime policy，pin 也不绕过当前治理撤权。工具权限、审批、幂等和 UNKNOWN 收敛继续由原 Owner 判断；UNKNOWN 不能作为重新执行授权。
 
 Loop Evidence/评测使用独立协议，只公开 code-owned allowlist、身份引用、枚举、计数与 digest，不公开 messages、工具参数/结果正文。`GET /api/runtime/runs/{run_id}/loop-evidence/v1` 复用 JWT Principal 与 Run ownership；评测 Execute 额外要求显式配置的 service Principal 与单一 Project 映射，correlation 不授予权限。Final 业务正文仍仅进入已授权 ClientEventFeed，Journal 保持安全投影。
+
+### ContextSnapshot 与 context-evidence.v1
+
+Snapshot final messages、工具原始来源、压缩请求和摘要正文仅存受控 execution aggregate，沿 Run 原授权/删除边界；不写 RunSnapshot、Journal、Trace 或日志。整个 Seed 保持原角色，保留工具 pair 的 id/name/arguments/result wrapper 原样；被替换的 pair 整组移除，以带来源引用的低信任 user data 摘要代替，不生成 system/developer 指令。结构验证不证明摘要语义无损，也不授予工具执行权。
+
+独立 `context-evidence.v1` 仅导出固定枚举、安全身份/digest、整数、检查布尔和预算；不导出源正文、参数、自由摘要、Provider error 或内部路径。内部调用者在既有 Run 授权后使用 `capture_context_evidence(repository, run_id)` 封存，并可用 Repository `read_context_evidence` 读取；没有新增 HTTP 端点。缺 Snapshot、validation、request/usage 或 terminal 绑定必须 PARTIAL，不以已有 Final 推断 COMPLETE。

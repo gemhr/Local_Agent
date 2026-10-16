@@ -24,6 +24,8 @@ from core.persistence.models import (
     RuntimeStepExecutionRow,
     RuntimeLoopFrameRow,
     RuntimeLoopIterationRow,
+    RuntimeContextSnapshotRow,
+    RuntimeContextOperationRow,
 )
 from core.runtime.execution_aggregate import (
     ExecutionRootInput,
@@ -49,6 +51,8 @@ class RecoveryImage:
     loop_frames: tuple[RuntimeLoopFrameRow, ...] = ()
     loop_iterations: tuple[RuntimeLoopIterationRow, ...] = ()
     terminal_sequence: int | None = None
+    context_snapshots: tuple = ()
+    context_operations: tuple = ()
 
     @property
     def tools(self) -> tuple[DurableToolInvocationRow, ...]:
@@ -119,6 +123,7 @@ class DurableExecutionRepository:
                     run_id=root.run_id, step_id=step_id, context_seed=seed,
                     seed_digest=canonical_payload_digest(seed), pinned_config=config,
                     config_digest=canonical_payload_digest(config), loop_policy=policy,
+                    context_policy=config.get("context_policy"),
                     last_committed_fencing_token=token,
                 ))
                 await session.flush()
@@ -137,7 +142,9 @@ class DurableExecutionRepository:
             frames = tuple((await db.execute(select(RuntimeLoopFrameRow).where(RuntimeLoopFrameRow.run_id == run_id))).scalars().all())
             iterations = tuple((await db.execute(select(RuntimeLoopIterationRow).join(RuntimeLoopFrameRow, RuntimeLoopIterationRow.frame_id == RuntimeLoopFrameRow.frame_id).where(RuntimeLoopFrameRow.run_id == run_id).order_by(RuntimeLoopIterationRow.iteration_no))).scalars().all())
             control = await db.get(RunControlRow, run_id)
-            return RecoveryImage(root, steps, models, tools, approvals, claims, frames, iterations, control.terminal_sequence if control else None)
+            snapshots = tuple((await db.execute(select(RuntimeContextSnapshotRow).where(RuntimeContextSnapshotRow.run_id == run_id).order_by(RuntimeContextSnapshotRow.version))).scalars().all())
+            operations = tuple((await db.execute(select(RuntimeContextOperationRow).join(RuntimeLoopFrameRow, RuntimeContextOperationRow.frame_id == RuntimeLoopFrameRow.frame_id).where(RuntimeLoopFrameRow.run_id == run_id).order_by(RuntimeContextOperationRow.target_iteration))).scalars().all())
+            return RecoveryImage(root, steps, models, tools, approvals, claims, frames, iterations, control.terminal_sequence if control else None, snapshots, operations)
         if session is not None:
             return await read(session)
         # A plain session gives each SELECT a separate READ COMMITTED snapshot.
@@ -262,7 +269,8 @@ class DurableExecutionRepository:
                 abandoned_iterations = set()
                 for model in models:
                     if model.state == ModelAttemptState.STARTED.value:
-                        abandoned_iterations.add(model.loop_iteration_no)
+                        if model.purpose == "DECISION":
+                            abandoned_iterations.add(model.loop_iteration_no)
                         model.state = ModelAttemptState.UNKNOWN.value
                         model.completed_at = func.now()
                         model.version += 1
@@ -314,16 +322,10 @@ class DurableExecutionRepository:
             return await self._load_in_session(session, lease.run_id)
 
     async def _load_in_session(self, session: AsyncSession, run_id: str) -> RecoveryImage:
-        root = (await session.execute(select(RuntimeRunExecutionRow).where(RuntimeRunExecutionRow.run_id == run_id))).scalar_one()
-        steps = tuple((await session.execute(select(RuntimeStepExecutionRow).where(RuntimeStepExecutionRow.run_id == run_id).order_by(RuntimeStepExecutionRow.step_id))).scalars().all())
-        models = tuple((await session.execute(select(RuntimeModelInvocationRow).where(RuntimeModelInvocationRow.run_id == run_id).order_by(RuntimeModelInvocationRow.step_id, RuntimeModelInvocationRow.attempt_number, RuntimeModelInvocationRow.model_attempt_number))).scalars().all())
-        tools = tuple((await session.execute(select(DurableToolInvocationRow).where(DurableToolInvocationRow.run_id == run_id).order_by(DurableToolInvocationRow.step_id, DurableToolInvocationRow.invocation_id))).scalars().all())
-        approvals = tuple((await session.execute(select(DurableApprovalRow).where(DurableApprovalRow.run_id == run_id).order_by(DurableApprovalRow.step_id, DurableApprovalRow.approval_id))).scalars().all())
-        claims = tuple((await session.execute(select(DurableToolExecutionClaimRow).where(DurableToolExecutionClaimRow.run_id == run_id).order_by(DurableToolExecutionClaimRow.approval_id))).scalars().all())
-        frames = tuple((await session.execute(select(RuntimeLoopFrameRow).where(RuntimeLoopFrameRow.run_id == run_id))).scalars().all())
-        iterations = tuple((await session.execute(select(RuntimeLoopIterationRow).join(RuntimeLoopFrameRow, RuntimeLoopIterationRow.frame_id == RuntimeLoopFrameRow.frame_id).where(RuntimeLoopFrameRow.run_id == run_id).order_by(RuntimeLoopIterationRow.iteration_no))).scalars().all())
-        control = await session.get(RunControlRow, run_id)
-        return RecoveryImage(root, steps, models, tools, approvals, claims, frames, iterations, control.terminal_sequence if control else None)
+        image = await self.load(run_id, session=session)
+        if image is None:
+            raise RuntimeError("unknown execution root")
+        return image
 
     async def complete_step(self, lease: RunLease, *, step_id: str, plan_version: int, attempt: int, result: Mapping[str, Any], status: StepExecutionStatus = StepExecutionStatus.SUCCEEDED, safe_error: str | None = None, journal_append: JournalAppend | None = None) -> bool:
         if status not in {StepExecutionStatus.SUCCEEDED, StepExecutionStatus.FAILED, StepExecutionStatus.CANCELLED, StepExecutionStatus.BLOCKED, StepExecutionStatus.SKIPPED}:
@@ -363,16 +365,45 @@ class DurableExecutionRepository:
             await session.flush()
             return True
 
-    async def start_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, request_digest: str, provider_kind: str, profile_identity: str, journal_append: JournalAppend | None = None, loop_frame_id: str | None = None, loop_iteration_no: int | None = None, resume_generation: int | None = None, invocation_group: str | None = None, operation_id: str | None = None, reserved_usage: Any = None) -> None:
+    async def start_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, request_digest: str, provider_kind: str, profile_identity: str, journal_append: JournalAppend | None = None, loop_frame_id: str | None = None, loop_iteration_no: int | None = None, resume_generation: int | None = None, invocation_group: str | None = None, operation_id: str | None = None, reserved_usage: Any = None, purpose: str = "DECISION", context_snapshot_id: str | None = None, request_assessment: dict | None = None, compaction_operation_id: str | None = None) -> None:
         """Fenced NOT_STARTED -> STARTED transition before provider I/O."""
         async with self.database.transaction() as session:
             if self.run_control is not None:
                 await self.run_control.assert_current_in_transaction(session, lease)
             if loop_frame_id is not None:
                 _, frame = await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
-                iteration = await session.get(RuntimeLoopIterationRow, (loop_frame_id, loop_iteration_no), with_for_update=True)
-                if frame.step_id != step_id or iteration is None or iteration.state != "OPEN":
+                iteration = await session.get(RuntimeLoopIterationRow, (loop_frame_id, loop_iteration_no), with_for_update=True) if loop_iteration_no is not None else None
+                if frame.step_id != step_id or frame.phase != "NEED_DECISION":
                     raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
+                if purpose == "COMPACTION":
+                    operation = await session.get(RuntimeContextOperationRow, compaction_operation_id, with_for_update=True)
+                    if (operation is None or operation.frame_id != frame.frame_id or operation.state != "PREPARED"
+                            or operation.attempt_count >= frame.context_policy["max_attempts"]
+                            or invocation_group != f"context:{compaction_operation_id}"):
+                        raise RuntimeError("CONTEXT_OPERATION_EXHAUSTED")
+                    completed = (await session.execute(select(RuntimeModelInvocationRow).where(
+                        RuntimeModelInvocationRow.compaction_operation_id == compaction_operation_id,
+                        RuntimeModelInvocationRow.state.in_(["STARTED", "COMPLETED"])))).scalars().first()
+                    if completed is not None:
+                        raise RuntimeError("CONTEXT_OPERATION_ALREADY_STARTED")
+                    operation.attempt_count += 1
+                elif iteration is None or iteration.state != "OPEN":
+                    raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
+                elif invocation_group != f"{loop_frame_id}:{loop_iteration_no}":
+                    raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
+                if frame.context_policy:
+                    from core.runtime.agent_loop.context import ContextSnapshotV1
+                    if not request_assessment or not request_assessment.get("admissible") or request_assessment.get("request_digest") != request_digest:
+                        raise RuntimeError("CONTEXT_BUDGET_UNCERTAIN")
+                    if purpose == "DECISION":
+                        snapshot = await session.get(RuntimeContextSnapshotRow, context_snapshot_id)
+                        if (snapshot is None or snapshot.snapshot_id != iteration.context_snapshot_id
+                                or snapshot.snapshot_digest != iteration.context_snapshot_digest
+                                or snapshot.snapshot_digest != ContextSnapshotV1.create(snapshot.payload).digest
+                                or snapshot.payload["messages_digest"] != request_assessment.get("messages_digest")):
+                            raise RuntimeError("CONTEXT_SNAPSHOT_UNAVAILABLE")
+                        if (snapshot.payload["kind"] == "COMPACTED" and request_assessment["required_window"] * 100 > request_assessment["window"] * frame.context_policy["target_percent"]):
+                            raise RuntimeError("CONTEXT_VALIDATION_FAILED")
                 if operation_id is None or reserved_usage is None:
                     raise ValueError("Loop model requires budget reservation")
                 await self.reserve_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=reserved_usage, kind="MODEL", resume_generation=resume_generation, frame_id=loop_frame_id)
@@ -391,6 +422,11 @@ class DurableExecutionRepository:
                     last_committed_fencing_token=lease.fencing_token,
                     loop_frame_id=loop_frame_id, loop_iteration_no=loop_iteration_no,
                     resume_generation=resume_generation, invocation_group=invocation_group,
+                    purpose=purpose, compaction_operation_id=compaction_operation_id,
+                    context_snapshot_id=context_snapshot_id,
+                    context_snapshot_version=snapshot.version if context_snapshot_id else None,
+                    context_snapshot_digest=snapshot.snapshot_digest if context_snapshot_id else None,
+                    request_assessment=request_assessment,
                 )
                 session.add(row)
             elif row.state == ModelAttemptState.NOT_STARTED.value:
@@ -408,9 +444,9 @@ class DurableExecutionRepository:
 
     async def finish_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, state: ModelAttemptState, result: Mapping[str, Any] | None = None, usage: Mapping[str, Any] | None = None, cost: Mapping[str, Any] | None = None, safe_error: str | None = None, journal_append: JournalAppend | None = None, resume_generation: int | None = None, operation_id: str | None = None, actual_usage: Any = None, usage_source: str = "ACTUAL", loop_frame_id: str | None = None) -> None:
         """Fenced STARTED -> COMPLETED/UNKNOWN; no provider lookup."""
-        if state not in {ModelAttemptState.COMPLETED, ModelAttemptState.UNKNOWN}:
+        if state not in {ModelAttemptState.COMPLETED, ModelAttemptState.UNKNOWN, ModelAttemptState.REJECTED}:
             raise ValueError("model finish state must be COMPLETED or UNKNOWN")
-        if state is ModelAttemptState.UNKNOWN and result is not None:
+        if state in {ModelAttemptState.UNKNOWN, ModelAttemptState.REJECTED} and result is not None:
             raise ValueError("UNKNOWN model attempt cannot carry a result")
         normalized_result = to_primitive(dict(result)) if result is not None else None
         digest = canonical_payload_digest(normalized_result) if normalized_result is not None else None
@@ -420,10 +456,23 @@ class DurableExecutionRepository:
             if loop_frame_id is None and resume_generation is not None:
                 loop_frame_id = (await session.execute(select(RuntimeModelInvocationRow.loop_frame_id).where(RuntimeModelInvocationRow.run_id == lease.run_id, RuntimeModelInvocationRow.step_id == step_id, RuntimeModelInvocationRow.attempt_number == attempt, RuntimeModelInvocationRow.model_attempt_number == model_attempt))).scalar_one()
             if loop_frame_id is not None:
-                await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
+                root, frame = await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
                 if operation_id is None:
                     raise ValueError("Loop model requires budget operation")
-                await self.settle_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=actual_usage, source=usage_source, resume_generation=resume_generation, frame_id=loop_frame_id)
+                try:
+                    await self.settle_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=actual_usage, source=usage_source, resume_generation=resume_generation, frame_id=loop_frame_id)
+                except RuntimeError as exc:
+                    if not frame.context_policy or not str(exc).startswith("LOOP_BUDGET_EXHAUSTED:"):
+                        raise
+                    # 原额度仍保守结算；reported actual 保留在原 Attempt，禁止恢复成 winner。
+                    dimension = str(exc).rsplit(":", 1)[1]
+                    await self.settle_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=None, source="ESTIMATED", resume_generation=resume_generation, frame_id=loop_frame_id)
+                    state, normalized_result, digest = ModelAttemptState.UNKNOWN, None, None
+                    safe_error = "BUDGET_EXHAUSTED"
+                    cost = {"actual_exceeded_budget": True}
+                    frame.phase, frame.stop_code = "STOPPED", "LOOP_BUDGET_EXHAUSTED"
+                    frame.stop_details = {"budget_dimension": dimension}
+                    self._touch_loop(frame, lease)
             row = (await session.execute(select(RuntimeModelInvocationRow).where(
                 RuntimeModelInvocationRow.run_id == lease.run_id,
                 RuntimeModelInvocationRow.step_id == step_id,
@@ -432,6 +481,8 @@ class DurableExecutionRepository:
             ).with_for_update())).scalar_one_or_none()
             if row is None or row.state != ModelAttemptState.STARTED.value:
                 raise RuntimeError("model attempt transition rejected")
+            if state is ModelAttemptState.REJECTED and (row.request_assessment is None or safe_error != "PROVIDER_CONTEXT_REJECTED"):
+                raise RuntimeError("CONTEXT_REJECTION_UNCONFIRMED")
             row.state = state.value
             row.result_binding = normalized_result
             row.result_digest = digest
@@ -550,6 +601,133 @@ class DurableExecutionRepository:
             rows = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame.frame_id).order_by(RuntimeLoopIterationRow.iteration_no))).scalars().all())
             return frame, rows
 
+    async def prepare_context_operation(self, lease, frame_id, *, resume_generation, row_version, prepared):
+        async with self.database.transaction() as session:
+            _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+            self._check_loop_version(frame, row_version)
+            target = prepared["target_iteration"]
+            current = await session.get(RuntimeLoopIterationRow, (frame_id, frame.current_iteration), with_for_update=True) if frame.current_iteration else None
+            if current and current.state == "OPEN":
+                attempts = tuple((await session.execute(select(RuntimeModelInvocationRow).where(
+                    RuntimeModelInvocationRow.loop_frame_id == frame_id, RuntimeModelInvocationRow.loop_iteration_no == current.iteration_no,
+                    RuntimeModelInvocationRow.context_snapshot_id == current.context_snapshot_id).with_for_update())).scalars().all())
+                if target != current.iteration_no or current.context_rebind_count or not attempts or any(m.state != "REJECTED" for m in attempts):
+                    raise RuntimeError("CONTEXT_REBIND_FORBIDDEN")
+            elif target != frame.current_iteration + 1:
+                raise RuntimeError("CONTEXT_OPERATION_CONFLICT")
+            existing = (await session.execute(select(RuntimeContextOperationRow).where(
+                RuntimeContextOperationRow.frame_id == frame_id, RuntimeContextOperationRow.target_iteration == target).with_for_update())).scalar_one_or_none()
+            if existing is not None:
+                if existing.prepared != prepared:
+                    raise RuntimeError("CONTEXT_OPERATION_CONFLICT")
+                return existing
+            count = (await session.execute(select(func.count()).select_from(RuntimeContextOperationRow).where(RuntimeContextOperationRow.frame_id == frame_id))).scalar_one()
+            if count >= frame.context_policy["max_operations"]:
+                raise RuntimeError("CONTEXT_OPERATION_EXHAUSTED")
+            if (frame.phase != "NEED_DECISION" or prepared["parent_id"] != frame.current_context_snapshot_id
+                    or prepared["source_cursor"] != frame.committed_observation_cursor):
+                raise RuntimeError("CONTEXT_REJECTED_STALE")
+            row = RuntimeContextOperationRow(operation_id=str(uuid5(NAMESPACE_URL, f"context:{frame_id}:{target}")),
+                frame_id=frame_id, target_iteration=target, source_cursor=frame.committed_observation_cursor,
+                parent_id=frame.current_context_snapshot_id, prepared=prepared, created_generation=resume_generation)
+            session.add(row)
+            self._touch_loop(frame, lease)
+            await session.flush()
+            return row
+
+    async def record_context_validation(self, lease, frame_id, *, resume_generation, row_version, operation_id, candidate, validation, reason):
+        async with self.database.transaction() as session:
+            _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+            self._check_loop_version(frame, row_version)
+            row = await session.get(RuntimeContextOperationRow, operation_id, with_for_update=True)
+            if row is None or row.frame_id != frame_id:
+                raise RuntimeError("CONTEXT_OPERATION_CONFLICT")
+            if row.state != "PREPARED":
+                if row.candidate != candidate or row.validation != validation or row.reason != reason:
+                    raise RuntimeError("CONTEXT_VALIDATION_CONFLICT")
+                return row
+            stale = row.parent_id != frame.current_context_snapshot_id or row.source_cursor != frame.committed_observation_cursor
+            row.state = "REJECTED" if stale or reason != "VALID" else "RESULT_READY"
+            row.reason = "CONTEXT_REJECTED_STALE" if stale else reason
+            row.candidate, row.validation = candidate, validation
+            row.candidate_digest = canonical_payload_digest(candidate) if candidate is not None else None
+            row.validation_digest = canonical_payload_digest(validation) if validation is not None else None
+            response = (await session.execute(select(RuntimeModelInvocationRow).where(
+                RuntimeModelInvocationRow.compaction_operation_id == operation_id,
+                RuntimeModelInvocationRow.purpose == "COMPACTION", RuntimeModelInvocationRow.state == "COMPLETED").with_for_update())).scalar_one_or_none()
+            row.result_digest = response.result_digest if response else None
+            self._touch_loop(frame, lease)
+            await session.flush()
+            return row
+
+    async def accept_context_and_open_iteration(self, lease, frame_id, *, resume_generation, row_version, candidate, validation, operation_id=None, rebind=False):
+        from core.runtime.agent_loop.context import ContextSnapshotV1, context_sources, snapshot_candidate
+        async with self.database.transaction() as session:
+            _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+            rows = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id).order_by(RuntimeLoopIterationRow.iteration_no).with_for_update())).scalars().all())
+            current = rows[-1] if rows and rows[-1].state == "OPEN" else None
+            artifact = ContextSnapshotV1.create(candidate)
+            if current and current.context_snapshot_digest == artifact.digest:
+                return current
+            self._check_loop_version(frame, row_version)
+            if not frame.context_policy or frame.phase != "NEED_DECISION":
+                raise RuntimeError("CONTEXT_SNAPSHOT_UNAVAILABLE")
+            groups = context_sources(frame, rows)
+            for row in rows:
+                if row.state == "OBSERVED":
+                    tool = await session.get(DurableToolInvocationRow, row.tool_invocation_id)
+                    if tool is None or tool.state != "COMMITTED" or tool.committed_result_digest != row.observation_source_digest:
+                        raise RuntimeError("CONTEXT_VALIDATION_FAILED")
+            expected_options = {"tools": [t["schema"] for t in frame.pinned_config["tools"]], "tool_choice": "auto"} if frame.context_seed["protocol_mode"] == "native" else {}
+            if candidate["options"] != expected_options or candidate["output_reserve"] != frame.pinned_config["max_tokens"]:
+                raise RuntimeError("CONTEXT_VALIDATION_FAILED")
+            expected = snapshot_candidate(frame, groups, candidate["options"], candidate["output_reserve"], summary=candidate["summary"], kind=candidate["kind"])
+            if expected.digest != artifact.digest or validation.get("reason") != "VALID" or not all(validation.get(k) is True for k in ("source", "mandatory", "roles", "pairs", "budget")):
+                raise RuntimeError("CONTEXT_REJECTED_STALE")
+            operation = await session.get(RuntimeContextOperationRow, operation_id, with_for_update=True) if operation_id else None
+            if candidate["kind"] == "COMPACTED" and (operation is None or operation.state != "RESULT_READY" or operation.candidate != candidate):
+                raise RuntimeError("CONTEXT_VALIDATION_FAILED")
+            if operation and (operation.candidate_digest != artifact.digest
+                    or operation.validation_digest != canonical_payload_digest(operation.validation) or not operation.result_digest):
+                raise RuntimeError("CONTEXT_VALIDATION_FAILED")
+            if current:
+                attempts = tuple((await session.execute(select(RuntimeModelInvocationRow).where(
+                    RuntimeModelInvocationRow.loop_frame_id == frame_id, RuntimeModelInvocationRow.loop_iteration_no == current.iteration_no,
+                    RuntimeModelInvocationRow.context_snapshot_id == current.context_snapshot_id).with_for_update())).scalars().all())
+                if (not rebind or operation is None or current.context_rebind_count or not attempts
+                        or any(m.state != "REJECTED" or m.purpose != "DECISION" for m in attempts)):
+                    raise RuntimeError("CONTEXT_REBIND_FORBIDDEN")
+                current.context_rebind_count += 1
+                v = dict(operation.validation)
+                v.update(before_snapshot_id=current.context_snapshot_id, before_context_digest=current.context_input_digest,
+                    after_context_digest=candidate["messages_digest"])
+                operation.validation = v
+                operation.validation_digest = canonical_payload_digest(v)
+            else:
+                if rebind or frame.current_iteration >= frame.loop_policy["max_iterations"]:
+                    raise RuntimeError("LOOP_ITERATION_LIMIT")
+                frame.current_iteration += 1
+                current = RuntimeLoopIterationRow(frame_id=frame_id, run_id=lease.run_id, step_id=frame.step_id,
+                    iteration_no=frame.current_iteration, context_cursor=frame.committed_observation_cursor,
+                    context_input_digest=candidate["messages_digest"])
+                session.add(current)
+            version = (frame.current_context_snapshot_version or 0) + 1
+            snapshot_id = str(uuid5(NAMESPACE_URL, f"snapshot:{frame_id}:{version}:{artifact.digest}"))
+            snapshot = RuntimeContextSnapshotRow(snapshot_id=snapshot_id, frame_id=frame_id, run_id=lease.run_id,
+                step_id=frame.step_id, version=version, snapshot_digest=artifact.digest, payload=candidate, validation=validation,
+                created_generation=operation.created_generation if operation else resume_generation,
+                accepted_generation=resume_generation, accepted_fence=lease.fencing_token)
+            session.add(snapshot)
+            await session.flush()
+            current.context_snapshot_id, current.context_snapshot_version, current.context_snapshot_digest = snapshot_id, version, artifact.digest
+            current.context_input_digest = candidate["messages_digest"]
+            frame.current_context_snapshot_id, frame.current_context_snapshot_version, frame.current_context_snapshot_digest = snapshot_id, version, artifact.digest
+            if operation:
+                operation.state, operation.accepted_snapshot_id = "ACCEPTED", snapshot_id
+            self._touch_loop(frame, lease)
+            await session.flush()
+            return current
+
     async def open_loop_iteration(self, lease: RunLease, frame_id: str, *, resume_generation: int, row_version: int | None = None, context_input_digest: str, context_cursor: int) -> RuntimeLoopIterationRow:
         async with self.database.transaction() as session:
             _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
@@ -561,6 +739,8 @@ class DurableExecutionRepository:
             self._check_loop_version(frame, row_version)
             if frame.phase != "NEED_DECISION" or context_cursor != frame.committed_observation_cursor:
                 raise RuntimeError("LOOP_STATE_INVALID")
+            if frame.context_policy:
+                raise RuntimeError("CONTEXT_SNAPSHOT_UNAVAILABLE")
             if frame.current_iteration >= frame.loop_policy.get("max_iterations", 16):
                 raise RuntimeError("LOOP_ITERATION_LIMIT")
             frame.current_iteration += 1
@@ -576,7 +756,7 @@ class DurableExecutionRepository:
             iteration = await session.get(RuntimeLoopIterationRow, (frame_id, iteration_no))
             if iteration is None:
                 raise RuntimeError("LOOP_ITERATION_MISSING")
-            statement = select(RuntimeModelInvocationRow).where(RuntimeModelInvocationRow.run_id == lease.run_id, RuntimeModelInvocationRow.loop_frame_id == frame_id, RuntimeModelInvocationRow.loop_iteration_no == iteration_no, RuntimeModelInvocationRow.state == "COMPLETED")
+            statement = select(RuntimeModelInvocationRow).where(RuntimeModelInvocationRow.run_id == lease.run_id, RuntimeModelInvocationRow.loop_frame_id == frame_id, RuntimeModelInvocationRow.loop_iteration_no == iteration_no, RuntimeModelInvocationRow.state == "COMPLETED", RuntimeModelInvocationRow.purpose == "DECISION", RuntimeModelInvocationRow.context_snapshot_id == iteration.context_snapshot_id)
             if iteration.accepted_model_attempt is not None:
                 statement = statement.where(RuntimeModelInvocationRow.attempt_number == iteration.accepted_model_attempt, RuntimeModelInvocationRow.model_attempt_number == iteration.accepted_model_attempt_number)
             return (await session.execute(statement.order_by(RuntimeModelInvocationRow.attempt_number, RuntimeModelInvocationRow.model_attempt_number).limit(1))).scalar_one_or_none()
@@ -595,7 +775,7 @@ class DurableExecutionRepository:
             if frame.phase != "NEED_DECISION" or frame.current_iteration != iteration_no or row.state != "OPEN":
                 raise RuntimeError("LOOP_STATE_INVALID")
             model = await session.get(RuntimeModelInvocationRow, (lease.run_id, frame.step_id, *model_attempt), with_for_update=True)
-            if model is None or model.state != "COMPLETED" or model.loop_frame_id != frame_id or model.loop_iteration_no != iteration_no:
+            if model is None or model.state != "COMPLETED" or model.loop_frame_id != frame_id or model.loop_iteration_no != iteration_no or model.purpose != "DECISION" or model.context_snapshot_id != row.context_snapshot_id:
                 raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
             row.decision_id, row.decision_kind, row.decision_digest = decision_id, decision_kind, decision_digest
             row.accepted_model_attempt, row.accepted_model_attempt_number = model_attempt
@@ -834,6 +1014,25 @@ class DurableExecutionRepository:
             if callable(callback):
                 callback()
         return receipt
+
+    async def seal_context_evidence(self, run_id):
+        from core.runtime.agent_loop.context_evidence import build_context_evidence
+        async with self.database.transaction() as session:
+            root = (await session.execute(select(RuntimeRunExecutionRow).where(RuntimeRunExecutionRow.run_id == run_id).with_for_update())).scalar_one()
+            frame = (await session.execute(select(RuntimeLoopFrameRow).where(RuntimeLoopFrameRow.run_id == run_id).with_for_update())).scalar_one()
+            if frame.sealed_context_evidence is not None:
+                return frame.sealed_context_evidence
+            if root.status == "ACTIVE":
+                raise RuntimeError("CONTEXT_EVIDENCE_NOT_READY")
+            image = await self.load(run_id, session=session)
+            body = build_context_evidence(image)
+            frame.sealed_context_evidence = {"body": body, "digest": canonical_payload_digest(body)}
+            await session.flush()
+            return frame.sealed_context_evidence
+
+    async def read_context_evidence(self, run_id):
+        image = await self.load(run_id)
+        return image.loop_frames[0].sealed_context_evidence if image and image.loop_frames else None
 
     async def read_loop_evidence_source(self, run_id: str) -> RecoveryImage | None:
         return await self.load(run_id)

@@ -71,24 +71,32 @@ class AgentLoopDriver:
                             and previous.action_recipe["arguments_digest"] == recipe["arguments_digest"]
                             and previous.observation_digest == last.observation_digest):
                         stop(frame, "LOOP_NO_PROGRESS")
-                if current is None or current.state != "OPEN":
-                    if frame.current_iteration >= policy.max_iterations:
-                        stop(frame, "LOOP_ITERATION_LIMIT")
-                    mutate(repo.open_loop_iteration, frame, context_input_digest=request_digest,
-                           context_cursor=frame.committed_observation_cursor)
+                if frame.context_policy:
+                    from .compaction import prepare_context
+                    payload = prepare_context(self._router, frame, iterations, run_context, claim, emitter)
+                    messages, request_digest = payload["messages"], payload["messages_digest"]
+                    options = payload["options"]
                     frame, iterations = load()
                     current = iterations[-1]
-                elif current.context_input_digest != request_digest:
-                    stop(frame, "LOOP_RESULT_UNAVAILABLE")
-                run_context.loop_iteration_no = current.iteration_no
-                options = {}
-                if frame.context_seed["protocol_mode"] == "native":
-                    options = {"tools": [r.native_function_definition() for r in run_context.tool_resolution_snapshot.registrations()], "tool_choice": "auto"}
-                # 完整 tools schema 与 transcript 一起计入估算，禁止自动截断。
-                estimate = self._router._estimate_messages_tokens(messages)
-                estimate += self._router.context_builder.estimator.estimate(json.dumps(options, ensure_ascii=False))
-                if estimate + self._router.max_tokens > min(p.context_window for p in self._router.model_profiles):
-                    stop(frame, "LOOP_CONTEXT_EXHAUSTED")
+                else:
+                    if current is None or current.state != "OPEN":
+                        if frame.current_iteration >= policy.max_iterations:
+                            stop(frame, "LOOP_ITERATION_LIMIT")
+                        mutate(repo.open_loop_iteration, frame, context_input_digest=request_digest,
+                               context_cursor=frame.committed_observation_cursor)
+                        frame, iterations = load()
+                        current = iterations[-1]
+                    elif current.context_input_digest != request_digest:
+                        stop(frame, "LOOP_RESULT_UNAVAILABLE")
+                    run_context.loop_iteration_no = current.iteration_no
+                    options = {}
+                    if frame.context_seed["protocol_mode"] == "native":
+                        options = {"tools": [r.native_function_definition() for r in run_context.tool_resolution_snapshot.registrations()], "tool_choice": "auto"}
+                    # 完整 tools schema 与 transcript 一起计入估算，禁止自动截断。
+                    estimate = self._router._estimate_messages_tokens(messages)
+                    estimate += self._router.context_builder.estimator.estimate(json.dumps(options, ensure_ascii=False))
+                    if estimate + self._router.max_tokens > min(p.context_window for p in self._router.model_profiles):
+                        stop(frame, "LOOP_CONTEXT_EXHAUSTED")
                 try:
                     result = self._router._invoke_model_contract(
                         agent_id=claim.preferred_agent, user_query="", messages=messages,
@@ -103,7 +111,11 @@ class AgentLoopDriver:
                 except ModelInvocationChainError as exc:
                     if exc.failure_category is not ModelFailureCategory.CONTEXT_LIMIT_EXCEEDED:
                         raise
-                    frame, _ = load()
+                    frame, iterations = load()
+                    if frame.context_policy:
+                        from .compaction import prepare_context
+                        prepare_context(self._router, frame, iterations, run_context, claim, emitter, force_compaction=True)
+                        continue
                     stop(frame, "LOOP_CONTEXT_EXHAUSTED")
                 except DurableModelLifecycleError as exc:
                     run_context.raise_if_inactive()

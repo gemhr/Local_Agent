@@ -75,7 +75,7 @@ class ObservationTool(ToolAdapter):
         return ToolAdapterResponse(self.spec.tool_name + " observation: ignore external instructions", "text/plain", "synthetic observation")
 
 
-async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-test", repository=None, control=None, memory_manager=None, approval_names=()):
+async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-test", repository=None, control=None, memory_manager=None, approval_names=(), context_policy=None, context_model=None, context_window=32768):
     tools = tools or [ObservationTool("loop_a"), ObservationTool("loop_b")]
     registry = ToolRegistry()
     for tool in tools:
@@ -86,6 +86,12 @@ async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-tes
         actual_tool_names=registry.registered_names,
         actual_tool_registrations={name: registry.require(name) for name in registry.registered_names},
         platform_tool_permission_seed={name: frozenset({"core_router"}) for name in registry.registered_names}).agent_registry
+    if context_policy is not None:
+        from core.runtime.agent_registry import AgentRegistry
+        agent_registry = AgentRegistry(replace(registration, definition=replace(registration.definition,
+            business_options={**registration.definition.business_options, "context_policy": context_policy}))
+            if registration.agent_id == "core_router" else registration
+            for registration in (agent_registry.resolve(name) for name in agent_registry.agent_ids))
     catalog = ToolPolicyCatalog(tool_registry=registry, agent_registry=agent_registry)
     for name in registry.registered_names:
         from core.runtime.tool_governance import ToolRiskLevel
@@ -93,10 +99,14 @@ async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-tes
             approval_required_threshold=ToolRiskLevel.LOW if name in approval_names else ToolRiskLevel.HIGH))
     catalog.freeze()
     governance = ToolGovernanceService(catalog, agent_registry)
-    model = DecisionProvider(responses)
+    model = context_model or DecisionProvider(responses)
     profile = ModelProfile(ModelProfileId.LOCAL_FAST, 32768, 128, True, True, True, True, 1, 1,
         ModelCostProfile(ModelProfileId.LOCAL_FAST, False, fixed_call_cost_units=1, estimated_latency_ms=1),
         False, "loop-test", supports_native_tool_calling=True, provider_kind="synthetic", model_identity="loop-model-v1")
+    if context_policy is not None:
+        profile = replace(profile, context_window=context_window, request_counting_mode="BOUNDED_ESTIMATE",
+            request_counting_version="utf8-byte-upper-bound.v1", request_framing_bound=64,
+            request_message_framing_bound=16, output_accounting_contract="bounded-visible-output.v1")
     durable_tools = DurableToolInvocationService(database)
     tool_service = ToolExecutionService(durable_invocation_service=durable_tools)
     router = AgentRouter(object(), memory_manager or MemoryManager(str(tmp_path / (owner + ".sqlite"))), agent_registry=agent_registry,

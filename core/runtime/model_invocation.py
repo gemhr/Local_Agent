@@ -134,7 +134,9 @@ class ModelAdapterInvocationError(RuntimeError):
         provider_started: bool = True,
         provider_responded: bool | None = None,
         output_started: bool = False,
+        confirmed_context_rejection: bool = False,
     ) -> None:
+        self.confirmed_context_rejection = confirmed_context_rejection
         self.model_failure_category = category
         self.safe_error_code = safe_error_code or category.value
         self.provider_started = provider_started
@@ -979,6 +981,31 @@ class ModelInvocationRouter:
                 ):
                     break
                 continue
+            context_assessments = getattr(run_context, "loop_request_assessments", None)
+            if context_assessments is not None:
+                from core.runtime.model_context import assess_request
+                from .agent_loop.contracts import LoopStopped
+                generation_options = run_context.loop_request_options[candidate.profile_id.value]
+                adapter = adapter_resolver.resolve(candidate.profile_id)
+                prior = context_assessments[candidate.profile_id.value]
+                current_assessment = assess_request(messages, generation_options, max_tokens, candidate.profile,
+                    exact_counter=getattr(adapter, "count_request_tokens", None))
+                if (not current_assessment.admissible or current_assessment.request_digest != prior.request_digest
+                        or current_assessment.input_bound != prior.input_bound):
+                    permit.abandon()
+                    raise LoopStopped("CONTEXT_BUDGET_UNCERTAIN")
+                token_estimate = current_assessment.input_bound
+                if run_context.loop_model_purpose == "COMPACTION":
+                    image = async_submit(run_context.execution_repository.load(run_context.run_id))
+                    operation = next(o for o in image.context_operations if o.operation_id == run_context.loop_compaction_operation_id)
+                    if operation.attempt_count >= 2:
+                        permit.abandon()
+                        raise LoopStopped("CONTEXT_COMPACTION_FAILED")
+                    retry_index = operation.attempt_count
+                elif run_context.loop_context_snapshot_id:
+                    image = async_submit(run_context.execution_repository.load(run_context.run_id))
+                    if any(m.purpose == "DECISION" and m.loop_iteration_no == run_context.loop_iteration_no for m in image.models):
+                        retry_index = max(retry_index, 1)
             usage = self._estimated_usage(candidate, token_estimate, max_tokens, retry_index)
             try:
                 reservation = budget_ledger.reserve(
@@ -1109,6 +1136,8 @@ class ModelInvocationRouter:
                         generation_options=generation_options,
                         run_context=run_context,
                     )
+                elif context_assessments is not None and callable(getattr(adapter, "invoke_request", None)):
+                    response = adapter.invoke_request(messages, max_tokens=max_tokens, generation_options=generation_options, run_context=run_context)
                 else:
                     response = adapter.invoke(messages, max_tokens=max_tokens)
             except DurableModelLifecycleError:
@@ -1173,12 +1202,15 @@ class ModelInvocationRouter:
                     # Once the durable STARTED marker is written, every local
                     # provider exception is uncertainty.  Recovery, rather
                     # than this worker, owns any retry decision.
+                    context_rejected = (context_assessments is not None and isinstance(exc, ModelAdapterInvocationError)
+                        and category is ModelFailureCategory.CONTEXT_LIMIT_EXCEEDED
+                        and exc.confirmed_context_rejection is True and exc.provider_responded is True and not partial_output)
                     self._finish_durable_model_attempt(
                         run_context=run_context,
                         durable_attempt=durable_attempt,
-                        state=ModelAttemptState.UNKNOWN,
+                        state=ModelAttemptState.REJECTED if context_rejected else ModelAttemptState.UNKNOWN,
                         async_submit=async_submit,
-                        safe_error=_safe_error_code(exc, category),
+                        safe_error="PROVIDER_CONTEXT_REJECTED" if context_rejected else _safe_error_code(exc, category),
                     )
                 health_outcome = self._circuit_health_outcome(
                     category=category,
@@ -1304,6 +1336,10 @@ class ModelInvocationRouter:
             actual = response.actual_usage
             if getattr(run_context, "loop_frame_id", None) is not None and actual is not None:
                 actual = replace(actual, model_calls=usage.model_calls, remote_model_calls=usage.remote_model_calls, retries=usage.retries, cost_units=actual.cost_units or usage.cost_units)
+                if context_assessments is not None:
+                    metadata = candidate.profile.cost_profile
+                    cost = metadata.fixed_call_cost_units + (actual.input_tokens * metadata.input_cost_units_per_1k_tokens + 999)//1000 + (actual.output_tokens * metadata.output_cost_units_per_1k_tokens + 999)//1000
+                    actual = replace(actual, cost_units=cost)
             if durable_attempt is not None:
                 try:
                     self._finish_durable_model_attempt(
@@ -1523,7 +1559,8 @@ class ModelInvocationRouter:
         if not callable(async_submit) or run_context.execution_repository is None:
             raise DurableModelLifecycleError("LOOP_DURABLE_MODEL_UNAVAILABLE")
         run_context.raise_if_inactive()
-        if routing_decision is None:
+        purpose = getattr(run_context, "loop_model_purpose", "DECISION")
+        if routing_decision is None and purpose == "DECISION":
             frame, iterations = async_submit(run_context.execution_repository.load_loop(run_context.durable_lease, step_id))
             if (frame.frame_id != frame_id or frame.resume_generation != run_context.loop_resume_generation
                     or frame.current_iteration != run_context.loop_iteration_no
@@ -1532,7 +1569,10 @@ class ModelInvocationRouter:
         image = async_submit(run_context.execution_repository.load(run_context.run_id))
         rows = [row for row in image.models
                 if getattr(row, "loop_frame_id", None) == frame_id
-                and getattr(row, "loop_iteration_no", None) == run_context.loop_iteration_no
+                and getattr(row, "purpose", "DECISION") == purpose
+                and ((purpose == "COMPACTION" and row.compaction_operation_id == run_context.loop_compaction_operation_id)
+                     or (purpose == "DECISION" and getattr(row, "loop_iteration_no", None) == run_context.loop_iteration_no
+                         and row.context_snapshot_id == run_context.loop_context_snapshot_id))
                 and row.state == ModelAttemptState.COMPLETED.value]
         if not rows:
             return None
@@ -1552,6 +1592,8 @@ class ModelInvocationRouter:
             formatted_options.setdefault("response_format", {"type": "json_object"})
             if row.request_digest == self._durable_model_request_digest(messages, max_tokens=max_tokens, generation_options=formatted_options):
                 generation_options = formatted_options
+        if getattr(run_context, "loop_request_options", None) is not None:
+            generation_options = run_context.loop_request_options[profile.profile_id.value]
         expected = self._durable_model_request_digest(messages, max_tokens=max_tokens, generation_options=generation_options)
         payload = row.result_binding
         if row.request_digest != expected or not isinstance(payload, Mapping) or canonical_payload_digest(payload) != row.result_digest:
@@ -1687,6 +1729,15 @@ class ModelInvocationRouter:
                 resume_generation=run_context.loop_resume_generation,
                 invocation_group=f"{loop_frame_id}:{iteration_no}", operation_id=operation_id,
                 reserved_usage=self._durable_usage(reserved_usage))
+            if getattr(run_context, "loop_request_assessments", None) is not None:
+                from dataclasses import asdict
+                purpose = run_context.loop_model_purpose
+                loop_kwargs.update(purpose=purpose,
+                    request_assessment=asdict(run_context.loop_request_assessments[candidate.profile_id.value]),
+                    context_snapshot_id=run_context.loop_context_snapshot_id if purpose == "DECISION" else None,
+                    compaction_operation_id=run_context.loop_compaction_operation_id if purpose == "COMPACTION" else None)
+                if purpose == "COMPACTION":
+                    loop_kwargs.update(loop_iteration_no=None, invocation_group=f"context:{run_context.loop_compaction_operation_id}")
         async_submit(
             start(
                 lease,

@@ -365,3 +365,13 @@ Loop 独立评测端点的部署映射配置：
 两项必须为 UUID；格式非法时 startup `invalid_uuid`。它们只保存非 secret 的可信部署身份，不借用全局 Trace Project 推断 Run 归属。启用流量前由部署者执行 Alembic 至 `0031_durable_agent_loop` 或更新 head；本次源码实施不迁移真实业务数据库。
 
 Loop 模型必须提供已冻结的 `cost_profile` 和明确完成状态；同步 Generator Adapter 通过既有 `agenerate` 收集 Finish/Refusal，缺少该能力时拒绝 Loop。输出 schema 沿用现有受支持的 JSON Schema 子集；结构化输出 Agent 必须在 `properties.kind.enum` 显式包含 `REFUSAL`，否则准入失败。拒绝内容同样验证该 schema，不能绕过业务输出合同。
+
+### Context Policy（默认关闭）
+
+由服务端受信 AgentDefinition 的 `business_options.context_policy` 显式配置；本能力未新增环境变量。最小配置为 `{"version": 1}`。缺省值：`recent_pairs=2`、`trigger_percent=80`、`target_percent=60`、`summary_output_cap=1024`、`max_operations=2`、`max_attempts=2`、`mandatory_iterations=[]`。保留组数及操作/Attempt 上限固定，阈值满足 `1 <= target < trigger <= 100`，摘要输出 cap 不大于1024。所有参数纳入冻结配置；源未增长不因同一软阈值反复总结。
+
+可信 ModelProfile 需显式声明 `request_counting_mode`（EXACT / BOUNDED_ESTIMATE / HEURISTIC）、`request_counting_version`、`request_framing_bound`、`request_message_framing_bound`、`output_accounting_contract` 及已有成本元数据。BOUNDED_ESTIMATE 当前实现识别 `utf8-byte-upper-bound.v1`，以完整 JSON UTF-8 字节与声明的 Provider framing 上界计算；仅适用于已确认该上界的 Adapter。EXACT 必须由 Adapter 实现匹配模型/协议的 `count_request_tokens(messages, options, reserve)`；`bounded-visible-output.v1` 声明无未计量隐藏输出。非 Generator Adapter 还必须实现可消费完整 options 的 `invoke_request`。禁止为不匹配的真实 Provider 冒填上述声明。
+
+默认 Profile 仍为 HEURISTIC，新 Policy 会以 `CONTEXT_BUDGET_UNCERTAIN` 拒绝调用；旧路径不受影响。完整请求包括 tools/tool_choice/response_format/JSON schema，不重复统计已存在于 Seed 的 schema；reserve 不得超过 Profile 输出上限。安全余量至少10%且不小于 Selection 的既有比例；fallback 前重新验证。软阈值没有可压缩组或没有新模型额度时，可靠且可容纳的 RAW 可继续；硬超限为 `LOOP_CONTEXT_EXHAUSTED`。每 Run 至多2个压缩 operation，每 operation 的首次、传输 Retry 和 crash Retry 合计至多2个真实 Attempt；无递归压缩或摘要 repair。
+
+压缩摘要的完整 JSON schema 位于 code-owned prompt，使用严格解析器验证 plain JSON；不会向未声明 Provider structured output 的 Engine 强制发送 `response_format`。该 schema 已计入 messages，不再作为独立 options 重复计算。

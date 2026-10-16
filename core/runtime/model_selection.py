@@ -69,7 +69,17 @@ class ModelProfile:
     supports_provider_structured_output: bool = False
     provider_kind: str = ""
     model_identity: str = ""
+    request_counting_mode: str = "HEURISTIC"
+    request_counting_version: str = ""
+    request_framing_bound: int = 0
+    request_message_framing_bound: int = 0
+    output_accounting_contract: str = ""
     def __post_init__(self) -> None:
+        if self.request_counting_mode not in {"EXACT", "BOUNDED_ESTIMATE", "HEURISTIC"}:
+            raise ValueError("CONTEXT_COUNTING_MODE_INVALID")
+        for value in (self.request_framing_bound, self.request_message_framing_bound):
+            if type(value) is not int or value < 0:
+                raise ValueError("CONTEXT_FRAMING_INVALID")
         for name in ("context_window", "max_output_tokens", "quality_tier", "latency_tier"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0: raise ValueError(f"{name} 必须是正整数")

@@ -204,3 +204,10 @@ test-only AST Gate 只是全production Python surface的owner/sink oracle，不�
 | Final 输出事实 | 原 OutputGate / EventChannel | Frame receipt + Journal + ClientEventFeed 原子提交，sequence Owner 不变 |
 | Step 完成与 Run terminal | 原 completion/coordinator Owner | Loop Suspension 不提交 StepResult 或 terminal |
 | Loop Evidence | `core/runtime/agent_loop/evidence.py` 的安全投影 | terminal 后允许无 lease 的 seal-only 事务；不可反向启动执行或补造历史 |
+
+### Context Snapshot Owner
+
+- Context/Compaction：纯来源构造、严格摘要验证和有界准备；没有工具、Run terminal、预算结算或 Snapshot 接受权限。
+- DurableExecutionRepository：持有 Snapshot/Operation、当前版本引用、Iteration 绑定及 CAS/Fencing 的唯一接受权限；模型开始/完成仍复用原预算事务。
+- ModelInvocationRouter：实际请求 assessment、purpose 分组、有限 Retry/Fallback、计费及已完成响应恢复。
+- 原 Coordinator：接收 typed stop 并提交原 Run terminal；`context_evidence.py` 只投影事实，seal 不改变执行结果。

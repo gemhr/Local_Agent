@@ -66,3 +66,11 @@
 恢复将 `budget_operations` 未结算预留持久标记为 `SETTLED/RECOVERY_CONSERVATIVE` 并计入 consumed；后续接管不能再收费或退款。Final receipt 已存在则继续原 completion pipeline，重用原 event/cursor。终态只读查询或 seal Evidence，不恢复执行业务。关闭新 Loop admission 时须保留认识 Loop schema 的 worker；不得删表、清 receipt 或把活跃 Loop 改回 fixed-plan。
 
 Loop 的 `persist` 意图随 root 冻结。交付后 Conversation exchange 仍由原 FinalMemoryWriter 提交；恢复可对同一 `run_id/exchange_id` 读取匹配且已 COMMITTED 的 PG exchange，只有 Agent、scope、user/assistant 正文均一致时才复用 receipt。不创建第二条消息对，不改变 fixed-plan 的重复提交行为。有界轮询以原工具 `committed_at` 和冻结最小间隔确定下次可调度时间。
+
+### Context Snapshot 恢复
+
+先部署增量 `0032_context_compaction` 再启用新 Policy；不重写旧 migration，也不改写旧活跃 Loop 的 Seed/config 身份。旧无 Policy Run 不强制绑定 Snapshot。Context Snapshot 缺失时新 Policy 明确失败，不回退旧上下文路径。
+
+NEED_DECISION 先重建/验证原提交源并检查 no-progress；已有 OPEN 使用原 Snapshot、先恢复 completed DECISION winner。压缩先保存 PREPARED operation（精确 request/source/parent/cursor），原 Model Owner 提交响应/结算，再保存 RESULT_READY 验证候选，接受时原子推进不可变 Snapshot + Frame 引用 + Iteration 绑定。接管不创造新内容版本；completed COMPACTION 响应由新 Owner 校验复用，不重新调用/收费。旧 generation 的 finish/validate/accept 被拒绝；未完成压缩 Attempt 按原 UNKNOWN 保守结算，剩余额度最多一次，不增加业务 Iteration 的 model_recovery_count。
+
+只有带可靠显式 Provider context 拒绝事实的窄 REJECTED 状态允许原 OPEN Iteration 一次安全重绑定；STARTED/UNKNOWN/COMPLETED 均不能据此重绑定。第二次拒绝停止，不新建 Iteration 规避预算；单纯413/超时仍属不确定。实际 usage 超出 Run 上限时保留原 Attempt 的 reported usage 与 budget failure，保守结算、不产生 winner。Snapshot/summary 不改写已接受 Decision、Observation、工具、Final Receipt 或 terminal。停止新 admission 不代表旧 Snapshot Run 可以交给不支持新 schema 的 worker。

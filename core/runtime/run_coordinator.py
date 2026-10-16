@@ -1609,6 +1609,7 @@ class RunCoordinator:
                     next_recovery_at=exc.next_recovery_at)
                 raise
             except LoopStopped as exc:
+                await self._record_loop_stop(exc.stop_code)
                 reason = (StopReason.BUDGET_EXHAUSTED if exc.stop_code == "LOOP_ITERATION_LIMIT"
                           else StopReason.REPEATED_ACTION if exc.stop_code in {"LOOP_NO_PROGRESS", "LOOP_REPEATED_ACTION"}
                           else StopReason.UNHANDLED_ERROR)

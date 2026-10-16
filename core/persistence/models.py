@@ -861,6 +861,12 @@ class RuntimeModelInvocationRow(PersistenceBase):
     loop_iteration_no: Mapped[int | None] = mapped_column(Integer)
     invocation_group: Mapped[str | None] = mapped_column(String(255))
     resume_generation: Mapped[int | None] = mapped_column(BigInteger)
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'DECISION'"))
+    context_snapshot_id: Mapped[str | None] = mapped_column(String(255))
+    context_snapshot_version: Mapped[int | None] = mapped_column(Integer)
+    context_snapshot_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    compaction_operation_id: Mapped[str | None] = mapped_column(String(255))
+    request_assessment: Mapped[dict | None] = mapped_column(JSONB)
     request_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     provider_kind: Mapped[str] = mapped_column(String(64), nullable=False)
     profile_identity: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -878,10 +884,14 @@ class RuntimeModelInvocationRow(PersistenceBase):
     updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     __table_args__ = (
         ForeignKeyConstraint(["loop_frame_id", "loop_iteration_no"], ["runtime_loop_iterations.frame_id", "runtime_loop_iterations.iteration_no"], name="fk_runtime_model_loop_iteration", use_alter=True),
-        CheckConstraint("(loop_frame_id IS NULL AND loop_iteration_no IS NULL AND invocation_group IS NULL AND resume_generation IS NULL) OR (loop_frame_id IS NOT NULL AND loop_iteration_no > 0 AND invocation_group IS NOT NULL AND resume_generation >= 0)", name="ck_runtime_model_loop_binding"),
+        CheckConstraint("(loop_frame_id IS NULL AND loop_iteration_no IS NULL AND invocation_group IS NULL AND resume_generation IS NULL) OR (loop_frame_id IS NOT NULL AND ((purpose = 'DECISION' AND loop_iteration_no IS NOT NULL AND loop_iteration_no > 0) OR (purpose = 'COMPACTION' AND loop_iteration_no IS NULL)) AND invocation_group IS NOT NULL AND resume_generation IS NOT NULL AND resume_generation >= 0)", name="ck_runtime_model_loop_binding"),
+        ForeignKeyConstraint(["loop_frame_id", "context_snapshot_id", "context_snapshot_version", "context_snapshot_digest"], ["runtime_context_snapshots.frame_id", "runtime_context_snapshots.snapshot_id", "runtime_context_snapshots.version", "runtime_context_snapshots.snapshot_digest"], name="fk_model_context_snapshot", use_alter=True),
+        ForeignKeyConstraint(["loop_frame_id", "compaction_operation_id"], ["runtime_context_operations.frame_id", "runtime_context_operations.operation_id"], name="fk_model_context_operation", use_alter=True),
+        CheckConstraint("(purpose = 'DECISION' AND compaction_operation_id IS NULL) OR (purpose = 'COMPACTION' AND compaction_operation_id IS NOT NULL AND loop_frame_id IS NOT NULL AND loop_iteration_no IS NULL AND context_snapshot_id IS NULL)", name="ck_model_context_purpose"),
+        CheckConstraint("(context_snapshot_id IS NULL AND context_snapshot_version IS NULL AND context_snapshot_digest IS NULL) OR (context_snapshot_id IS NOT NULL AND context_snapshot_version IS NOT NULL AND context_snapshot_version > 0 AND context_snapshot_digest IS NOT NULL)", name="ck_model_context_tuple"),
         CheckConstraint("attempt_number > 0", name="ck_runtime_model_attempt_number"),
         CheckConstraint("model_attempt_number > 0", name="ck_runtime_model_model_attempt_number"),
-        CheckConstraint("state IN ('NOT_STARTED', 'STARTED', 'COMPLETED', 'UNKNOWN')", name="ck_runtime_model_state"),
+        CheckConstraint("state IN ('NOT_STARTED', 'STARTED', 'COMPLETED', 'UNKNOWN', 'REJECTED')", name="ck_runtime_model_state"),
         CheckConstraint(
             "last_committed_fencing_token >= 0",
             name="ck_runtime_model_fencing_token",
@@ -912,6 +922,11 @@ class RuntimeLoopFrameRow(PersistenceBase):
     pinned_config: Mapped[dict] = mapped_column(JSONB, nullable=False)
     config_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     loop_policy: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    context_policy: Mapped[dict | None] = mapped_column(JSONB)
+    current_context_snapshot_id: Mapped[str | None] = mapped_column(String(255))
+    current_context_snapshot_version: Mapped[int | None] = mapped_column(Integer)
+    current_context_snapshot_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    sealed_context_evidence: Mapped[dict | None] = mapped_column(JSONB)
     stop_code: Mapped[str | None] = mapped_column(String(128))
     stop_details: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     result_decision_id: Mapped[str | None] = mapped_column(String(255))
@@ -923,6 +938,7 @@ class RuntimeLoopFrameRow(PersistenceBase):
         ForeignKeyConstraint(["run_id", "step_id"], ["runtime_step_executions.run_id", "runtime_step_executions.step_id"], ondelete="CASCADE", name="fk_runtime_loop_frame_step"),
         UniqueConstraint("run_id", "step_id", name="uq_runtime_loop_frame_step"),
         UniqueConstraint("frame_id", "run_id", "step_id", name="uq_runtime_loop_frame_identity"),
+        ForeignKeyConstraint(["frame_id", "current_context_snapshot_id", "current_context_snapshot_version", "current_context_snapshot_digest"], ["runtime_context_snapshots.frame_id", "runtime_context_snapshots.snapshot_id", "runtime_context_snapshots.version", "runtime_context_snapshots.snapshot_digest"], name="fk_frame_context_snapshot", use_alter=True),
         CheckConstraint("schema_version = 1 AND decision_schema_version = 1 AND context_seed_version = 1 AND execution_policy = 'durable-agent-loop.v1'", name="ck_runtime_loop_frame_versions"),
         CheckConstraint("row_version > 0 AND resume_generation >= 0 AND last_committed_fencing_token >= 0 AND current_iteration >= 0 AND committed_observation_cursor >= 0 AND committed_observation_cursor <= current_iteration", name="ck_runtime_loop_frame_counters"),
         CheckConstraint("phase IN ('NEED_DECISION','DECISION_ACCEPTED','WAIT_TOOL','RESULT_READY','STOPPED')", name="ck_runtime_loop_frame_phase"),
@@ -955,10 +971,16 @@ class RuntimeLoopIterationRow(PersistenceBase):
     observation_digest: Mapped[str | None] = mapped_column(CHAR(64))
     observation_cursor: Mapped[int | None] = mapped_column(Integer)
     observed_generation: Mapped[int | None] = mapped_column(BigInteger)
+    context_snapshot_id: Mapped[str | None] = mapped_column(String(255))
+    context_snapshot_version: Mapped[int | None] = mapped_column(Integer)
+    context_snapshot_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    context_rebind_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     model_recovery_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     __table_args__ = (
         ForeignKeyConstraint(["frame_id", "run_id", "step_id"], ["runtime_loop_frames.frame_id", "runtime_loop_frames.run_id", "runtime_loop_frames.step_id"], name="fk_runtime_loop_iteration_frame_identity"),
         ForeignKeyConstraint(["run_id", "step_id", "accepted_model_attempt", "accepted_model_attempt_number"], ["runtime_model_invocations.run_id", "runtime_model_invocations.step_id", "runtime_model_invocations.attempt_number", "runtime_model_invocations.model_attempt_number"], name="fk_runtime_loop_iteration_accepted_model"),
+        ForeignKeyConstraint(["frame_id", "context_snapshot_id", "context_snapshot_version", "context_snapshot_digest"], ["runtime_context_snapshots.frame_id", "runtime_context_snapshots.snapshot_id", "runtime_context_snapshots.version", "runtime_context_snapshots.snapshot_digest"], name="fk_iteration_context_snapshot", use_alter=True),
+        CheckConstraint("context_rebind_count BETWEEN 0 AND 1", name="ck_context_rebind_count"),
         CheckConstraint("iteration_no > 0 AND context_cursor >= 0", name="ck_runtime_loop_iteration_counters"),
         CheckConstraint("model_recovery_count >= 0 AND model_recovery_count <= 2", name="ck_runtime_loop_model_recovery_count"),
         CheckConstraint("state IN ('OPEN','ACCEPTED','OBSERVED','CLOSED')", name="ck_runtime_loop_iteration_state"),
@@ -966,6 +988,55 @@ class RuntimeLoopIterationRow(PersistenceBase):
         CheckConstraint("(decision_id IS NULL AND decision_kind IS NULL AND decision_digest IS NULL AND accepted_model_attempt IS NULL AND accepted_model_attempt_number IS NULL AND accepted_generation IS NULL) OR (decision_id IS NOT NULL AND decision_kind IS NOT NULL AND decision_digest IS NOT NULL AND accepted_model_attempt > 0 AND accepted_model_attempt_number > 0 AND accepted_generation >= 0)", name="ck_runtime_loop_accepted_tuple"),
         CheckConstraint("(decision_kind = 'TOOL_CALL' AND action_id IS NOT NULL AND action_recipe IS NOT NULL) OR (decision_kind IS DISTINCT FROM 'TOOL_CALL' AND action_id IS NULL AND action_recipe IS NULL AND tool_invocation_id IS NULL)", name="ck_runtime_loop_action_tuple"),
         CheckConstraint("(observation IS NULL AND observation_source_digest IS NULL AND observation_digest IS NULL AND observation_cursor IS NULL AND observed_generation IS NULL) OR (decision_kind = 'TOOL_CALL' AND tool_invocation_id IS NOT NULL AND observation IS NOT NULL AND observation_source_digest IS NOT NULL AND observation_digest IS NOT NULL AND observation_cursor > 0 AND observed_generation >= 0)", name="ck_runtime_loop_observation_tuple"),
+    )
+
+
+class RuntimeContextSnapshotRow(PersistenceBase):
+    """接受后不可变的业务模型输入，不属于安全 RunSnapshot。"""
+    __tablename__ = "runtime_context_snapshots"
+    snapshot_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    frame_id: Mapped[str] = mapped_column(ForeignKey("runtime_loop_frames.frame_id", ondelete="CASCADE"), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    step_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    validation: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    accepted_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    accepted_fence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("frame_id", "version", name="uq_context_snapshot_version"),
+        UniqueConstraint("frame_id", "snapshot_id", "version", "snapshot_digest", name="uq_context_snapshot_binding"),
+        ForeignKeyConstraint(["frame_id", "run_id", "step_id"], ["runtime_loop_frames.frame_id", "runtime_loop_frames.run_id", "runtime_loop_frames.step_id"], name="fk_context_snapshot_identity"),
+        CheckConstraint("version > 0 AND accepted_generation >= 0 AND created_generation >= 0 AND accepted_fence >= 0", name="ck_context_snapshot_counters"),
+    )
+
+
+class RuntimeContextOperationRow(PersistenceBase):
+    """一个有限压缩操作的工作记录；费用仅由 Model Owner 结算。"""
+    __tablename__ = "runtime_context_operations"
+    operation_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    frame_id: Mapped[str] = mapped_column(ForeignKey("runtime_loop_frames.frame_id", ondelete="CASCADE"), nullable=False)
+    target_iteration: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_cursor: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_id: Mapped[str | None] = mapped_column(String(255))
+    prepared: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'PREPARED'"))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    candidate: Mapped[dict | None] = mapped_column(JSONB)
+    validation: Mapped[dict | None] = mapped_column(JSONB)
+    candidate_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    validation_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    result_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    reason: Mapped[str | None] = mapped_column(String(64))
+    accepted_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("runtime_context_snapshots.snapshot_id"))
+    __table_args__ = (
+        UniqueConstraint("frame_id", "target_iteration", name="uq_context_operation_slot"),
+        UniqueConstraint("frame_id", "operation_id", name="uq_context_operation_binding"),
+        CheckConstraint("attempt_count BETWEEN 0 AND 2 AND target_iteration > 0 AND source_cursor >= 0", name="ck_context_operation_counters"),
+        CheckConstraint("state IN ('PREPARED','RESULT_READY','ACCEPTED','REJECTED','FAILED')", name="ck_context_operation_state"),
     )
 
 
@@ -1307,6 +1378,8 @@ CANONICAL_TABLES = (
     "runtime_run_executions",
     "runtime_step_executions",
     "runtime_model_invocations",
+    "runtime_context_operations",
+    "runtime_context_snapshots",
     "runtime_loop_frames",
     "runtime_loop_iterations",
     "runtime_snapshots",

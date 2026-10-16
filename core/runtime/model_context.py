@@ -487,6 +487,50 @@ class FinalProviderMessageBudget:
             raise ValueError("context_budget_utilization 必须在 [0,1]")
 
 
+@dataclass(frozen=True)
+class RequestBudgetAssessment:
+    """实际完整请求的容量证明；HEURISTIC 永不授予新 policy 调用权限。"""
+    profile_id: str
+    mode: str
+    counting_version: str
+    request_digest: str
+    messages_digest: str
+    messages_bound: int
+    options_bound: int
+    framing_bound: int
+    input_bound: int
+    output_reserve: int
+    safety_margin: int
+    required_window: int
+    window: int
+    reliable: bool
+    admissible: bool
+
+
+def assess_request(messages, options, reserve, profile, *, safety_ratio=1.1, exact_counter=None):
+    from math import ceil
+    from core.runtime.execution_aggregate import canonical_payload_digest
+    serialize = lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    mode = profile.request_counting_mode
+    message_bound, option_bound = len(serialize(messages)), len(serialize(options))
+    framing = profile.request_framing_bound + profile.request_message_framing_bound * len(messages)
+    reliable = (profile.request_counting_version == "utf8-byte-upper-bound.v1" and mode == "BOUNDED_ESTIMATE"
+        and profile.output_accounting_contract == "bounded-visible-output.v1")
+    input_bound = message_bound + option_bound + framing
+    if mode == "EXACT" and callable(exact_counter) and profile.request_counting_version and profile.output_accounting_contract == "bounded-visible-output.v1":
+        exact = exact_counter(messages, options, reserve)
+        reliable = type(exact) is int and exact >= 0
+        if reliable:
+            input_bound = exact
+    margin = ceil((input_bound + reserve) * max(0.1, safety_ratio - 1))
+    required = input_bound + reserve + margin
+    digest = canonical_payload_digest({"messages": messages, "max_tokens": reserve, "generation_options": options})
+    return RequestBudgetAssessment(profile.profile_id.value, mode, profile.request_counting_version,
+        digest, canonical_payload_digest(messages), message_bound, option_bound, framing, input_bound, reserve,
+        margin, required, profile.context_window, bool(reliable),
+        bool(reliable and 0 < reserve <= profile.max_output_tokens and required <= profile.context_window))
+
+
 class ContextBuilder:
     """按来源边界、预算和稳定规则构建模型实际输入文本。"""
     # WP4-B：MEMORY_RETRIEVAL 使用显式历史数据标题 + 固定安全语义说明；

@@ -891,3 +891,9 @@ WP4-A `PUBLIC_VERSIONED` Trace Export Contract；不修改
 Alembic `0031_durable_agent_loop` 增量扩展 execution root 的 policy/operation 预算，新增 `runtime_loop_frames` 与 `runtime_loop_iterations`。Frame 阶段为 `NEED_DECISION → DECISION_ACCEPTED → WAIT_TOOL → NEED_DECISION`，Final/Refusal 进入 `RESULT_READY`，受控停止进入 `STOPPED`。Iteration 为 `OPEN/ACCEPTED/OBSERVED/CLOSED`。接受决策事务先保存唯一模型 attempt、action identity 和恢复材料，提交之后才进入工具治理/审批/执行；Observation 仅从已持久确认的工具结果提交。模型 attempt 的完整请求 digest 与 iteration 的 messages context digest 分别保存。
 
 Final 通过原 OutputGate/EventChannel 事务同时写不可变 Frame receipt、Journal `OUTPUT_DELTA` 和 ClientEventFeed cursor。Receipt 校验已接受模型结果、决策 digest 与输出正文 hash；恢复重用同一持久输出事实。已有 Run terminal 事务继续是唯一 terminal Authority。独立 `loop-evidence.v1` 从受控聚合生成安全投影，不修改 Trace v2。
+
+### 显式 Context Snapshot 与有界压缩
+
+仅 `durable-agent-loop.v1` 的受信 `AgentDefinition.business_options.context_policy` 指定 `version: 1` 时启用。`agent_loop/context.py` 构造不可变 `context-snapshot.v1` 与 Source/Mandatory Manifest；`compaction.py` 选择完整旧只读工具组、严格解析摘要并准备模型输入。整个冻结 Seed、最近两组、所有副作用/分类不明组及显式 mandatory 组原样保留；摘要仅作为 user data。PASS 仅证明结构、来源、覆盖和预算，语义保持为 `NOT_PROVEN`。
+
+模型仍经 AgentRouter → ModelInvocationRouter → 原 BudgetLedger/持久 Attempt；完整 messages、tools、response schema、framing 与 output reserve 在最终选项确定后评估。Repository 接受 Snapshot 并原子绑定 OPEN Iteration，随后 DECISION STARTED 再核对 Snapshot/完整 request。COMPACTION 使用独立 purpose 和 `context:{operation_id}`，不创建业务 Iteration、不进入 OutputGate。未启用的 Loop 与 fixed-plan 保持原路径；不扩展 Trace v2、loop-evidence.v1 或 Go Execute。

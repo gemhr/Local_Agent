@@ -313,3 +313,15 @@ evidence；其 category/phase/side_effect_state 语义见 Phase9-WP2 Gate C/E
 | `LOOP_MODEL_RECOVERY_EXHAUSTED`、`LOOP_RESULT_UNAVAILABLE` | FAILED / UNHANDLED_ERROR；保留未知/缺失事实 |
 
 审批与工具 UNKNOWN 等待抛内部 `LoopSuspended`，不是 Run terminal。取消和 deadline 仍由原 Owner 收口，已确认交付事实不会被取消抹除。
+
+### Context Policy 的受控失败
+
+| Code | 行为 |
+| --- | --- |
+| `CONTEXT_SNAPSHOT_UNAVAILABLE` | 新 Policy 所需接受 Snapshot 或绑定缺失/不一致；不回退旧路径。 |
+| `CONTEXT_VALIDATION_FAILED` | 摘要格式、来源覆盖、mandatory、pair、角色或缩减目标验证失败；无 repair。 |
+| `CONTEXT_BUDGET_UNCERTAIN` | 没有可靠完整请求计数/上界或完整 options Adapter 合同；不发新调用。 |
+| `CONTEXT_COMPACTION_FAILED` | 有限压缩操作失败/额度不可用；不递归压缩。 |
+| `LOOP_CONTEXT_EXHAUSTED` | 可靠硬窗口超限、无安全可压缩源或已完成一次拒绝重绑定后再次拒绝。 |
+
+CAS/过期 parent/cursor/旧 generation 是内部拒绝，不能制造第二个 Run terminal。Token/cost/retry 仍用原 `BUDGET_EXHAUSTED`；取消/deadline 沿原映射，其余上述停止使用原 UNHANDLED_ERROR + safe code，不扩 Trace stop_reason。`CONTEXT_POLICY_INVALID` / `CONTEXT_COUNTING_MODE_INVALID` / `CONTEXT_FRAMING_INVALID` 是受信配置构造失败，不代表 Provider 错误。
