@@ -5,6 +5,7 @@ owned by the existing Runtime Factory/RunCoordinator.
 """
 
 from __future__ import annotations
+from core.runtime.agent_loop.contracts import LoopSuspended
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -225,6 +226,8 @@ class RecoveryCoordinator:
             await self.rehydrate_and_execute(run_id, lease, image)
         except asyncio.CancelledError:
             raise
+        except LoopSuspended:
+            return
         except Exception as exc:
             await self.repository.record_recovery_failure(
                 run_id, type(exc).__name__.upper(),

@@ -91,6 +91,22 @@ class ModelAdapterResponse:
     actual_usage: BudgetUsage | None = None
     native_tool_call: NativeToolCall | None = None
     assistant_message: Mapping[str, object] | None = None
+    finish_reason: str | None = None
+    refusal: str | None = None
+    tool_call_count: int | None = None
+
+
+def restore_loop_model_response(row: object) -> ModelAdapterResponse:
+    """从已完成且摘要匹配的持久 winner 恢复决策响应。"""
+    payload = row.result_binding
+    if row.state != ModelAttemptState.COMPLETED.value or not isinstance(payload, Mapping) or canonical_payload_digest(payload) != row.result_digest:
+        raise DurableModelLifecycleError("LOOP_MODEL_RESULT_BINDING_INVALID")
+    native = payload.get("native_tool_call")
+    return ModelAdapterResponse(
+        output=payload["output"], native_tool_call=NativeToolCall(**native) if native is not None else None,
+        assistant_message=payload.get("assistant_message"), finish_reason=payload.get("finish_reason"),
+        refusal=payload.get("refusal"), tool_call_count=payload.get("tool_call_count"),
+    )
 
 
 class ModelAdapter(Protocol):
@@ -148,6 +164,15 @@ class GeneratorModelAdapter:
         run_context: RunContext | None = None,
         on_delta: Callable[[], None] | None = None,
     ) -> ModelAdapterResponse:
+        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1" and "tools" not in (generation_options or {}):
+            if not callable(getattr(self._engine, "agenerate", None)):
+                raise ModelAdapterInvocationError(
+                    ModelFailureCategory.PROVIDER_CONFIGURATION_ERROR,
+                    safe_error_code="LOOP_MODEL_FINISH_METADATA_UNAVAILABLE",
+                    provider_started=False, provider_responded=False,
+                )
+            return asyncio.run(self.ainvoke(messages, max_tokens=max_tokens,
+                on_started=on_started, generation_options=generation_options, run_context=run_context))
         chunks: list[str] = []
         provider_started = False
         try:
@@ -267,7 +292,9 @@ class GeneratorModelAdapter:
                 return response
             chunks: list[str] = []
             actual_usage = None
-            from core.llm_engine import TextDelta, UsageDelta
+            finish_reason = None
+            refusal_parts: list[str] = []
+            from core.llm_engine import Finish, RefusalDelta, TextDelta, UsageDelta
 
             async for delta in native_stream(
                 [dict(message) for message in messages],
@@ -280,6 +307,11 @@ class GeneratorModelAdapter:
                     if on_delta is not None:
                         await on_delta(delta.text)
                         accepted_output = True
+                elif isinstance(delta, Finish):
+                    if delta.reason is not None:
+                        finish_reason = delta.reason
+                elif isinstance(delta, RefusalDelta):
+                    refusal_parts.append(delta.text)
                 elif isinstance(delta, UsageDelta):
                     from core.runtime.budget import BudgetUsage
 
@@ -288,7 +320,7 @@ class GeneratorModelAdapter:
                         output_tokens=delta.output_tokens,
                         total_tokens=delta.input_tokens + delta.output_tokens,
                     )
-            return ModelAdapterResponse("".join(chunks), actual_usage=actual_usage)
+            return ModelAdapterResponse("".join(chunks), actual_usage=actual_usage, finish_reason=finish_reason, refusal="".join(refusal_parts) or None, tool_call_count=0)
         except Exception as exc:
             if isinstance(exc, ModelAdapterInvocationError):
                 raise
@@ -367,6 +399,7 @@ class ModelInvocationResult:
     selected_context_items: int = 0
     dropped_context_items: int = 0
     structured_repair_count: int = 0
+    model_attempt_ref: str | None = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -670,6 +703,8 @@ class ModelInvocationRouter:
         Event/Journal publication remains owned by the surrounding Runtime;
         this method only coordinates typed Provider deltas and attempt policy.
         """
+        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1":
+            raise DurableModelLifecycleError("LOOP_REQUIRES_FENCED_STEP_INVOCATION")
         attempts: list[ModelInvocationAttempt] = []
         candidates = list(routing_decision.candidates)
         retry_indexes: dict[ModelProfileId, int] = {}
@@ -867,6 +902,12 @@ class ModelInvocationRouter:
             raise ModelInvocationConfirmationRequired()
         if token_estimate < 0:
             raise ValueError("token_estimate 必须是非负整数")
+        restored = self.restore_completed_loop_result(
+            run_context=run_context, routing_decision=routing_decision, messages=messages,
+            max_tokens=max_tokens, generation_options=generation_options, async_submit=async_submit,
+        )
+        if restored is not None:
+            return restored
         attempts: list[ModelInvocationAttempt] = []
         seen: set[ModelProfileId] = set()
         last_category = ModelFailureCategory.UNKNOWN_FAILURE
@@ -1014,6 +1055,7 @@ class ModelInvocationRouter:
                         generation_options=generation_options,
                         async_submit=async_submit,
                         attempts=attempts,
+                        reserved_usage=usage,
                     )
                 except Exception as exc:
                     raise DurableModelLifecycleError(
@@ -1260,6 +1302,8 @@ class ModelInvocationRouter:
                 reset_trace_context(attempt_trace_token)
                 raise
             actual = response.actual_usage
+            if getattr(run_context, "loop_frame_id", None) is not None and actual is not None:
+                actual = replace(actual, model_calls=usage.model_calls, remote_model_calls=usage.remote_model_calls, retries=usage.retries, cost_units=actual.cost_units or usage.cost_units)
             if durable_attempt is not None:
                 try:
                     self._finish_durable_model_attempt(
@@ -1268,7 +1312,7 @@ class ModelInvocationRouter:
                         state=ModelAttemptState.COMPLETED,
                         async_submit=async_submit,
                         result=self._durable_model_result(response),
-                        usage=self._durable_usage(response.actual_usage),
+                        usage=self._durable_usage(actual),
                     )
                 except Exception:
                     # The provider already returned, but a fenced durable
@@ -1410,6 +1454,7 @@ class ModelInvocationRouter:
                 _safe_int("selected_context_items"),
                 _safe_int("dropped_context_items"),
                 _safe_int("structured_repair_count"),
+                (f"{durable_attempt[1]}:{durable_attempt[2]}:{durable_attempt[3]}" if durable_attempt is not None else None),
             )
         raise ModelInvocationChainError(
             ModelInvocationFailure(
@@ -1468,6 +1513,60 @@ class ModelInvocationRouter:
                 provider_responded=False,
             )
 
+    def restore_completed_loop_result(
+        self, *, run_context, messages, max_tokens, generation_options, async_submit,
+        routing_decision=None, profiles=(), step_id=None, requires_structured_output=False,
+    ) -> ModelInvocationResult | None:
+        frame_id = getattr(run_context, "loop_frame_id", None)
+        if frame_id is None:
+            return None
+        if not callable(async_submit) or run_context.execution_repository is None:
+            raise DurableModelLifecycleError("LOOP_DURABLE_MODEL_UNAVAILABLE")
+        run_context.raise_if_inactive()
+        if routing_decision is None:
+            frame, iterations = async_submit(run_context.execution_repository.load_loop(run_context.durable_lease, step_id))
+            if (frame.frame_id != frame_id or frame.resume_generation != run_context.loop_resume_generation
+                    or frame.current_iteration != run_context.loop_iteration_no
+                    or not iterations or iterations[-1].state != "OPEN"):
+                raise DurableModelLifecycleError("LOOP_MODEL_RESULT_BINDING_INVALID")
+        image = async_submit(run_context.execution_repository.load(run_context.run_id))
+        rows = [row for row in image.models
+                if getattr(row, "loop_frame_id", None) == frame_id
+                and getattr(row, "loop_iteration_no", None) == run_context.loop_iteration_no
+                and row.state == ModelAttemptState.COMPLETED.value]
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise DurableModelLifecycleError("LOOP_MODEL_WINNER_CONFLICT")
+        row = rows[0]
+        frozen_profiles = tuple(item.profile for item in routing_decision.candidates) if routing_decision is not None else profiles
+        profile = next((item for item in frozen_profiles
+                        if item.provider_kind == row.provider_kind
+                        and (item.model_identity or item.profile_id.value) == row.profile_identity), None)
+        if profile is None:
+            raise DurableModelLifecycleError("LOOP_PINNED_CONFIG_UNAVAILABLE")
+        # 初次路由可按已冻结 Profile 添加 provider structured format。
+        # 恢复只匹配已提交请求摘要，不重新选择 Profile 或申请调用额度。
+        if routing_decision is None and requires_structured_output and any(item.supports_provider_structured_output for item in frozen_profiles):
+            formatted_options = dict(generation_options or {})
+            formatted_options.setdefault("response_format", {"type": "json_object"})
+            if row.request_digest == self._durable_model_request_digest(messages, max_tokens=max_tokens, generation_options=formatted_options):
+                generation_options = formatted_options
+        expected = self._durable_model_request_digest(messages, max_tokens=max_tokens, generation_options=generation_options)
+        payload = row.result_binding
+        if row.request_digest != expected or not isinstance(payload, Mapping) or canonical_payload_digest(payload) != row.result_digest:
+            raise DurableModelLifecycleError("LOOP_MODEL_RESULT_BINDING_INVALID")
+        response = restore_loop_model_response(row)
+        return ModelInvocationResult(
+            output=response.output,
+            capability_preferred_profile_id=routing_decision.capability_preferred_profile_id if routing_decision is not None else None,
+            initial_selected_profile_id=routing_decision.initial_selected_profile_id if routing_decision is not None else None,
+            executed_profile_id=profile.profile_id, attempts=(),
+            quality_tradeoff_disclosed=routing_decision.quality_tradeoff_disclosed if routing_decision is not None else False,
+            response=response, provider_kind=row.provider_kind, model_identity=row.profile_identity,
+            model_attempt_ref=f"{row.step_id}:{row.attempt_number}:{row.model_attempt_number}",
+        )
+
     @staticmethod
     def _durable_model_request_digest(
         messages: Sequence[Mapping[str, str]],
@@ -1495,6 +1594,10 @@ class ModelInvocationRouter:
                 "tool_name": native.tool_name,
                 "arguments_json": native.arguments_json,
             }
+        for name in ("finish_reason", "refusal", "tool_call_count", "assistant_message"):
+            value = getattr(response, name)
+            if value is not None:
+                result[name] = dict(value) if isinstance(value, Mapping) else value
         return result
 
     @staticmethod
@@ -1518,7 +1621,8 @@ class ModelInvocationRouter:
         generation_options: Mapping[str, object] | None,
         async_submit: Callable[[object], object] | None,
         attempts: Sequence[ModelInvocationAttempt],
-    ) -> tuple[object, str, int, int] | None:
+        reserved_usage: BudgetUsage,
+    ) -> tuple[object, str, int, int, str | None, BudgetUsage] | None:
         """Persist a fenced STARTED marker before entering provider I/O.
 
         The tuple is ``(repository, step_id, step_attempt, model_attempt)``.
@@ -1573,6 +1677,16 @@ class ModelInvocationRouter:
         start = getattr(repository, "start_model_attempt", None)
         if not callable(start):
             raise RuntimeError("execution repository lacks start_model_attempt")
+        loop_frame_id = getattr(run_context, "loop_frame_id", None)
+        loop_kwargs = {}
+        operation_id = None
+        if loop_frame_id is not None:
+            iteration_no = run_context.loop_iteration_no
+            operation_id = f"model:{step_id}:{step_attempt}:{model_attempt}"
+            loop_kwargs = dict(loop_frame_id=loop_frame_id, loop_iteration_no=iteration_no,
+                resume_generation=run_context.loop_resume_generation,
+                invocation_group=f"{loop_frame_id}:{iteration_no}", operation_id=operation_id,
+                reserved_usage=self._durable_usage(reserved_usage))
         async_submit(
             start(
                 lease,
@@ -1587,22 +1701,23 @@ class ModelInvocationRouter:
                 provider_kind=candidate.profile.provider_kind,
                 profile_identity=candidate.profile.model_identity
                 or candidate.profile_id.value,
+                **loop_kwargs,
             )
         )
-        return repository, step_id, step_attempt, model_attempt
+        return repository, step_id, step_attempt, model_attempt, operation_id, reserved_usage
 
     @staticmethod
     def _finish_durable_model_attempt(
         *,
         run_context: RunContext,
-        durable_attempt: tuple[object, str, int, int],
+        durable_attempt: tuple[object, str, int, int, str | None, BudgetUsage],
         state: ModelAttemptState,
         async_submit: Callable[[object], object] | None,
         result: Mapping[str, object] | None = None,
         usage: Mapping[str, object] | None = None,
         safe_error: str | None = None,
     ) -> None:
-        repository, step_id, step_attempt, model_attempt = durable_attempt
+        repository, step_id, step_attempt, model_attempt, operation_id, reserved_usage = durable_attempt
         finish = getattr(repository, "finish_model_attempt", None)
         if not callable(finish) or not callable(async_submit):
             raise RuntimeError("execution repository lacks fenced model completion")
@@ -1616,6 +1731,9 @@ class ModelInvocationRouter:
                 result=result,
                 usage=usage,
                 safe_error=safe_error,
+                **(dict(resume_generation=run_context.loop_resume_generation, operation_id=operation_id,
+                    actual_usage=usage or ModelInvocationRouter._durable_usage(reserved_usage),
+                    usage_source="ACTUAL" if usage else "ESTIMATED") if operation_id else {}),
             )
         )
 

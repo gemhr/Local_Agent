@@ -95,6 +95,7 @@ class RunFinalMemoryWriter:
         span_recorder=None,
         metrics_recorder=None,
         statement_timeout_ms: int | None = None,
+        idempotent_replay: bool = False,
     ) -> None:
         if not isinstance(entry_agent_id, str) or not entry_agent_id.strip():
             raise ValueError("entry_agent_id 不能为空")
@@ -118,6 +119,7 @@ class RunFinalMemoryWriter:
         self._span_recorder = span_recorder
         self._metrics_recorder = metrics_recorder
         self._statement_timeout_ms = statement_timeout_ms
+        self._idempotent_replay = idempotent_replay
         self._write_lock = threading.Lock()
         self._written = False
 
@@ -220,6 +222,8 @@ class RunFinalMemoryWriter:
             }
             if self._statement_timeout_ms is not None:
                 exchange_kwargs["statement_timeout_ms"] = self._statement_timeout_ms
+            if self._idempotent_replay:
+                exchange_kwargs["idempotent_replay"] = True
             memory.append_exchange_atomic(
                 self._entry_agent_id, scope, self._user_request, content,
                 **exchange_kwargs,

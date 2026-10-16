@@ -67,6 +67,7 @@ from core.runtime.invocation_bindings import (
     InvocationRole,
     StepInvocationBindings,
 )
+from core.runtime.agent_loop.contracts import LOOP_POLICY, LoopPolicyV1, LoopSuspended
 
 
 def _required_text(value: object, name: str) -> str:
@@ -445,6 +446,9 @@ class CoordinatedRunScope:
             if self._control_error is not None:
                 raise self._control_error
             return result
+        except LoopSuspended:
+            await self.durable_run_control.release(self.durable_lease)
+            raise
         finally:
             await self._stop_durable_control()
             self.plan = self.coordinator.plan
@@ -698,6 +702,9 @@ class CoordinatedRuntimeFactory:
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
+        execution_policy: str | None = None,
+        loop_policy: LoopPolicyV1 | None = None,
+        loop_correlation: dict | None = None,
     ) -> CoordinatedRunScope:
         """默认 Coordinated 入口：始终经过动态 PlanResolver。"""
         return await self._create_run_scope(
@@ -718,6 +725,9 @@ class CoordinatedRuntimeFactory:
             workflow_id=workflow_id,
             workflow_version=workflow_version,
             static_plan=None,
+            execution_policy=execution_policy,
+            loop_policy=loop_policy,
+            loop_correlation=loop_correlation,
         )
 
     async def create_static_run_scope(
@@ -790,6 +800,9 @@ class CoordinatedRuntimeFactory:
         run_id = durable_run_id
         if getattr(lease, "run_id", run_id) != run_id:
             raise ValueError("recovery lease run_id mismatch")
+        is_loop = getattr(root, "execution_policy", "fixed-plan.v1") == LOOP_POLICY
+        if is_loop and query is not None:
+            raise ValueError("Loop recovery cannot override frozen input")
         payload = getattr(root, "plan_payload", None)
         plan = plan_from_payload(payload)
         expected_fingerprint = getattr(root, "plan_fingerprint", None)
@@ -798,6 +811,8 @@ class CoordinatedRuntimeFactory:
         resume_input = getattr(root, "resume_input", {})
         if not isinstance(resume_input, Mapping):
             raise TypeError("durable resume_input must be a mapping")
+        if is_loop:
+            persist = resume_input["agent_loop"]["persist"]
         agent_id = str(
             resume_input.get("entry_agent_id")
             or (plan.steps[0].preferred_agent if plan.steps else "core_router")
@@ -879,6 +894,9 @@ class CoordinatedRuntimeFactory:
         # intentionally leaves approval-bound Steps replayable as PENDING;
         # the existing controller will rebuild its local waiter from this row.
         tool_rows = tuple(getattr(recovery_image, "tool_invocations", ()))
+        if is_loop:
+            # LoopDriver 仅按当前 action_id 加载，禁用旧 Step 第一条工具绑定。
+            tool_rows = ()
         active_step_ids = {
             getattr(row, "step_id", None)
             for row in rows
@@ -889,7 +907,7 @@ class CoordinatedRuntimeFactory:
                 context.attach_durable_tool_invocation(invocation)
                 break
         else:
-            approvals = tuple(getattr(recovery_image, "approvals", ()))
+            approvals = () if is_loop else tuple(getattr(recovery_image, "approvals", ()))
             claims_by_approval = {
                 getattr(claim, "approval_id", None): claim
                 for claim in tuple(
@@ -967,10 +985,43 @@ class CoordinatedRuntimeFactory:
         rehydrated_steps=(),
         rehydrated_root=None,
         rehydrated_ledger=None,
+        execution_policy: str | None = None,
+        loop_policy: LoopPolicyV1 | None = None,
+        loop_correlation: dict | None = None,
     ) -> CoordinatedRunScope:
         """Create one identity set and clean up any partially built transport."""
         if self._services.lifecycle_state is not RuntimeLifecycleState.READY:
             raise RuntimeError("application runtime services are not ready")
+        definition = self._agent_registry.resolve(agent_id).definition
+        selected_policy = (getattr(rehydrated_root, "execution_policy", None)
+                           or execution_policy or definition.business_options.get("execution_policy", "fixed-plan.v1"))
+        if selected_policy not in {"fixed-plan.v1", LOOP_POLICY}:
+            raise ValueError("unsupported execution policy")
+        if selected_policy == LOOP_POLICY:
+            if self._agent_registry.resolve(agent_id).workflow is not None:
+                raise ValueError("Loop policy requires a single Agent registration")
+            if any(profile.cost_profile is None for profile in self._router.model_profiles):
+                raise ValueError("Loop policy requires pinned model cost metadata")
+            if definition.output_schema is not None:
+                refusal_kinds = definition.output_schema.get("properties", {}).get("kind", {}).get("enum", ())
+                if "REFUSAL" not in refusal_kinds:
+                    raise ValueError("Loop output schema must explicitly declare a REFUSAL kind")
+            loop_policy = loop_policy or LoopPolicyV1(**dict(definition.business_options.get("loop_policy", {})))
+            if rehydrated_root is None:
+                budget_values = {name: getattr(budget or RunBudget(), name) for name in RunBudget.__dataclass_fields__}
+                for name in ("max_model_calls", "max_tool_calls", "max_retries", "max_elapsed_seconds"):
+                    cap = getattr(loop_policy, name)
+                    budget_values[name] = min(budget_values[name], cap) if budget_values[name] is not None else cap
+                budget = RunBudget(**budget_values)
+                timeout_seconds = min(timeout_seconds or loop_policy.max_elapsed_seconds, budget.max_elapsed_seconds)
+                static_plan = static_plan or self._router.build_single_agent_plan(agent_id, query)
+            if (len(static_plan.steps) != 1 or static_plan.steps[0].execution_kind is not ExecutionKind.AGENT
+                    or static_plan.steps[0].output_policy is not OutputPolicy.FINAL_PASSTHROUGH):
+                raise ValueError("Loop policy requires one final AGENT Step")
+            if not callable(getattr(getattr(self._services, "client_event_feed", None), "append_event_in_transaction", None)):
+                raise ValueError("Loop policy requires durable atomic client feed")
+            if (self._execution_repository or getattr(self._services, "execution_repository", None)) is None:
+                raise ValueError("Loop policy requires durable execution repository")
         if fault_controller is not None and not isinstance(
             fault_controller,
             FaultInjectionController,
@@ -1030,6 +1081,9 @@ class CoordinatedRuntimeFactory:
                 if definition.output_schema is not None and callable(register_delivery):
                     register_delivery(run_context.run_id, definition.output_schema)
             durable_control = self._services.durable_run_control
+            run_context.execution_policy = selected_policy
+            run_context.loop_policy = loop_policy
+            run_context.loop_correlation = loop_correlation or {}
             durable_lease = existing_lease or await durable_control.claim(
                 run_context.run_id,
                 self._services.run_control_owner_id,
@@ -1195,6 +1249,17 @@ class CoordinatedRuntimeFactory:
                         for performer_id in performer_ids
                     }
                     run_context.bind_performer_identities(performer_identities)
+                if selected_policy == LOOP_POLICY:
+                    coordinator._planning_request = PlanningRequest(agent_id, query)
+                    coordinator._persist = persist
+                    coordinator._invocation_bindings = (StepInvocationBindings((AgentInvocationSpec(
+                        static_plan.steps[0].step_id, agent_id, query, role=InvocationRole.ENTRY),))
+                        if rehydrated_root is None else _rehydrated_bindings(static_plan))
+                    coordinator.attach_multi_agent_runtime(MultiAgentDriver(
+                        router=self._router, coordinator=coordinator, adapter_factory=self._adapter_factory,
+                        registry=self._agent_registry, fault_controller=fault_controller))
+                    if rehydrated_root is None:
+                        coordinator._initialize_typed_runtime()
                 rehydrated_store = None
                 rehydrated_gate = None
                 rehydrated_driver = None
@@ -1220,6 +1285,7 @@ class CoordinatedRuntimeFactory:
                         span_recorder=span_recorder,
                         metrics_recorder=self._services.runtime_metrics_recorder,
                         fault_controller=fault_controller,
+                        loop_context=run_context if selected_policy == LOOP_POLICY else None,
                     )
                     rehydrated_committer = StepResultCommitter(
                         store=rehydrated_store,
@@ -1231,6 +1297,13 @@ class CoordinatedRuntimeFactory:
                         durable_lease=durable_lease,
                         durable_journal=self._services.event_journal,
                     )
+                    if selected_policy == LOOP_POLICY:
+                        from core.runtime.final_memory_writer import RunFinalMemoryWriter
+                        rehydrated_committer._final_memory_writer = RunFinalMemoryWriter(
+                            self._router, entry_agent_id=agent_id, user_request=query,
+                            persist=bool((rehydrated_root.resume_input.get("agent_loop") or {}).get("persist", persist)),
+                            run_id=run_context.run_id, span_recorder=span_recorder,
+                            metrics_recorder=self._services.runtime_metrics_recorder, idempotent_replay=True)
                     rehydrated_bindings = _rehydrated_bindings(static_plan)
                     rehydrated_driver = MultiAgentDriver(
                         router=self._router,

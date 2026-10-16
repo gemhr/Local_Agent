@@ -350,3 +350,18 @@ agent token 和 `LOCAL_AGENT_DATABASE_URL`，启动前先 `alembic upgrade head`
 初始准入窗口为 600 秒；每 incident/subject 最多一次、间隔至少 1800 秒的 material
 re-analysis，nightly 原子 hard budget 为 60（失败/未知不退款）。WP03 仅使用明确版本化的
 controlled placeholder subject，Job 停在 `READY`；WP04 必须显式绑定真实 subject。
+
+## Durable Agent Loop v1 配置
+
+默认执行策略仍为 `fixed-plan.v1`。受信 Agent definition 的 `business_options.execution_policy` 可显式选择 `durable-agent-loop.v1`，`business_options.loop_policy` 保存有限上限：`max_iterations=16`（1–64）、`max_model_calls=32`（1–32）、`max_tool_calls=16`（1–16）、`max_retries=2`（0–2）、`max_elapsed_seconds=300`（1–300）。用户 RunBudget 更小值优先；Run 初始化后 policy/config/seed 不可变，绝对 deadline 在恢复时不重置。准入要求单 Step、durable 模型/工具与支持原子 append 的 ClientEventFeed。
+
+Loop 独立评测端点的部署映射配置：
+
+| 环境变量 | 默认值 | 失败行为 |
+| --- | --- | --- |
+| `LOCAL_AGENT_LOOP_EVALUATION_PROJECT_ID` | 空 | 与 service Principal 同时为空则 target 关闭；单独配置时 startup `requires_paired_service_principal` |
+| `LOCAL_AGENT_LOOP_EVALUATION_SERVICE_PRINCIPAL_ID` | 空 | 与 Project 成对配置；请求 Principal 不匹配时拒绝，不能用 correlation 替代授权 |
+
+两项必须为 UUID；格式非法时 startup `invalid_uuid`。它们只保存非 secret 的可信部署身份，不借用全局 Trace Project 推断 Run 归属。启用流量前由部署者执行 Alembic 至 `0031_durable_agent_loop` 或更新 head；本次源码实施不迁移真实业务数据库。
+
+Loop 模型必须提供已冻结的 `cost_profile` 和明确完成状态；同步 Generator Adapter 通过既有 `agenerate` 收集 Finish/Refusal，缺少该能力时拒绝 Loop。输出 schema 沿用现有受支持的 JSON Schema 子集；结构化输出 Agent 必须在 `properties.kind.enum` 显式包含 `REFUSAL`，否则准入失败。拒绝内容同样验证该 schema，不能绕过业务输出合同。

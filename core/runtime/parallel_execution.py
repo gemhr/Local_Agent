@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """独立于 Legacy AgentLoop 的最小并行 Step 执行边界。"""
 from __future__ import annotations
+from core.runtime.agent_loop.contracts import LoopStopped, LoopSuspended
 
 import asyncio
 import inspect
@@ -296,6 +297,7 @@ class ParallelExecutor:
                             asyncio.CancelledError, RunCancelledError,
                             RunDeadlineExceededError, BudgetExceededError,
                             ParallelExecutionInfrastructureError,
+                            LoopStopped, LoopSuspended,
                         ):
                             raise
                         except ToolApprovalRejectedError:
@@ -388,6 +390,8 @@ class ParallelExecutor:
                             durable_result=result,
                             plan=plan,
                         )
+            except (LoopStopped, LoopSuspended):
+                raise
             except asyncio.CancelledError:
                 outcomes[claim.step_id] = self._settle_outcome(
                     state, claim, StepStatus.CANCELLED,
@@ -455,6 +459,7 @@ class ParallelExecutor:
 
         budget_error: BudgetExceededError | None = None
         deadline_error: RunDeadlineExceededError | None = None
+        loop_signal = None
         try:
             try:
                 async with asyncio.TaskGroup() as group:
@@ -466,10 +471,16 @@ class ParallelExecutor:
                 budget_error = errors.exceptions[0]
             except* RunDeadlineExceededError as errors:
                 deadline_error = errors.exceptions[0]
+            except* (LoopStopped, LoopSuspended) as errors:
+                loop_signal = errors.exceptions[0]
+            if loop_signal is not None:
+                raise loop_signal
             if budget_error is not None:
                 raise budget_error
             if deadline_error is not None:
                 raise deadline_error
+        except (LoopStopped, LoopSuspended):
+            raise
         except asyncio.CancelledError:
             await self._cancel_unfinished(claims, outcomes, state)
             raise

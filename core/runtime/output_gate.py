@@ -35,6 +35,8 @@ from core.runtime.planning import OutputPolicy, Plan
 from core.runtime.scheduler import StepClaim
 from core.runtime.state import AgentState, RunStatus, StepStatus
 from core.runtime.step_result import StepResult
+from core.runtime.cancellation import RunCancelledError
+from core.runtime.context import RunDeadlineExceededError
 from core.runtime.step_result_store import (
     StepResultStore,
     StepResultStoreError,
@@ -141,6 +143,7 @@ class OutputGate:
         span_recorder=None,
         metrics_recorder=None,
         fault_controller: FaultInjectionController | None = None,
+        loop_context=None,
     ) -> None:
         if not isinstance(plan, Plan):
             raise TypeError("OutputGate 需要冻结的 Plan")
@@ -166,6 +169,7 @@ class OutputGate:
         self._span_recorder = span_recorder
         self._metrics_recorder = metrics_recorder
         self._fault_controller = fault_controller
+        self._loop_context = loop_context
         finals = tuple(
             step
             for step in plan.steps
@@ -427,7 +431,9 @@ class OutputGate:
                     else "final output 在 journal append 前失败"
                 ),
             )
-        except (EventChannelClosedError, RuntimeError):
+        except (EventChannelClosedError, RuntimeError) as exc:
+            if self._loop_context is not None and isinstance(exc, RunCancelledError):
+                raise
             attempt = DeliveryAttempt(
                 claim.step_id,
                 output_policy,
@@ -443,7 +449,9 @@ class OutputGate:
                 "FINAL_OUTPUT_DELIVERY_UNKNOWN",
                 "publish 被取消，无法确认是否已持久化",
             )
-        except Exception:
+        except Exception as exc:
+            if self._loop_context is not None and isinstance(exc, RunDeadlineExceededError):
+                raise
             attempt = DeliveryAttempt(
                 claim.step_id,
                 output_policy,
@@ -541,10 +549,30 @@ class OutputGate:
         emitter: StepEventEmitter = self._event_emitter.for_step(claim.step_id)
         if emitter.is_closed:
             raise RuntimeError("StepEmitter 已关闭，拒绝再次发布")
+        atomic_mutation = None
+        if self._loop_context is not None:
+            context = self._loop_context
+            repository = context.execution_repository
+            frame, _ = await repository.load_loop(context.durable_lease, claim.step_id)
+            digest = hashlib.sha256(result.content.encode("utf-8")).hexdigest()
+            if frame.final_delivery_receipt is not None:
+                if (frame.final_delivery_receipt["decision_id"] != frame.result_decision_id
+                        or frame.final_delivery_receipt["result_digest"] != digest):
+                    raise RuntimeError("durable final binding mismatch")
+                return
+            async def atomic_mutation(event):
+                await repository.publish_loop_final(context.durable_lease,
+                    frame_id=frame.frame_id, decision_id=frame.result_decision_id,
+                    result_digest=digest, event=event,
+                    journal=emitter.parent.channel._journal,
+                    client_event_feed=emitter.parent.channel._client_event_feed,
+                    resume_generation=frame.resume_generation, row_version=frame.row_version)
+                return {"client_projection_persisted": True}
         await emitter.emit(
             RuntimeEventType.OUTPUT_DELTA,
             OutputDeltaPayload(result.content),
             component="output_gate",
+            atomic_mutation=atomic_mutation,
         )
 
     def __repr__(self) -> str:

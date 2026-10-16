@@ -336,6 +336,9 @@ class AgentApplicationService:
         evaluation_plan_resolver=None,
         project_identity=None,
         project_grants=(),
+        execution_policy=None,
+        loop_policy=None,
+        loop_correlation=None,
     ) -> ExecutionResult:
         """受信任评测入口；控制 seam 不属于 PUBLIC ExecutionRequest。"""
         _registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
@@ -351,12 +354,24 @@ class AgentApplicationService:
             evaluation_plan_resolver=evaluation_plan_resolver,
             project_identity=project_identity,
             project_grants=tuple(project_grants),
+            execution_policy=execution_policy,
+            loop_policy=loop_policy,
+            loop_correlation=loop_correlation,
             session_id=request.session_id,
             agent_version=definition.agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
         )
         return self._validate_output(self._project_result(runtime_result, output, _registration), definition)
+
+    async def execute_agent_loop(self, request: ExecutionRequest, *, loop_correlation: dict) -> ExecutionResult:
+        """受信 Loop 评测入口：policy 来自注册定义而非请求正文。"""
+        from core.runtime.agent_loop.contracts import LOOP_POLICY
+        _, definition, _, _, _ = self._resolve_request(request)
+        if definition.business_options.get("execution_policy") != LOOP_POLICY:
+            raise AgentApplicationError("LOOP_POLICY_REQUIRED", "Agent 未启用 durable Loop 策略")
+        return await self.execute_evaluation(request, execution_policy=LOOP_POLICY,
+                                             loop_correlation=loop_correlation)
 
 
 __all__ = ["AgentApplicationError", "AgentApplicationService", "ExecutionEvent", "ExecutionRequest", "ExecutionResult"]

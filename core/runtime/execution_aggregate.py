@@ -101,6 +101,7 @@ class ExecutionRootInput:
     budget_reserved: Mapping[str, Any]
     budget_consumed: Mapping[str, Any]
     recovery_supported: bool = True
+    execution_policy: str = "fixed-plan.v1"
 
     def as_row_values(self) -> dict[str, Any]:
         if not isinstance(self.run_id, str) or not self.run_id.strip():
@@ -115,6 +116,7 @@ class ExecutionRootInput:
             raise TypeError("recovery_supported must be bool")
         return {
             "run_id": self.run_id,
+            "execution_policy": self.execution_policy,
             "schema_version": 1,
             "execution_version": 1,
             "resume_input": to_primitive(dict(self.resume_input)),

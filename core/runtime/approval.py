@@ -1175,6 +1175,9 @@ class ToolApprovalController:
                     and durable_status is not ApprovalStatus.PENDING
                 ):
                     continue
+            if getattr(self._run_context, "execution_policy", None) == "durable-agent-loop.v1":
+                from core.runtime.agent_loop.contracts import LoopSuspended
+                raise LoopSuspended("APPROVAL_PENDING")
             remaining = self._deadline_check()
             if remaining is not None and remaining <= 0:
                 if deadline_exhausted:

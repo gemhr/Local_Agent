@@ -344,8 +344,10 @@ class RuntimeEventChannel:
                     if atomic_mutation is not None:
                         if not callable(atomic_mutation):
                             raise TypeError("atomic_mutation must be callable")
-                        await atomic_mutation(event)
+                        mutation_result = await atomic_mutation(event)
                         append_status = JournalAppendStatus.APPENDED
+                        projection_persisted = (isinstance(mutation_result, dict)
+                                                and mutation_result.get("client_projection_persisted") is True)
                     elif (
                         event.event_type.value == "RUN_COMPLETED"
                         and self._terminal_append is not None

@@ -2598,6 +2598,31 @@ class AgentRouter:
             reserved_output_tokens=max_tokens,
         )
         messages = list(final_budget.messages)
+        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1":
+            owner_emitter = event_emitter.parent if isinstance(event_emitter, StepEventEmitter) else event_emitter
+            restored = self.model_invocation_router.restore_completed_loop_result(
+                run_context=run_context, messages=messages, max_tokens=max_tokens,
+                generation_options=generation_options, profiles=self.model_profiles,
+                step_id=event_emitter.step_id if isinstance(event_emitter, StepEventEmitter) else None,
+                requires_structured_output=capability_requirements.requires_structured_output,
+                async_submit=owner_emitter.submit_coroutine_from_worker if owner_emitter is not None else None,
+            )
+            if restored is not None:
+                return restored
+            from core.runtime.budget import BudgetExceededError
+            snapshot = run_context.budget_ledger.snapshot()
+            input_tokens = final_budget.estimated_input_tokens + self.context_builder.estimator.estimate(json.dumps(generation_options or {}, ensure_ascii=False))
+            costs = [p.cost_profile.fixed_call_cost_units
+                     + (input_tokens * p.cost_profile.input_cost_units_per_1k_tokens + 999) // 1000
+                     + (max_tokens * p.cost_profile.output_cost_units_per_1k_tokens + 999) // 1000
+                     for p in self.model_profiles if p.cost_profile is not None]
+            requested = {"model_calls": 1, "remote_model_calls": int(all(p.effective_is_remote for p in self.model_profiles)),
+                         "input_tokens": input_tokens, "output_tokens": max_tokens, "total_tokens": input_tokens + max_tokens}
+            if costs:
+                requested["cost_units"] = min(costs)
+            for dimension, required in requested.items():
+                if getattr(snapshot.run_budget, "max_" + dimension) is not None and required > getattr(snapshot.remaining, dimension):
+                    raise BudgetExceededError(dimension, required, getattr(snapshot.remaining, dimension), snapshot)
         final_minimum_context_window = final_budget.estimated_input_tokens + max_tokens
         if context_requirements is None:
             final_context_requirements = ModelContextRequirements(
@@ -2682,6 +2707,11 @@ class AgentRouter:
                 }
             )
         owner_emitter = event_emitter.parent if isinstance(event_emitter, StepEventEmitter) else event_emitter
+        request_token_estimate = self._estimate_messages_tokens(messages)
+        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1":
+            request_token_estimate += self.context_builder.estimator.estimate(
+                json.dumps(effective_generation_options, ensure_ascii=False)
+            )
         return self.model_invocation_router.invoke(
             run_context=run_context,
             budget_ledger=run_context.budget_ledger,
@@ -2689,7 +2719,7 @@ class AgentRouter:
             messages=messages,
             adapter_resolver=self.model_adapter_resolver,
             circuit_breaker_registry=self.circuit_breaker_registry,
-            token_estimate=self._estimate_messages_tokens(messages),
+            token_estimate=request_token_estimate,
             max_tokens=max_tokens,
             output_started=False,
             event_emitter=event_emitter,

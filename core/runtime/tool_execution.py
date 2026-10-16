@@ -409,6 +409,9 @@ class ToolAttemptExecutor:
         durable_finalized = False
         durable_unknown = False
         durable_commit_pending = False
+        loop_frame_id = getattr(run_context, "loop_frame_id", None)
+        budget_operation = None
+        budget_kwargs = {}
         started_at = datetime.now(UTC)
         started_monotonic = time.monotonic()
 
@@ -424,6 +427,7 @@ class ToolAttemptExecutor:
                 invocation_id=invocation.invocation_id,
                 reason=reason,
                 provider_operation_id=provider_operation_id,
+                **budget_kwargs,
             )
             durable_finalized = True
             durable_unknown = True
@@ -492,12 +496,21 @@ class ToolAttemptExecutor:
                 remaining_seconds=context.remaining_seconds,
             )
             context.raise_if_cancelled()
-            if durable_invocation_service is not None and spec.side_effect_kind.value != "NONE":
+            if durable_invocation_service is not None:
                 if run_context.durable_lease is None:
                     raise RuntimeError("durable Tool invocation requires current Run lease")
+                if loop_frame_id is not None:
+                    budget_operation = dict(
+                        operation_id=f"tool:{invocation.invocation_id}:{attempt_id}",
+                        usage={name: getattr(usage, name) for name in BudgetUsage.__dataclass_fields__ if not name.startswith("_")},
+                        kind="TOOL_ATTEMPT", frame_id=loop_frame_id,
+                        resume_generation=run_context.loop_resume_generation,
+                    )
+                    budget_kwargs = dict(budget_repository=run_context.execution_repository, budget_operation=budget_operation)
                 await durable_invocation_service.start(
                     lease=run_context.durable_lease,
                     invocation_id=invocation.invocation_id,
+                    **budget_kwargs,
                 )
                 durable_started = True
             provider_started = True
@@ -522,7 +535,7 @@ class ToolAttemptExecutor:
                 tracker.resolve_authoritative(response.side_effect_state)
             else:
                 tracker.observe(response.side_effect_state)
-            if tracker.state is ToolSideEffectState.COMMITTED:
+            if tracker.state is ToolSideEffectState.COMMITTED or (loop_frame_id is not None and spec.side_effect_kind.value == "NONE"):
                 if durable_started and durable_invocation_service is not None:
                     # 先构造完整 typed result，再与 COMMITTED 状态一次性持久化，
                     # 使恢复路径可直接复用 output content 而不再调用 provider。
@@ -573,6 +586,7 @@ class ToolAttemptExecutor:
                     0, int((time.monotonic() - started_monotonic) * 1000)
                 ),
                 retry_index=retry_index,
+                provider_receipt=response.provider_receipt,
             )
             if durable_commit_pending and durable_invocation_service is not None:
                 await durable_invocation_service.committed(
@@ -580,6 +594,7 @@ class ToolAttemptExecutor:
                     invocation_id=invocation.invocation_id,
                     provider_operation_id=response.provider_operation_id,
                     result=result,
+                    **budget_kwargs,
                 )
                 durable_finalized = True
             completed = await self._emit_completed(
@@ -1396,6 +1411,10 @@ class ToolExecutionService:
         if not isinstance(ledger, BudgetLedger):
             raise RuntimeError("Tool Execution 需要 RunContext 已绑定 BudgetLedger")
         recovered_invocation = getattr(run_context, "durable_tool_invocation", None)
+        if getattr(run_context, "loop_frame_id", None) is not None:
+            # Loop actions carry their own immutable invocation id; the legacy
+            # Step-level recovery hint must never redirect a later action.
+            recovered_invocation = None
         if recovered_invocation is not None:
             recovered_arguments_digest = getattr(recovered_invocation, "arguments_digest", None)
             if (
@@ -1467,11 +1486,12 @@ class ToolExecutionService:
         durable_service = self.durable_invocation_service
         durable_lease = run_context.durable_lease
         side_effecting = spec.side_effect_kind.value != "NONE"
-        if side_effecting and durable_lease is not None and durable_service is None:
+        loop_enabled = getattr(run_context, "loop_frame_id", None) is not None
+        if (side_effecting or loop_enabled) and durable_lease is not None and durable_service is None:
             raise RuntimeError("durable Run 的 side-effect Tool 缺少 invocation service")
         durable_enabled = (
             durable_service is not None
-            and side_effecting
+            and (side_effecting or loop_enabled)
         )
         if durable_enabled:
             if durable_lease is None:
@@ -1484,6 +1504,10 @@ class ToolExecutionService:
                 approval_id=durable_approval_id,
                 execution_claim_id=durable_execution_claim_id,
                 invocation_binding_digest=durable_binding_digest,
+                **(dict(loop_repository=run_context.execution_repository, loop_binding=dict(
+                    frame_id=run_context.loop_frame_id, iteration_no=run_context.loop_iteration_no,
+                    resume_generation=run_context.loop_resume_generation,
+                )) if loop_enabled else {}),
             )
             if durable_record.state.value != "PREPARED":
                 if durable_record.state.value == "COMMITTED":

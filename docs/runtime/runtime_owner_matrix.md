@@ -192,3 +192,15 @@ test-only AST Gate 只是全production Python surface的owner/sink oracle，不�
 | OTel provider/export lifecycle | `ObservabilityService`（PROCESS_SCOPE） | OTLP exporter、tests | application/进程 composition 构造；bounded batch/flush/shutdown | exporter 外部系统可选 | exporter failure 传播业务；每请求/provider 重建；替代 Runtime semantic trace | INTERNAL_RC |
 | Durable distributed trace metadata | `EvaluationJobService` 写入 + Outbox PostgreSQL row 保存 | Publisher、Kafka header injector、Worker extractor | 只允许 nullable `traceparent/tracestate`；与 Job+Outbox 同事务 | PostgreSQL `outbox_events` | baggage/JWT/Principal/query/payload；成为 delivery/consumer authority | INTERNAL_RC |
 | Dependency readiness snapshot | `ComponentReadinessService`（只读 projection） | `/readyz`、healthcheck CLI、orchestrator | bounded PG SELECT 1 / Redis PING / Kafka full metadata | 无 | 写数据、auto-create topic、改变 lifecycle/admission/Outbox/offset | INTERNAL_RC |
+
+## Durable Agent Loop v1 Owners
+
+| 事实 | Owner | 持久位置与边界 |
+| --- | --- | --- |
+| 单 Step 多轮推进与冻结上下文 | `AgentLoopDriver` / `LoopContextInputV1` | `core/runtime/agent_loop/`；不创建新 Scheduler，不改 Memory Authority |
+| Frame、接受决策、Observation、operation 预算 | `DurableExecutionRepository` | 原 execution aggregate；control → root → frame → iteration → model/tool 锁序，lease/fence/generation/CAS 保护 |
+| 模型 attempts、retry/fallback 与计量 | `ModelInvocationRouter` + `BudgetLedger` | 模型行绑定同一 iteration，真实 attempt 在 I/O 前持久预留，结果与结算同事务 |
+| Tool、审批、幂等与 UNKNOWN | 原 ToolExecutionService / durable Tool 与 Approval Owner | action 仅绑定唯一 invocation；Loop read-only 结果也持久化，不复制 Tool 状态机 |
+| Final 输出事实 | 原 OutputGate / EventChannel | Frame receipt + Journal + ClientEventFeed 原子提交，sequence Owner 不变 |
+| Step 完成与 Run terminal | 原 completion/coordinator Owner | Loop Suspension 不提交 StepResult 或 terminal |
+| Loop Evidence | `core/runtime/agent_loop/evidence.py` 的安全投影 | terminal 后允许无 lease 的 seal-only 事务；不可反向启动执行或补造历史 |

@@ -66,6 +66,13 @@ class ToolCallDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class RefusalDelta:
+    """Provider 显式拒绝正文，与普通回答分离。"""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class UsageDelta:
     input_tokens: int = 0
     output_tokens: int = 0
@@ -76,7 +83,7 @@ class Finish:
     reason: str | None = None
 
 
-ProviderDelta = TextDelta | ToolCallDelta | UsageDelta | Finish
+ProviderDelta = TextDelta | ToolCallDelta | RefusalDelta | UsageDelta | Finish
 
 
 class _SSEDecoder:
@@ -699,6 +706,9 @@ class RemoteLLMEngine:
                     content = delta.get("content")
                     if isinstance(content, str) and content:
                         deltas.append(TextDelta(content))
+                    refusal = delta.get("refusal")
+                    if isinstance(refusal, str) and refusal:
+                        deltas.append(RefusalDelta(refusal))
                     calls = delta.get("tool_calls")
                     if isinstance(calls, list):
                         for call in calls:
@@ -856,6 +866,8 @@ class RemoteLLMEngine:
         chunks: list[str] = []
         call_parts: dict[int, dict[str, str]] = {}
         actual_usage = None
+        finish_reason = None
+        refusal_parts: list[str] = []
         async for delta in self.agenerate(
             messages,
             temperature,
@@ -868,6 +880,11 @@ class RemoteLLMEngine:
         ):
             if isinstance(delta, TextDelta):
                 chunks.append(delta.text)
+            elif isinstance(delta, Finish):
+                if delta.reason is not None:
+                    finish_reason = delta.reason
+            elif isinstance(delta, RefusalDelta):
+                refusal_parts.append(delta.text)
             elif isinstance(delta, ToolCallDelta):
                 item = call_parts.setdefault(delta.index, {"id": "", "name": "", "arguments": ""})
                 if delta.provider_tool_call_id:
@@ -882,11 +899,24 @@ class RemoteLLMEngine:
             elif isinstance(delta, UsageDelta):
                 from core.runtime.budget import BudgetUsage
                 actual_usage = BudgetUsage(input_tokens=delta.input_tokens, output_tokens=delta.output_tokens, total_tokens=delta.input_tokens + delta.output_tokens)
+        loop_mode = getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1"
+        if loop_mode:
+            content = "".join(chunks)
+            calls = [{"id": item["id"], "type": "function", "function": {"name": item["name"], "arguments": item["arguments"]}} for item in call_parts.values()]
+            native = None
+            if len(call_parts) == 1:
+                item = next(iter(call_parts.values()))
+                native = NativeToolCall(item["id"], item["name"], item["arguments"])
+            return ModelAdapterResponse(
+                content, actual_usage=actual_usage, native_tool_call=native,
+                assistant_message={"role": "assistant", "content": content or None, "tool_calls": calls} if calls else None,
+                finish_reason=finish_reason, refusal="".join(refusal_parts) or None, tool_call_count=len(call_parts),
+            )
         if not call_parts:
             content = "".join(chunks)
-            if not content.strip():
+            if not content.strip() and not refusal_parts:
                 raise RemoteLLMError("Remote model returned empty content", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_EMPTY_CONTENT", provider_responded=True)
-            return ModelAdapterResponse(content, actual_usage=actual_usage)
+            return ModelAdapterResponse(content, actual_usage=actual_usage, finish_reason=finish_reason, refusal="".join(refusal_parts) or None, tool_call_count=0)
         if len(call_parts) != 1:
             raise RemoteLLMError("Remote API returned unsupported tool call count", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_COUNT_INVALID", provider_responded=True, output_started=True)
         item = next(iter(call_parts.values()))
@@ -899,7 +929,7 @@ class RemoteLLMEngine:
         arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
         native = NativeToolCall(item["id"], item["name"], arguments_json)
         assistant_message = {"role": "assistant", "content": "".join(chunks) or None, "tool_calls": [{"id": item["id"], "type": "function", "function": {"name": item["name"], "arguments": arguments_json}}]}
-        return ModelAdapterResponse("".join(chunks), actual_usage=actual_usage, native_tool_call=native, assistant_message=assistant_message)
+        return ModelAdapterResponse("".join(chunks), actual_usage=actual_usage, native_tool_call=native, assistant_message=assistant_message, finish_reason=finish_reason, refusal="".join(refusal_parts) or None, tool_call_count=len(call_parts))
 
     def close(self) -> object | None:
         """幂等关闭 application-scoped client。

@@ -1447,6 +1447,7 @@ async def lifespan(app: FastAPI):
         persistence_database,
         durable_run_control,
     )
+    app.state.loop_execution_repository = execution_repository
     coordinated_runtime_factory = await initialization_stack.create(
         "coordinated_runtime_factory",
         lambda: CoordinatedRuntimeFactory(
@@ -2210,6 +2211,8 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                     request.state.principal, STAGE8_RESULT_CALLBACK_SCOPE
                 )
             elif request.state.principal.principal_kind == "SERVICE" and not (
+                (request.url.path.startswith("/api/runtime/runs/") and request.url.path.endswith("/loop-evidence/v1"))
+                or
                 (request.url.path.startswith("/api/runtime/runs/") and request.url.path.endswith("/cancel"))
                 or (request.url.path.startswith("/api/v1/runs/") and request.url.path.endswith("/cancel"))
                 or (
@@ -4085,6 +4088,14 @@ async def delete_memory_endpoint(request: Request, payload: DeleteMemoryRequest)
         result = await result
     return result
 
+
+from core.agent_platform.agent_loop_evaluation import register_agent_loop_evaluation
+
+register_agent_loop_evaluation(
+    app, settings=settings, require_service=require_agent_application_service,
+    bind_run=_bind_new_run_and_conversation, authorize_run=_authorize_run,
+    authorization_service=_authorization_service, final_answer_capture=_final_answer_capture,
+)
 
 if __name__ == "__main__":
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)

@@ -54,3 +54,15 @@
 8. `RecoveryValidator` 始终只读，不自动执行 Tool/compensation。
 
 升级条件：外部系统不可查询、证据冲突、补偿失败、non-idempotent outcome unknown、worker 仍 detached。相关测试：RC-15/16、`test_recovery_integration.py`、`test_recovery_tool_completion_gap.py`、`test_recovery_version_compatibility.py`。
+
+## Durable Agent Loop v1 的执行恢复
+
+本节专用于 root `execution_policy=durable-agent-loop.v1` 的当前执行聚合；上文 Snapshot/RecoveryValidator 的只读评估合同保持原适用范围。已有 fixed-plan、DAG、Triage 不套用 Loop 恢复规则。
+
+接管先经原 RunControl claim，在 fenced hydrate 事务中递增一次 `resume_generation`（同 fence 重复 hydrate 不递增）。Frame/seed 缺失、未知版本、digest 或 pin 不匹配时保留事实并明确失败，不重新选择首轮 Memory/RAG。已接受决策不重选；同一 iteration 已完成模型 winner 可恢复复用，STARTED 无结果转 UNKNOWN，同轮最多一次 crash retry。`model_recovery_count` 仅计接管时仍 STARTED 的遗弃批次；已由 Router 收口的 transport UNKNOWN 计费但不算 crash。迟到 generation 不得提交 Decision、Observation、预算或 Final。
+
+工具 STARTED/UNKNOWN 等待原 reconciliation lane，只读查证后才能消费 COMMITTED 结果；缺结果以 `LOOP_RESULT_UNAVAILABLE` 停止，禁止重执行取结果。审批与 UNKNOWN 等待保持 root ACTIVE / Step RUNNING，`suspend_loop` 保存 backoff 或 manual_required；scan 在有确认结果/审批裁决时恢复，取消/deadline 可越过 manual/backoff 进入控制收口。合法 bounded polling 使用同一持久 backoff 与绝对 deadline。
+
+恢复将 `budget_operations` 未结算预留持久标记为 `SETTLED/RECOVERY_CONSERVATIVE` 并计入 consumed；后续接管不能再收费或退款。Final receipt 已存在则继续原 completion pipeline，重用原 event/cursor。终态只读查询或 seal Evidence，不恢复执行业务。关闭新 Loop admission 时须保留认识 Loop schema 的 worker；不得删表、清 receipt 或把活跃 Loop 改回 fixed-plan。
+
+Loop 的 `persist` 意图随 root 冻结。交付后 Conversation exchange 仍由原 FinalMemoryWriter 提交；恢复可对同一 `run_id/exchange_id` 读取匹配且已 COMMITTED 的 PG exchange，只有 Agent、scope、user/assistant 正文均一致时才复用 receipt。不创建第二条消息对，不改变 fixed-plan 的重复提交行为。有界轮询以原工具 `committed_at` 和冻结最小间隔确定下次可调度时间。

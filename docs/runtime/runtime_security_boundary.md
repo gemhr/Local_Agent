@@ -316,3 +316,11 @@ prompt/query、retrieved chunk、完整 evaluation input/result。必要 request
 Health response 只暴露固定 component、`healthy|degraded|unavailable`、bounded reason code 和
 latency；不返回 exception、host、URL、DSN、credential、pool internals 或 stack trace。检查为
 read-only，Kafka metadata lookup 不以 missing topic 为参数，因此不得触发 auto-create。
+
+## Durable Loop 执行数据边界
+
+`runtime_loop_frames.context_seed` 保存当前 Run 首轮已经授权选择的 messages、目标/安全约束和 history/RAG/Memory 输入；`pinned_config` 仅保存非 secret 配置内容身份。Iteration 的 assistant 协议记录、action 恢复材料与确认 Observation 属于受控 execution aggregate 的业务恢复正文，沿 Run 对象授权访问。它们不复制到 Journal、Trace、Metric、日志或通用诊断接口，不保存模型隐式推理链或凭据。
+
+后轮只能使用冻结 seed 与已提交 Observation，不能重新读当前 Memory 或知识库替换历史输入。模型文本不能选择 Runtime policy，pin 也不绕过当前治理撤权。工具权限、审批、幂等和 UNKNOWN 收敛继续由原 Owner 判断；UNKNOWN 不能作为重新执行授权。
+
+Loop Evidence/评测使用独立协议，只公开 code-owned allowlist、身份引用、枚举、计数与 digest，不公开 messages、工具参数/结果正文。`GET /api/runtime/runs/{run_id}/loop-evidence/v1` 复用 JWT Principal 与 Run ownership；评测 Execute 额外要求显式配置的 service Principal 与单一 Project 映射，correlation 不授予权限。Final 业务正文仍仅进入已授权 ClientEventFeed，Journal 保持安全投影。

@@ -165,6 +165,8 @@ class DurableToolInvocationService:
         invocation_binding_digest: str | None = None,
         approval_id: str | None = None,
         execution_claim_id: str | None = None,
+        loop_repository: object | None = None,
+        loop_binding: dict | None = None,
     ) -> DurableToolInvocation:
         binding = invocation_binding_digest or tool_invocation_binding_digest(invocation)
         idempotency_digest = safe_key_digest(invocation.idempotency_key) or safe_key_digest(invocation.invocation_id)
@@ -198,6 +200,8 @@ class DurableToolInvocationService:
         }
         async with self.database.transaction() as session:
             await self._lock_current_lease(session, lease)
+            if loop_binding is not None:
+                await loop_repository._lock_loop(session, lease, loop_binding["frame_id"], resume_generation=loop_binding["resume_generation"])
             row = (await session.execute(
                 select(DurableToolInvocationRow)
                 .where(DurableToolInvocationRow.invocation_id == invocation.invocation_id)
@@ -233,11 +237,22 @@ class DurableToolInvocationService:
                         row.owner_id = lease.owner_id
                         row.fencing_token = lease.fencing_token
                         row.version += 1
+            if loop_binding is not None:
+                await loop_repository.bind_loop_action_in_transaction(
+                    session, lease, **loop_binding, invocation_id=invocation.invocation_id
+                )
             return self._record(row)
 
-    async def start(self, *, lease: RunLease, invocation_id: str) -> DurableToolInvocation:
+    async def start(
+        self, *, lease: RunLease, invocation_id: str,
+        budget_repository: object | None = None, budget_operation: dict | None = None,
+    ) -> DurableToolInvocation:
         async with self.database.transaction() as session:
             await self._lock_current_lease(session, lease)
+            if budget_operation is not None:
+                await budget_repository.reserve_budget_operation_in_transaction(
+                    session, lease, **budget_operation
+                )
             row = await self._locked_row(session, invocation_id)
             self._assert_owner(row, lease)
             if row.state != ToolInvocationState.PREPARED.value:
@@ -254,10 +269,16 @@ class DurableToolInvocationService:
         invocation_id: str,
         provider_operation_id: str | None = None,
         result: ToolExecutionResult | Mapping[str, object] | None = None,
+        budget_repository: object | None = None, budget_operation: dict | None = None,
     ) -> DurableToolInvocation:
         result_payload, result_digest = _committed_result_payload(result)
         async with self.database.transaction() as session:
             await self._lock_current_lease(session, lease)
+            if budget_operation is not None:
+                settlement = {key: value for key, value in budget_operation.items() if key != "kind"}
+                await budget_repository.settle_budget_operation_in_transaction(
+                    session, lease, **settlement, source="ESTIMATED"
+                )
             row = await self._locked_row(session, invocation_id)
             self._assert_owner(row, lease)
             if row.state == ToolInvocationState.COMMITTED.value:
@@ -281,11 +302,17 @@ class DurableToolInvocationService:
         invocation_id: str,
         reason: str,
         provider_operation_id: str | None = None,
+        budget_repository: object | None = None, budget_operation: dict | None = None,
     ) -> DurableToolInvocation:
         if not reason or len(reason) > 128:
             raise ValueError("uncertainty reason 必须是 bounded safe text")
         async with self.database.transaction() as session:
             await self._lock_current_lease(session, lease)
+            if budget_operation is not None:
+                settlement = {key: value for key, value in budget_operation.items() if key != "kind"}
+                await budget_repository.settle_budget_operation_in_transaction(
+                    session, lease, **settlement, source="ESTIMATED"
+                )
             row = await self._locked_row(session, invocation_id)
             self._assert_owner(row, lease)
             if row.state == ToolInvocationState.COMMITTED.value:
@@ -844,6 +871,7 @@ def _tool_execution_result_from_payload(
             worker_terminated=bool(payload.get("worker_terminated", True)),
             execution_detached=bool(payload.get("execution_detached", False)),
             resource_release_pending=bool(payload.get("resource_release_pending", False)),
+            provider_receipt=payload.get("provider_receipt"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("COMMITTED Tool result payload invalid") from exc

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from dataclasses import asdict, is_dataclass
+from uuid import NAMESPACE_URL, uuid5
+import hashlib
 from typing import Any, Awaitable, Callable, Mapping
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.persistence.database import Database
@@ -19,6 +22,8 @@ from core.persistence.models import (
     RuntimeModelInvocationRow,
     RuntimeRunExecutionRow,
     RuntimeStepExecutionRow,
+    RuntimeLoopFrameRow,
+    RuntimeLoopIterationRow,
 )
 from core.runtime.execution_aggregate import (
     ExecutionRootInput,
@@ -41,6 +46,9 @@ class RecoveryImage:
     tool_invocations: tuple[DurableToolInvocationRow, ...] = ()
     approvals: tuple[DurableApprovalRow, ...] = ()
     execution_claims: tuple[DurableToolExecutionClaimRow, ...] = ()
+    loop_frames: tuple[RuntimeLoopFrameRow, ...] = ()
+    loop_iterations: tuple[RuntimeLoopIterationRow, ...] = ()
+    terminal_sequence: int | None = None
 
     @property
     def tools(self) -> tuple[DurableToolInvocationRow, ...]:
@@ -95,6 +103,26 @@ class DurableExecutionRepository:
                 ))
             await session.flush()
 
+            if values.get("execution_policy") == "durable-agent-loop.v1":
+                loop = root.resume_input.get("agent_loop")
+                if not isinstance(loop, Mapping) or len(root.plan.steps) != 1:
+                    raise ValueError("LOOP_ADMISSION_INVALID")
+                seed = to_primitive(dict(loop["context_seed"]))
+                config = to_primitive(dict(loop["pinned_config"]))
+                policy = to_primitive(dict(loop["loop_policy"]))
+                maximum = policy.get("max_iterations", 16)
+                if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= 64:
+                    raise ValueError("LOOP_ADMISSION_INVALID")
+                step_id = root.plan.steps[0].step_id
+                session.add(RuntimeLoopFrameRow(
+                    frame_id=str(uuid5(NAMESPACE_URL, f"{root.run_id}:{step_id}:agent-loop")),
+                    run_id=root.run_id, step_id=step_id, context_seed=seed,
+                    seed_digest=canonical_payload_digest(seed), pinned_config=config,
+                    config_digest=canonical_payload_digest(config), loop_policy=policy,
+                    last_committed_fencing_token=token,
+                ))
+                await session.flush()
+
     async def load(self, run_id: str, *, session: AsyncSession | None = None) -> RecoveryImage | None:
         """Load all recovery sub-aggregates from one DB transaction snapshot."""
         async def read(db: AsyncSession) -> RecoveryImage | None:
@@ -106,7 +134,10 @@ class DurableExecutionRepository:
             tools = tuple((await db.execute(select(DurableToolInvocationRow).where(DurableToolInvocationRow.run_id == run_id).order_by(DurableToolInvocationRow.step_id, DurableToolInvocationRow.invocation_id))).scalars().all())
             approvals = tuple((await db.execute(select(DurableApprovalRow).where(DurableApprovalRow.run_id == run_id).order_by(DurableApprovalRow.step_id, DurableApprovalRow.approval_id))).scalars().all())
             claims = tuple((await db.execute(select(DurableToolExecutionClaimRow).where(DurableToolExecutionClaimRow.run_id == run_id).order_by(DurableToolExecutionClaimRow.approval_id))).scalars().all())
-            return RecoveryImage(root, steps, models, tools, approvals, claims)
+            frames = tuple((await db.execute(select(RuntimeLoopFrameRow).where(RuntimeLoopFrameRow.run_id == run_id))).scalars().all())
+            iterations = tuple((await db.execute(select(RuntimeLoopIterationRow).join(RuntimeLoopFrameRow, RuntimeLoopIterationRow.frame_id == RuntimeLoopFrameRow.frame_id).where(RuntimeLoopFrameRow.run_id == run_id).order_by(RuntimeLoopIterationRow.iteration_no))).scalars().all())
+            control = await db.get(RunControlRow, run_id)
+            return RecoveryImage(root, steps, models, tools, approvals, claims, frames, iterations, control.terminal_sequence if control else None)
         if session is not None:
             return await read(session)
         # A plain session gives each SELECT a separate READ COMMITTED snapshot.
@@ -117,6 +148,13 @@ class DurableExecutionRepository:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be positive")
         async with self.database.session() as session:
+            waiting_loop = exists(select(1).where(RuntimeLoopFrameRow.run_id == RuntimeRunExecutionRow.run_id, RuntimeLoopFrameRow.phase == "WAIT_TOOL"))
+            pending_approval = exists(select(1).where(DurableApprovalRow.run_id == RuntimeRunExecutionRow.run_id, DurableApprovalRow.state == "PENDING"))
+            unresolved_tool = exists(select(1).where(DurableToolInvocationRow.run_id == RuntimeRunExecutionRow.run_id, DurableToolInvocationRow.state.in_(("STARTED", "UNKNOWN"))))
+            ready_tool = exists(select(1).where(DurableToolInvocationRow.run_id == RuntimeRunExecutionRow.run_id, DurableToolInvocationRow.state.in_(("PREPARED", "COMMITTED", "NOT_COMMITTED"))))
+            decided_approval = exists(select(1).where(DurableApprovalRow.run_id == RuntimeRunExecutionRow.run_id, DurableApprovalRow.state != "PENDING"))
+            # WAIT_TOOL 本身不构成执行许可；仅已确认结果/审批裁决或控制命令唤醒。
+            loop_ready = or_(~waiting_loop, and_(~pending_approval, ~unresolved_tool, or_(ready_tool, decided_approval)))
             result = await session.execute(
                 select(RuntimeRunExecutionRow.run_id)
                 .join(RunControlRow, RunControlRow.run_id == RuntimeRunExecutionRow.run_id)
@@ -125,8 +163,10 @@ class DurableExecutionRepository:
                     or_(RunControlRow.lease_until.is_(None), RunControlRow.lease_until <= func.now()),
                     RuntimeRunExecutionRow.status.notin_(("SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED")),
                     RuntimeRunExecutionRow.recovery_supported.is_(True),
-                    RuntimeRunExecutionRow.manual_required.is_(False),
-                    or_(RuntimeRunExecutionRow.next_recovery_at.is_(None), RuntimeRunExecutionRow.next_recovery_at <= func.now()),
+                    or_(
+                        and_(RuntimeRunExecutionRow.manual_required.is_(False), or_(RuntimeRunExecutionRow.next_recovery_at.is_(None), RuntimeRunExecutionRow.next_recovery_at <= func.now()), or_(RuntimeRunExecutionRow.execution_policy != "durable-agent-loop.v1", loop_ready)),
+                        and_(RuntimeRunExecutionRow.execution_policy == "durable-agent-loop.v1", or_(RunControlRow.cancel_requested_at.is_not(None), RuntimeRunExecutionRow.absolute_deadline <= func.now())),
+                    ),
                     ~exists(select(1).where(
                         RuntimeEventJournalRow.run_id == RuntimeRunExecutionRow.run_id,
                         RuntimeEventJournalRow.event_type == "RUN_COMPLETED",
@@ -206,6 +246,36 @@ class DurableExecutionRepository:
             root = (await session.execute(select(RuntimeRunExecutionRow).where(RuntimeRunExecutionRow.run_id == lease.run_id).with_for_update())).scalar_one_or_none()
             if root is None:
                 raise ValueError("unknown execution root")
+            if root.execution_policy == "durable-agent-loop.v1":
+                frames = tuple((await session.execute(select(RuntimeLoopFrameRow).where(RuntimeLoopFrameRow.run_id == lease.run_id).with_for_update())).scalars().all())
+                if len(frames) != 1:
+                    raise RuntimeError("LOOP_FRAME_MISSING")
+                frame = frames[0]
+                self._validate_loop_frame(frame)
+                if frame.last_committed_fencing_token == lease.fencing_token:
+                    return await self._load_in_session(session, lease.run_id)
+                frame.resume_generation += 1
+                self._touch_loop(frame, lease)
+                self._settle_recovery_budget(root, lease)
+                iterations = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame.frame_id).order_by(RuntimeLoopIterationRow.iteration_no).with_for_update())).scalars().all())
+                models = tuple((await session.execute(select(RuntimeModelInvocationRow).where(RuntimeModelInvocationRow.run_id == lease.run_id).with_for_update())).scalars().all())
+                abandoned_iterations = set()
+                for model in models:
+                    if model.state == ModelAttemptState.STARTED.value:
+                        abandoned_iterations.add(model.loop_iteration_no)
+                        model.state = ModelAttemptState.UNKNOWN.value
+                        model.completed_at = func.now()
+                        model.version += 1
+                        model.last_committed_fencing_token = lease.fencing_token
+                for iteration in iterations:
+                    if iteration.iteration_no in abandoned_iterations:
+                        iteration.model_recovery_count += 1
+                current = next((row for row in iterations if row.iteration_no == frame.current_iteration), None)
+                if current is not None and current.state == "OPEN" and current.model_recovery_count >= 2:
+                    frame.phase = "STOPPED"
+                    frame.stop_code = "LOOP_MODEL_RECOVERY_EXHAUSTED"
+                await session.flush()
+                return await self._load_in_session(session, lease.run_id)
             models = tuple((await session.execute(select(RuntimeModelInvocationRow).where(RuntimeModelInvocationRow.run_id == lease.run_id).with_for_update())).scalars().all())
             for model in models:
                 if model.state == ModelAttemptState.STARTED.value:
@@ -250,7 +320,10 @@ class DurableExecutionRepository:
         tools = tuple((await session.execute(select(DurableToolInvocationRow).where(DurableToolInvocationRow.run_id == run_id).order_by(DurableToolInvocationRow.step_id, DurableToolInvocationRow.invocation_id))).scalars().all())
         approvals = tuple((await session.execute(select(DurableApprovalRow).where(DurableApprovalRow.run_id == run_id).order_by(DurableApprovalRow.step_id, DurableApprovalRow.approval_id))).scalars().all())
         claims = tuple((await session.execute(select(DurableToolExecutionClaimRow).where(DurableToolExecutionClaimRow.run_id == run_id).order_by(DurableToolExecutionClaimRow.approval_id))).scalars().all())
-        return RecoveryImage(root, steps, models, tools, approvals, claims)
+        frames = tuple((await session.execute(select(RuntimeLoopFrameRow).where(RuntimeLoopFrameRow.run_id == run_id))).scalars().all())
+        iterations = tuple((await session.execute(select(RuntimeLoopIterationRow).join(RuntimeLoopFrameRow, RuntimeLoopIterationRow.frame_id == RuntimeLoopFrameRow.frame_id).where(RuntimeLoopFrameRow.run_id == run_id).order_by(RuntimeLoopIterationRow.iteration_no))).scalars().all())
+        control = await session.get(RunControlRow, run_id)
+        return RecoveryImage(root, steps, models, tools, approvals, claims, frames, iterations, control.terminal_sequence if control else None)
 
     async def complete_step(self, lease: RunLease, *, step_id: str, plan_version: int, attempt: int, result: Mapping[str, Any], status: StepExecutionStatus = StepExecutionStatus.SUCCEEDED, safe_error: str | None = None, journal_append: JournalAppend | None = None) -> bool:
         if status not in {StepExecutionStatus.SUCCEEDED, StepExecutionStatus.FAILED, StepExecutionStatus.CANCELLED, StepExecutionStatus.BLOCKED, StepExecutionStatus.SKIPPED}:
@@ -290,11 +363,19 @@ class DurableExecutionRepository:
             await session.flush()
             return True
 
-    async def start_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, request_digest: str, provider_kind: str, profile_identity: str, journal_append: JournalAppend | None = None) -> None:
+    async def start_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, request_digest: str, provider_kind: str, profile_identity: str, journal_append: JournalAppend | None = None, loop_frame_id: str | None = None, loop_iteration_no: int | None = None, resume_generation: int | None = None, invocation_group: str | None = None, operation_id: str | None = None, reserved_usage: Any = None) -> None:
         """Fenced NOT_STARTED -> STARTED transition before provider I/O."""
         async with self.database.transaction() as session:
             if self.run_control is not None:
                 await self.run_control.assert_current_in_transaction(session, lease)
+            if loop_frame_id is not None:
+                _, frame = await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
+                iteration = await session.get(RuntimeLoopIterationRow, (loop_frame_id, loop_iteration_no), with_for_update=True)
+                if frame.step_id != step_id or iteration is None or iteration.state != "OPEN":
+                    raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
+                if operation_id is None or reserved_usage is None:
+                    raise ValueError("Loop model requires budget reservation")
+                await self.reserve_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=reserved_usage, kind="MODEL", resume_generation=resume_generation, frame_id=loop_frame_id)
             row = (await session.execute(select(RuntimeModelInvocationRow).where(
                 RuntimeModelInvocationRow.run_id == lease.run_id,
                 RuntimeModelInvocationRow.step_id == step_id,
@@ -308,6 +389,8 @@ class DurableExecutionRepository:
                     provider_kind=provider_kind, profile_identity=profile_identity,
                     state=ModelAttemptState.STARTED.value, started_at=func.now(),
                     last_committed_fencing_token=lease.fencing_token,
+                    loop_frame_id=loop_frame_id, loop_iteration_no=loop_iteration_no,
+                    resume_generation=resume_generation, invocation_group=invocation_group,
                 )
                 session.add(row)
             elif row.state == ModelAttemptState.NOT_STARTED.value:
@@ -323,7 +406,7 @@ class DurableExecutionRepository:
                 await journal_append(session)
             await session.flush()
 
-    async def finish_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, state: ModelAttemptState, result: Mapping[str, Any] | None = None, usage: Mapping[str, Any] | None = None, cost: Mapping[str, Any] | None = None, safe_error: str | None = None, journal_append: JournalAppend | None = None) -> None:
+    async def finish_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, state: ModelAttemptState, result: Mapping[str, Any] | None = None, usage: Mapping[str, Any] | None = None, cost: Mapping[str, Any] | None = None, safe_error: str | None = None, journal_append: JournalAppend | None = None, resume_generation: int | None = None, operation_id: str | None = None, actual_usage: Any = None, usage_source: str = "ACTUAL", loop_frame_id: str | None = None) -> None:
         """Fenced STARTED -> COMPLETED/UNKNOWN; no provider lookup."""
         if state not in {ModelAttemptState.COMPLETED, ModelAttemptState.UNKNOWN}:
             raise ValueError("model finish state must be COMPLETED or UNKNOWN")
@@ -334,6 +417,13 @@ class DurableExecutionRepository:
         async with self.database.transaction() as session:
             if self.run_control is not None:
                 await self.run_control.assert_current_in_transaction(session, lease)
+            if loop_frame_id is None and resume_generation is not None:
+                loop_frame_id = (await session.execute(select(RuntimeModelInvocationRow.loop_frame_id).where(RuntimeModelInvocationRow.run_id == lease.run_id, RuntimeModelInvocationRow.step_id == step_id, RuntimeModelInvocationRow.attempt_number == attempt, RuntimeModelInvocationRow.model_attempt_number == model_attempt))).scalar_one()
+            if loop_frame_id is not None:
+                await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
+                if operation_id is None:
+                    raise ValueError("Loop model requires budget operation")
+                await self.settle_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=actual_usage, source=usage_source, resume_generation=resume_generation, frame_id=loop_frame_id)
             row = (await session.execute(select(RuntimeModelInvocationRow).where(
                 RuntimeModelInvocationRow.run_id == lease.run_id,
                 RuntimeModelInvocationRow.step_id == step_id,
@@ -409,6 +499,362 @@ class DurableExecutionRepository:
             if callable(record_write_succeeded):
                 record_write_succeeded()
         return append_status
+
+    async def _lock_loop(self, session: AsyncSession, lease: RunLease, frame_id: str, *, resume_generation: int | None = None, row_version: int | None = None, allow_control_stop: bool = False) -> tuple[RuntimeRunExecutionRow, RuntimeLoopFrameRow]:
+        if self.run_control is None:
+            raise RuntimeError("Loop requires durable Run control")
+        await self.run_control.assert_current_in_transaction(session, lease)
+        root = (await session.execute(select(RuntimeRunExecutionRow).where(RuntimeRunExecutionRow.run_id == lease.run_id).with_for_update())).scalar_one()
+        frame = (await session.execute(select(RuntimeLoopFrameRow).where(RuntimeLoopFrameRow.run_id == lease.run_id, RuntimeLoopFrameRow.frame_id == frame_id).with_for_update())).scalar_one()
+        self._validate_loop_frame(frame)
+        if root.execution_policy != "durable-agent-loop.v1" or root.status != "ACTIVE" or frame.schema_version != 1:
+            raise RuntimeError("LOOP_STATE_INVALID")
+        if resume_generation is not None and frame.resume_generation != resume_generation:
+            raise RuntimeError("LOOP_STALE_GENERATION")
+        if row_version is not None and frame.row_version != row_version:
+            raise RuntimeError("LOOP_CAS_CONFLICT")
+        if not allow_control_stop:
+            control = await session.get(RunControlRow, lease.run_id)
+            if control.cancel_requested_at is not None:
+                from core.runtime.cancellation import RunCancelledError
+                raise RunCancelledError(control.cancel_reason or "REQUEST_CANCELLED")
+            if root.absolute_deadline is not None and root.absolute_deadline <= datetime.now(UTC):
+                from core.runtime.context import RunDeadlineExceededError
+                raise RunDeadlineExceededError()
+        return root, frame
+
+    @staticmethod
+    def _validate_loop_frame(frame: RuntimeLoopFrameRow) -> None:
+        if (frame.schema_version, frame.decision_schema_version, frame.context_seed_version, frame.execution_policy) != (1, 1, 1, "durable-agent-loop.v1"):
+            raise RuntimeError("LOOP_VERSION_UNSUPPORTED")
+        if canonical_payload_digest(frame.context_seed) != frame.seed_digest or canonical_payload_digest(frame.pinned_config) != frame.config_digest:
+            raise RuntimeError("LOOP_PINNED_CONFIG_UNAVAILABLE")
+
+    @staticmethod
+    def _touch_loop(frame: RuntimeLoopFrameRow, lease: RunLease) -> None:
+        frame.row_version += 1
+        frame.last_committed_fencing_token = lease.fencing_token
+        frame.updated_at = func.now()
+
+    @staticmethod
+    def _check_loop_version(frame: RuntimeLoopFrameRow, row_version: int | None) -> None:
+        if row_version is not None and frame.row_version != row_version:
+            raise RuntimeError("LOOP_CAS_CONFLICT")
+
+    async def load_loop(self, lease: RunLease, step_id: str) -> tuple[RuntimeLoopFrameRow, tuple[RuntimeLoopIterationRow, ...]]:
+        async with self.database.transaction() as session:
+            if self.run_control is not None:
+                await self.run_control.assert_current_in_transaction(session, lease)
+            frame = (await session.execute(select(RuntimeLoopFrameRow).where(RuntimeLoopFrameRow.run_id == lease.run_id, RuntimeLoopFrameRow.step_id == step_id))).scalar_one()
+            self._validate_loop_frame(frame)
+            rows = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame.frame_id).order_by(RuntimeLoopIterationRow.iteration_no))).scalars().all())
+            return frame, rows
+
+    async def open_loop_iteration(self, lease: RunLease, frame_id: str, *, resume_generation: int, row_version: int | None = None, context_input_digest: str, context_cursor: int) -> RuntimeLoopIterationRow:
+        async with self.database.transaction() as session:
+            _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+            current = (await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id, RuntimeLoopIterationRow.iteration_no == frame.current_iteration).with_for_update())).scalar_one_or_none()
+            if current is not None and current.state == "OPEN":
+                if (current.context_input_digest, current.context_cursor) != (context_input_digest, context_cursor):
+                    raise RuntimeError("LOOP_CONTEXT_CONFLICT")
+                return current
+            self._check_loop_version(frame, row_version)
+            if frame.phase != "NEED_DECISION" or context_cursor != frame.committed_observation_cursor:
+                raise RuntimeError("LOOP_STATE_INVALID")
+            if frame.current_iteration >= frame.loop_policy.get("max_iterations", 16):
+                raise RuntimeError("LOOP_ITERATION_LIMIT")
+            frame.current_iteration += 1
+            row = RuntimeLoopIterationRow(frame_id=frame_id, run_id=lease.run_id, step_id=frame.step_id, iteration_no=frame.current_iteration, context_input_digest=context_input_digest, context_cursor=context_cursor)
+            session.add(row)
+            self._touch_loop(frame, lease)
+            await session.flush()
+            return row
+
+    async def get_loop_model_response(self, lease: RunLease, frame_id: str, iteration_no: int) -> RuntimeModelInvocationRow | None:
+        async with self.database.transaction() as session:
+            await self._lock_loop(session, lease, frame_id, allow_control_stop=True)
+            iteration = await session.get(RuntimeLoopIterationRow, (frame_id, iteration_no))
+            if iteration is None:
+                raise RuntimeError("LOOP_ITERATION_MISSING")
+            statement = select(RuntimeModelInvocationRow).where(RuntimeModelInvocationRow.run_id == lease.run_id, RuntimeModelInvocationRow.loop_frame_id == frame_id, RuntimeModelInvocationRow.loop_iteration_no == iteration_no, RuntimeModelInvocationRow.state == "COMPLETED")
+            if iteration.accepted_model_attempt is not None:
+                statement = statement.where(RuntimeModelInvocationRow.attempt_number == iteration.accepted_model_attempt, RuntimeModelInvocationRow.model_attempt_number == iteration.accepted_model_attempt_number)
+            return (await session.execute(statement.order_by(RuntimeModelInvocationRow.attempt_number, RuntimeModelInvocationRow.model_attempt_number).limit(1))).scalar_one_or_none()
+
+    async def accept_loop_decision(self, lease: RunLease, frame_id: str, iteration_no: int, *, resume_generation: int, row_version: int | None = None, decision_id: str, decision_kind: str, decision_digest: str, model_attempt: tuple[int, int], action_id: str | None = None, action_recipe: Mapping[str, Any] | None = None, assistant_record: Mapping[str, Any] | None = None) -> RuntimeLoopIterationRow:
+        if decision_kind not in {"FINAL", "REFUSAL", "TOOL_CALL"} or ((decision_kind == "TOOL_CALL") != (action_id is not None and action_recipe is not None)):
+            raise ValueError("LOOP_DECISION_INVALID")
+        async with self.database.transaction() as session:
+            _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+            row = (await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id, RuntimeLoopIterationRow.iteration_no == iteration_no).with_for_update())).scalar_one()
+            if row.decision_id is not None:
+                if (row.decision_id, row.decision_digest) != (decision_id, decision_digest):
+                    raise RuntimeError("LOOP_DECISION_CONFLICT")
+                return row
+            self._check_loop_version(frame, row_version)
+            if frame.phase != "NEED_DECISION" or frame.current_iteration != iteration_no or row.state != "OPEN":
+                raise RuntimeError("LOOP_STATE_INVALID")
+            model = await session.get(RuntimeModelInvocationRow, (lease.run_id, frame.step_id, *model_attempt), with_for_update=True)
+            if model is None or model.state != "COMPLETED" or model.loop_frame_id != frame_id or model.loop_iteration_no != iteration_no:
+                raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
+            row.decision_id, row.decision_kind, row.decision_digest = decision_id, decision_kind, decision_digest
+            row.accepted_model_attempt, row.accepted_model_attempt_number = model_attempt
+            row.accepted_generation = resume_generation
+            row.action_id = action_id
+            row.action_recipe = to_primitive(dict(action_recipe)) if action_recipe is not None else None
+            row.assistant_record = to_primitive(dict(assistant_record)) if assistant_record is not None else None
+            row.state = "ACCEPTED" if decision_kind == "TOOL_CALL" else "CLOSED"
+            frame.phase = "DECISION_ACCEPTED" if decision_kind == "TOOL_CALL" else "RESULT_READY"
+            if decision_kind != "TOOL_CALL":
+                frame.result_decision_id = decision_id
+                frame.stop_code = decision_kind
+            self._touch_loop(frame, lease)
+            await session.flush()
+            return row
+
+    async def bind_loop_action(self, lease: RunLease, frame_id: str, iteration_no: int, *, resume_generation: int, row_version: int | None = None, invocation_id: str) -> RuntimeLoopIterationRow:
+        async with self.database.transaction() as session:
+            return await self.bind_loop_action_in_transaction(session, lease, frame_id, iteration_no, resume_generation=resume_generation, row_version=row_version, invocation_id=invocation_id)
+
+    async def bind_loop_action_in_transaction(self, session: AsyncSession, lease: RunLease, frame_id: str, iteration_no: int, *, resume_generation: int, row_version: int | None = None, invocation_id: str) -> RuntimeLoopIterationRow:
+        _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+        row = await session.get(RuntimeLoopIterationRow, (frame_id, iteration_no), with_for_update=True)
+        tool = await session.get(DurableToolInvocationRow, invocation_id, with_for_update=True)
+        if row is None or row.action_id != invocation_id or tool is None or (tool.run_id, tool.step_id) != (lease.run_id, frame.step_id):
+            raise RuntimeError("LOOP_ACTION_BINDING_INVALID")
+        if row.tool_invocation_id is not None:
+            if row.tool_invocation_id != invocation_id:
+                raise RuntimeError("LOOP_ACTION_CONFLICT")
+            return row
+        self._check_loop_version(frame, row_version)
+        if frame.phase not in {"DECISION_ACCEPTED", "WAIT_TOOL"}:
+            raise RuntimeError("LOOP_STATE_INVALID")
+        row.tool_invocation_id = invocation_id
+        frame.phase = "WAIT_TOOL"
+        self._touch_loop(frame, lease)
+        await session.flush()
+        return row
+
+    async def commit_loop_observation(self, lease: RunLease, frame_id: str, iteration_no: int, *, resume_generation: int, row_version: int | None = None, invocation_id: str, source_digest: str, observation: Mapping[str, Any], observation_digest: str) -> RuntimeLoopIterationRow:
+        payload = to_primitive(dict(observation))
+        if canonical_payload_digest(payload) != observation_digest:
+            raise ValueError("LOOP_OBSERVATION_DIGEST_INVALID")
+        async with self.database.transaction() as session:
+            _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+            row = await session.get(RuntimeLoopIterationRow, (frame_id, iteration_no), with_for_update=True)
+            tool = await session.get(DurableToolInvocationRow, invocation_id, with_for_update=True)
+            if row is None or row.tool_invocation_id != invocation_id or tool is None or tool.state != "COMMITTED" or tool.committed_result is None or tool.committed_result_digest != source_digest:
+                raise RuntimeError("LOOP_RESULT_UNAVAILABLE")
+            if row.observation is not None:
+                if (row.observation_digest, row.observation_source_digest) != (observation_digest, source_digest):
+                    raise RuntimeError("LOOP_OBSERVATION_CONFLICT")
+                return row
+            self._check_loop_version(frame, row_version)
+            if frame.phase != "WAIT_TOOL" or frame.current_iteration != iteration_no or row.state != "ACCEPTED":
+                raise RuntimeError("LOOP_STATE_INVALID")
+            frame.committed_observation_cursor += 1
+            row.observation = payload
+            row.observation_digest = observation_digest
+            row.observation_source_digest = source_digest
+            row.observation_cursor = frame.committed_observation_cursor
+            row.observed_generation = resume_generation
+            row.state = "OBSERVED"
+            frame.phase = "NEED_DECISION"
+            self._touch_loop(frame, lease)
+            await session.flush()
+            return row
+
+    async def stop_loop(self, lease: RunLease, frame_id: str, *, resume_generation: int, row_version: int | None = None, stop_code: str, stop_details: Mapping[str, Any] | None = None) -> RuntimeLoopFrameRow:
+        details = to_primitive(dict(stop_details or {}))
+        async with self.database.transaction() as session:
+            _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation, allow_control_stop=True)
+            if frame.phase == "STOPPED":
+                if frame.stop_code != stop_code or frame.stop_details != details:
+                    raise RuntimeError("LOOP_STOP_CONFLICT")
+                return frame
+            self._check_loop_version(frame, row_version)
+            if frame.final_delivery_receipt is not None:
+                raise RuntimeError("LOOP_FINAL_ALREADY_DELIVERED")
+            frame.phase, frame.stop_code = "STOPPED", stop_code
+            frame.stop_details = details
+            self._touch_loop(frame, lease)
+            await session.flush()
+            return frame
+
+    async def suspend_loop(self, lease: RunLease, frame_id: str, *, resume_generation: int, row_version: int | None = None, reason: str, next_recovery_at: datetime | None = None, manual_required: bool = False) -> RuntimeLoopFrameRow:
+        """只保存等待与重扫边界；不改变 Step 或 Run 的非终态事实。"""
+        async with self.database.transaction() as session:
+            root, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation, row_version=row_version, allow_control_stop=True)
+            if frame.phase == "DECISION_ACCEPTED":
+                frame.phase = "WAIT_TOOL"
+            if frame.phase not in {"WAIT_TOOL", "NEED_DECISION"}:
+                raise RuntimeError("LOOP_NOT_SUSPENDABLE")
+            root.last_recovery_error = reason[:128]
+            root.next_recovery_at = next_recovery_at or datetime.now(UTC) + timedelta(seconds=5)
+            root.manual_required = manual_required
+            root.execution_version += 1
+            root.last_committed_fencing_token = lease.fencing_token
+            self._touch_loop(frame, lease)
+            await session.flush()
+            return frame
+
+    @staticmethod
+    def _budget_usage(usage: Any) -> dict[str, int]:
+        from core.runtime.budget import BudgetUsage, _DIMENSIONS
+        if usage is None:
+            return {}
+        values = asdict(usage) if is_dataclass(usage) else dict(usage)
+        values.pop("_allow_independent_total", None)
+        if set(values) - set(_DIMENSIONS):
+            raise ValueError("unknown budget dimension")
+        BudgetUsage(**values)
+        return {key: value for key, value in values.items() if value}
+
+    @staticmethod
+    def _budget_add(left: Mapping[str, int], right: Mapping[str, int], sign: int = 1) -> dict[str, int]:
+        result = dict(left)
+        for key, value in right.items():
+            result[key] = result.get(key, 0) + sign * value
+            if result[key] < 0:
+                raise RuntimeError("LOOP_BUDGET_INCONSISTENT")
+        return result
+
+    async def reserve_budget_operation(self, lease: RunLease, *, operation_id: str, usage: Any, kind: str, resume_generation: int, frame_id: str) -> dict:
+        async with self.database.transaction() as session:
+            return await self.reserve_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=usage, kind=kind, resume_generation=resume_generation, frame_id=frame_id)
+
+    async def reserve_budget_operation_in_transaction(self, session: AsyncSession, lease: RunLease, *, operation_id: str, usage: Any, kind: str, resume_generation: int, frame_id: str) -> dict:
+        root, _ = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+        values = self._budget_usage(usage)
+        operations = dict(root.budget_operations)
+        if operation_id in operations:
+            stored = operations[operation_id]
+            if stored["reserved"] != values or stored["kind"] != kind:
+                raise RuntimeError("LOOP_BUDGET_OPERATION_CONFLICT")
+            return stored
+        if len(operations) >= 512:
+            raise RuntimeError("LOOP_BUDGET_OPERATION_LIMIT")
+        reserved = self._budget_add(root.budget_reserved, values)
+        for dimension, count in values.items():
+            limit = root.budget_totals.get(f"max_{dimension}")
+            if limit is not None and root.budget_consumed.get(dimension, 0) + reserved.get(dimension, 0) > limit:
+                raise RuntimeError(f"LOOP_BUDGET_EXHAUSTED:{dimension}")
+        operation = {"kind": kind, "state": "RESERVED", "reserved": values, "actual": None, "source": None, "generation": resume_generation}
+        operations[operation_id] = operation
+        root.budget_operations, root.budget_reserved = operations, reserved
+        root.execution_version += 1
+        root.last_committed_fencing_token = lease.fencing_token
+        root.updated_at = func.now()
+        return operation
+
+    async def settle_budget_operation(self, lease: RunLease, *, operation_id: str, usage: Any = None, source: str = "ACTUAL", resume_generation: int, frame_id: str) -> dict:
+        async with self.database.transaction() as session:
+            return await self.settle_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=usage, source=source, resume_generation=resume_generation, frame_id=frame_id)
+
+    async def settle_budget_operation_in_transaction(self, session: AsyncSession, lease: RunLease, *, operation_id: str, usage: Any = None, source: str = "ACTUAL", resume_generation: int, frame_id: str) -> dict:
+        root, _ = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation, allow_control_stop=True)
+        operations = dict(root.budget_operations)
+        stored = operations.get(operation_id)
+        if stored is None:
+            raise RuntimeError("LOOP_BUDGET_OPERATION_MISSING")
+        values = stored["reserved"] if usage is None else self._budget_usage(usage)
+        if stored["state"] == "SETTLED":
+            if stored["actual"] != values:
+                raise RuntimeError("LOOP_BUDGET_SETTLEMENT_CONFLICT")
+            return stored
+        reserved = self._budget_add(root.budget_reserved, stored["reserved"], -1)
+        consumed = self._budget_add(root.budget_consumed, values)
+        for dimension in values:
+            limit = root.budget_totals.get(f"max_{dimension}")
+            if limit is not None and consumed.get(dimension, 0) + reserved.get(dimension, 0) > limit:
+                raise RuntimeError(f"LOOP_BUDGET_EXHAUSTED:{dimension}")
+        root.budget_reserved, root.budget_consumed = reserved, consumed
+        operation = {**stored, "state": "SETTLED", "actual": values, "source": source}
+        operations[operation_id] = operation
+        root.budget_operations = operations
+        root.execution_version += 1
+        root.last_committed_fencing_token = lease.fencing_token
+        root.updated_at = func.now()
+        return operation
+
+    def _settle_recovery_budget(self, root: RuntimeRunExecutionRow, lease: RunLease) -> None:
+        operations = dict(root.budget_operations)
+        changed = False
+        for key, operation in operations.items():
+            if operation["state"] == "RESERVED":
+                changed = True
+                root.budget_reserved = self._budget_add(root.budget_reserved, operation["reserved"], -1)
+                root.budget_consumed = self._budget_add(root.budget_consumed, operation["reserved"])
+                operations[key] = {**operation, "state": "SETTLED", "actual": operation["reserved"], "source": "RECOVERY_CONSERVATIVE"}
+        root.budget_operations = operations
+        if changed:
+            root.execution_version += 1
+            root.last_committed_fencing_token = lease.fencing_token
+            root.updated_at = func.now()
+
+    async def publish_loop_final(self, lease: RunLease, frame_id: str, decision_id: str, result_digest: str, event: Any, journal: Any, client_event_feed: Any, *, resume_generation: int | None = None, row_version: int | None = None) -> dict:
+        from core.runtime.events import RuntimeEventType
+        if client_event_feed is None or not callable(getattr(client_event_feed, "append_event_in_transaction", None)):
+            raise ValueError("LOOP_ATOMIC_FEED_REQUIRED")
+        if event.run_id != lease.run_id or event.event_type != RuntimeEventType.OUTPUT_DELTA:
+            raise ValueError("LOOP_FINAL_EVENT_INVALID")
+        projected = False
+        async with self.database.transaction() as session:
+            _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation, allow_control_stop=True)
+            if frame.final_delivery_receipt is not None:
+                receipt = frame.final_delivery_receipt
+                if receipt["decision_id"] != decision_id or receipt["result_digest"] != result_digest:
+                    raise RuntimeError("LOOP_FINAL_CONFLICT")
+                return receipt
+            await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation, row_version=row_version)
+            if frame.phase != "RESULT_READY" or frame.result_decision_id != decision_id:
+                raise RuntimeError("LOOP_FINAL_NOT_READY")
+            iteration = (await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id, RuntimeLoopIterationRow.decision_id == decision_id).with_for_update())).scalar_one()
+            model = await session.get(RuntimeModelInvocationRow, (lease.run_id, frame.step_id, iteration.accepted_model_attempt, iteration.accepted_model_attempt_number), with_for_update=True)
+            if model is None or model.state != "COMPLETED":
+                raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
+            from core.runtime.agent_loop.contracts import LoopDecisionV1
+            from core.runtime.model_invocation import restore_loop_model_response
+            decision = LoopDecisionV1.parse(restore_loop_model_response(model), protocol_mode=frame.context_seed["protocol_mode"], synthetic_id="unused")
+            if decision.kind not in {"FINAL", "REFUSAL"} or decision.digest != iteration.decision_digest or hashlib.sha256(decision.content.encode("utf-8")).hexdigest() != result_digest:
+                raise RuntimeError("LOOP_FINAL_CONTENT_DIGEST_INVALID")
+            content_digest = hashlib.sha256(event.payload.text.encode("utf-8")).hexdigest()
+            if content_digest != result_digest:
+                raise RuntimeError("LOOP_FINAL_CONTENT_DIGEST_INVALID")
+            receipt = {"decision_id": decision_id, "result_digest": result_digest, "content_digest": content_digest, "event_id": str(event.event_id), "sequence": event.sequence, "cursor": event.sequence, "status": "DELIVERED"}
+            await journal.append_in_transaction(session, event)
+            projected = await client_event_feed.append_event_in_transaction(session, event)
+            frame.final_delivery_receipt = receipt
+            self._touch_loop(frame, lease)
+        if projected:
+            callback = getattr(client_event_feed, "projection_committed", None)
+            if callable(callback):
+                callback(event)
+            callback = getattr(client_event_feed, "record_write_succeeded", None)
+            if callable(callback):
+                callback()
+        return receipt
+
+    async def read_loop_evidence_source(self, run_id: str) -> RecoveryImage | None:
+        return await self.load(run_id)
+
+    async def seal_loop_evidence(self, run_id: str, body: Mapping[str, Any], digest: str) -> dict:
+        async with self.database.transaction() as session:
+            root = (await session.execute(select(RuntimeRunExecutionRow).where(RuntimeRunExecutionRow.run_id == run_id).with_for_update())).scalar_one()
+            frame = (await session.execute(select(RuntimeLoopFrameRow).where(RuntimeLoopFrameRow.run_id == run_id).with_for_update())).scalar_one()
+            if frame.sealed_evidence is not None:
+                return frame.sealed_evidence
+            if root.status == "ACTIVE":
+                raise RuntimeError("LOOP_EVIDENCE_NOT_READY")
+            rows = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame.frame_id).order_by(RuntimeLoopIterationRow.iteration_no))).scalars().all())
+            if tuple(row.iteration_no for row in rows) != tuple(range(1, frame.current_iteration + 1)):
+                raise RuntimeError("LOOP_EVIDENCE_PREFIX_INVALID")
+            if root.status == "SUCCEEDED" and (frame.final_delivery_receipt is None or frame.result_decision_id != frame.final_delivery_receipt["decision_id"]):
+                raise RuntimeError("LOOP_FINAL_RECEIPT_MISSING")
+            frame.sealed_evidence = {"body": to_primitive(dict(body)), "digest": digest}
+            frame.row_version += 1
+            await session.flush()
+            return frame.sealed_evidence
 
     async def record_recovery_failure(self, run_id: str, error_code: str, *, max_attempts: int, initial_seconds: int = 5, max_seconds: int = 60) -> bool:
         if not error_code or max_attempts <= 0 or initial_seconds <= 0 or max_seconds < initial_seconds:

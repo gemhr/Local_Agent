@@ -52,6 +52,7 @@ class ToolAdapterResponse:
     idempotency_replayed: bool = False
     side_effect_state_authoritative: bool = True
     provider_operation_id: str | None = None
+    provider_receipt: Mapping[str, object] | None = None
 
 
 class ToolAdapterInvocationError(RuntimeError):

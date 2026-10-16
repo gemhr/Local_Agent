@@ -735,6 +735,8 @@ class Settings:
     agentevalops_base_url: str = ""
     agentevalops_api_key: str = field(default="", repr=False)
     agentevalops_project_id: str = ""
+    loop_evaluation_project_id: str = ""
+    loop_evaluation_service_principal_id: str = ""
     agentevalops_connect_timeout_seconds: float = 0.5
     agentevalops_total_deadline_seconds: float = 3.0
     evaluation_mode: bool = False
@@ -1229,6 +1231,18 @@ class Settings:
                 "below_initial_backoff",
             )
 
+        loop_evaluation_project_id = os.getenv("LOCAL_AGENT_LOOP_EVALUATION_PROJECT_ID", "").strip()
+        loop_evaluation_service_principal_id = os.getenv("LOCAL_AGENT_LOOP_EVALUATION_SERVICE_PRINCIPAL_ID", "").strip()
+        if bool(loop_evaluation_project_id) != bool(loop_evaluation_service_principal_id):
+            raise SettingsValidationError(STARTUP_CONFIGURATION_ERROR, "LOCAL_AGENT_LOOP_EVALUATION_PROJECT_ID", "requires_paired_service_principal")
+        for key, value in (("LOCAL_AGENT_LOOP_EVALUATION_PROJECT_ID", loop_evaluation_project_id),
+                           ("LOCAL_AGENT_LOOP_EVALUATION_SERVICE_PRINCIPAL_ID", loop_evaluation_service_principal_id)):
+            if value:
+                try:
+                    uuid.UUID(value)
+                except ValueError:
+                    raise SettingsValidationError(STARTUP_CONFIGURATION_ERROR, key, "invalid_uuid") from None
+
         return cls(
             project_root=project_root,
             environment_profile=environment_profile,
@@ -1430,6 +1444,8 @@ class Settings:
             agentevalops_base_url=agentevalops_base_url,
             agentevalops_api_key=agentevalops_api_key,
             agentevalops_project_id=agentevalops_project_id,
+            loop_evaluation_project_id=loop_evaluation_project_id,
+            loop_evaluation_service_principal_id=loop_evaluation_service_principal_id,
             agentevalops_connect_timeout_seconds=agentevalops_connect_timeout_seconds,
             agentevalops_total_deadline_seconds=agentevalops_total_deadline_seconds,
             evaluation_mode=evaluation_mode,

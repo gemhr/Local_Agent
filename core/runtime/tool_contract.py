@@ -360,6 +360,10 @@ class ToolExecutionSpec:
         default_factory=default_trusted_sandbox_policy
     )
 
+    bounded_polling: bool = False
+    max_poll_attempts: int = 1
+    min_poll_interval_seconds: float = 1.0
+
     def __post_init__(self) -> None:
         _require_text(self.tool_name, "tool_name")
         if not isinstance(self.side_effect_kind, ToolSideEffectKind):
@@ -371,12 +375,17 @@ class ToolExecutionSpec:
             "supports_cooperative_cancellation",
             "supports_side_effect_checkpoint",
             "supports_idempotency_replay",
+            "bounded_polling",
         ):
             if not isinstance(getattr(self, field_name), bool):
                 raise TypeError(f"{field_name} 必须是 bool")
         _require_positive_number(self.default_timeout_seconds, "default_timeout_seconds")
         _require_positive_integer(self.max_output_bytes, "max_output_bytes")
         _require_positive_integer(self.max_concurrency, "max_concurrency")
+        _require_positive_integer(self.max_poll_attempts, "max_poll_attempts")
+        _require_positive_number(self.min_poll_interval_seconds, "min_poll_interval_seconds")
+        if self.bounded_polling and self.side_effect_kind is not ToolSideEffectKind.NONE:
+            raise ValueError("bounded_polling 仅适用于明确只读工具")
         if not isinstance(self.sandbox_policy, SandboxExecutionPolicy):
             raise TypeError("sandbox_policy 必须是 SandboxExecutionPolicy")
 
@@ -435,8 +444,21 @@ class ToolExecutionResult:
     execution_detached: bool = False
     resource_release_pending: bool = False
     completion_evidence: ToolCompletedPayload | None = None
+    provider_receipt: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
+        if self.provider_receipt is not None:
+            receipt = dict(self.provider_receipt)
+            if set(receipt) != {"provider_receipt_digest", "business_operation_key_digest", "side_effect_count"}:
+                raise ValueError("provider_receipt 字段不符合安全合同")
+            for key in ("provider_receipt_digest", "business_operation_key_digest"):
+                value = receipt[key]
+                if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                    raise ValueError("provider_receipt 必须使用 SHA-256 摘要")
+            count = receipt["side_effect_count"]
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ValueError("side_effect_count 必须是非负整数")
+            object.__setattr__(self, "provider_receipt", MappingProxyType(receipt))
         _require_text(self.invocation_id, "invocation_id")
         _require_text(self.attempt_id, "attempt_id")
         _require_text(self.tool_name, "tool_name")
@@ -459,7 +481,7 @@ class ToolExecutionResult:
         _validate_timing(self.started_at, self.completed_at, self.duration_ms)
 
     def to_safe_dict(self, *, include_output: bool = False) -> dict[str, object]:
-        return {
+        result = {
             "invocation_id": self.invocation_id,
             "attempt_id": self.attempt_id,
             "tool_name": self.tool_name,
@@ -478,6 +500,10 @@ class ToolExecutionResult:
             "execution_detached": self.execution_detached,
             "resource_release_pending": self.resource_release_pending,
         }
+
+        if self.provider_receipt is not None:
+            result["provider_receipt"] = dict(self.provider_receipt)
+        return result
 
 
 @dataclass(frozen=True, slots=True)

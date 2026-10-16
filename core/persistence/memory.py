@@ -36,7 +36,7 @@ from core.advanced_memory import (
 )
 from core.memory_manager import MemoryExchangeError, MemoryExchangeErrorCode
 from core.persistence.database import Database
-from core.persistence.errors import PersistenceError, to_persistence_error
+from core.persistence.errors import DatabaseErrorCode, PersistenceError, to_persistence_error
 from core.persistence.models import (
     ConversationSummaryRow,
     LongTermMemoryRow,
@@ -157,6 +157,7 @@ class PostgresMemoryManager:
         run_id: str | None = None,
         exchange_id: str | None = None,
         statement_timeout_ms: int | None = None,
+        idempotent_replay: bool = False,
     ) -> dict[str, Any]:
         final_exchange_id = self._validate_exchange(
             agent_id, memory_scope, user_message, assistant_message, run_id, exchange_id
@@ -193,7 +194,19 @@ class PostgresMemoryManager:
                     "user_message_id": int(user.id),
                     "assistant_message_id": int(assistant.id),
                 }
-        except IntegrityError:
+        except (IntegrityError, PersistenceError) as exc:
+            if isinstance(exc, PersistenceError) and (not idempotent_replay or exc.error_code is not DatabaseErrorCode.DATABASE_INTEGRITY_VIOLATION):
+                raise
+            if idempotent_replay:
+                async with self.database.session() as session:
+                    exchange = await session.get(MessageExchangeRow, final_exchange_id)
+                    if (exchange is not None and exchange.state == "COMMITTED"
+                            and (exchange.run_id, exchange.agent_id, exchange.memory_scope) == (run_id, agent_id, memory_scope)):
+                        user = await session.get(MessageRow, exchange.user_message_id)
+                        assistant = await session.get(MessageRow, exchange.assistant_message_id)
+                        if (user is not None and assistant is not None
+                                and (user.role, user.content, assistant.role, assistant.content) == ("user", user_message, "assistant", assistant_message)):
+                            return {"exchange_id": final_exchange_id, "user_message_id": int(user.id), "assistant_message_id": int(assistant.id)}
             raise MemoryExchangeError(
                 MemoryExchangeErrorCode.DUPLICATE_EXCHANGE,
                 "该 Run 的 exchange 已提交，拒绝重复写入",

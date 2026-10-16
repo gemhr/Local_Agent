@@ -217,6 +217,13 @@ class RunContext:
         self._execution_repository = None
         self._durable_tool_invocation = None
         self._tool_resolution_snapshot = None
+        # 仅由可信 Factory/LoopDriver 从持久 aggregate 绑定。
+        self.execution_policy = "fixed-plan.v1"
+        self.loop_frame_id = None
+        self.loop_iteration_no = None
+        self.loop_resume_generation = None
+        self.loop_model_attempt_ref = None
+        self.loop_initialization = None
 
     @property
     def tool_resolution_snapshot(self):
@@ -376,6 +383,14 @@ class RunContext:
             raise ValueError("durable Tool invocation run_id mismatch")
         if not getattr(invocation, "invocation_id", None):
             raise ValueError("durable Tool invocation identity 不能为空")
+        self._durable_tool_invocation = invocation
+
+    def bind_loop_tool_invocation(self, invocation: object | None) -> None:
+        """Loop 仅按当前 accepted action 绑定恢复结果，不按 Step 任取工具。"""
+        if self.execution_policy != "durable-agent-loop.v1":
+            raise RuntimeError("loop binding requires loop policy")
+        if invocation is not None and getattr(invocation, "run_id", None) != self.run_id:
+            raise ValueError("loop tool run mismatch")
         self._durable_tool_invocation = invocation
 
     @classmethod

@@ -151,6 +151,9 @@ class MultiAgentDriver:
             binding_agent_id=binding.agent_id,
             registration=registration,
         )
+        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1":
+            from core.runtime.agent_loop.driver import AgentLoopDriver
+            return AgentLoopDriver(self._router, self._coordinator).execute(claim, run_context)
         adapter: AgentExecutionAdapter = self._adapter_factory.resolve(
             registration.execution_adapter_id
         )

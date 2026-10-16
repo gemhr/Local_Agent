@@ -3,6 +3,7 @@
 """单次 Run 的 Parent Runtime 与统一生命周期所有者。"""
 
 from __future__ import annotations
+from core.runtime.agent_loop.contracts import LOOP_POLICY, LoopStopped, LoopSuspended
 
 import asyncio
 import inspect
@@ -693,7 +694,7 @@ class RunCoordinator:
         plan = self.plan
         if plan is None:
             return False
-        return self._dynamic
+        return self._dynamic or self.run_context.execution_policy == LOOP_POLICY
 
     def _typed_multi_step_enabled(self) -> bool:
         return (
@@ -731,6 +732,7 @@ class RunCoordinator:
             span_recorder=self.span_recorder,
             metrics_recorder=self._metrics_recorder,
             fault_controller=self._fault_controller,
+            loop_context=self.run_context if self.run_context.execution_policy == LOOP_POLICY else None,
         )
         memory_writer: RunFinalMemoryWriter | None = None
         if self._planning_request is not None:
@@ -753,6 +755,7 @@ class RunCoordinator:
                 span_recorder=self.span_recorder,
                 metrics_recorder=self._metrics_recorder,
                 statement_timeout_ms=statement_timeout_ms,
+                idempotent_replay=self.run_context.execution_policy == LOOP_POLICY,
             )
         # WP2: run-scoped post-delivery Semantic Formation component，与 final
         # writer 并列注入；持久化 Owner 来自 application-scoped PG stores。
@@ -1295,6 +1298,18 @@ class RunCoordinator:
                 key: dict(value) for key, value in self.run_context.data.performer_binding_identities.items()
             },
         }
+        if self.run_context.execution_policy == LOOP_POLICY:
+            from core.runtime.agent_loop.context import prepare_loop_seed
+            router = self._multi_agent_driver._router
+            step = self.plan.steps[0]
+            binding = self._invocation_bindings.resolve_for_step(step.step_id, expected_agent_id=step.preferred_agent)
+            seed, config = await asyncio.to_thread(prepare_loop_seed, router, step.preferred_agent,
+                binding.instruction, self.run_context, event_emitter=self.event_emitter.for_step(step.step_id),
+                memory_context_bundle=self._memory_context_bundle)
+            resume_input["agent_loop"] = {"context_seed": seed, "pinned_config": config,
+                "loop_policy": self.run_context.loop_policy.to_dict(),
+                "correlation": self.run_context.loop_correlation, "persist": self._persist}
+            snapshot = self.budget_ledger.snapshot()
         root = ExecutionRootInput(
             run_id=self.run_context.run_id,
             resume_input=resume_input,
@@ -1303,6 +1318,7 @@ class RunCoordinator:
             budget_totals=budget_totals,
             budget_reserved={name: getattr(snapshot.reserved_usage, name) for name in snapshot.reserved_usage.__dataclass_fields__ if not name.startswith("_")},
             budget_consumed={name: getattr(snapshot.committed_usage, name) for name in snapshot.committed_usage.__dataclass_fields__ if not name.startswith("_")},
+            execution_policy=self.run_context.execution_policy,
         )
         await self._durable_repository.initialize(root, lease=lease)
         self._durable_initialized = True
@@ -1312,6 +1328,17 @@ class RunCoordinator:
         from core.runtime.multi_agent_planning import PlanningErrorCode
 
         return PlanningErrorCode.PLANNER_TIMEOUT
+
+    async def _record_loop_stop(self, code: str, *, details=None) -> None:
+        """只记录 Loop 停止原因；终态仍由下方原 Coordinator 提交。"""
+        if self.run_context.execution_policy != LOOP_POLICY or not self._durable_initialized:
+            return
+        frame, _ = await self._durable_repository.load_loop(self._durable_approval_lease, self.plan.steps[0].step_id)
+        if frame.phase == "STOPPED" or frame.final_delivery_receipt is not None:
+            return
+        await self._durable_repository.stop_loop(self._durable_approval_lease, frame.frame_id,
+            resume_generation=frame.resume_generation, row_version=frame.row_version,
+            stop_code=code, stop_details=details)
 
     def _record_planning_metrics(
         self,
@@ -1518,6 +1545,7 @@ class RunCoordinator:
         registered = False
         task_cancelled = False
         terminal_publication_failed = False
+        suspended = False
         cleanup_error_codes: list[str] = []
         decision: RunFinalizationDecision | None = None
         result: RunCoordinatorResult | None = None
@@ -1573,12 +1601,31 @@ class RunCoordinator:
                         execution_mode=execution_mode,
                         concurrency_specs=concurrency_specs,
                     )
+            except LoopSuspended as exc:
+                suspended = True
+                frame, _ = await self._durable_repository.load_loop(self._durable_approval_lease, self.plan.steps[0].step_id)
+                await self._durable_repository.suspend_loop(self._durable_approval_lease, frame.frame_id,
+                    resume_generation=frame.resume_generation, row_version=frame.row_version, reason=exc.reason,
+                    next_recovery_at=exc.next_recovery_at)
+                raise
+            except LoopStopped as exc:
+                reason = (StopReason.BUDGET_EXHAUSTED if exc.stop_code == "LOOP_ITERATION_LIMIT"
+                          else StopReason.REPEATED_ACTION if exc.stop_code in {"LOOP_NO_PROGRESS", "LOOP_REPEATED_ACTION"}
+                          else StopReason.UNHANDLED_ERROR)
+                decision = RunFinalizationDecision(RunStatus.FAILED, reason, exc.stop_code, "Agent Loop 已受控停止")
             except BudgetExceededError as exc:
                 self._budget_dimension = exc.dimension
+                await self._record_loop_stop("LOOP_BUDGET_EXHAUSTED", details={
+                    "budget_dimension": exc.dimension,
+                    "budget_requested": exc.requested,
+                    "budget_remaining": exc.remaining,
+                })
                 decision = self._budget_decision()
             except RunDeadlineExceededError:
+                await self._record_loop_stop("DEADLINE_EXCEEDED")
                 decision = self._deadline_decision()
             except RunCancelledError:
+                await self._record_loop_stop("CANCELLED")
                 decision = self._cancellation_decision()
             except (PlanningError, AgentRegistryError, PlanCompileError) as exc:
                 self._dynamic_plan_state = DynamicPlanState.FAILED
@@ -1612,39 +1659,46 @@ class RunCoordinator:
             finally:
                 await self._stop_executor_task(cleanup_error_codes)
                 self._seal_step_result_store(cleanup_error_codes)
-                if decision is None:
-                    decision = self._infrastructure_decision(
-                        "COORDINATOR_FINALIZATION_REQUIRED"
-                    )
-                if self._dynamic and self._dynamic_plan_state in {
-                    DynamicPlanState.UNRESOLVED,
-                    DynamicPlanState.RESOLVING,
-                }:
-                    self._dynamic_plan_state = DynamicPlanState.FAILED
-                await self._settle_active_steps(decision, cleanup_error_codes)
-                await self._invalidate_pending_approvals_for_terminal(
-                    decision, cleanup_error_codes
-                )
-                with self.activity_tracker.track(
-                    "state_event_transitions_in_flight"
-                ):
-                    decision = self._finalize_once(decision)
-                    await self._run_specialist_episodic_formation()
-                    await self._run_episodic_formation(decision)
-                    try:
-                        await self._emit_terminal_events(decision)
-                    except Exception:
-                        terminal_publication_failed = True
-                        cleanup_error_codes.append(
-                            "RUNTIME_TERMINAL_PUBLICATION_FAILED"
+                if not suspended:
+                    if decision is None:
+                        decision = self._infrastructure_decision(
+                            "COORDINATOR_FINALIZATION_REQUIRED"
                         )
-                self._stop_deadline_watcher(cleanup_error_codes)
-                self._clear_step_result_store(cleanup_error_codes)
-                self._clear_invocation_bindings(cleanup_error_codes)
-                await self._run_cleanup_callbacks(cleanup_error_codes)
-                budget_snapshot = self._snapshot_budget(cleanup_error_codes)
-                if registered:
-                    self._unregister(cleanup_error_codes)
+                    if self._dynamic and self._dynamic_plan_state in {
+                        DynamicPlanState.UNRESOLVED,
+                        DynamicPlanState.RESOLVING,
+                    }:
+                        self._dynamic_plan_state = DynamicPlanState.FAILED
+                    await self._settle_active_steps(decision, cleanup_error_codes)
+                    await self._invalidate_pending_approvals_for_terminal(
+                        decision, cleanup_error_codes
+                    )
+                    with self.activity_tracker.track(
+                        "state_event_transitions_in_flight"
+                    ):
+                        decision = self._finalize_once(decision)
+                        await self._run_specialist_episodic_formation()
+                        await self._run_episodic_formation(decision)
+                        try:
+                            await self._emit_terminal_events(decision)
+                        except Exception:
+                            terminal_publication_failed = True
+                            cleanup_error_codes.append(
+                                "RUNTIME_TERMINAL_PUBLICATION_FAILED"
+                            )
+                    self._stop_deadline_watcher(cleanup_error_codes)
+                    self._clear_step_result_store(cleanup_error_codes)
+                    self._clear_invocation_bindings(cleanup_error_codes)
+                    await self._run_cleanup_callbacks(cleanup_error_codes)
+                    budget_snapshot = self._snapshot_budget(cleanup_error_codes)
+                    if registered:
+                        self._unregister(cleanup_error_codes)
+                else:
+                    self._stop_deadline_watcher(cleanup_error_codes)
+                    self._clear_step_result_store(cleanup_error_codes)
+                    self._clear_invocation_bindings(cleanup_error_codes)
+                    if registered:
+                        self._unregister(cleanup_error_codes)
 
             result = self._build_result(
                 decision=decision,
@@ -1843,6 +1897,13 @@ class RunCoordinator:
             finally:
                 if self._executor_task.done():
                     self._executor_task = None
+            if self.run_context.execution_policy == LOOP_POLICY and report.was_cancelled:
+                # 事务内看见的 durable cancel 可早于续租线程的下一次轮询。
+                intent = await self._durable_repository.run_control.cancel_intent(self.run_context.run_id)
+                if intent is not None:
+                    self.run_handle.cancellation_source.cancel(intent.reason, intent.created_at)
+                self.run_context.raise_if_inactive()
+                return self._infrastructure_decision("LOOP_CANCELLATION_UNCONFIRMED")
             # WP3: consume safe completion failures before the next Scheduler
             # success decision; raw StepResult never enters this report.
             decision = self._decision_from_batch_report(report)

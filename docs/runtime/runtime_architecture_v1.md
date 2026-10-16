@@ -883,3 +883,11 @@ drop 只使用 `worker_unavailable` reason（不得使用 `shutdown_timeout`）�
 属于 WP4-B `TraceExportDispatcher` 的 `INTERNAL_RC` operational contract，不是
 WP4-A `PUBLIC_VERSIONED` Trace Export Contract；不修改
 `TraceExportEnvelope`/fingerprint/health schema/lifecycle。
+
+## Durable Agent Loop v1
+
+显式 `durable-agent-loop.v1` 在一个既有 Step 内执行多轮模型决策，每轮至多一个工具调用；默认仍为 `fixed-plan.v1`。`core/runtime/agent_loop/` 拥有决策合同、有界推进和冻结上下文重建，复用既有 ModelInvocationRouter、ToolExecutionService、Step Completion 和 Terminal Owner；不增加 Scheduler 或工具执行 Authority。
+
+Alembic `0031_durable_agent_loop` 增量扩展 execution root 的 policy/operation 预算，新增 `runtime_loop_frames` 与 `runtime_loop_iterations`。Frame 阶段为 `NEED_DECISION → DECISION_ACCEPTED → WAIT_TOOL → NEED_DECISION`，Final/Refusal 进入 `RESULT_READY`，受控停止进入 `STOPPED`。Iteration 为 `OPEN/ACCEPTED/OBSERVED/CLOSED`。接受决策事务先保存唯一模型 attempt、action identity 和恢复材料，提交之后才进入工具治理/审批/执行；Observation 仅从已持久确认的工具结果提交。模型 attempt 的完整请求 digest 与 iteration 的 messages context digest 分别保存。
+
+Final 通过原 OutputGate/EventChannel 事务同时写不可变 Frame receipt、Journal `OUTPUT_DELTA` 和 ClientEventFeed cursor。Receipt 校验已接受模型结果、决策 digest 与输出正文 hash；恢复重用同一持久输出事实。已有 Run terminal 事务继续是唯一 terminal Authority。独立 `loop-evidence.v1` 从受控聚合生成安全投影，不修改 Trace v2。

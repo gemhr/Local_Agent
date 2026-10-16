@@ -298,3 +298,18 @@ evidence；其 category/phase/side_effect_state 语义见 Phase9-WP2 Gate C/E
 - Capability unsupported / Evidence corrupted：fail closed，不升级写回，不当作空数据。
 - Diagnostic degraded：Observability/Trace 失败不等于业务未执行。
 - Shutdown deferred：保留 worker/resource 真值，不能强关 Model 或伪造 idle。
+
+## Durable Agent Loop v1 内部停止码
+
+下列细分码只属于 Loop aggregate/Evidence，不增加 Trace v2 字段或公共 `stop_reason` domain。
+
+| 内部码 | 既有 Run 映射 |
+| --- | --- |
+| `LOOP_ITERATION_LIMIT`、`LOOP_BUDGET_EXHAUSTED` | FAILED / BUDGET_EXHAUSTED；预算维度、请求与剩余额度来自真实停止异常 |
+| `LOOP_NO_PROGRESS`、`LOOP_REPEATED_ACTION` | FAILED / REPEATED_ACTION |
+| `LOOP_DECISION_INVALID` | FAILED / UNHANDLED_ERROR；不接受动作、不做参数 repair |
+| `LOOP_CONTEXT_EXHAUSTED` | FAILED / UNHANDLED_ERROR；不压缩或丢弃必需 transcript |
+| `LOOP_PINNED_CONFIG_UNAVAILABLE` | FAILED / UNHANDLED_ERROR；不以当前配置猜测历史输入 |
+| `LOOP_MODEL_RECOVERY_EXHAUSTED`、`LOOP_RESULT_UNAVAILABLE` | FAILED / UNHANDLED_ERROR；保留未知/缺失事实 |
+
+审批与工具 UNKNOWN 等待抛内部 `LoopSuspended`，不是 Run terminal。取消和 deadline 仍由原 Owner 收口，已确认交付事实不会被取消抹除。
