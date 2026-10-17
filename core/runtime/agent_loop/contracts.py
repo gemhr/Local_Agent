@@ -7,6 +7,8 @@ from typing import Mapping
 from core.runtime.execution_aggregate import canonical_payload_digest
 
 LOOP_POLICY = "durable-agent-loop.v1"
+LOOP_POLICY_V2 = "durable-agent-loop.v2"
+HANDOFF_FUNCTION = "__agent_handoff_v1"
 
 
 class LoopStopped(RuntimeError):
@@ -42,6 +44,28 @@ class LoopPolicyV1:
 
     def to_dict(self):
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class LoopPolicyV2(LoopPolicyV1):
+    max_batch_size: int = 4
+    max_batch_concurrency: int = 2
+    failure_mode: str = "FAIL_FAST"
+    max_child_depth: int = 1
+    max_delegations: int = 2
+    max_active_children: int = 1
+    total_tokens: int = 65536
+    cost_units: int = 65536
+
+    def __post_init__(self):
+        super().__post_init__()
+        for key, ceiling in (("max_batch_size", 4), ("max_batch_concurrency", 2),
+                             ("max_child_depth", 1), ("max_delegations", 2), ("max_active_children", 1),
+                             ("total_tokens", 1000000), ("cost_units", 1000000)):
+            if type(getattr(self, key)) is not int or not 1 <= getattr(self, key) <= ceiling:
+                raise ValueError(f"invalid loop limit: {key}")
+        if self.failure_mode not in {"FAIL_FAST", "BEST_EFFORT"}:
+            raise ValueError("invalid batch failure mode")
 
 
 @dataclass(frozen=True)
@@ -98,7 +122,7 @@ class LoopDecisionV1:
     @classmethod
     def parse(cls, response, *, protocol_mode: str, synthetic_id: str):
         try:
-            if response is None or getattr(response, "finish_reason", None) not in {"stop", "tool_calls", "end_turn"} or (getattr(response, "tool_call_count", None) or 0) > 1:
+            if response is None or getattr(response, "native_tool_calls", None) or getattr(response, "finish_reason", None) not in {"stop", "tool_calls", "end_turn"} or (getattr(response, "tool_call_count", None) or 0) > 1:
                 raise ValueError("incomplete response")
             call = response.native_tool_call
             refusal = getattr(response, "refusal", None)
@@ -143,6 +167,101 @@ class LoopDecisionV1:
                 raise ValueError("empty content")
             if kind == "REFUSAL" and value["reason_code"] not in {"PROVIDER_REFUSAL", "SAFETY", "UNSUPPORTED"}:
                 raise ValueError("invalid refusal code")
+            return cls(kind, content=value["content"], reason_code=value.get("reason_code"))
+        except (TypeError, ValueError, KeyError, AttributeError):
+            raise LoopStopped("LOOP_DECISION_INVALID") from None
+
+
+@dataclass(frozen=True)
+class LoopDecisionV2:
+    kind: str
+    content: str | None = None
+    calls: tuple[dict, ...] = ()
+    target_agent_id: str | None = None
+    task: str | None = None
+    provider_tool_call_id: str | None = None
+    reason_code: str | None = None
+
+    @property
+    def digest(self):
+        return canonical_payload_digest(asdict(self))
+
+    @classmethod
+    def parse(cls, response, *, protocol_mode, synthetic_id, handoff_targets=()):
+        try:
+            if response.finish_reason not in {"stop", "tool_calls", "end_turn"}:
+                raise ValueError("incomplete response")
+            calls = tuple(getattr(response, "native_tool_calls", None) or ())
+            if response.native_tool_call is not None:
+                raise ValueError("v2 single representation forbidden")
+            count = response.tool_call_count
+            if type(count) is not int or count != len(calls):
+                raise ValueError("tool count mismatch")
+            if protocol_mode == "native":
+                if calls:
+                    if not 1 <= len(calls) <= 4 or response.output.strip() or response.refusal or response.finish_reason != "tool_calls":
+                        raise ValueError("contradictory batch")
+                    expected = [{"id": c.provider_tool_call_id, "type": "function",
+                        "function": {"name": c.tool_name, "arguments": c.arguments_json}} for c in calls]
+                    assistant = response.assistant_message
+                    if (not assistant or set(assistant) - {"role", "content", "tool_calls"}
+                            or assistant.get("role") != "assistant" or assistant.get("content") not in {None, ""}
+                            or assistant.get("tool_calls") != expected):
+                        raise ValueError("native binding mismatch")
+                    ids = [c.provider_tool_call_id for c in calls]
+                    if len(set(ids)) != len(ids) or any(not isinstance(i, str) or not i.strip() or len(i) > 255 for i in ids):
+                        raise ValueError("invalid call identity")
+                    normalized = tuple({"tool_name": c.tool_name, "arguments": strict_object(c.arguments_json),
+                        "call_id": c.provider_tool_call_id} for c in calls)
+                    if any(c["tool_name"] == HANDOFF_FUNCTION for c in normalized):
+                        if len(normalized) != 1:
+                            raise ValueError("mixed handoff")
+                        call = normalized[0]
+                        value = {"kind": "HANDOFF", **call["arguments"]}
+                        if set(call["arguments"]) != {"target_agent_id", "task"}:
+                            raise ValueError("invalid handoff")
+                        call_id = call["call_id"]
+                    else:
+                        value = {"kind": "TOOL_BATCH", "calls": normalized}
+                        call_id = None
+                else:
+                    if response.finish_reason == "tool_calls" or (response.assistant_message and response.assistant_message.get("tool_calls")):
+                        raise ValueError("missing native batch")
+                    value = {"kind": "REFUSAL", "content": response.refusal, "reason_code": "PROVIDER_REFUSAL"} if response.refusal else {"kind": "FINAL", "content": response.output}
+                    if response.refusal and response.output.strip():
+                        raise ValueError("contradictory refusal")
+                    call_id = None
+            elif protocol_mode == "structured" and not calls and not response.refusal and response.finish_reason != "tool_calls":
+                value = strict_object(response.output)
+                call_id = synthetic_id
+            else:
+                raise ValueError("protocol mismatch")
+            kind = value.get("kind")
+            fields = {"FINAL": {"kind", "content"}, "REFUSAL": {"kind", "content", "reason_code"},
+                "TOOL_BATCH": {"kind", "calls"}, "HANDOFF": {"kind", "target_agent_id", "task"}}
+            if kind not in fields or set(value) != fields[kind]:
+                raise ValueError("invalid tagged decision")
+            if kind == "TOOL_BATCH":
+                items = value["calls"]
+                if not isinstance(items, (list, tuple)) or not 1 <= len(items) <= 4:
+                    raise ValueError("invalid batch size")
+                normalized = []
+                for ordinal, item in enumerate(items):
+                    required = {"tool_name", "arguments", "call_id"} if protocol_mode == "native" else {"tool_name", "arguments"}
+                    if (not isinstance(item, dict) or set(item) != required or not isinstance(item["tool_name"], str)
+                            or not item["tool_name"].strip() or item["tool_name"] == HANDOFF_FUNCTION or not isinstance(item["arguments"], dict)):
+                        raise ValueError("invalid batch call")
+                    normalized.append({**item, "call_id": item["call_id"] if protocol_mode == "native" else f"{synthetic_id}_{ordinal}"})
+                return cls(kind, calls=tuple(normalized))
+            if kind == "HANDOFF":
+                if (value["target_agent_id"] not in handoff_targets or not isinstance(value["task"], str)
+                        or not value["task"].strip() or len(value["task"].encode("utf-8")) > 16384):
+                    raise ValueError("handoff denied")
+                return cls(kind, target_agent_id=value["target_agent_id"], task=value["task"], provider_tool_call_id=call_id)
+            if not isinstance(value["content"], str) or not value["content"].strip() or len(value["content"].encode("utf-8")) > 65536:
+                raise ValueError("invalid result")
+            if kind == "REFUSAL" and value["reason_code"] not in {"SAFETY", "UNSUPPORTED", "PROVIDER_REFUSAL"}:
+                raise ValueError("invalid refusal")
             return cls(kind, content=value["content"], reason_code=value.get("reason_code"))
         except (TypeError, ValueError, KeyError, AttributeError):
             raise LoopStopped("LOOP_DECISION_INVALID") from None

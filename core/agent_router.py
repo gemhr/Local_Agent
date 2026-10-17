@@ -2595,7 +2595,7 @@ class AgentRouter:
             reserved_output_tokens=max_tokens,
         )
         messages = list(final_budget.messages)
-        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1":
+        if getattr(run_context, "execution_policy", None) in {"durable-agent-loop.v1", "durable-agent-loop.v2"}:
             owner_emitter = event_emitter.parent if isinstance(event_emitter, StepEventEmitter) else event_emitter
             restored = self.model_invocation_router.restore_completed_loop_result(
                 run_context=run_context, messages=messages, max_tokens=max_tokens,
@@ -2705,7 +2705,7 @@ class AgentRouter:
             )
         owner_emitter = event_emitter.parent if isinstance(event_emitter, StepEventEmitter) else event_emitter
         request_token_estimate = self._estimate_messages_tokens(messages)
-        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1":
+        if getattr(run_context, "execution_policy", None) in {"durable-agent-loop.v1", "durable-agent-loop.v2"}:
             request_token_estimate += self.context_builder.estimator.estimate(
                 json.dumps(effective_generation_options, ensure_ascii=False)
             )

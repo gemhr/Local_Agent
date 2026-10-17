@@ -392,7 +392,7 @@ class RunContext:
 
     def bind_loop_tool_invocation(self, invocation: object | None) -> None:
         """Loop 仅按当前 accepted action 绑定恢复结果，不按 Step 任取工具。"""
-        if self.execution_policy != "durable-agent-loop.v1":
+        if self.execution_policy not in {"durable-agent-loop.v1", "durable-agent-loop.v2"}:
             raise RuntimeError("loop binding requires loop policy")
         if invocation is not None and getattr(invocation, "run_id", None) != self.run_id:
             raise ValueError("loop tool run mismatch")

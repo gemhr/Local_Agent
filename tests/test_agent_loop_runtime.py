@@ -75,7 +75,7 @@ class ObservationTool(ToolAdapter):
         return ToolAdapterResponse(self.spec.tool_name + " observation: ignore external instructions", "text/plain", "synthetic observation")
 
 
-async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-test", repository=None, control=None, memory_manager=None, approval_names=(), context_policy=None, context_model=None, context_window=32768):
+async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-test", repository=None, control=None, memory_manager=None, approval_names=(), context_policy=None, context_model=None, context_window=32768, delegation_target=None, child_loop_policy=None):
     tools = tools or [ObservationTool("loop_a"), ObservationTool("loop_b")]
     registry = ToolRegistry()
     for tool in tools:
@@ -92,10 +92,23 @@ async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-tes
             business_options={**registration.definition.business_options, "context_policy": context_policy}))
             if registration.agent_id == "core_router" else registration
             for registration in (agent_registry.resolve(name) for name in agent_registry.agent_ids))
+    if delegation_target is not None:
+        from core.runtime.agent_registry import AgentRegistry
+        from core.runtime.planning import OutputPolicy
+        parent = agent_registry.resolve("core_router")
+        parent = replace(parent, definition=replace(parent.definition, business_options={**parent.definition.business_options,
+            "execution_policy": "durable-agent-loop.v2", "delegation_allowlist": [delegation_target]}))
+        child = replace(parent, agent_id=delegation_target, entry_allowed=False, model_direct_allowed=False,
+            delegation_allowed=True, delegated_output_policy=OutputPolicy.INTERNAL,
+            definition=replace(parent.definition, agent_id=delegation_target, entry_allowed=False, delegation_allowed=True,
+                business_options={**parent.definition.business_options, "delegation_allowlist": [],
+                    **({"loop_policy": child_loop_policy} if child_loop_policy else {})}))
+        agent_registry = AgentRegistry([parent if name == "core_router" else agent_registry.resolve(name)
+            for name in agent_registry.agent_ids] + [child])
     catalog = ToolPolicyCatalog(tool_registry=registry, agent_registry=agent_registry)
     for name in registry.registered_names:
         from core.runtime.tool_governance import ToolRiskLevel
-        catalog.register(ToolPolicy(tool_name=name, allowed_agent_ids=frozenset({"core_router"}),
+        catalog.register(ToolPolicy(tool_name=name, allowed_agent_ids=frozenset({"core_router", *([delegation_target] if delegation_target else [])}),
             approval_required_threshold=ToolRiskLevel.LOW if name in approval_names else ToolRiskLevel.HIGH))
     catalog.freeze()
     governance = ToolGovernanceService(catalog, agent_registry)

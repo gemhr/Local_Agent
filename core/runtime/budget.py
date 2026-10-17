@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """单个 Run 的线程安全预算账本；不保存任何业务正文。"""
 from __future__ import annotations
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime
 from enum import Enum
 from math import isfinite
@@ -78,8 +78,8 @@ class BudgetUsage:
             value=getattr(self,name)
             if isinstance(value,bool) or not isinstance(value,int) or value<0: raise ValueError(f"{name} 必须是非负整数")
         if not self._allow_independent_total and self.total_tokens < self.input_tokens + self.output_tokens: raise ValueError("total_tokens 不得小于 input_tokens + output_tokens")
-    def plus(self, other:"BudgetUsage")->"BudgetUsage": return BudgetUsage(**{n:getattr(self,n)+getattr(other,n) for n in _DIMENSIONS})
-    def minus(self, other:"BudgetUsage")->"BudgetUsage": return BudgetUsage(**{n:getattr(self,n)-getattr(other,n) for n in _DIMENSIONS})
+    def plus(self, other:"BudgetUsage")->"BudgetUsage": return BudgetUsage(**{n:getattr(self,n)+getattr(other,n) for n in _DIMENSIONS}, _allow_independent_total=self._allow_independent_total or other._allow_independent_total)
+    def minus(self, other:"BudgetUsage")->"BudgetUsage": return BudgetUsage(**{n:getattr(self,n)-getattr(other,n) for n in _DIMENSIONS}, _allow_independent_total=self._allow_independent_total or other._allow_independent_total)
 
 class UsageSource(str,Enum): ACTUAL="ACTUAL"; ESTIMATED="ESTIMATED"
 @dataclass(frozen=True,slots=True)
@@ -106,6 +106,7 @@ class BudgetLedger:
         *,
         committed_usage: BudgetUsage,
         reserved_usage: BudgetUsage | None = None,
+        budget_operations: dict | None = None,
         deadline_remaining: Callable[[], float | None] | None = None,
     ) -> "BudgetLedger":
         """Rebuild a ledger without releasing crash-time reservations.
@@ -122,11 +123,22 @@ class BudgetLedger:
         if not isinstance(reserved_usage, BudgetUsage):
             raise TypeError("reserved_usage must be BudgetUsage")
         ledger = cls(budget, deadline_remaining=deadline_remaining)
-        ledger._committed = committed_usage.plus(reserved_usage)
+        envelopes = {key.removeprefix("delegation:"): op["unspent"] for key, op in (budget_operations or {}).items()
+            if op["kind"] == "DELEGATION_ALLOCATION" and op["state"] == "RESERVED"}
+        if not envelopes:
+            ledger._committed = committed_usage.plus(reserved_usage)
+            return ledger
+        held = BudgetUsage(_allow_independent_total=True)
+        for usage in envelopes.values():
+            held = held.plus(BudgetUsage(**usage, _allow_independent_total=True))
+        ledger._committed = committed_usage.plus(reserved_usage.minus(held))
+        ledger._envelopes = {key: BudgetUsage(**value, _allow_independent_total=True) for key, value in envelopes.items()}
+        ledger._delegated_reservations = {}
         return ledger
     def _reserved(self):
         value=BudgetUsage()
         for r in self._reservations.values(): value=value.plus(r.reserved_usage)
+        for envelope in getattr(self, "_envelopes", {}).values(): value=value.plus(envelope)
         return value
     def _snapshot_locked(self):
         reserved=self._reserved(); elapsed=monotonic()-self._started; candidates=[]
@@ -141,12 +153,48 @@ class BudgetLedger:
         exhausted=tuple(dim for dim in _DIMENSIONS if getattr(self.budget,_LIMITS[dim]) is not None and remaining[dim]==0)
         if rt is not None and rt<=0: exhausted+=("elapsed_seconds",)
         return BudgetSnapshot(self.budget,self._committed,reserved,BudgetUsage(**remaining, _allow_independent_total=True),elapsed,rt,len(self._reservations),exhausted,datetime.now(UTC))
-    def snapshot(self):
-        with self._lock: return self._snapshot_locked()
-    def reserve(self, usage:BudgetUsage, *, reservation_type:str, step_id:str|None=None):
+    def snapshot(self, delegation_id=None):
+        with self._lock:
+            snapshot = self._snapshot_locked()
+            if delegation_id is not None:
+                remaining = getattr(self, "_envelopes", {}).get(delegation_id)
+                if remaining is None: raise BudgetReservationError("DELEGATION_ALLOCATION_MISSING")
+                snapshot = replace(snapshot, remaining=remaining)
+            return snapshot
+
+    def allocate_delegation(self, delegation_id, usage):
+        with self._lock:
+            if not hasattr(self, "_envelopes"):
+                self._envelopes, self._delegated_reservations = {}, {}
+            if delegation_id in self._envelopes: return
+            snap = self._snapshot_locked()
+            for dim in _DIMENSIONS:
+                limit = getattr(self.budget, _LIMITS[dim])
+                if limit is not None and getattr(usage,dim)>getattr(snap.remaining,dim):
+                    raise BudgetExceededError(dim,getattr(usage,dim),getattr(snap.remaining,dim),snap)
+            self._envelopes[delegation_id] = usage
+
+    def release_delegation(self, delegation_id):
+        with self._lock:
+            if delegation_id in getattr(self, "_delegated_reservations", {}).values():
+                raise BudgetReservationError("DELEGATION_INFLIGHT")
+            getattr(self, "_envelopes", {}).pop(delegation_id, None)
+
+    def reserve(self, usage:BudgetUsage, *, reservation_type:str, step_id:str|None=None, delegation_id=None):
         with self._lock:
             snap=self._snapshot_locked()
             if snap.remaining_time_seconds is not None and snap.remaining_time_seconds<=0: raise BudgetExceededError("elapsed_seconds",1,0,snap,time=True)
+            if delegation_id is not None:
+                available = getattr(self, "_envelopes", {}).get(delegation_id)
+                if available is None: raise BudgetReservationError("DELEGATION_ALLOCATION_MISSING")
+                for dim in _DIMENSIONS:
+                    if getattr(usage,dim)>getattr(available,dim):
+                        raise BudgetExceededError(dim,getattr(usage,dim),getattr(available,dim),snap)
+                r=BudgetReservation(uuid4().hex,reservation_type,step_id,usage,datetime.now(UTC))
+                self._envelopes[delegation_id] = available.minus(usage)
+                self._delegated_reservations[r.reservation_id] = delegation_id
+                self._reservations[r.reservation_id] = r
+                return r
             for dim in _DIMENSIONS:
                 limit=getattr(self.budget,_LIMITS[dim]); requested=getattr(usage,dim)
                 if limit is not None and getattr(self._committed,dim)+getattr(snap.reserved_usage,dim)+requested>limit: raise BudgetExceededError(dim,requested,getattr(snap.remaining,dim),snap)
@@ -156,6 +204,17 @@ class BudgetLedger:
             stored=self._reservations.get(reservation.reservation_id)
             if stored != reservation: raise BudgetReservationError("Reservation 未知、已结算或已释放")
             actual=actual_usage if actual_usage is not None else reservation.reserved_usage
+            delegation = getattr(self, "_delegated_reservations", {}).pop(reservation.reservation_id, None)
+            if delegation is not None:
+                available = self._envelopes[delegation]
+                refunded = available.plus(reservation.reserved_usage)
+                # 超额如实计入根账本，额度不允许变负，后续准入必须停止。
+                over = any(getattr(actual,d)>getattr(refunded,d) for d in _DIMENSIONS)
+                self._envelopes[delegation] = BudgetUsage(**{d:max(0,getattr(refunded,d)-getattr(actual,d)) for d in _DIMENSIONS}, _allow_independent_total=True)
+                self._reservations.pop(reservation.reservation_id)
+                self._committed = self._committed.plus(actual)
+                if over: raise BudgetReservationError("DELEGATION_BUDGET_EXCEEDED")
+                return self._snapshot_locked()
             # 调用发生且未知实际值时调用方传 None，保守结算预留。
             # 实际值小于预留时原子退款；大于预留时在同一把锁内补差并重新校验，
             # 不允许已完成调用把任何有限预算推到上限之外。
@@ -173,6 +232,9 @@ class BudgetLedger:
         with self._lock:
             stored=self._reservations.pop(reservation.reservation_id,None)
             if stored != reservation: raise BudgetReservationError("Reservation 未知、已结算或已释放")
+            delegation = getattr(self, "_delegated_reservations", {}).pop(reservation.reservation_id, None)
+            if delegation is not None:
+                self._envelopes[delegation] = self._envelopes[delegation].plus(reservation.reserved_usage)
             return self._snapshot_locked()
 
 class BudgetPolicy:

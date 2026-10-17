@@ -4,6 +4,8 @@ from core.runtime.execution_aggregate import canonical_payload_digest
 
 
 def build_context_evidence(image):
+    if image.root.execution_policy == "durable-agent-loop.v2":
+        raise ValueError("UNSUPPORTED_EXECUTION_POLICY")
     if image.root.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
         raise ValueError("CONTEXT_EVIDENCE_NOT_READY")
     frame = image.loop_frames[0]

@@ -68,7 +68,7 @@ from core.runtime.invocation_bindings import (
     InvocationRole,
     StepInvocationBindings,
 )
-from core.runtime.agent_loop.contracts import LOOP_POLICY, LoopPolicyV1, LoopSuspended
+from core.runtime.agent_loop.contracts import LOOP_POLICY, LOOP_POLICY_V2, LoopPolicyV2, LoopPolicyV1, LoopSuspended
 
 
 def _required_text(value: object, name: str) -> str:
@@ -117,6 +117,7 @@ def _rehydrated_budget(root: object, context) -> BudgetLedger:
         budget,
         committed_usage=committed,
         reserved_usage=reserved,
+        budget_operations=getattr(root, "budget_operations", {}),
         deadline_remaining=context.remaining_seconds,
     )
 
@@ -805,7 +806,7 @@ class CoordinatedRuntimeFactory:
         run_id = durable_run_id
         if getattr(lease, "run_id", run_id) != run_id:
             raise ValueError("recovery lease run_id mismatch")
-        is_loop = getattr(root, "execution_policy", "fixed-plan.v1") == LOOP_POLICY
+        is_loop = getattr(root, "execution_policy", "fixed-plan.v1") in {LOOP_POLICY, LOOP_POLICY_V2}
         if is_loop and query is not None:
             raise ValueError("Loop recovery cannot override frozen input")
         payload = getattr(root, "plan_payload", None)
@@ -1001,9 +1002,9 @@ class CoordinatedRuntimeFactory:
         definition = self._agent_registry.resolve(agent_id).definition
         selected_policy = (getattr(rehydrated_root, "execution_policy", None)
                            or execution_policy or definition.business_options.get("execution_policy", "fixed-plan.v1"))
-        if selected_policy not in {"fixed-plan.v1", LOOP_POLICY}:
+        if selected_policy not in {"fixed-plan.v1", LOOP_POLICY, LOOP_POLICY_V2}:
             raise ValueError("unsupported execution policy")
-        if selected_policy == LOOP_POLICY:
+        if selected_policy in {LOOP_POLICY, LOOP_POLICY_V2}:
             if self._agent_registry.resolve(agent_id).workflow is not None:
                 raise ValueError("Loop policy requires a single Agent registration")
             if any(profile.cost_profile is None for profile in self._router.model_profiles):
@@ -1012,12 +1013,18 @@ class CoordinatedRuntimeFactory:
                 refusal_kinds = definition.output_schema.get("properties", {}).get("kind", {}).get("enum", ())
                 if "REFUSAL" not in refusal_kinds:
                     raise ValueError("Loop output schema must explicitly declare a REFUSAL kind")
-            loop_policy = loop_policy or LoopPolicyV1(**dict(definition.business_options.get("loop_policy", {})))
+            loop_policy = loop_policy or (LoopPolicyV2 if selected_policy == LOOP_POLICY_V2 else LoopPolicyV1)(**dict(definition.business_options.get("loop_policy", {})))
+            if selected_policy == LOOP_POLICY_V2 and not isinstance(loop_policy, LoopPolicyV2):
+                raise ValueError("v2 requires LoopPolicyV2")
             if rehydrated_root is None:
                 budget_values = {name: getattr(budget or RunBudget(), name) for name in RunBudget.__dataclass_fields__}
                 for name in ("max_model_calls", "max_tool_calls", "max_retries", "max_elapsed_seconds"):
                     cap = getattr(loop_policy, name)
                     budget_values[name] = min(budget_values[name], cap) if budget_values[name] is not None else cap
+                if selected_policy == LOOP_POLICY_V2:
+                    for name in ("total_tokens", "cost_units"):
+                        old = budget_values[f"max_{name}"]
+                        budget_values[f"max_{name}"] = min(old, getattr(loop_policy, name)) if old is not None else getattr(loop_policy, name)
                 budget = RunBudget(**budget_values)
                 timeout_seconds = min(timeout_seconds or loop_policy.max_elapsed_seconds, budget.max_elapsed_seconds)
                 static_plan = static_plan or self._router.build_single_agent_plan(agent_id, query)
@@ -1288,7 +1295,7 @@ class CoordinatedRuntimeFactory:
                         for performer_id in performer_ids
                     }
                     run_context.bind_performer_identities(performer_identities)
-                if selected_policy == LOOP_POLICY:
+                if selected_policy in {LOOP_POLICY, LOOP_POLICY_V2}:
                     coordinator._planning_request = PlanningRequest(agent_id, query)
                     coordinator._persist = persist
                     coordinator._invocation_bindings = (StepInvocationBindings((AgentInvocationSpec(
@@ -1324,7 +1331,7 @@ class CoordinatedRuntimeFactory:
                         span_recorder=span_recorder,
                         metrics_recorder=self._services.runtime_metrics_recorder,
                         fault_controller=fault_controller,
-                        loop_context=run_context if selected_policy == LOOP_POLICY else None,
+                        loop_context=run_context if selected_policy in {LOOP_POLICY, LOOP_POLICY_V2} else None,
                         memory_context=run_context,
                     )
                     rehydrated_committer = StepResultCommitter(
@@ -1337,7 +1344,7 @@ class CoordinatedRuntimeFactory:
                         durable_lease=durable_lease,
                         durable_journal=self._services.event_journal,
                     )
-                    if selected_policy == LOOP_POLICY:
+                    if selected_policy in {LOOP_POLICY, LOOP_POLICY_V2}:
                         from core.runtime.final_memory_writer import RunFinalMemoryWriter
                         rehydrated_committer._final_memory_writer = RunFinalMemoryWriter(
                             self._router, entry_agent_id=agent_id, user_request=query,

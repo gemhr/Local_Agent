@@ -53,8 +53,27 @@ class ContextSnapshotV1:
         return canonical_payload_digest(self.payload)
 
 
+@dataclass(frozen=True)
+class ContextPolicyV2(ContextPolicyV1):
+    version: int = 2
+
+    def __post_init__(self):
+        if type(self.version) is not int or self.version != 2:
+            raise ValueError("CONTEXT_POLICY_INVALID")
+        from dataclasses import asdict
+        ContextPolicyV1(**{**asdict(self), "version": 1})
+        object.__setattr__(self, "mandatory_iterations", tuple(self.mandatory_iterations))
+
+
+@dataclass(frozen=True)
+class ContextSnapshotV2(ContextSnapshotV1):
+    """v2 原子 Batch/Delegation 消息组，绝不作为 v1 输入重解释。"""
+
+
 def context_sources(frame, iterations):
     """原始业务记录是唯一来源，summary 从不成为下一次压缩的输入。"""
+    if getattr(frame, "schema_version", 1) == 2:
+        return context_sources_v2(frame, iterations)
     policy = ContextPolicyV1(**frame.context_policy)
     observed = [i for i in iterations if i.state == "OBSERVED"]
     if [i.observation_cursor for i in observed] != list(range(1, frame.committed_observation_cursor + 1)):
@@ -92,8 +111,10 @@ def snapshot_candidate(frame, groups, options, reserve, *, summary=None, kind=No
     manifest = [{k: v for k, v in g.items() if k != "messages"} for g in groups]
     mandatory = [{"ref": "seed", "digest": canonical_payload_digest(seed)}] + [
         {"ref": g["ref"], "digest": g["pair_digest"]} for g in groups if g["mandatory"]]
-    return ContextSnapshotV1.create({"schema_version": "context-snapshot.v1", "policy": frame.context_policy,
-        "validator_version": "context-validator.v1", "renderer_version": "context-renderer.v1",
+    version = getattr(frame, "schema_version", 1)
+    artifact = ContextSnapshotV2 if version == 2 else ContextSnapshotV1
+    return artifact.create({"schema_version": f"context-snapshot.v{version}", "policy": frame.context_policy,
+        "validator_version": f"context-validator.v{version}", "renderer_version": f"context-renderer.v{version}",
         "parent_id": frame.current_context_snapshot_id, "parent_digest": frame.current_context_snapshot_digest,
         "parent_version": frame.current_context_snapshot_version, "seed_digest": frame.seed_digest,
         "config_digest": frame.config_digest, "source_cursor": frame.committed_observation_cursor,
@@ -149,15 +170,26 @@ def pinned_loop_config(router, agent_id, run_context):
     # 旧 Run 的 profile 序列化不能因新增默认字段而改变冻结身份。
     policy = definition.business_options.get("context_policy")
     if policy is not None:
-        config["context_policy"] = ContextPolicyV1(**dict(policy)).to_dict()
+        config["context_policy"] = (ContextPolicyV2 if run_context.execution_policy == "durable-agent-loop.v2" else ContextPolicyV1)(**dict(policy)).to_dict()
+    elif run_context.execution_policy == "durable-agent-loop.v2":
+        config["context_policy"] = ContextPolicyV2().to_dict()
     else:
         for profile in config["profiles"]:
             for name in ("request_counting_mode", "request_counting_version", "request_framing_bound", "request_message_framing_bound", "output_accounting_contract"):
                 profile.pop(name, None)
+    if getattr(run_context, "loop_allowed_model_profiles", None) is not None:
+        config["allowed_model_profiles"] = list(run_context.loop_allowed_model_profiles)
+    if run_context.execution_policy == "durable-agent-loop.v2" and not getattr(run_context, "delegation_id", None):
+        from .handoff import freeze_targets
+        config["delegation_targets"] = freeze_targets(router, agent_id, run_context)
     return config
 
 
 def prepare_loop_seed(router, agent_id, instruction, run_context, *, event_emitter, memory_context_bundle=None):
+    if run_context.execution_policy == "durable-agent-loop.v2":
+        from .contracts import HANDOFF_FUNCTION
+        if router.tool_registry.resolve(HANDOFF_FUNCTION) is not None:
+            raise ValueError("DELEGATION_CONTROL_NAME_CONFLICT")
     definition = router.agent_registry.resolve(agent_id).definition
     messages = router._prepare_answer_messages(
         agent_id, instruction, run_context=run_context, event_emitter=event_emitter,
@@ -178,6 +210,12 @@ def prepare_loop_seed(router, agent_id, instruction, run_context, *, event_emitt
             '{"kind":"REFUSAL","reason_code":"SAFETY|UNSUPPORTED|PROVIDER_REFUSAL","content":"..."}。'
             '\n可用工具 schema：' + json.dumps([item["schema"] for item in config["tools"]], ensure_ascii=False)
         )
+        if run_context.execution_policy == "durable-agent-loop.v2":
+            messages[0]["content"] = messages[0]["content"].replace(
+                '{"kind":"TOOL_CALL","tool_name":"...","arguments":{...}}',
+                '{"kind":"TOOL_BATCH","calls":[{"tool_name":"...","arguments":{...}}]}')
+            if config.get("delegation_targets"):
+                messages[0]["content"] += '\n可返回 {"kind":"HANDOFF","target_agent_id":"...","task":"..."}，目标仅限：' + json.dumps(sorted(config["delegation_targets"]))
     return {"messages": messages, "protocol_mode": mode, "goal_digest": canonical_payload_digest(instruction)}, config
 
 
@@ -218,3 +256,37 @@ class LoopContextInputV1:
         if len(observations) != self.cursor:
             raise LoopStopped("LOOP_RESULT_UNAVAILABLE")
         return messages, canonical_payload_digest(messages)
+
+
+def context_sources_v2(frame, iterations):
+    policy = ContextPolicyV2(**frame.context_policy)
+    observed = [i for i in iterations if i.state == "OBSERVED"]
+    if [i.observation_cursor for i in observed] != list(range(1, frame.committed_observation_cursor + 1)):
+        raise LoopStopped("CONTEXT_VALIDATION_FAILED")
+    groups, seen = [], set()
+    for index, item in enumerate(observed):
+        if (item.schema_version != 2 or (item.frame_id, item.run_id, item.step_id) != (frame.frame_id, frame.run_id, frame.step_id)
+                or item.decision_kind not in {"TOOL_BATCH", "HANDOFF"} or not item.observation_source_digest
+                or canonical_payload_digest(item.observation) != item.observation_digest):
+            raise LoopStopped("CONTEXT_VALIDATION_FAILED")
+        assistant = deepcopy(item.assistant_record)
+        calls = assistant["tool_calls"]
+        results = item.observation["results"]
+        ids = [c["id"] for c in calls]
+        if len(set(ids)) != len(ids) or seen.intersection(ids) or ids != [r["call_id"] for r in results]:
+            raise LoopStopped("CONTEXT_VALIDATION_FAILED")
+        seen.update(ids)
+        if frame.context_seed["protocol_mode"] == "native":
+            messages = [assistant] + [{"role": "tool", "tool_call_id": r["call_id"],
+                "content": json.dumps(r["result"], ensure_ascii=False, sort_keys=True)} for r in results]
+        else:
+            messages = [{"role": "assistant", "content": json.dumps({"kind": item.decision_kind, "calls": calls}, ensure_ascii=False)},
+                {"role": "user", "content": json.dumps(item.observation, ensure_ascii=False, sort_keys=True)}]
+        read_only = item.observation.get("all_read_only") is True
+        mandatory = (item.decision_kind == "HANDOFF" or not read_only or index >= len(observed) - policy.recent_pairs
+            or item.iteration_no in policy.mandatory_iterations)
+        groups.append({"ref": f"source:{item.iteration_no}", "iteration": item.iteration_no,
+            "decision_id": item.decision_id, "action_id": None, "source_digest": item.observation_source_digest,
+            "observation_digest": item.observation_digest, "pair_digest": canonical_payload_digest(messages),
+            "mandatory": mandatory, "trust": "AGENT_DERIVED_DATA" if item.decision_kind == "HANDOFF" else "UNTRUSTED_TOOL_DATA", "messages": messages})
+    return groups

@@ -886,6 +886,9 @@ class RemoteLLMEngine:
             elif isinstance(delta, RefusalDelta):
                 refusal_parts.append(delta.text)
             elif isinstance(delta, ToolCallDelta):
+                if (getattr(run_context, "execution_policy", None) == "durable-agent-loop.v2"
+                        and (type(delta.index) is not int or not 0 <= delta.index < 4)):
+                    raise RemoteLLMError("Invalid batch index", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True)
                 item = call_parts.setdefault(delta.index, {"id": "", "name": "", "arguments": ""})
                 if delta.provider_tool_call_id:
                     if item["id"] and item["id"] != delta.provider_tool_call_id:
@@ -899,6 +902,16 @@ class RemoteLLMEngine:
             elif isinstance(delta, UsageDelta):
                 from core.runtime.budget import BudgetUsage
                 actual_usage = BudgetUsage(input_tokens=delta.input_tokens, output_tokens=delta.output_tokens, total_tokens=delta.input_tokens + delta.output_tokens)
+        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v2":
+            if sorted(call_parts) != list(range(len(call_parts))):
+                raise RemoteLLMError("Noncontiguous batch indices", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True)
+            content = "".join(chunks)
+            native_calls = tuple(NativeToolCall(item["id"], item["name"], item["arguments"]) for _, item in sorted(call_parts.items()))
+            assistant = {"role": "assistant", "content": content or None, "tool_calls": [
+                {"id": c.provider_tool_call_id, "type": "function", "function": {"name": c.tool_name, "arguments": c.arguments_json}} for c in native_calls]}
+            return ModelAdapterResponse(content, actual_usage=actual_usage, native_tool_calls=native_calls,
+                assistant_message=assistant if native_calls else None, finish_reason=finish_reason,
+                refusal="".join(refusal_parts) or None, tool_call_count=len(native_calls))
         loop_mode = getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1"
         if loop_mode:
             content = "".join(chunks)

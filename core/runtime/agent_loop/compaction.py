@@ -29,7 +29,7 @@ def parse_summary(response, groups, selected_refs=None):
             result[key] = value
         return result
     try:
-        if (response.finish_reason != "stop" or response.refusal or response.native_tool_call
+        if (response.finish_reason != "stop" or response.refusal or response.native_tool_call or getattr(response, "native_tool_calls", None)
                 or response.tool_call_count != 0 or not isinstance(response.output, str)
                 or len(response.output.encode("utf-8")) > 131072):
             raise ValueError("response")
@@ -78,7 +78,7 @@ def validate_candidate(frame, groups, candidate, assessments, raw_assessments):
         if payload["kind"] == "COMPACTED" and not any(a.required_window < raw[a.profile_id].required_window
                 and a.required_window * 100 <= a.window * frame.context_policy["target_percent"] for a in reliable):
             raise LoopStopped("CONTEXT_VALIDATION_FAILED")
-    return {"version": "context-validator.v1", "source": True, "mandatory": True, "roles": True,
+    return {"version": f"context-validator.v{getattr(frame, 'schema_version', 1)}", "source": True, "mandatory": True, "roles": True,
         "pairs": True, "budget": True, "semantic_preservation": "NOT_PROVEN", "reason": "VALID"}
 
 
@@ -116,6 +116,8 @@ def invoke_context_model(router, agent_id, messages, context, capabilities, rese
     if restored is not None:
         return restored
     eligible_ids = {a.profile_id for a in assessments if a.admissible}
+    if getattr(context, "loop_allowed_model_profiles", None) is not None:
+        eligible_ids &= set(context.loop_allowed_model_profiles)
     if context.loop_model_purpose == "DECISION":
         image = emitter.parent.submit_coroutine_from_worker(context.execution_repository.load(context.run_id))
         snapshot = next(s for s in image.context_snapshots if s.snapshot_id == context.loop_context_snapshot_id)
@@ -128,7 +130,7 @@ def invoke_context_model(router, agent_id, messages, context, capabilities, rese
         raise LoopStopped("LOOP_CONTEXT_EXHAUSTED" if reliable else "CONTEXT_BUDGET_UNCERTAIN")
     minimal = min((a for a in assessments if a.admissible), key=lambda a: a.required_window)
     from core.runtime.budget import BudgetExceededError
-    budget = context.budget_ledger.snapshot()
+    budget = context.budget_ledger.snapshot(getattr(context, "delegation_id", None))
     costs = [p.cost_profile.fixed_call_cost_units
         + (context.loop_request_assessments[p.profile_id.value].input_bound * p.cost_profile.input_cost_units_per_1k_tokens + 999)//1000
         + (reserve * p.cost_profile.output_cost_units_per_1k_tokens + 999)//1000 for p in profiles]
@@ -143,7 +145,7 @@ def invoke_context_model(router, agent_id, messages, context, capabilities, rese
         context, capabilities, definition, available_profiles=profiles)
     routing = router.model_routing_policy.route(selection_decision=decision, capability_requirements=capabilities,
         context_requirements=requirements, profiles=profiles, preference=ModelPreference.AUTO,
-        budget_snapshot=context.budget_ledger.snapshot(),
+        budget_snapshot=context.budget_ledger.snapshot(getattr(context, "delegation_id", None)),
         breaker_snapshots=router.circuit_breaker_registry.snapshots(tuple(p.effective_breaker_key for p in profiles)))
     return router.model_invocation_router.invoke(run_context=context, budget_ledger=context.budget_ledger,
         routing_decision=routing, messages=messages, adapter_resolver=router.model_adapter_resolver,
@@ -167,7 +169,7 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
     image = submit(repo.load(context.run_id))
     current = iterations[-1] if iterations and iterations[-1].state == "OPEN" else None
     if current:
-        attempts = [m for m in image.models if m.purpose == "DECISION" and m.loop_iteration_no == current.iteration_no
+        attempts = [m for m in image.models if m.purpose == "DECISION" and m.loop_frame_id == frame.frame_id and m.loop_iteration_no == current.iteration_no
             and m.context_snapshot_id == current.context_snapshot_id]
         if attempts and all(m.state == "REJECTED" for m in attempts):
             if current.context_rebind_count:
@@ -187,6 +189,9 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
         context.loop_request_assessments = {}
         return snapshot.payload
     options = {"tools": [r.native_function_definition() for r in context.tool_resolution_snapshot.registrations()], "tool_choice": "auto"} if frame.context_seed["protocol_mode"] == "native" else {}
+    if frame.schema_version == 2:
+        from .handoff import loop_options
+        options = loop_options(frame)
     previous = next((s for s in image.context_snapshots if s.snapshot_id == frame.current_context_snapshot_id), None)
     prior_summary = previous.payload["summary"] if previous else None
     raw = snapshot_candidate(frame, groups, options, router.max_tokens, summary=prior_summary, kind="RAW")
@@ -197,7 +202,7 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
     if not reliable:
         raise LoopStopped("CONTEXT_BUDGET_UNCERTAIN")
     target = current.iteration_no if current else frame.current_iteration + 1
-    operation = next((o for o in image.context_operations if o.target_iteration == target), None)
+    operation = next((o for o in image.context_operations if o.frame_id == frame.frame_id and o.target_iteration == target), None)
     if force_compaction and operation is not None and operation.state == "ACCEPTED":
         raise LoopStopped("LOOP_CONTEXT_EXHAUSTED")
     trigger = force_compaction or not valid or all(a.required_window * 100 >= a.window * frame.context_policy["trigger_percent"] for a in valid)
@@ -227,7 +232,7 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
                     remote_model_calls=int(profile.effective_is_remote), input_tokens=assessment.input_bound,
                     output_tokens=summary_reserve, total_tokens=assessment.input_bound + summary_reserve,
                     cost_units=costs.fixed_call_cost_units + (assessment.input_bound * costs.input_cost_units_per_1k_tokens + 999)//1000 + (summary_reserve * costs.output_cost_units_per_1k_tokens + 999)//1000)
-                if BudgetPolicy.feasible(context.budget_ledger.snapshot(), usage):
+                if BudgetPolicy.feasible(context.budget_ledger.snapshot(getattr(context, "delegation_id", None)), usage):
                     feasible.append(assessment)
             # 已有 durable response 必须先恢复，不能被新调用预算拒绝。
             completed = next((m for m in image.models if m.purpose == "COMPACTION" and operation is not None
@@ -268,13 +273,13 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
                         validation = validate_candidate(frame, groups, candidate, assess(candidate), raw_assessments)
                         reason = "VALID"
                     except (LoopStopped, ModelInvocationChainError, ModelSelectionError) as exc:
-                        validation = {"version": "context-validator.v1", "reason": "CONTEXT_COMPACTION_FAILED"}
+                        validation = {"version": f"context-validator.v{getattr(frame, 'schema_version', 1)}", "reason": "CONTEXT_COMPACTION_FAILED"}
                         candidate = None
                         reason = getattr(exc, "stop_code", "CONTEXT_COMPACTION_FAILED")
                     finally:
                         context.loop_model_purpose = "DECISION"
                         context.loop_compaction_operation_id = None
-                    refreshed, _ = submit(repo.load_loop(lease, claim.step_id))
+                    refreshed, _ = submit(repo.load_loop(lease, claim.step_id, frame.frame_id))
                     operation = submit(repo.record_context_validation(lease, frame.frame_id, resume_generation=frame.resume_generation,
                         row_version=refreshed.row_version, operation_id=operation.operation_id,
                         candidate=candidate.payload if candidate else None, validation=validation, reason=reason))
@@ -286,7 +291,7 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
         raise LoopStopped("LOOP_CONTEXT_EXHAUSTED")
     if validation is None:
         validation = validate_candidate(frame, groups, candidate, raw_assessments, raw_assessments)
-    refreshed, _ = submit(repo.load_loop(lease, claim.step_id))
+    refreshed, _ = submit(repo.load_loop(lease, claim.step_id, frame.frame_id))
     iteration = submit(repo.accept_context_and_open_iteration(lease, frame.frame_id, resume_generation=frame.resume_generation,
         row_version=refreshed.row_version, candidate=candidate.payload, validation=validation,
         operation_id=operation.operation_id if candidate.payload["kind"] == "COMPACTED" else None, rebind=force_compaction))

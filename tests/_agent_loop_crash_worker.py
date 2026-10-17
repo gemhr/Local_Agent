@@ -27,8 +27,8 @@ from tests.test_agent_loop_runtime import ObservationTool, assembly, execute, na
 
 
 class BusinessReceiptTool(ObservationTool):
-    def __init__(self, directory, phase):
-        super().__init__("loop_a")
+    def __init__(self, directory, phase, name="loop_a"):
+        super().__init__(name)
         self.directory, self.phase = directory, phase
         self.spec = replace(self.spec, side_effect_kind=ToolSideEffectKind.EXTERNAL_STATE_MUTATION,
             idempotency=OperationIdempotency.IDEMPOTENT_WITH_KEY, supports_idempotency_replay=True)
@@ -45,7 +45,7 @@ class BusinessReceiptTool(ObservationTool):
         receipt = {"provider_receipt_digest": canonical_json_digest({"operation_key": invocation.idempotency_key, "side_effect_count": 1}),
             "business_operation_key_digest": safe_key_digest(invocation.idempotency_key), "side_effect_count": 1}
         result = ToolExecutionResult(invocation_id=invocation.invocation_id, attempt_id=context.attempt_id,
-            tool_name="loop_a", status=ToolExecutionStatus.SUCCEEDED,
+            tool_name=self.spec.tool_name, status=ToolExecutionStatus.SUCCEEDED,
             output=build_tool_output("loop_a committed business receipt", "text/plain", 4096),
             safe_summary="synthetic business committed", side_effect_state=ToolSideEffectState.COMMITTED,
             idempotency_replayed=False, retry_disposition=RetryDisposition.UNSAFE, resource_key_digest=None,
@@ -109,6 +109,10 @@ class RepeatObservationTool(ObservationTool):
 
 
 async def main():
+    if sys.argv[1].startswith("agent-batch-") or sys.argv[1].startswith("agent-child-"):
+        from tests.test_agent_batch_handoff import execution_crash_worker
+        await execution_crash_worker(*sys.argv[1:])
+        return
     if sys.argv[1].startswith("scoped-formation-"):
         from tests.test_scoped_memory_lifecycle import formation_crash_worker
         await formation_crash_worker(*sys.argv[1:])

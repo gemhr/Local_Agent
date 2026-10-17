@@ -21,6 +21,7 @@ Alembic revision 产生（见 ``alembic/versions/``）；运行时代码**不**�
 from __future__ import annotations
 
 from sqlalchemy import (
+    Boolean,
     BigInteger,
     CHAR,
     CheckConstraint,
@@ -913,6 +914,10 @@ class RuntimeLoopFrameRow(PersistenceBase):
     decision_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     context_seed_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     execution_policy: Mapped[str] = mapped_column(String(64), nullable=False, server_default=text("'durable-agent-loop.v1'"))
+    frame_role: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'ROOT'"))
+    execution_agent_id: Mapped[str | None] = mapped_column(String(255))
+    parent_frame_id: Mapped[str | None] = mapped_column(String(255))
+    delegation_id: Mapped[str | None] = mapped_column(String(255), unique=True)
     row_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
     resume_generation: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     last_committed_fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -938,12 +943,13 @@ class RuntimeLoopFrameRow(PersistenceBase):
     updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     __table_args__ = (
         ForeignKeyConstraint(["run_id", "step_id"], ["runtime_step_executions.run_id", "runtime_step_executions.step_id"], ondelete="CASCADE", name="fk_runtime_loop_frame_step"),
-        UniqueConstraint("run_id", "step_id", name="uq_runtime_loop_frame_step"),
+        Index("uq_runtime_loop_root_step", "run_id", "step_id", unique=True, postgresql_where=text("frame_role = 'ROOT'")),
         UniqueConstraint("frame_id", "run_id", "step_id", name="uq_runtime_loop_frame_identity"),
         ForeignKeyConstraint(["frame_id", "current_context_snapshot_id", "current_context_snapshot_version", "current_context_snapshot_digest"], ["runtime_context_snapshots.frame_id", "runtime_context_snapshots.snapshot_id", "runtime_context_snapshots.version", "runtime_context_snapshots.snapshot_digest"], name="fk_frame_context_snapshot", use_alter=True),
-        CheckConstraint("schema_version = 1 AND decision_schema_version = 1 AND context_seed_version = 1 AND execution_policy = 'durable-agent-loop.v1'", name="ck_runtime_loop_frame_versions"),
+        CheckConstraint("(schema_version = 1 AND decision_schema_version = 1 AND context_seed_version = 1 AND execution_policy = 'durable-agent-loop.v1' AND frame_role = 'ROOT' AND parent_frame_id IS NULL AND delegation_id IS NULL) OR (schema_version = 2 AND decision_schema_version = 2 AND context_seed_version = 2 AND execution_policy = 'durable-agent-loop.v2' AND execution_agent_id IS NOT NULL)", name="ck_runtime_loop_frame_versions"),
+        CheckConstraint("(frame_role = 'ROOT' AND parent_frame_id IS NULL AND delegation_id IS NULL) OR (frame_role = 'CHILD' AND parent_frame_id IS NOT NULL AND delegation_id IS NOT NULL AND schema_version = 2)", name="ck_loop_frame_role"),
         CheckConstraint("row_version > 0 AND resume_generation >= 0 AND last_committed_fencing_token >= 0 AND current_iteration >= 0 AND committed_observation_cursor >= 0 AND committed_observation_cursor <= current_iteration", name="ck_runtime_loop_frame_counters"),
-        CheckConstraint("phase IN ('NEED_DECISION','DECISION_ACCEPTED','WAIT_TOOL','RESULT_READY','STOPPED')", name="ck_runtime_loop_frame_phase"),
+        CheckConstraint("phase IN ('NEED_DECISION','DECISION_ACCEPTED','WAIT_TOOL','WAIT_ACTIONS','WAIT_CHILD','RESULT_READY','STOPPED')", name="ck_runtime_loop_frame_phase"),
     )
 
 
@@ -952,6 +958,7 @@ class RuntimeLoopIterationRow(PersistenceBase):
 
     __tablename__ = "runtime_loop_iterations"
     frame_id: Mapped[str] = mapped_column(ForeignKey("runtime_loop_frames.frame_id", ondelete="CASCADE"), primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     iteration_no: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[str] = mapped_column(String(255), nullable=False)
     step_id: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -986,10 +993,66 @@ class RuntimeLoopIterationRow(PersistenceBase):
         CheckConstraint("iteration_no > 0 AND context_cursor >= 0", name="ck_runtime_loop_iteration_counters"),
         CheckConstraint("model_recovery_count >= 0 AND model_recovery_count <= 2", name="ck_runtime_loop_model_recovery_count"),
         CheckConstraint("state IN ('OPEN','ACCEPTED','OBSERVED','CLOSED')", name="ck_runtime_loop_iteration_state"),
-        CheckConstraint("decision_kind IS NULL OR decision_kind IN ('TOOL_CALL','FINAL','REFUSAL')", name="ck_runtime_loop_decision_kind"),
+        CheckConstraint("(schema_version = 1 AND (decision_kind IS NULL OR decision_kind IN ('TOOL_CALL','FINAL','REFUSAL'))) OR (schema_version = 2 AND (decision_kind IS NULL OR decision_kind IN ('TOOL_BATCH','HANDOFF','FINAL','REFUSAL')))", name="ck_runtime_loop_decision_kind"),
         CheckConstraint("(decision_id IS NULL AND decision_kind IS NULL AND decision_digest IS NULL AND accepted_model_attempt IS NULL AND accepted_model_attempt_number IS NULL AND accepted_generation IS NULL) OR (decision_id IS NOT NULL AND decision_kind IS NOT NULL AND decision_digest IS NOT NULL AND accepted_model_attempt > 0 AND accepted_model_attempt_number > 0 AND accepted_generation >= 0)", name="ck_runtime_loop_accepted_tuple"),
         CheckConstraint("(decision_kind = 'TOOL_CALL' AND action_id IS NOT NULL AND action_recipe IS NOT NULL) OR (decision_kind IS DISTINCT FROM 'TOOL_CALL' AND action_id IS NULL AND action_recipe IS NULL AND tool_invocation_id IS NULL)", name="ck_runtime_loop_action_tuple"),
-        CheckConstraint("(observation IS NULL AND observation_source_digest IS NULL AND observation_digest IS NULL AND observation_cursor IS NULL AND observed_generation IS NULL) OR (decision_kind = 'TOOL_CALL' AND tool_invocation_id IS NOT NULL AND observation IS NOT NULL AND observation_source_digest IS NOT NULL AND observation_digest IS NOT NULL AND observation_cursor > 0 AND observed_generation >= 0)", name="ck_runtime_loop_observation_tuple"),
+        CheckConstraint("(observation IS NULL AND observation_source_digest IS NULL AND observation_digest IS NULL AND observation_cursor IS NULL AND observed_generation IS NULL) OR ((decision_kind = 'TOOL_CALL' AND tool_invocation_id IS NOT NULL OR schema_version = 2 AND decision_kind IN ('TOOL_BATCH','HANDOFF')) AND observation IS NOT NULL AND observation_source_digest IS NOT NULL AND observation_digest IS NOT NULL AND observation_cursor > 0 AND observed_generation >= 0)", name="ck_runtime_loop_observation_tuple"),
+    )
+
+
+class RuntimeLoopActionRow(PersistenceBase):
+    """批次的不可变执行安排；结果状态仍由原 Tool Owner 拥有。"""
+    __tablename__ = "runtime_loop_actions"
+    action_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    frame_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    step_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    iteration_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    protocol_call_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    recipe: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    recipe_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    invocation_id: Mapped[str | None] = mapped_column(ForeignKey("runtime_tool_invocations.invocation_id"), unique=True)
+    result_projection: Mapped[dict | None] = mapped_column(JSONB)
+    result_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    source_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    not_executed: Mapped[dict | None] = mapped_column(JSONB)
+    __table_args__ = (
+        ForeignKeyConstraint(["frame_id", "iteration_no"], ["runtime_loop_iterations.frame_id", "runtime_loop_iterations.iteration_no"]),
+        ForeignKeyConstraint(["frame_id", "run_id", "step_id"], ["runtime_loop_frames.frame_id", "runtime_loop_frames.run_id", "runtime_loop_frames.step_id"]),
+        ForeignKeyConstraint(["run_id", "step_id", "invocation_id"], ["runtime_tool_invocations.run_id", "runtime_tool_invocations.step_id", "runtime_tool_invocations.invocation_id"]),
+        UniqueConstraint("frame_id", "iteration_no", "ordinal", name="uq_loop_action_ordinal"),
+        UniqueConstraint("frame_id", "protocol_call_id", name="uq_loop_action_call_id"),
+        CheckConstraint("ordinal BETWEEN 0 AND 3", name="ck_loop_action_ordinal"),
+        CheckConstraint("invocation_id IS NULL OR invocation_id = action_id", name="ck_loop_action_invocation"),
+        CheckConstraint("(result_projection IS NULL AND result_digest IS NULL AND source_digest IS NULL) OR (result_projection IS NOT NULL AND result_digest IS NOT NULL AND source_digest IS NOT NULL AND invocation_id IS NOT NULL AND not_executed IS NULL)", name="ck_loop_action_result"),
+    )
+
+
+class RuntimeAgentDelegationRow(PersistenceBase):
+    """同一 Run/Step 的有限子 Frame 与内部结果，不是 Run Terminal。"""
+    __tablename__ = "runtime_agent_delegations"
+    delegation_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    step_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_frame_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    parent_iteration: Mapped[int] = mapped_column(Integer, nullable=False)
+    child_frame_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    frozen: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    frozen_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    absolute_deadline: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False)
+    envelope_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    result_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    observed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    accepted_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    __table_args__ = (
+        UniqueConstraint("parent_frame_id", "parent_iteration", name="uq_delegation_parent_iteration"),
+        ForeignKeyConstraint(["parent_frame_id", "parent_iteration"], ["runtime_loop_iterations.frame_id", "runtime_loop_iterations.iteration_no"]),
+        ForeignKeyConstraint(["parent_frame_id", "run_id", "step_id"], ["runtime_loop_frames.frame_id", "runtime_loop_frames.run_id", "runtime_loop_frames.step_id"]),
+        ForeignKeyConstraint(["child_frame_id", "run_id", "step_id"], ["runtime_loop_frames.frame_id", "runtime_loop_frames.run_id", "runtime_loop_frames.step_id"], deferrable=True, initially="DEFERRED"),
+        CheckConstraint("child_frame_id <> parent_frame_id AND accepted_generation >= 0", name="ck_delegation_identity"),
+        CheckConstraint("(result IS NULL AND result_digest IS NULL AND NOT observed) OR (result IS NOT NULL AND result_digest IS NOT NULL)", name="ck_delegation_result"),
     )
 
 
@@ -1527,6 +1590,8 @@ CANONICAL_TABLES = (
     "runtime_memory_bindings",
     "runtime_loop_frames",
     "runtime_loop_iterations",
+    "runtime_loop_actions",
+    "runtime_agent_delegations",
     "runtime_snapshots",
     "event_consumption_checkpoint",
     "consumer_processed_events",

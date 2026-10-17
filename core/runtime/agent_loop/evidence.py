@@ -24,6 +24,8 @@ def evidence_digest(body: dict) -> str:
 def build_loop_evidence(image) -> dict:
     """仅投影 durable 事实；缺少证明时显式 PARTIAL，绝不推测成功。"""
     root = image.root
+    if root.execution_policy == "durable-agent-loop.v2":
+        raise ValueError("UNSUPPORTED_EXECUTION_POLICY")
     if root.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
         raise ValueError("LOOP_EVIDENCE_NOT_READY")
     if root.execution_policy != LOOP_POLICY or len(image.loop_frames) != 1:

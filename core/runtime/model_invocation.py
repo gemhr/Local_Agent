@@ -95,6 +95,7 @@ class ModelAdapterResponse:
     finish_reason: str | None = None
     refusal: str | None = None
     tool_call_count: int | None = None
+    native_tool_calls: tuple[NativeToolCall, ...] | None = None
 
 
 def restore_loop_model_response(row: object) -> ModelAdapterResponse:
@@ -107,6 +108,7 @@ def restore_loop_model_response(row: object) -> ModelAdapterResponse:
         output=payload["output"], native_tool_call=NativeToolCall(**native) if native is not None else None,
         assistant_message=payload.get("assistant_message"), finish_reason=payload.get("finish_reason"),
         refusal=payload.get("refusal"), tool_call_count=payload.get("tool_call_count"),
+        native_tool_calls=tuple(NativeToolCall(**c) for c in payload["native_tool_calls"]) if "native_tool_calls" in payload else None,
     )
 
 
@@ -167,7 +169,7 @@ class GeneratorModelAdapter:
         run_context: RunContext | None = None,
         on_delta: Callable[[], None] | None = None,
     ) -> ModelAdapterResponse:
-        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1" and "tools" not in (generation_options or {}):
+        if getattr(run_context, "execution_policy", None) in {"durable-agent-loop.v1", "durable-agent-loop.v2"} and "tools" not in (generation_options or {}):
             if not callable(getattr(self._engine, "agenerate", None)):
                 raise ModelAdapterInvocationError(
                     ModelFailureCategory.PROVIDER_CONFIGURATION_ERROR,
@@ -706,7 +708,7 @@ class ModelInvocationRouter:
         Event/Journal publication remains owned by the surrounding Runtime;
         this method only coordinates typed Provider deltas and attempt policy.
         """
-        if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1":
+        if getattr(run_context, "execution_policy", None) in {"durable-agent-loop.v1", "durable-agent-loop.v2"}:
             raise DurableModelLifecycleError("LOOP_REQUIRES_FENCED_STEP_INVOCATION")
         attempts: list[ModelInvocationAttempt] = []
         candidates = list(routing_decision.candidates)
@@ -735,6 +737,7 @@ class ModelInvocationRouter:
                 reservation = budget_ledger.reserve(
                     self._estimated_usage(candidate, token_estimate, max_tokens, retry_index),
                     reservation_type="model_invocation",
+                    delegation_id=getattr(run_context, "delegation_id", None),
                 )
                 adapter = adapter_resolver.resolve(candidate.profile_id)
                 if guard is not None:
@@ -1025,13 +1028,14 @@ class ModelInvocationRouter:
                     retry_index = operation.attempt_count
                 elif run_context.loop_context_snapshot_id:
                     image = async_submit(run_context.execution_repository.load(run_context.run_id))
-                    if any(m.purpose == "DECISION" and m.loop_iteration_no == run_context.loop_iteration_no for m in image.models):
+                    if any(m.purpose == "DECISION" and m.loop_frame_id == run_context.loop_frame_id and m.loop_iteration_no == run_context.loop_iteration_no for m in image.models):
                         retry_index = max(retry_index, 1)
             usage = self._estimated_usage(candidate, token_estimate, max_tokens, retry_index)
             try:
                 reservation = budget_ledger.reserve(
                     usage,
                     reservation_type="model_invocation",
+                    delegation_id=getattr(run_context, "delegation_id", None),
                 )
             except BudgetExceededError as exc:
                 permit.abandon()
@@ -1611,7 +1615,7 @@ class ModelInvocationRouter:
         run_context.raise_if_inactive()
         purpose = getattr(run_context, "loop_model_purpose", "DECISION")
         if routing_decision is None and purpose == "DECISION":
-            frame, iterations = async_submit(run_context.execution_repository.load_loop(run_context.durable_lease, step_id))
+            frame, iterations = async_submit(run_context.execution_repository.load_loop(run_context.durable_lease, step_id, frame_id))
             if (frame.frame_id != frame_id or frame.resume_generation != run_context.loop_resume_generation
                     or frame.current_iteration != run_context.loop_iteration_no
                     or not iterations or iterations[-1].state != "OPEN"):
@@ -1679,6 +1683,9 @@ class ModelInvocationRouter:
     def _durable_model_result(response: ModelAdapterResponse) -> dict[str, object]:
         """Return only JSON-safe data needed by a resumed step."""
         result: dict[str, object] = {"output": response.output}
+        if response.native_tool_calls is not None:
+            result["native_tool_calls"] = [{"provider_tool_call_id": c.provider_tool_call_id,
+                "tool_name": c.tool_name, "arguments_json": c.arguments_json} for c in response.native_tool_calls]
         native = response.native_tool_call
         if native is not None:
             result["native_tool_call"] = {

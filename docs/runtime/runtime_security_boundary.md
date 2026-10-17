@@ -334,3 +334,7 @@ Snapshot final messages、工具原始来源、压缩请求和摘要正文仅存
 ## Scoped Memory 当前边界
 
 见 [Scoped Memory Lifecycle v1](scoped_memory_lifecycle_v1.md)。Principal 是 tenant/user Authority；ADMIN 无他人私人使用权，SERVICE 仅受信 PROJECT 精确 grant。旧 agent-only/global Memory API 已关闭。Memory、历史与摘要都不能绕过 Scope/TTL/来源 SQL 或每次 dispatch guard。DELETE 只承诺 MEMORY_STORE_AND_FUTURE_USE；历史执行正文受限保留，备份/Provider 未证明擦除，ALL_COPIES 显式拒绝。Evidence 不带正文、用户标识或自由错误。
+
+## Batch / Handoff 使用边界
+
+v2 整批 typed 校验及持久接受先于 dispatch；control function 不是真实工具。Child 工具/模型为 Registry、父权限和根调用者的交集，只使用有界委派数据及根 MemoryGuard，不检索/写入自己的 Memory 或执行 Formation。所有新尝试、retry/fallback 继续检查原身份/撤销/取消；Child 结果保持 AGENT_DERIVED_DATA，不能提权为 system/developer 授权。旧 Evidence 对 v2 明确不支持，不过滤后伪造 COMPLETE。详见 [合同](agent_execution_v2.md)。

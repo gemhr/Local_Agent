@@ -80,3 +80,7 @@ NEED_DECISION 先重建/验证原提交源并检查 no-progress；已有 OPEN �
 恢复只读原 runtime_memory_bindings，验证当前 User/Scope/epoch/version/TTL；不得用当前用户猜旧 Seed 归属，不重新检索或修改 Seed/Snapshot。新 Model/Tool dispatch、Decision 接受和未提交 Final 被拒绝；原 Coordinator typed stop。STARTED/UNKNOWN 沿原 Owner 结算/reconcile/suspend，不重发。已有 Final receipt 保持 event/cursor；失效源 Exchange/Formation 跳过。pre-root Planner 缺可恢复正文时停止为 UNVERIFIABLE，不重新收费。旧无 Binding Run 先 drain，不能补造 STATELESS。灾备开放 Memory 前必须核验 operation/source suppression；未知删除水位的备份禁止直接启用 Memory。见 [合同](scoped_memory_lifecycle_v1.md)。
 
 已提交 FORMATION 模型响应、候选尚未保存的进程退出窗口：rehydrated Step completion 重新装配原 SemanticMemoryFormation，按相同 operation 复用完成响应，不派发新模型或重复结算。USER_ASSERTION 独立来源由代码保证提取请求仅含原始用户消息；操作准入仍核验完整 Run 依赖，不以新 UUID 绕过已撤销来源。
+
+## v2 Batch / Delegation 恢复
+
+复用原 RecoveryCoordinator/Run lease；一次接管在唯一 ROOT 与绑定 Child 树上使用同一新 generation，旧 Owner 拒绝。已接受 Batch 不重选，COMMITTED 工具不重做，UNKNOWN/审批等待仍沿原 lane，完整组确认后才继续模型。WAIT_CHILD 优先推进原 Child，已有 ChildResult 直接消费；根 OutputGate 保持原 event/cursor。DELEGATION_ALLOCATION 未使用部分保持预留，不能当成崩溃 I/O 消费；安全收口后释放。详见 [合同](agent_execution_v2.md)。

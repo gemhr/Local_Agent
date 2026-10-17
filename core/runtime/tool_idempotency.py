@@ -250,6 +250,8 @@ class DurableToolInvocationService:
         async with self.database.transaction() as session:
             await self._lock_current_lease(session, lease)
             if budget_operation is not None:
+                from core.persistence.repositories.agent_loop import admit_action
+                await admit_action(budget_repository, session, lease, budget_operation["frame_id"], invocation_id, budget_operation["resume_generation"])
                 await budget_repository.reserve_budget_operation_in_transaction(
                     session, lease, **budget_operation
                 )

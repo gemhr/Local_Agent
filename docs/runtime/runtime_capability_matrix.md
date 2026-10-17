@@ -137,3 +137,7 @@
 | Stage6-WP6 Backend Observability & Reliability | SUPPORTED | private Prometheus registry；HTTP/Redis/Job/Outbox/Kafka/Worker/DLQ metrics；real OTel SDK/optional OTLP；durable W3C Outbox/Kafka propagation；实现/测试见 `core/observability.py`、`core/health_checks.py`、Alembic `0006_wp6_observability` 与 `tests/test_stage6_wp6_*` | 无 dashboards/alerts/production Collector/durable backlog sampler |
 | Stage6-WP7 Docker Compose | SUPPORTED | one image/multiple roles、non-root、one-shot migration/topic init、named volumes、real Compose failure smoke | API 单副本；单节点依赖非 HA；无真实模型 E2E |
 | Stage6-WP8 Kubernetes | SUPPORTED | Kustomize、Jobs、probes、securityContext、Docker Desktop real smoke、Worker `1→2→1` | API `replicas=1` + `Recreate`；无 HPA/Ingress/PDB/NetworkPolicy/production HA |
+
+## Durable Agent Execution v2
+
+受信显式 v2：有限工具批次、同 Step 嵌套 Child、原预算额度转换、ContextSnapshotV2 及本地 agent-execution-evidence.v1 已接生产路径；实际验收范围与限制见 [合同](agent_execution_v2.md) 及当前 WP5 实施交接。旧 v1/Trace/Evidence/Go 协议不扩义，v2 不声明已进入 Go 质量 Gate。

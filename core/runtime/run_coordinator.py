@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from core.runtime.memory_scope import MemoryContextError
-from core.runtime.agent_loop.contracts import LOOP_POLICY, LoopStopped, LoopSuspended
+from core.runtime.agent_loop.contracts import LOOP_POLICY, LOOP_POLICY_V2, LoopPolicyV2, LoopStopped, LoopSuspended
 
 import asyncio
 import inspect
@@ -696,7 +696,7 @@ class RunCoordinator:
         plan = self.plan
         if plan is None:
             return False
-        return self._dynamic or self.run_context.execution_policy == LOOP_POLICY
+        return self._dynamic or self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2}
 
     def _typed_multi_step_enabled(self) -> bool:
         return (
@@ -734,7 +734,7 @@ class RunCoordinator:
             span_recorder=self.span_recorder,
             metrics_recorder=self._metrics_recorder,
             fault_controller=self._fault_controller,
-            loop_context=self.run_context if self.run_context.execution_policy == LOOP_POLICY else None,
+            loop_context=self.run_context if self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2} else None,
             memory_context=self.run_context,
         )
         memory_writer: RunFinalMemoryWriter | None = None
@@ -759,7 +759,7 @@ class RunCoordinator:
                 span_recorder=self.span_recorder,
                 metrics_recorder=self._metrics_recorder,
                 statement_timeout_ms=statement_timeout_ms,
-                idempotent_replay=self.run_context.execution_policy == LOOP_POLICY,
+                idempotent_replay=self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2},
             )
         # WP2: run-scoped post-delivery Semantic Formation component，与 final
         # writer 并列注入；持久化 Owner 来自 application-scoped PG stores。
@@ -1309,7 +1309,7 @@ class RunCoordinator:
                 key: dict(value) for key, value in self.run_context.data.performer_binding_identities.items()
             },
         }
-        if self.run_context.execution_policy == LOOP_POLICY:
+        if self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2}:
             from core.runtime.agent_loop.context import prepare_loop_seed
             router = self._multi_agent_driver._router
             step = self.plan.steps[0]
@@ -1342,7 +1342,7 @@ class RunCoordinator:
 
     async def _record_loop_stop(self, code: str, *, details=None) -> None:
         """只记录 Loop 停止原因；终态仍由下方原 Coordinator 提交。"""
-        if self.run_context.execution_policy != LOOP_POLICY or not self._durable_initialized:
+        if self.run_context.execution_policy not in {LOOP_POLICY, LOOP_POLICY_V2} or not self._durable_initialized:
             return
         frame, _ = await self._durable_repository.load_loop(self._durable_approval_lease, self.plan.steps[0].step_id)
         if frame.phase == "STOPPED" or frame.final_delivery_receipt is not None:
@@ -1919,7 +1919,7 @@ class RunCoordinator:
             finally:
                 if self._executor_task.done():
                     self._executor_task = None
-            if self.run_context.execution_policy == LOOP_POLICY and report.was_cancelled:
+            if self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2} and report.was_cancelled:
                 # 事务内看见的 durable cancel 可早于续租线程的下一次轮询。
                 intent = await self._durable_repository.run_control.cancel_intent(self.run_context.run_id)
                 if intent is not None:

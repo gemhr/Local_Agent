@@ -15,6 +15,7 @@ from typing import Callable
 from uuid import uuid4
 
 from core.runtime.memory_scope import MemoryContextError
+from core.runtime.agent_loop.contracts import LoopSuspended
 from core.runtime.budget import (
     BudgetExceededError,
     BudgetLedger,
@@ -455,7 +456,7 @@ class ToolAttemptExecutor:
                 retries=1 if retry_index > 0 else 0,
             )
             reservation = budget_ledger.reserve(
-                usage, reservation_type="tool_attempt", step_id=step_id
+                usage, reservation_type="tool_attempt", step_id=step_id, delegation_id=getattr(run_context, "delegation_id", None)
             )
             context.raise_if_cancelled()
             if event_emitter is not None:
@@ -894,7 +895,7 @@ class ToolAttemptExecutor:
                     fault_controller=fault_controller,
                 )
             raise ToolAttemptFailed(error) from None
-        except MemoryContextError:
+        except (MemoryContextError, LoopSuspended):
             if durable_started:
                 await mark_durable_unknown("MEMORY_CONTEXT_REVOKED")
                 budget_ledger.commit(reservation, usage, usage_source=UsageSource.ESTIMATED)
@@ -1633,7 +1634,7 @@ class ToolExecutionService:
                 raise
 
         def category_of(exc: BaseException) -> ModelFailureCategory:
-            if isinstance(exc, MemoryContextError):
+            if isinstance(exc, (MemoryContextError, LoopSuspended)):
                 raise exc  # 使用资格拒绝不进入 Tool retry 分类，也不丢失 UNKNOWN 原事实。
             if isinstance(exc, ToolAttemptFailed):
                 return _model_category(exc.error.category)

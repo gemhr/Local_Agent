@@ -655,13 +655,18 @@ class MemoryLifecycleRepository:
             return receipt
 
     async def evidence(self, access, run_id):
+        from core.persistence.models import RuntimeRunExecutionRow
+
         from core.runtime.memory_evidence import build_memory_evidence
         from core.persistence.models import RuntimeContextSnapshotRow
         async with self.database.transaction() as session:
             await self._actor(session, access)
+            root = await session.get(RuntimeRunExecutionRow, run_id)
             binding = await session.get(RuntimeMemoryBindingRow, run_id)
             if binding is None or binding.access != access.to_dict():
                 raise MemoryContextError("MEMORY_RECORD_DENIED")
+            if root is not None and root.execution_policy == "durable-agent-loop.v2":
+                raise ValueError("UNSUPPORTED_EXECUTION_POLICY")
             ids = sorted(set([s["scope_id"] for s in binding.scopes] + [d["scope_id"] for d in binding.manifest]))
             await self._locks(session, ids)
             # 已撤销的原 Owner 可查询自己的审计证据，但不能重新获得使用资格。

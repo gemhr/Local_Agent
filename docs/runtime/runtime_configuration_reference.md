@@ -379,3 +379,7 @@ Loop 模型必须提供已冻结的 `cost_profile` 和明确完成状态；同�
 ## Scoped Memory 准入与 TTL
 
 Memory 不新增环境开关：persist=True 需要独立 typed MemoryAccessContext；persist=False 显式 STATELESS。HTTP session_id 缺省为各用户自己的 default，不共享 tenant/user。SESSION 默认24h、USER 默认30天、INFERENCE 30分钟；来源 TTL 也约束派生使用。PROJECT 必须由受信 Composition 调用 configure_project 持久配置 grant/TTL，默认关闭共享。scoped 路径禁用滚动 summary，上述历史 summary 参数不授权使用全局摘要。旧全局 Memory UI/API 不再支持。详见 [合同](scoped_memory_lifecycle_v1.md)。
+
+## Durable Agent Execution v2
+
+受信 business_options.execution_policy=`durable-agent-loop.v2`；LoopPolicyV2 固定 Batch≤4/并发≤2/写≤1、Child 深度1/累计≤2/活动≤1。缺省 total_tokens/cost_units 各65536；可配置更严有限额度。ContextPolicyV2 默认开启，需完整请求可靠计量；旧 v1 的 Context 配置不自动升级。delegation_allowlist 来自受信 AgentDefinition，缺省为空，Child 目标必须显式启用 v2。Migration head 0034_agent_batches_delegations，部署者迁移；本实现不自动迁移业务库。详见 [合同](agent_execution_v2.md)。

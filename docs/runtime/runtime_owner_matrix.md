@@ -188,3 +188,7 @@ test-only AST Gate 只是全production Python surface的owner/sink oracle，不�
 - DurableExecutionRepository：持有 Snapshot/Operation、当前版本引用、Iteration 绑定及 CAS/Fencing 的唯一接受权限；模型开始/完成仍复用原预算事务。
 - ModelInvocationRouter：实际请求 assessment、purpose 分组、有限 Retry/Fallback、计费及已完成响应恢复。
 - 原 Coordinator：接收 typed stop 并提交原 Run terminal；`context_evidence.py` 只投影事实，seal 不改变执行结果。
+
+### Durable Batch / Handoff
+
+同 Step 内 v2 Frame/Action/Delegation 的接受仍归 DurableExecutionRepository；批次与 Child Driver 仅推进。ToolExecutionService 继续拥有所有工具状态与 I/O，BudgetLedger/root budget_operations 继续拥有额度及结算；仅 ROOT 调用原 OutputGate。内部 ChildResult 不是 Run terminal。详见 [v2 合同](agent_execution_v2.md)。

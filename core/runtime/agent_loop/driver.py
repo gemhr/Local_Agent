@@ -24,6 +24,9 @@ class AgentLoopDriver:
         self._coordinator = coordinator
 
     def execute(self, claim, run_context):
+        if run_context.execution_policy == "durable-agent-loop.v2":
+            from .driver_v2 import AgentLoopDriverV2
+            return AgentLoopDriverV2(self._router, self._coordinator).execute(claim, run_context)
         repo = run_context.execution_repository
         lease = run_context.durable_lease
         emitter = self._coordinator.event_emitter.for_step(claim.step_id)
