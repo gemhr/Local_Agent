@@ -14,6 +14,8 @@ Manifest pin 包括实际代码摘要、公开 Fixture 版本、Agent 定义摘�
 
 Migration `0035_agent_quality_receipts` 新增 `runtime_agent_evaluation_receipts`。远端 Run、Attempt、Request 唯一，完整关联和 query digest 构成指纹。仅首次 INSERT 赢家调用已有 Application；冲突 409；未完成重复请求 202；已封存响应逐字复用。准入后失败或进程退出不再次授予 Execute。
 
+Receipt 事务通过 ChatService/Factory 共用的 RuntimeAdmissionGate 获取短准入 lease，并在事务返回后释放；模型执行和 HTTP 长等待不计为 pending construction。生产 finally 首个 await 前关门；DRAINING 后 POST（含重复 POST）返回 `503 RUNTIME_SHUTTING_DOWN`。GET 保持当前授权下的只读行为；关门前已获准入的在途窗口仍由原关闭流程等待，不将未知执行解释为可重试。
+
 `GET /api/runtime/runs/{run_id}/agent-quality-evidence/v1` 只查询/封存。它不创建 Run、不 claim Lease、不调用恢复、不升级 Go 已结束 UNKNOWN。封存依次锁 control/root/frame/iteration/Memory Scope，最后锁 Receipt；事务内没有 Provider I/O。数据库禁止修改 Receipt 身份和已封存响应。
 
 ## Evidence 边界

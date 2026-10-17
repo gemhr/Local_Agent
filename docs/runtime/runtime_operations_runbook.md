@@ -64,7 +64,9 @@ GET /readyz    # 200 表示可以安全尝试接受新的 Run
 
 ## Shutdown Runbook
 
-真实顺序：Lifecycle→`SHUTTING_DOWN`；Admission→`DRAINING`；等待 admission lease；请求取消 active Run；bounded run drain；force abort remaining；关闭 worker admission；worker drain；Observability flush；Trace flush；组件 close（含 Snapshot/Journal）；Model safety gate；remaining close；Admission/Lifecycle→`CLOSED`。
+生产 `lifespan` 进入 finally 后，在任何 await 清理前同步发布 Lifecycle→`SHUTTING_DOWN`、Admission→`DRAINING` 并停止 Recovery 发现；随后清理附属服务、由原 RecoveryCoordinator 排空，再进入原 GracefulShutdownCoordinator：等待 admission lease；请求取消 active Run；bounded run drain；force abort remaining；关闭 worker admission；worker drain；Observability flush；Trace flush；组件 close（含 Snapshot/Journal）；Model safety gate；remaining close；Admission/Lifecycle→`CLOSED`。重复关闭沿原幂等报告，不创建第二个关闭 Owner。
+
+质量 Execute Receipt 使用同一应用准入门的短事务窗口。DRAINING 后新 POST 返回 `503 RUNTIME_SHUTTING_DOWN`，不插入 Receipt；GET 继续按原对象授权只读查询/封存，不创建 Run 或恢复任务。关门前已准入但尚无 T0 的 Receipt 仍可能 UNKNOWN，不由后台补派。
 
 判断字段必须同时查看：`orchestration_completed`、`fully_closed`、`has_failures`、`has_deferred_resources`、`active_worker_count`、`detached_worker_count`、`unknown_worker_count`。Detached worker 不可清记录；Model deferred 时不能强关共享 client；同步 close 为 UNKNOWN 时不能自动 double close。正常完成后的再次 shutdown 返回同一缓存报告；中途取消后的安全重入由 `test_shutdown_cancellation_reentry.py` 锁定，不能假定所有组件重新关闭。
 

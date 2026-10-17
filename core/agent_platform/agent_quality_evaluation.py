@@ -11,6 +11,7 @@ from core.persistence.repositories.agent_quality import AgentQualityReceiptRepos
 from core.runtime.agent_loop.contracts import LoopSuspended
 from core.runtime.agent_loop.quality_contract import QualityEvaluationRequest, PROTOCOL, canonical_bytes, catalog_digest
 from core.runtime.memory_scope import MemoryAccessContext
+from core.runtime.admission import RuntimeAdmissionRejectedError
 
 
 def register_agent_quality_evaluation(app, *, settings, require_service, bind_run, authorize_run, final_answer_capture):
@@ -78,8 +79,12 @@ def register_agent_quality_evaluation(app, *, settings, require_service, bind_ru
             raise HTTPException(422, "QUALITY_CONFIGURATION_PIN_INVALID") from None
         receipts, execution = repository(request)
         try:
-            winner, receipt = await receipts.admit(correlation=payload.correlation(), principal=principal,
-                manifest=manifest, profile=profile)
+            # 只覆盖 Receipt 事务；长执行由原 Runtime construction/RunRegistry 管理。
+            with service._chat_service.admission_gate.admission():
+                winner, receipt = await receipts.admit(correlation=payload.correlation(), principal=principal,
+                    manifest=manifest, profile=profile)
+        except RuntimeAdmissionRejectedError:
+            raise HTTPException(503, "RUNTIME_SHUTTING_DOWN") from None
         except ValueError:
             raise HTTPException(409, "QUALITY_REQUEST_CONFLICT") from None
         if not winner:

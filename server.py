@@ -4,6 +4,7 @@
 
 from contextlib import asynccontextmanager
 import asyncio
+import os
 import dataclasses
 import inspect
 import json
@@ -1514,6 +1515,9 @@ async def lifespan(app: FastAPI):
     async def reconcile_tool_candidate(candidate):
         """生产对账 lane：claim Run 后仅调用 adapter 的只读 provider lookup。"""
         lease = await durable_run_control.claim(candidate.run_id, app.state.application_metadata.instance_id)
+        if recovery_coordinator.stopping:
+            await durable_run_control.release(lease)
+            return None
         registration = router.tool_registry.resolve(candidate.tool_name)
         adapter = registration.adapter if registration is not None else None
         if adapter is None:
@@ -1634,6 +1638,10 @@ async def lifespan(app: FastAPI):
             )
         yield
     finally:
+        runtime_services.begin_shutdown()
+        runtime_services.admission_gate.close_admission()
+        recovery_coordinator.request_stop()
+        app.state.runtime_lifecycle_state = RuntimeLifecycleState.SHUTTING_DOWN
         if stage13_delivery_client is not None:
             await stage13_delivery_client.aclose()
             app.state.stage13_delivery_service = None

@@ -55,6 +55,9 @@ class PublicProvider:
         return True
 
     def invoke_request(self, messages, *, max_tokens, generation_options, run_context):
+        if hasattr(self, "audit_directory"):
+            with (self.audit_directory / (self.variant + "-models.jsonl")).open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"run_id": run_context.run_id, "purpose": run_context.loop_model_purpose}) + "\n")
         self.requests.append((run_context.run_id, run_context.loop_model_purpose))
         purpose = run_context.loop_model_purpose
         iteration = run_context.loop_iteration_no
@@ -95,7 +98,7 @@ class PublicProvider:
         return replace(response, actual_usage=BudgetUsage(input_tokens=10, output_tokens=2, total_tokens=12))
 
 
-async def serve(directory, project):
+async def serve(directory, project, drain=False):
     from fastapi import FastAPI
     from fastapi.responses import JSONResponse
     import uvicorn
@@ -139,9 +142,14 @@ async def serve(directory, project):
     app, configs = FastAPI(), {}
     sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]
     memory = PostgresMemoryManagerBridge(PostgresMemoryManager(database), SyncPersistenceBridge(asyncio.get_running_loop()))
-    for variant in ("baseline", "candidate", "regression", "unknown", "invalid"):
+    for variant in (("baseline", "drain") if drain else ("baseline", "candidate", "regression", "unknown", "invalid")):
         provider = PublicProvider(variant)
-        factory, repository, _, _ = await assembly(database, directory, [], tools=[PublicTool(n) for n in ("loop_a", "loop_b")],
+        tools = [PublicTool(n) for n in ("loop_a", "loop_b")]
+        if drain:
+            from tests._agent_loop_crash_worker import BusinessReceiptTool
+            tools = [BusinessReceiptTool(directory, "normal"), PublicTool("loop_b")]
+            provider.audit_directory = directory
+        factory, repository, _, _ = await assembly(database, directory, [], tools=tools,
             owner="quality-"+variant, memory_manager=memory, context_model=provider,
             context_policy={"version": 2, "trigger_percent": 45, "target_percent": 35}, context_window=40000, delegation_target="reader")
         router = factory._router
@@ -169,7 +177,22 @@ async def serve(directory, project):
                 if request.headers.get("Authorization") != "Bearer public-quality-test-token":
                     return JSONResponse(status_code=401, content={"code": "AUTH_INVALID_TOKEN"})
                 request.state.principal = principal
+                if drain and request.method == "POST":
+                    with (directory / (variant + "-posts.jsonl")).open("a", encoding="utf-8") as stream:
+                        stream.write("{}\n")
                 response = await call_next(request)
+                if drain and request.method == "POST" and variant == "drain":
+                    async with database.session() as session:
+                        receipt = (await session.execute(select(RuntimeAgentEvaluationReceiptRow).where(
+                            RuntimeAgentEvaluationReceiptRow.execution_manifest["agents"]["core_router"]["agent_version"].astext == "quality-drain"))).scalar_one()
+                    assert receipt.sealed_response is not None
+                    import sqlite3
+                    with sqlite3.connect(str(directory / "business.sqlite")) as business:
+                        business_receipts = business.execute("SELECT COUNT(*) FROM receipts").fetchone()[0]
+                    (directory / "response-held.json").write_text(json.dumps({"run_id": receipt.remote_run_id,
+                        "sealed_digest": receipt.sealed_digest, "business_receipts": business_receipts}), encoding="utf-8")
+                    while not (directory / "release-response").exists():
+                        await asyncio.sleep(0.01)
                 if request.method == "POST" and variant == "unknown":
                     # 模拟响应丢失：真实 Producer 已完成并封存，但消费者只看到202。
                     async with database.session() as session:
@@ -212,5 +235,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--drain", action="store_true")
     args = parser.parse_args()
-    asyncio.run(serve(args.directory, args.project_id))
+    asyncio.run(serve(args.directory, args.project_id, args.drain))

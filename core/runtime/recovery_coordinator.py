@@ -78,15 +78,21 @@ class RecoveryCoordinator:
         self._reconciliation_handler = handler
 
     async def scan_once(self) -> int:
+        if self.stopping:
+            return 0
         candidates = await self.repository.stale_run_ids(limit=self.config.batch_size)
         started = 0
         for run_id in candidates:
+            if self.stopping:
+                break
             try:
                 lease = await self.run_control.claim(run_id, self.instance_id)
             except RunControlConflict:
                 # Claim races are expected and are not recovery failures.
                 continue
             except Exception as exc:
+                if self.stopping:
+                    break
                 await self.repository.record_recovery_failure(
                     run_id, type(exc).__name__.upper(),
                     max_attempts=self.config.max_attempts,
@@ -94,12 +100,18 @@ class RecoveryCoordinator:
                     max_seconds=self.config.max_backoff_seconds,
                 )
                 continue
+            if self.stopping:
+                await self.run_control.release(lease)
+                break
             try:
                 # Claim is the authority boundary.  Classify abandoned work
                 # under the newly acquired fence before Factory hydration;
                 # a pre-claim scan image is only a discovery hint.
                 image = await self.repository.prepare_recovery(lease)
             except Exception as exc:
+                if self.stopping:
+                    await self.run_control.release(lease)
+                    break
                 await self.repository.record_recovery_failure(
                     run_id, type(exc).__name__.upper(),
                     max_attempts=self.config.max_attempts,
@@ -107,6 +119,9 @@ class RecoveryCoordinator:
                     max_seconds=self.config.max_backoff_seconds,
                 )
                 continue
+            if self.stopping:
+                await self.run_control.release(lease)
+                break
             if image is None:
                 continue
             task = asyncio.create_task(self._supervise(run_id, lease, image))
@@ -118,7 +133,7 @@ class RecoveryCoordinator:
     async def reconciliation_scan_once(self) -> int:
         """有界发现与调度；不会在 coordinator 内直接修改 Tool 状态。"""
         handler = self._reconciliation_handler
-        if handler is None:
+        if handler is None or self.stopping:
             return 0
         candidates = await self.repository.reconciliation_candidates(limit=self.config.batch_size)
         self._metric(
@@ -127,6 +142,8 @@ class RecoveryCoordinator:
         slots = max(0, self.config.reconciliation_max_concurrency - len(self._reconciliation_tasks))
         scheduled = 0
         for candidate in candidates[:slots]:
+            if self.stopping:
+                break
             task = asyncio.create_task(self._supervise_reconciliation(candidate), name="runtime-tool-reconciliation")
             self._reconciliation_tasks.add(task)
             task.add_done_callback(self._reconciliation_tasks.discard)
@@ -135,7 +152,7 @@ class RecoveryCoordinator:
 
     async def _supervise_reconciliation(self, candidate: object) -> None:
         handler = self._reconciliation_handler
-        if handler is None:
+        if handler is None or self.stopping:
             return
         started = monotonic()
         try:
@@ -222,6 +239,9 @@ class RecoveryCoordinator:
                 pass
 
     async def _supervise(self, run_id: str, lease: RunLease, image: object) -> None:
+        if self.stopping:
+            await self.run_control.release(lease)
+            return
         try:
             await self.rehydrate_and_execute(run_id, lease, image)
         except asyncio.CancelledError:
@@ -229,6 +249,9 @@ class RecoveryCoordinator:
         except LoopSuspended:
             return
         except Exception as exc:
+            if self.stopping:
+                # 关门/排空不是业务失败；已开始的事实和 lease 由原 Owner 保留。
+                return
             await self.repository.record_recovery_failure(
                 run_id, type(exc).__name__.upper(),
                 max_attempts=self.config.max_attempts,
@@ -260,8 +283,16 @@ class RecoveryCoordinator:
             except asyncio.TimeoutError:
                 pass
 
-    async def stop(self) -> None:
+    @property
+    def stopping(self) -> bool:
+        return self._stop.is_set()
+
+    def request_stop(self) -> None:
+        """同步停止发现；排空仍由原 stop() 拥有。"""
         self._stop.set()
+
+    async def stop(self) -> None:
+        self.request_stop()
         scan_task = self._task
         self._task = None
         if scan_task is not None:
