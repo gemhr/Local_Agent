@@ -1148,23 +1148,11 @@ class AgentRouter:
         section 注入；模型可见内容只有 ``canonical_text``。memory_id /
         logical_key / payload / ranking score 不进入模型可见文本。
         """
+        # Scoped 路径禁用无来源闭包的全局摘要和历史。
         summary_text = ""
-        if (
-            history_policy is HistoryPolicy.AGENT_SCOPE
-            and history_scope == self.DIRECT_MEMORY_SCOPE
-        ):
-            summary_text = self._update_summary_if_needed(agent_id)
-
-        history = ()
-        history_groups: tuple[ConversationTurnGroup, ...] = ()
-        if history_policy is HistoryPolicy.AGENT_SCOPE:
-            history = self._get_recent_history(
-                agent_id=agent_id,
-                limit=self.history_window_size,
-                memory_scope=history_scope,
-            )
-            history = self._dedupe_current_user_message(history, user_query)
-            history_groups = self._group_history(history)
+        history = tuple(getattr(memory_context_bundle, "scoped_history", ())) if history_policy is HistoryPolicy.AGENT_SCOPE else ()
+        history = self._dedupe_current_user_message(history, user_query)
+        history_groups = self._group_history(history)
 
         system_prompt = self._build_system_prompt(
             agent_id, allow_delegation=allow_delegation,
@@ -2593,6 +2581,10 @@ class AgentRouter:
         """Model Adapter 的唯一同步入口；复用既有 Budget/Circuit/Retry/Event。"""
         if run_context.budget_ledger is None:
             raise RuntimeError("统一 Model Invocation 需要 BudgetLedger")
+        guard = getattr(run_context, "memory_guard", None)
+        if guard is not None:
+            owner = event_emitter.parent if isinstance(event_emitter, StepEventEmitter) else event_emitter
+            guard.check(owner.submit_coroutine_from_worker if owner is not None else None)
         if getattr(run_context, "loop_request_assessments", None) is not None:
             from core.runtime.agent_loop.compaction import invoke_context_model
             return invoke_context_model(self, agent_id, messages, run_context, capability_requirements,

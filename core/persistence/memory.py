@@ -105,6 +105,8 @@ class PostgresMemoryManager:
         if not isinstance(database, Database):
             raise TypeError("database 必须是 Database")
         self.database = database
+        from core.persistence.repositories.memory_lifecycle import MemoryLifecycleRepository
+        self.lifecycle = MemoryLifecycleRepository(database)
 
     async def add_message(
         self,
@@ -114,22 +116,8 @@ class PostgresMemoryManager:
         metadata: dict[str, Any] | None = None,
         memory_scope: str = "direct",
     ) -> int:
-        try:
-            async with self.database.transaction() as session:
-                row = MessageRow(
-                    agent_id=agent_id,
-                    role=role,
-                    content=content,
-                    metadata_json=metadata,
-                    memory_scope=memory_scope,
-                )
-                session.add(row)
-                await session.flush()
-                return int(row.id)
-        except PersistenceError:
-            raise
-        except SQLAlchemyError as exc:
-            raise to_persistence_error(exc, operation="memory.add_message") from None
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     @staticmethod
     def _validate_exchange(
@@ -159,65 +147,8 @@ class PostgresMemoryManager:
         statement_timeout_ms: int | None = None,
         idempotent_replay: bool = False,
     ) -> dict[str, Any]:
-        final_exchange_id = self._validate_exchange(
-            agent_id, memory_scope, user_message, assistant_message, run_id, exchange_id
-        )
-        try:
-            async with self.database.transaction(statement_timeout_ms=statement_timeout_ms) as session:
-                exchange = MessageExchangeRow(
-                    exchange_id=final_exchange_id,
-                    run_id=run_id,
-                    agent_id=agent_id,
-                    memory_scope=memory_scope,
-                    state="PENDING",
-                )
-                session.add(exchange)
-                await session.flush()
-                user = MessageRow(
-                    agent_id=agent_id, role="user", content=user_message,
-                    memory_scope=memory_scope, exchange_id=final_exchange_id,
-                    run_id=run_id, sequence=0,
-                )
-                assistant = MessageRow(
-                    agent_id=agent_id, role="assistant", content=assistant_message,
-                    memory_scope=memory_scope, exchange_id=final_exchange_id,
-                    run_id=run_id, sequence=1,
-                )
-                session.add_all((user, assistant))
-                await session.flush()
-                exchange.state = "COMMITTED"
-                exchange.user_message_id = user.id
-                exchange.assistant_message_id = assistant.id
-                await session.flush()
-                return {
-                    "exchange_id": final_exchange_id,
-                    "user_message_id": int(user.id),
-                    "assistant_message_id": int(assistant.id),
-                }
-        except (IntegrityError, PersistenceError) as exc:
-            if isinstance(exc, PersistenceError) and (not idempotent_replay or exc.error_code is not DatabaseErrorCode.DATABASE_INTEGRITY_VIOLATION):
-                raise
-            if idempotent_replay:
-                async with self.database.session() as session:
-                    exchange = await session.get(MessageExchangeRow, final_exchange_id)
-                    if (exchange is not None and exchange.state == "COMMITTED"
-                            and (exchange.run_id, exchange.agent_id, exchange.memory_scope) == (run_id, agent_id, memory_scope)):
-                        user = await session.get(MessageRow, exchange.user_message_id)
-                        assistant = await session.get(MessageRow, exchange.assistant_message_id)
-                        if (user is not None and assistant is not None
-                                and (user.role, user.content, assistant.role, assistant.content) == ("user", user_message, "assistant", assistant_message)):
-                            return {"exchange_id": final_exchange_id, "user_message_id": int(user.id), "assistant_message_id": int(assistant.id)}
-            raise MemoryExchangeError(
-                MemoryExchangeErrorCode.DUPLICATE_EXCHANGE,
-                "该 Run 的 exchange 已提交，拒绝重复写入",
-            ) from None
-        except MemoryExchangeError:
-            raise
-        except SQLAlchemyError as exc:
-            raise MemoryExchangeError(
-                MemoryExchangeErrorCode.EXCHANGE_FAILED,
-                "Memory exchange 写入失败",
-            ) from exc
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     @staticmethod
     def _message_dict(row: MessageRow) -> dict[str, Any]:
@@ -254,110 +185,46 @@ class PostgresMemoryManager:
             raise to_persistence_error(exc, operation="memory.read_messages") from None
 
     async def count_messages(self, agent_id: str, memory_scope: str | None = "direct") -> int:
-        conditions = [
-            MessageRow.agent_id == agent_id,
-            or_(
-                MessageRow.exchange_id.is_(None),
-                MessageExchangeRow.state == "COMMITTED",
-            ),
-        ]
-        if memory_scope is not None:
-            conditions.append(MessageRow.memory_scope == memory_scope)
-        async with self.database.session() as session:
-            result = await session.execute(
-                select(func.count())
-                .select_from(MessageRow)
-                .outerjoin(
-                    MessageExchangeRow,
-                    MessageExchangeRow.exchange_id == MessageRow.exchange_id,
-                )
-                .where(and_(*conditions))
-            )
-            return int(result.scalar_one())
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def get_chat_history(self, agent_id: str, limit: int = 10, offset: int = 0,
                                ascending: bool = False, memory_scope: str | None = "direct") -> list[dict[str, Any]]:
-        return await self._messages(agent_id=agent_id, memory_scope=memory_scope, limit=limit, offset=offset, ascending=ascending)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def get_messages_for_summary(self, agent_id: str, after_id: int, before_id: int,
                                        memory_scope: str | None = "direct") -> list[dict[str, Any]]:
-        if before_id <= after_id:
-            return []
-        return await self._messages(agent_id=agent_id, memory_scope=memory_scope, limit=500000,
-                                    offset=0, ascending=True, after_id=after_id, before_id=before_id)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def get_all_messages(self, limit: int = 500, memory_scope: str | None = None) -> list[dict[str, Any]]:
-        return await self._messages(memory_scope=memory_scope, limit=limit, offset=0, ascending=False)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def get_summary_record(self, agent_id: str) -> dict[str, Any]:
-        async with self.database.session() as session:
-            row = (await session.execute(select(ConversationSummaryRow).where(ConversationSummaryRow.agent_id == agent_id))).scalar_one_or_none()
-            if row is None:
-                return {"agent_id": agent_id, "summary": "", "last_message_id": 0, "updated_at": ""}
-            return {"agent_id": row.agent_id, "summary": row.summary, "last_message_id": int(row.last_message_id), "updated_at": _iso(row.updated_at)}
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def get_all_summaries(self) -> list[dict[str, Any]]:
-        async with self.database.session() as session:
-            rows = (await session.execute(select(ConversationSummaryRow).order_by(ConversationSummaryRow.updated_at.desc(), ConversationSummaryRow.agent_id.asc()))).scalars().all()
-            return [{"agent_id": r.agent_id, "summary": r.summary, "last_message_id": int(r.last_message_id), "updated_at": _iso(r.updated_at)} for r in rows]
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def save_summary(self, agent_id: str, summary: str, last_message_id: int) -> None:
-        async with self.database.transaction() as session:
-            row = (await session.execute(select(ConversationSummaryRow).where(ConversationSummaryRow.agent_id == agent_id).with_for_update())).scalar_one_or_none()
-            if row is None:
-                session.add(ConversationSummaryRow(agent_id=agent_id, summary=summary, last_message_id=last_message_id))
-            else:
-                row.summary = summary
-                row.last_message_id = last_message_id
-            await session.flush()
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def search_messages(self, keyword: str, limit: int = 50, memory_scope: str | None = None) -> list[dict[str, Any]]:
-        query = " ".join(keyword.split()).strip()
-        if not query:
-            return []
-        params: dict[str, object] = {"query": query, "limit": limit}
-        if memory_scope is None:
-            statement = text(
-                "SELECT m.id, m.agent_id, m.memory_scope, m.role, m.content, m.timestamp, m.metadata "
-                "FROM messages m LEFT JOIN message_exchanges e ON e.exchange_id = m.exchange_id "
-                "WHERE m.search_vector @@ websearch_to_tsquery('simple', :query) "
-                "AND (m.exchange_id IS NULL OR e.state = 'COMMITTED') "
-                "ORDER BY ts_rank(m.search_vector, websearch_to_tsquery('simple', :query)) DESC, "
-                "m.timestamp DESC, m.id DESC LIMIT :limit"
-            )
-        else:
-            params["memory_scope"] = memory_scope
-            statement = text(
-                "SELECT m.id, m.agent_id, m.memory_scope, m.role, m.content, m.timestamp, m.metadata "
-                "FROM messages m LEFT JOIN message_exchanges e ON e.exchange_id = m.exchange_id "
-                "WHERE m.search_vector @@ websearch_to_tsquery('simple', :query) "
-                "AND (m.exchange_id IS NULL OR e.state = 'COMMITTED') "
-                "AND m.memory_scope = :memory_scope "
-                "ORDER BY ts_rank(m.search_vector, websearch_to_tsquery('simple', :query)) DESC, "
-                "m.timestamp DESC, m.id DESC LIMIT :limit"
-            )
-        async with self.database.session() as session:
-            result = await session.execute(statement, params)
-            return [{"id": int(r.id), "agent_id": r.agent_id, "memory_scope": r.memory_scope,
-                     "role": r.role, "content": r.content, "timestamp": _iso(r.timestamp),
-                     "metadata": r.metadata or {}} for r in result]
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def delete_messages(self, message_ids: list[int]) -> dict[str, list[str]]:
-        if not message_ids:
-            return {"affected_agent_ids": [], "refresh_agent_ids": []}
-        async with self.database.transaction() as session:
-            rows = (await session.execute(select(MessageRow).where(MessageRow.id.in_(message_ids)))).scalars().all()
-            affected = sorted({r.agent_id for r in rows})
-            refresh = sorted({r.agent_id for r in rows if r.memory_scope == "direct"})
-            await session.execute(delete(MessageRow).where(MessageRow.id.in_(message_ids)))
-            if refresh:
-                await session.execute(delete(ConversationSummaryRow).where(ConversationSummaryRow.agent_id.in_(refresh)))
-            return {"affected_agent_ids": affected, "refresh_agent_ids": refresh}
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def clear_all_memory(self) -> None:
-        async with self.database.transaction() as session:
-            await session.execute(delete(MessageRow))
-            await session.execute(delete(ConversationSummaryRow))
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
 
 class PostgresMemoryManagerBridge:
@@ -395,6 +262,8 @@ class PostgresAdvancedMemoryStore:
         if not isinstance(database, Database):
             raise TypeError("database 必须是 Database")
         self.database = database
+        from core.persistence.repositories.memory_lifecycle import MemoryLifecycleRepository
+        self.lifecycle = MemoryLifecycleRepository(database)
 
     @staticmethod
     def _record(row: LongTermMemoryRow) -> SemanticMemoryRecord:
@@ -425,137 +294,49 @@ class PostgresAdvancedMemoryStore:
         )
 
     async def create(self, record: SemanticMemoryRecord) -> SemanticMemoryRecord:
-        if not isinstance(record, SemanticMemoryRecord):
-            raise TypeError("create 需要 SemanticMemoryRecord")
-        if record.memory_type is not MemoryType.SEMANTIC or record.status is not MemoryStatus.ACTIVE:
-            raise MemoryDomainError(MemoryErrorCode.PUBLIC_CREATE_ACTIVE_ONLY, "公共 create 只允许创建 ACTIVE SEMANTIC record")
-        try:
-            async with self.database.transaction() as session:
-                existing = (await session.execute(select(LongTermMemoryRow).where(LongTermMemoryRow.memory_id == record.memory_id))).scalar_one_or_none()
-                if existing is not None:
-                    if _row_dict(existing) == _row_dict_from_record(record):
-                        return self._record(existing)
-                    raise MemoryDomainError(MemoryErrorCode.DUPLICATE_CONFLICT)
-                session.add(_ltm_row(record))
-                await session.flush()
-                return record
-        except MemoryDomainError:
-            raise
-        except IntegrityError:
-            raise MemoryDomainError(MemoryErrorCode.DUPLICATE_CONFLICT) from None
-        except SQLAlchemyError:
-            raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def get_by_memory_id(self, memory_id: str) -> SemanticMemoryRecord:
-        async with self.database.session() as session:
-            row = (await session.execute(select(LongTermMemoryRow).where(LongTermMemoryRow.memory_id == memory_id))).scalar_one_or_none()
-            if row is None:
-                raise MemoryDomainError(MemoryErrorCode.NOT_FOUND)
-            return self._record(row)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def list_by_agent(self, agent_id: str, *, memory_scope: str | None = None,
                             active_only: bool = True) -> list[SemanticMemoryRecord]:
-        async with self.database.session() as session:
-            query = select(LongTermMemoryRow).where(LongTermMemoryRow.agent_id == agent_id, LongTermMemoryRow.memory_type == MemoryType.SEMANTIC.value)
-            if memory_scope is not None: query = query.where(LongTermMemoryRow.memory_scope == memory_scope)
-            if active_only: query = query.where(LongTermMemoryRow.status == MemoryStatus.ACTIVE.value)
-            rows = (await session.execute(query.order_by(LongTermMemoryRow.created_at.asc(), LongTermMemoryRow.memory_id.asc()))).scalars().all()
-            return [self._record(r) for r in rows]
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def list_active_semantic_for_scope(self, agent_id: str, memory_scope: str, *, candidate_limit: int):
-        async with self.database.session() as session:
-            query = select(LongTermMemoryRow).where(LongTermMemoryRow.agent_id == agent_id, LongTermMemoryRow.memory_scope == memory_scope, LongTermMemoryRow.memory_type == MemoryType.SEMANTIC.value, LongTermMemoryRow.status == MemoryStatus.ACTIVE.value).order_by(LongTermMemoryRow.created_at.desc(), LongTermMemoryRow.memory_id.asc()).limit(candidate_limit)
-            rows = (await session.execute(query)).scalars().all()
-            records, malformed = [], 0
-            for row in rows:
-                try: records.append(self._record(row))
-                except (MemoryDomainError, TypeError, ValueError): malformed += 1
-            return ActiveSemanticScopeRead(tuple(records), malformed)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def create_or_get_episode(self, record: EpisodicMemoryRecord) -> EpisodicMemoryRecord:
-        try:
-            async with self.database.transaction() as session:
-                query = select(LongTermMemoryRow).where(LongTermMemoryRow.memory_type == MemoryType.EPISODIC.value, LongTermMemoryRow.origin_run_id == record.origin_run_id)
-                if record.episode_kind.value == "STEP":
-                    query = query.where(LongTermMemoryRow.agent_id == record.agent_id, LongTermMemoryRow.payload["episode_kind"].as_string() == "STEP", LongTermMemoryRow.payload["origin_step_id"].as_string() == record.origin_step_id)
-                else:
-                    query = query.where(text("COALESCE(payload ->> 'episode_kind', 'RUN') = 'RUN'"))
-                existing = (await session.execute(query)).scalar_one_or_none()
-                if existing is not None:
-                    if existing.agent_id != record.agent_id or existing.memory_scope != record.memory_scope:
-                        raise MemoryDomainError(MemoryErrorCode.EPISODE_ORIGIN_CONFLICT)
-                    return self._episode(existing)
-                if (await session.execute(select(LongTermMemoryRow).where(LongTermMemoryRow.memory_id == record.memory_id))).scalar_one_or_none() is not None:
-                    raise MemoryDomainError(MemoryErrorCode.DUPLICATE_CONFLICT)
-                session.add(_ltm_row(record))
-                await session.flush()
-                return record
-        except MemoryDomainError: raise
-        except IntegrityError: raise MemoryDomainError(MemoryErrorCode.EPISODE_ORIGIN_CONFLICT) from None
-        except SQLAlchemyError: raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def get_episode(self, memory_id: str, agent_id: str, memory_scope: str) -> EpisodicMemoryRecord:
-        async with self.database.session() as session:
-            row = (await session.execute(select(LongTermMemoryRow).where(LongTermMemoryRow.memory_id == memory_id, LongTermMemoryRow.agent_id == agent_id, LongTermMemoryRow.memory_scope == memory_scope, LongTermMemoryRow.memory_type == MemoryType.EPISODIC.value))).scalar_one_or_none()
-            if row is None: raise MemoryDomainError(MemoryErrorCode.NOT_FOUND)
-            return self._episode(row)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def get_episode_by_origin_run_id(self, origin_run_id: str, agent_id: str, memory_scope: str) -> EpisodicMemoryRecord:
-        async with self.database.session() as session:
-            row = (await session.execute(select(LongTermMemoryRow).where(LongTermMemoryRow.origin_run_id == origin_run_id, LongTermMemoryRow.agent_id == agent_id, LongTermMemoryRow.memory_scope == memory_scope, LongTermMemoryRow.memory_type == MemoryType.EPISODIC.value))).scalar_one_or_none()
-            if row is None: raise MemoryDomainError(MemoryErrorCode.NOT_FOUND)
-            return self._episode(row)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def list_active_episodic_for_scope(self, agent_id: str, memory_scope: str, *, candidate_limit: int):
-        async with self.database.session() as session:
-            rows = (await session.execute(select(LongTermMemoryRow).where(LongTermMemoryRow.agent_id == agent_id, LongTermMemoryRow.memory_scope == memory_scope, LongTermMemoryRow.memory_type == MemoryType.EPISODIC.value, LongTermMemoryRow.status == MemoryStatus.ACTIVE.value).order_by(LongTermMemoryRow.created_at.desc(), LongTermMemoryRow.memory_id.asc()).limit(candidate_limit))).scalars().all()
-            records, malformed = [], 0
-            for row in rows:
-                try: records.append(self._episode(row))
-                except (MemoryDomainError, TypeError, ValueError): malformed += 1
-            return ActiveEpisodicScopeRead(tuple(records), malformed)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def resolve_semantic(self, candidate: SemanticMemoryRecord):
-        """在一个 PG transaction 内复用已冻结的 lifecycle resolver。"""
-        try:
-            async with self.database.transaction() as session:
-                existing = (await session.execute(select(LongTermMemoryRow).where(LongTermMemoryRow.memory_id == candidate.memory_id))).scalar_one_or_none()
-                if existing is not None:
-                    if _row_dict(existing) == _row_dict_from_record(candidate):
-                        from core.advanced_memory import LifecycleOperation, LifecycleResolutionResult
-                        return LifecycleResolutionResult(LifecycleOperation.NO_CHANGE, "OK", "REUSED", candidate.memory_id, candidate.memory_id, (), 0, False, 0, "IDEMPOTENT_REUSE", None, 0, 0)
-                    raise MemoryDomainError(MemoryErrorCode.DUPLICATE_CONFLICT)
-                result = await session.execute(select(LongTermMemoryRow).where(LongTermMemoryRow.agent_id == candidate.agent_id, LongTermMemoryRow.memory_scope == candidate.memory_scope, LongTermMemoryRow.memory_type == MemoryType.SEMANTIC.value).order_by(LongTermMemoryRow.created_at.asc(), LongTermMemoryRow.memory_id.asc()))
-                rows = [_row_dict(r) for r in result.scalars().all()]
-                plan = MemoryLifecycleResolver.resolve_remember(candidate, rows, mutation_time=datetime.now(UTC))
-                if plan.insert is not None:
-                    session.add(_ltm_row(plan.insert))
-                for mid in plan.supersede_rows:
-                    await session.execute(update(LongTermMemoryRow).where(LongTermMemoryRow.memory_id == mid).values(status=MemoryStatus.SUPERSEDED.value, superseded_by_memory_id=plan.winner_memory_id, updated_at=plan.mutation_timestamp.isoformat() if plan.mutation_timestamp else candidate.updated_at.isoformat()))
-                for mid in plan.repoint_rows:
-                    await session.execute(update(LongTermMemoryRow).where(LongTermMemoryRow.memory_id == mid).values(superseded_by_memory_id=plan.winner_memory_id, updated_at=plan.mutation_timestamp.isoformat() if plan.mutation_timestamp else candidate.updated_at.isoformat()))
-                await session.flush()
-                return _lifecycle_result(plan)
-        except MemoryDomainError: raise
-        except IntegrityError: raise MemoryDomainError(MemoryErrorCode.DUPLICATE_CONFLICT) from None
-        except SQLAlchemyError: raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def forget_semantic_partition(self, *, agent_id: str, memory_scope: str, logical_key: str, mutation_time: datetime | None = None):
-        from core.advanced_memory import LifecycleOperation, LifecycleResolutionResult
-        mutation_time = mutation_time or datetime.now(UTC)
-        async with self.database.transaction() as session:
-            result = await session.execute(select(LongTermMemoryRow).where(LongTermMemoryRow.agent_id == agent_id, LongTermMemoryRow.memory_scope == memory_scope, LongTermMemoryRow.memory_type == MemoryType.SEMANTIC.value, LongTermMemoryRow.logical_key == logical_key).order_by(LongTermMemoryRow.created_at.asc(), LongTermMemoryRow.memory_id.asc()))
-            rows = [_row_dict(r) for r in result.scalars().all()]
-            plan = MemoryLifecycleResolver.resolve_forget(rows, mutation_time=mutation_time)
-            if plan.forget_rows:
-                await session.execute(update(LongTermMemoryRow).where(LongTermMemoryRow.memory_id.in_(plan.forget_rows)).values(status=MemoryStatus.FORGOTTEN.value, canonical_text="[FORGOTTEN]", payload={}, superseded_by_memory_id=None, updated_at=mutation_time.isoformat()))
-            await session.flush()
-            return _lifecycle_result(plan)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def list_logical_keys(self, agent_id: str, memory_scope: str, *, max_keys: int = 64) -> list[str]:
-        async with self.database.session() as session:
-            rows = (await session.execute(select(LongTermMemoryRow.logical_key).where(LongTermMemoryRow.agent_id == agent_id, LongTermMemoryRow.memory_scope == memory_scope, LongTermMemoryRow.memory_type == MemoryType.SEMANTIC.value, LongTermMemoryRow.logical_key.is_not(None)).distinct().order_by(LongTermMemoryRow.logical_key.asc()))).scalars().all()
-            return [] if len(rows) > max_keys else [str(v) for v in rows]
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
 
 class PostgresAdvancedMemoryStoreBridge(AdvancedMemoryStore):
@@ -584,6 +365,8 @@ class PostgresProjectSemanticMemoryStore:
         if not isinstance(database, Database):
             raise TypeError("database 必须是 Database")
         self.database = database
+        from core.persistence.repositories.memory_lifecycle import MemoryLifecycleRepository
+        self.lifecycle = MemoryLifecycleRepository(database)
 
     @staticmethod
     def _record(row: ProjectSemanticMemoryRow) -> ProjectSemanticRecord:
@@ -597,73 +380,16 @@ class PostgresProjectSemanticMemoryStore:
         return ProjectSemanticRecord(**values)
 
     async def active(self, project_id: str, logical_key: str | None = None) -> tuple[ProjectSemanticRecord, ...]:
-        async with self.database.session() as session:
-            query = select(ProjectSemanticMemoryRow).where(
-                ProjectSemanticMemoryRow.project_id == project_id,
-                ProjectSemanticMemoryRow.visibility == "PROJECT",
-                ProjectSemanticMemoryRow.status == "ACTIVE",
-            )
-            if logical_key is not None:
-                query = query.where(ProjectSemanticMemoryRow.logical_key == logical_key)
-            rows = (await session.execute(query.order_by(ProjectSemanticMemoryRow.created_at.desc(), ProjectSemanticMemoryRow.memory_id.asc()))).scalars().all()
-            return tuple(self._record(row) for row in rows)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def mutate(self, record: ProjectSemanticRecord, *, supersede: bool) -> ProjectMemoryMutation:
-        now = datetime.now(UTC).isoformat()
-        try:
-            async with self.database.transaction() as session:
-                query = select(ProjectSemanticMemoryRow).where(
-                    ProjectSemanticMemoryRow.project_id == record.project_id,
-                    ProjectSemanticMemoryRow.logical_key == record.logical_key,
-                    ProjectSemanticMemoryRow.visibility == "PROJECT",
-                    ProjectSemanticMemoryRow.status == "ACTIVE",
-                ).order_by(ProjectSemanticMemoryRow.created_at.asc(), ProjectSemanticMemoryRow.memory_id.asc()).with_for_update()
-                rows = (await session.execute(query)).scalars().all()
-                current = rows[-1] if rows else None
-                if current is not None:
-                    current_record = self._record(current)
-                    if current_record.payload == record.payload and current_record.canonical_text == record.canonical_text:
-                        return ProjectMemoryMutation("NO_CHANGE", current_record, _project_allow(record))
-                    if not supersede:
-                        from core.runtime.project_memory import ProjectMemoryReason, ProjectMemoryAuthorizationResult, ProjectMemoryPermission
-                        return ProjectMemoryMutation("CONFLICT", current_record, ProjectMemoryAuthorizationResult("WRITE", record.created_by_agent_id, record.project_id, ProjectMemoryPermission.WRITE.value, False, ProjectMemoryReason.PROJECT_SEMANTIC_CONFLICT))
-                    await session.execute(update(ProjectSemanticMemoryRow).where(
-                        ProjectSemanticMemoryRow.project_id == record.project_id,
-                        ProjectSemanticMemoryRow.logical_key == record.logical_key,
-                        ProjectSemanticMemoryRow.status == "ACTIVE",
-                    ).values(status="SUPERSEDED", superseded_by_memory_id=record.memory_id, updated_at=now, updated_by_agent_id=record.updated_by_agent_id))
-                session.add(ProjectSemanticMemoryRow(
-                    memory_id=record.memory_id, project_id=record.project_id,
-                    owner_kind="PROJECT", owner_id=record.project_id,
-                    visibility="PROJECT", scope_id=record.project_id,
-                    logical_key=record.logical_key, canonical_text=record.canonical_text,
-                    payload=record.payload, status="ACTIVE",
-                    origin_agent_id=record.origin_agent_id, origin_run_id=record.origin_run_id,
-                    created_by_agent_id=record.created_by_agent_id, updated_by_agent_id=record.updated_by_agent_id,
-                    source_memory_id=record.source_memory_id, source_owner_agent_id=record.source_owner_agent_id,
-                    promoted_by_agent_id=record.promoted_by_agent_id, promotion_run_id=record.promotion_run_id,
-                    promotion_time=record.promotion_time, superseded_by_memory_id=None,
-                    created_at=now, updated_at=now,
-                ))
-                await session.flush()
-                from core.runtime.project_memory import ProjectMemoryReason, ProjectMemoryAuthorizationResult, ProjectMemoryPermission
-                return ProjectMemoryMutation("SUPERSEDED" if current else "CREATED", record, ProjectMemoryAuthorizationResult("WRITE", record.created_by_agent_id, record.project_id, ProjectMemoryPermission.WRITE.value, True, ProjectMemoryReason.ALLOW))
-        except MemoryDomainError:
-            raise
-        except IntegrityError:
-            raise MemoryDomainError(MemoryErrorCode.DUPLICATE_CONFLICT) from None
-        except SQLAlchemyError:
-            raise MemoryDomainError(MemoryErrorCode.PERSISTENCE_FAILED) from None
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
     async def forget(self, project_id: str, logical_key: str, updater: str) -> int:
-        async with self.database.transaction() as session:
-            result = await session.execute(update(ProjectSemanticMemoryRow).where(
-                ProjectSemanticMemoryRow.project_id == project_id,
-                ProjectSemanticMemoryRow.logical_key == logical_key,
-                ProjectSemanticMemoryRow.visibility == "PROJECT",
-                ProjectSemanticMemoryRow.status == "ACTIVE",
-            ).values(status="FORGOTTEN", updated_at=datetime.now(UTC).isoformat(), updated_by_agent_id=updater))
-            return int(result.rowcount or 0)
+        from core.runtime.memory_scope import MemoryContextError
+        raise MemoryContextError("MEMORY_SCOPED_ACCESS_REQUIRED")
 
 
 class PostgresProjectSemanticMemoryStoreBridge:

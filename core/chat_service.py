@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator, Callable
 import math
 from typing import Any, Optional
 
+from core.runtime.memory_scope import MemoryAccessContext
+from core.runtime.memory_scope import MemoryContextError
 from core.agent_router import AgentRouter
 from core.runtime.metrics import ApplicationRuntimeGaugeProvider
 from core.runtime.observability_dispatcher import RuntimeObservabilityDispatcher
@@ -116,6 +118,7 @@ class ChatService:
         persist: bool = True,
         retrieval_cache_authz_domain: str | None = None,
         session_id: str | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
@@ -135,6 +138,7 @@ class ChatService:
             persist=persist,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain,
             session_id=session_id,
+            memory_access_context=memory_access_context,
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
@@ -166,6 +170,7 @@ class ChatService:
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
         session_id: str | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
@@ -195,6 +200,7 @@ class ChatService:
             project_identity=project_identity,
             project_grants=project_grants,
             session_id=session_id,
+            memory_access_context=memory_access_context,
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
@@ -228,6 +234,7 @@ class ChatService:
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
         retrieval_cache_authz_domain: str | None = None,
         session_id: str | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
@@ -250,6 +257,7 @@ class ChatService:
             project_grants=project_grants,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain,
             session_id=session_id,
+            memory_access_context=memory_access_context,
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
@@ -276,6 +284,7 @@ class ChatService:
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
         retrieval_cache_authz_domain: str | None = None,
         session_id: str | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
@@ -302,6 +311,7 @@ class ChatService:
                 project_identity=project_identity,
                 project_grants=project_grants,
                 session_id=session_id or "default",
+                memory_access_context=memory_access_context,
                 agent_version=agent_version,
                 workflow_id=workflow_id,
                 workflow_version=workflow_version,
@@ -314,6 +324,8 @@ class ChatService:
             return scope
         except asyncio.CancelledError:
             raise
+        except MemoryContextError as exc:
+            raise ChatRuntimeTransportError(exc.error_code) from None
         except RuntimeAdmissionRejectedError:
             raise ChatRuntimeTransportError(
                 "RUNTIME_SHUTTING_DOWN"
@@ -338,6 +350,7 @@ class ChatService:
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
         retrieval_cache_authz_domain: str | None = None,
         session_id: str | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
@@ -359,6 +372,7 @@ class ChatService:
             project_grants=project_grants,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain,
             session_id=session_id,
+            memory_access_context=memory_access_context,
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
@@ -391,6 +405,7 @@ class ChatService:
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
         session_id: str | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
@@ -446,6 +461,7 @@ class ChatService:
         project_identity: ProjectIdentity | None = None,
         project_grants: tuple[ProjectMemoryGrant, ...] = (),
         session_id: str | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
@@ -469,6 +485,7 @@ class ChatService:
             project_identity=project_identity,
             project_grants=project_grants,
             session_id=session_id,
+            memory_access_context=memory_access_context,
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,

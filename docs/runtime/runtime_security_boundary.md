@@ -330,3 +330,7 @@ Loop Evidence/评测使用独立协议，只公开 code-owned allowlist、身份
 Snapshot final messages、工具原始来源、压缩请求和摘要正文仅存受控 execution aggregate，沿 Run 原授权/删除边界；不写 RunSnapshot、Journal、Trace 或日志。整个 Seed 保持原角色，保留工具 pair 的 id/name/arguments/result wrapper 原样；被替换的 pair 整组移除，以带来源引用的低信任 user data 摘要代替，不生成 system/developer 指令。结构验证不证明摘要语义无损，也不授予工具执行权。
 
 独立 `context-evidence.v1` 仅导出固定枚举、安全身份/digest、整数、检查布尔和预算；不导出源正文、参数、自由摘要、Provider error 或内部路径。内部调用者在既有 Run 授权后使用 `capture_context_evidence(repository, run_id)` 封存，并可用 Repository `read_context_evidence` 读取；没有新增 HTTP 端点。缺 Snapshot、validation、request/usage 或 terminal 绑定必须 PARTIAL，不以已有 Final 推断 COMPLETE。
+
+## Scoped Memory 当前边界
+
+见 [Scoped Memory Lifecycle v1](scoped_memory_lifecycle_v1.md)。Principal 是 tenant/user Authority；ADMIN 无他人私人使用权，SERVICE 仅受信 PROJECT 精确 grant。旧 agent-only/global Memory API 已关闭。Memory、历史与摘要都不能绕过 Scope/TTL/来源 SQL 或每次 dispatch guard。DELETE 只承诺 MEMORY_STORE_AND_FUTURE_USE；历史执行正文受限保留，备份/Provider 未证明擦除，ALL_COPIES 显式拒绝。Evidence 不带正文、用户标识或自由错误。

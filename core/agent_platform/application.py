@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Mapping
 from types import MappingProxyType
 from typing import Any
 
+from core.runtime.memory_scope import MemoryAccessContext
 from core.runtime.state import RunStatus, StopReason
 from core.runtime.events import OutputDeltaPayload, RuntimeEvent
 from core.runtime.stream_adapter import ChatStreamCompatibilityAdapter, ChatStreamChunkKind
@@ -160,6 +161,7 @@ class AgentApplicationService:
         request: ExecutionRequest,
         *,
         retrieval_cache_authz_domain: str | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
     ) -> AsyncIterator[ExecutionEvent]:
         """单次执行并只投影安全 identity、输出 delta 和 terminal。"""
         registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
@@ -179,6 +181,7 @@ class AgentApplicationService:
             workflow_id=workflow_id,
             workflow_version=workflow_version,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain,
+            memory_access_context=memory_access_context,
             _result_out=result_out,
         ):
             chunk = None
@@ -299,6 +302,7 @@ class AgentApplicationService:
         request: ExecutionRequest,
         *,
         retrieval_cache_authz_domain: str | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
     ) -> ExecutionResult:
         registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
         runtime_options = {}
@@ -319,6 +323,7 @@ class AgentApplicationService:
             workflow_id=workflow_id,
             workflow_version=workflow_version,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain,
+            memory_access_context=memory_access_context,
             **runtime_options,
         )
         # Output is available only on Runtime success; status and stop reason

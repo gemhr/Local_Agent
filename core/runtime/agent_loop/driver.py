@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, uuid5
 
+from core.runtime.memory_scope import MemoryContextError
 from core.runtime.business_output_schema import schema_matches
 from core.runtime.execution_aggregate import canonical_payload_digest
 from core.runtime.model_context import ContextBudgetExceededError
@@ -55,6 +56,9 @@ class AgentLoopDriver:
                 raise LoopStopped(frame.stop_code)
             current = iterations[-1] if iterations else None
             if frame.phase == "NEED_DECISION":
+                guard = getattr(run_context, "memory_guard", None)
+                if guard is not None:
+                    guard.check(submit, seed_digest=frame.seed_digest)
                 messages, request_digest = LoopContextInputV1(
                     frame.context_seed, tuple(i for i in iterations if i.decision_id),
                     tuple(i for i in iterations if i.state == "OBSERVED"),
@@ -193,6 +197,11 @@ class AgentLoopDriver:
                 from core.runtime.tool_execution import ToolExecutionFailed
                 if isinstance(exc, ToolExecutionFailed) and exc.error.side_effect_state is ToolSideEffectState.UNKNOWN:
                     raise LoopSuspended("TOOL_OUTCOME_UNKNOWN") from None
+                if isinstance(exc, MemoryContextError):
+                    latest = submit(repo.load(run_context.run_id))
+                    invocation = next((r for r in latest.tool_invocations if r.invocation_id==current.action_id),None)
+                    if invocation is not None and invocation.state in {"STARTED","UNKNOWN"}:
+                        raise LoopSuspended("TOOL_OUTCOME_UNKNOWN") from None
                 raise
             frame, iterations = load()
             current = iterations[-1]

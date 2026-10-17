@@ -325,3 +325,19 @@ evidence；其 category/phase/side_effect_state 语义见 Phase9-WP2 Gate C/E
 | `LOOP_CONTEXT_EXHAUSTED` | 可靠硬窗口超限、无安全可压缩源或已完成一次拒绝重绑定后再次拒绝。 |
 
 CAS/过期 parent/cursor/旧 generation 是内部拒绝，不能制造第二个 Run terminal。Token/cost/retry 仍用原 `BUDGET_EXHAUSTED`；取消/deadline 沿原映射，其余上述停止使用原 UNHANDLED_ERROR + safe code，不扩 Trace stop_reason。`CONTEXT_POLICY_INVALID` / `CONTEXT_COUNTING_MODE_INVALID` / `CONTEXT_FRAMING_INVALID` 是受信配置构造失败，不代表 Provider 错误。
+
+## Scoped Memory 固定错误
+
+| code | 行为 |
+| --- | --- |
+| MEMORY_PRINCIPAL_REQUIRED / MEMORY_SCOPED_ACCESS_REQUIRED | 缺可信身份或调用旧 agent-only PG API，拒绝读写 |
+| MEMORY_ACCESS_DENIED / MEMORY_SCOPE_DENIED / MEMORY_PRIVATE_SCOPE_DENIED / MEMORY_PROJECT_GRANT_REQUIRED | 身份、Scope 或精确 action grant 不满足 |
+| MEMORY_IDENTITY_CONFLICT / MEMORY_BINDING_CONFLICT | typed 身份与 Run/Session 或已有 Binding 冲突 |
+| MEMORY_CONTEXT_REVOKED / MEMORY_CONTEXT_EXPIRED / MEMORY_CONTEXT_UNVERIFIABLE | 停止新使用，旧事实/UNKNOWN/receipt 保持原 Owner |
+| MEMORY_VERSION_CONFLICT / MEMORY_OPERATION_CONFLICT / MEMORY_CORRECTION_DENIED | 拒绝 stale CAS、异内容 replay 或未授权更正 |
+| MEMORY_ERASURE_SCOPE_UNSUPPORTED | ALL_COPIES 等模式在 mutation 前拒绝 |
+| MEMORY_SOURCE_INVALID / MEMORY_PROVENANCE_UNSUPPORTED / MEMORY_DEPENDENCIES_UNVERIFIABLE / MEMORY_CAS_UNVERIFIABLE | 来源/候选/有界证明不足，fail closed |
+| FORMATION_EXPLICIT_MUTATION_REQUIRED | 聊天 forget 不运行旧 agent/key 删除，使用 scoped mutation |
+| MEMORY_GLOBAL_ACCESS_UNSUPPORTED | 旧全局 HTTP Memory/search 返回410 |
+
+操作回执 VERSION_CONFLICT 是业务拒绝；UNKNOWN/PARTIAL 不是成功。完整边界见 [Scoped Memory Lifecycle v1](scoped_memory_lifecycle_v1.md)。

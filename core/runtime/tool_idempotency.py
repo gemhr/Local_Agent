@@ -253,6 +253,14 @@ class DurableToolInvocationService:
                 await budget_repository.reserve_budget_operation_in_transaction(
                     session, lease, **budget_operation
                 )
+            from core.persistence.repositories.memory_lifecycle import MemoryLifecycleRepository
+            from core.persistence.models import RuntimeRunExecutionRow
+            from core.runtime.memory_scope import MemoryContextError
+            await session.get(RuntimeRunExecutionRow, lease.run_id, with_for_update=True)
+            code = await MemoryLifecycleRepository(self.database).guard_in_transaction(session, lease,
+                admission=f"tool:{invocation_id}")
+            if code:
+                raise MemoryContextError(code)
             row = await self._locked_row(session, invocation_id)
             self._assert_owner(row, lease)
             if row.state != ToolInvocationState.PREPARED.value:

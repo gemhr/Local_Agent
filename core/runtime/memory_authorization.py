@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
+from core.runtime.memory_scope import MemoryAccessContext, MemoryContextError
+
 
 class MemoryVisibility(str, Enum):
     PRIVATE = "PRIVATE"
@@ -334,7 +336,7 @@ class MemoryAccessAuthorizer:
         elif requester.agent_id != owner_agent_id.strip():
             reason = MemoryAuthorizationReason.FOREIGN_PRIVATE_OWNER
         else:
-            reason = MemoryAuthorizationReason.OWNER_MATCH
+            reason = MemoryAuthorizationReason.UNKNOWN_REQUESTER
         result = MemoryAuthorizationResult(
             operation=operation,
             decision=(

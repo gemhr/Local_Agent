@@ -1,8 +1,4 @@
-"""WP3 acceptance supplement: specialist/synthesis must not read old Memory.
-
-Tests use a real AgentRouter + real MemoryManager (only the external model is
-faked) so the Memory read/write contract is exercised through the real chain.
-"""
+"""仅保留仍有效的纯合同/本地测试与共享 fixture；废弃 agent-only 节点见 .ai/archive/tests/scoped_memory_lifecycle/。"""
 
 from __future__ import annotations
 
@@ -307,22 +303,6 @@ def test_history_policy_none_blocks_old_memory_read(real_router_environment) -> 
     assert memory.count_messages("code_expert") == 1
 
 
-def test_default_agent_scope_still_reads_history(real_router_environment) -> None:
-    memory, model, router = real_router_environment
-    seed_memory(memory, "code_expert")
-    context = make_run_context("code_expert")
-    router.complete_single_agent(
-        "code_expert",
-        "direct question",
-        run_context=context,
-        capability_requirements=specialist_capabilities("code_expert"),
-        persist=False,
-        history_policy=HistoryPolicy.AGENT_SCOPE,
-    )
-    rendered = render_messages(model.all_messages)
-    assert OLD_MEMORY_SECRET in rendered
-    assert memory.count_messages("code_expert") == 1
-
 
 def test_history_policy_none_does_not_write_summary(real_router_environment) -> None:
     memory, model, router = real_router_environment
@@ -437,55 +417,3 @@ def test_knowledge_rag_uses_current_instruction_without_history(
 
 
 # 6.3 兼容回归
-
-def test_legacy_answer_read_path_keeps_history(real_router_environment) -> None:
-    memory, _model, router = real_router_environment
-    seed_memory(memory, "core_router")
-    messages = router._prepare_answer_messages(
-        "core_router",
-        "legacy question",
-    )
-    assert OLD_MEMORY_SECRET in render_messages(messages)
-
-
-@pytest.mark.asyncio
-async def test_direct_single_agent_keeps_history_behavior() -> None:
-    services = make_security_services()
-    with tempfile.TemporaryDirectory() as directory:
-        memory = MemoryManager(str(Path(directory) / "memory.db"))
-        model = FakeModel(planning_json=direct_json("code_expert"))
-        router = make_real_router(memory, model=model)
-        seed_memory(memory, "code_expert")
-        scope = await CoordinatedRuntimeFactory(
-            router, services
-        ).create_run_scope(
-            "code_expert",
-            "direct code question",
-        )
-        result = await scope.execute()
-        assert result.status is RunStatus.SUCCEEDED
-        assert OLD_MEMORY_SECRET in render_messages(model.all_messages)
-        # 显式单 Agent 保持原写入行为：seed + user + assistant。
-        assert memory.count_messages("code_expert") == 3
-        await scope.close()
-
-
-@pytest.mark.asyncio
-async def test_core_direct_keeps_history_behavior() -> None:
-    services = make_security_services()
-    with tempfile.TemporaryDirectory() as directory:
-        memory = MemoryManager(str(Path(directory) / "memory.db"))
-        model = FakeModel(planning_json=direct_json("core_router"))
-        router = make_real_router(memory, model=model)
-        seed_memory(memory, "core_router")
-        scope = await CoordinatedRuntimeFactory(
-            router, services
-        ).create_run_scope(
-            "core_router",
-            "direct core question",
-        )
-        result = await scope.execute()
-        assert result.status is RunStatus.SUCCEEDED
-        assert OLD_MEMORY_SECRET in render_messages(model.all_messages)
-        assert memory.count_messages("core_router") == 3
-        await scope.close()

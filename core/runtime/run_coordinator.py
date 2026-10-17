@@ -3,6 +3,8 @@
 """单次 Run 的 Parent Runtime 与统一生命周期所有者。"""
 
 from __future__ import annotations
+
+from core.runtime.memory_scope import MemoryContextError
 from core.runtime.agent_loop.contracts import LOOP_POLICY, LoopStopped, LoopSuspended
 
 import asyncio
@@ -457,7 +459,7 @@ class RunCoordinator:
         self._step_result_max_entries = step_result_max_entries
         self._fault_controller = fault_controller
         self._memory_retrieval_service = memory_retrieval_service
-        self._memory_context_bundle: MemoryContextBundle | None = None
+        self._memory_context_bundle: MemoryContextBundle | None = getattr(run_context, "scoped_memory_bundle", None)
         self._memory_retrieval_observation: _MemoryRetrievalObservation | None = None
         self._episodic_evaluation_observer = episodic_evaluation_observer
         return self
@@ -522,7 +524,7 @@ class RunCoordinator:
         self._planning_timeout_seconds = 0.0
         self._fault_controller = None
         self._memory_retrieval_service = None
-        self._memory_context_bundle = None
+        self._memory_context_bundle = getattr(self.run_context, "scoped_memory_bundle", None)
         self._memory_retrieval_observation = None
         self._episodic_evaluation_observer = None
         self._durable_approval_service = durable_approval_service
@@ -733,6 +735,7 @@ class RunCoordinator:
             metrics_recorder=self._metrics_recorder,
             fault_controller=self._fault_controller,
             loop_context=self.run_context if self.run_context.execution_policy == LOOP_POLICY else None,
+            memory_context=self.run_context,
         )
         memory_writer: RunFinalMemoryWriter | None = None
         if self._planning_request is not None:
@@ -750,6 +753,7 @@ class RunCoordinator:
                     self._planning_request.selected_agent_id
                 ),
                 user_request=self._planning_request.user_request,
+                run_context=self.run_context,
                 persist=self._persist,
                 run_id=self.run_context.run_id,
                 span_recorder=self.span_recorder,
@@ -772,6 +776,7 @@ class RunCoordinator:
                     ),
                     user_request=self._planning_request.user_request,
                     memory_store=memory_store,
+                    run_context=self.run_context,
                     extraction_model=UnifiedFormationExtractionAdapter(
                         router,
                         run_context=self.run_context,
@@ -938,6 +943,9 @@ class RunCoordinator:
 
     def _retrieve_memory_context(self) -> None:
         """同步测试/兼容入口；生产异步路径使用 ``_retrieve_memory_context_async``。"""
+        if hasattr(self.run_context, "scoped_memory_bundle"):
+            self._memory_context_bundle = self.run_context.scoped_memory_bundle
+            return
         if self._memory_context_bundle is not None or self._planning_request is None:
             return
         entry_agent_id = self._planning_request.selected_agent_id
@@ -998,6 +1006,9 @@ class RunCoordinator:
         为 safe observation + 空 bundle，Run 继续；Cancellation / run deadline
         / budget terminal signal 按既有 contract 传播，不被吞掉。
         """
+        if hasattr(self.run_context, "scoped_memory_bundle"):
+            self._memory_context_bundle = self.run_context.scoped_memory_bundle
+            return
         if self._memory_context_bundle is not None:
             # 每 Run 至多一次 retrieval；禁止第二次查询。
             return
@@ -1608,6 +1619,16 @@ class RunCoordinator:
                     resume_generation=frame.resume_generation, row_version=frame.row_version, reason=exc.reason,
                     next_recovery_at=exc.next_recovery_at)
                 raise
+            except MemoryContextError as exc:
+                guard = getattr(self.run_context, "memory_guard", None)
+                if guard is not None:
+                    try:
+                        await guard.check_async()
+                    except MemoryContextError:
+                        pass  # 持久准入事务回滚后，独立保存 binding 失效事实。
+                await self._record_loop_stop(exc.error_code)
+                decision = RunFinalizationDecision(RunStatus.FAILED, StopReason.UNHANDLED_ERROR,
+                    exc.error_code, "Memory 来源资格已失效，停止新的执行动作")
             except LoopStopped as exc:
                 await self._record_loop_stop(exc.stop_code)
                 reason = (StopReason.BUDGET_EXHAUSTED if exc.stop_code == "LOOP_ITERATION_LIMIT"
@@ -2213,6 +2234,8 @@ class RunCoordinator:
     async def _run_episodic_formation(
         self, decision: RunFinalizationDecision
     ) -> None:
+        # 旧 episode lesson 无可信 observation allowlist；本版不自动保存推断。
+        return
         """WP6-C canonical post-terminal/pre-cleanup observer.
 
         The observer is deliberately best-effort.  It receives only typed Run
@@ -2265,6 +2288,8 @@ class RunCoordinator:
             return
 
     async def _run_specialist_episodic_formation(self) -> None:
+        # 旧 episode lesson 无可信 observation allowlist；本版不自动保存推断。
+        return
         """Post-terminal best-effort projection for committed delegated steps.
 
         A failed step without a committed ``StepResult`` is intentionally

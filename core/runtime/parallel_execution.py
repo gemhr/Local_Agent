@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """独立于 Legacy AgentLoop 的最小并行 Step 执行边界。"""
 from __future__ import annotations
+from core.runtime.memory_scope import MemoryContextError
 from core.runtime.agent_loop.contracts import LoopStopped, LoopSuspended
 
 import asyncio
@@ -297,7 +298,7 @@ class ParallelExecutor:
                             asyncio.CancelledError, RunCancelledError,
                             RunDeadlineExceededError, BudgetExceededError,
                             ParallelExecutionInfrastructureError,
-                            LoopStopped, LoopSuspended,
+                            LoopStopped, LoopSuspended, MemoryContextError,
                         ):
                             raise
                         except ToolApprovalRejectedError:
@@ -390,7 +391,7 @@ class ParallelExecutor:
                             durable_result=result,
                             plan=plan,
                         )
-            except (LoopStopped, LoopSuspended):
+            except (LoopStopped, LoopSuspended, MemoryContextError):
                 raise
             except asyncio.CancelledError:
                 outcomes[claim.step_id] = self._settle_outcome(
@@ -471,7 +472,7 @@ class ParallelExecutor:
                 budget_error = errors.exceptions[0]
             except* RunDeadlineExceededError as errors:
                 deadline_error = errors.exceptions[0]
-            except* (LoopStopped, LoopSuspended) as errors:
+            except* (LoopStopped, LoopSuspended, MemoryContextError) as errors:
                 loop_signal = errors.exceptions[0]
             if loop_signal is not None:
                 raise loop_signal
@@ -479,7 +480,7 @@ class ParallelExecutor:
                 raise budget_error
             if deadline_error is not None:
                 raise deadline_error
-        except (LoopStopped, LoopSuspended):
+        except (LoopStopped, LoopSuspended, MemoryContextError):
             raise
         except asyncio.CancelledError:
             await self._cancel_unfinished(claims, outcomes, state)

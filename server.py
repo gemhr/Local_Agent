@@ -2257,6 +2257,8 @@ app.add_middleware(HttpObservabilityMiddleware)
 
 class ChatRequest(BaseModel):
     """聊天流式接口的请求体。"""
+    model_config = ConfigDict(extra="forbid")
+    session_id: Annotated[str, Field(min_length=1, max_length=255)] | None = None
 
     agent_id: Annotated[
         str, Field(max_length=REQUEST_PAYLOAD_POLICY.AGENT_ID_MAX_CHARS)
@@ -2282,6 +2284,7 @@ RUNTIME_EXECUTE_TIMEOUT_MAX_SECONDS = 3_600.0
 
 class RuntimeExecuteRequest(BaseModel):
     """结构化 Coordinated Runtime 执行请求。"""
+    session_id: Annotated[StrictStr, Field(min_length=1, max_length=255)] | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2758,13 +2761,18 @@ async def _owned_evaluation_job(
     return await _evaluation_job_service(request).get(job_id)
 
 
+def _memory_access(request, agent_id, session_id=None):
+    from core.runtime.memory_scope import MemoryAccessContext
+    return MemoryAccessContext.from_principal(request.state.principal, agent_id, session_id or "default")
+
+
 async def _bind_new_run_and_conversation(
-    request: Request, *, run_id: str, agent_id: str
+    request: Request, *, run_id: str, agent_id: str, session_id: str | None = None
 ) -> None:
     """以认证 Principal 持久化对象归属，不接管 Runtime 运行态。"""
     principal = request.state.principal
     authz = _authorization_service(request)
-    await authz.bind_new(principal, "CONVERSATION", agent_id)
+    await authz.bind_new(principal, "CONVERSATION", _memory_access(request, agent_id, session_id).conversation_id)
     await authz.bind_new(principal, "RUN", run_id)
 
 
@@ -2928,7 +2936,7 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
     await _bind_new_run_and_conversation(
-        request, run_id=run_id, agent_id=payload.agent_id
+        request, run_id=run_id, agent_id=payload.agent_id, session_id=payload.session_id
     )
 
     coordinated_query = payload.query
@@ -2939,10 +2947,12 @@ async def chat_endpoint(payload: ChatRequest, request: Request):
     stream = service.stream(
         ExecutionRequest(
             agent_id=payload.agent_id,
+            session_id=payload.session_id,
             input=coordinated_query,
             run_id=run_id,
         ),
         retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
+        memory_access_context=_memory_access(request, payload.agent_id, getattr(payload, "session_id", None)),
     )
 
     async def generate():
@@ -3008,7 +3018,7 @@ async def v1_chat_endpoint(payload: V1ChatRequest, request: Request):
     reserved_slot = await supervisor.acquire_slot()
     try:
         await _bind_new_run_and_conversation(
-            request, run_id=run_id, agent_id=payload.agent_id
+            request, run_id=run_id, agent_id=payload.agent_id, session_id=payload.session_id
         )
     except BaseException:
         supervisor.release_slot(reserved_slot)
@@ -3020,10 +3030,12 @@ async def v1_chat_endpoint(payload: V1ChatRequest, request: Request):
         stream = service.stream(
             ExecutionRequest(
                 agent_id=payload.agent_id,
+                session_id=payload.session_id,
                 input=query,
                 run_id=run_id,
             ),
             retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
+            memory_access_context=_memory_access(request, payload.agent_id, getattr(payload, "session_id", None)),
         )
         supervisor.spawn(run_id, stream, reserved_slot=reserved_slot)
     except BaseException:
@@ -3112,18 +3124,20 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Requ
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
     await _bind_new_run_and_conversation(
-        request, run_id=payload.run_id, agent_id=payload.agent_id
+        request, run_id=payload.run_id, agent_id=payload.agent_id, session_id=payload.session_id
     )
 
     try:
         result = await service.execute(
             ExecutionRequest(
                 agent_id=payload.agent_id,
+                session_id=payload.session_id,
                 input=payload.query,
                 run_id=payload.run_id,
                 timeout_seconds=payload.timeout_seconds,
             ),
             retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
+            memory_access_context=_memory_access(request, payload.agent_id, getattr(payload, "session_id", None)),
         )
     except ChatRuntimeTransportError as exc:
         raise HTTPException(status_code=503, detail=exc.error_code) from None
@@ -4021,6 +4035,7 @@ async def get_history_endpoint(
         str, Path(max_length=REQUEST_PAYLOAD_POLICY.AGENT_ID_MAX_CHARS)
     ],
     request: Request,
+    session_id: Annotated[str, Query(min_length=1, max_length=255)] = "default",
     limit: Annotated[
         int,
         Query(
@@ -4037,17 +4052,15 @@ async def get_history_endpoint(
     ] = REQUEST_PAYLOAD_POLICY.HISTORY_OFFSET_DEFAULT,
 ):
     """按页返回某个智能体的历史消息。"""
-    await _authorization_service(request).authorize(
-        request.state.principal,
-        "CONVERSATION",
-        agent_id,
-        AuthorizationAction.READ,
-    )
-    service = require_service()
-    result = service.get_history(agent_id=agent_id, limit=limit, offset=offset)
-    if inspect.isawaitable(result):
-        result = await result
-    return {"messages": result}
+    access = _memory_access(request, agent_id, session_id)
+    await _authorization_service(request).authorize(request.state.principal, "CONVERSATION",
+        access.conversation_id, AuthorizationAction.READ)
+    factory = require_service()._coordinated_runtime_factory
+    from core.persistence.repositories.memory_lifecycle import MemoryLifecycleRepository
+    repository = MemoryLifecycleRepository(factory.services.execution_repository.database)
+    rows = await repository.history(access, access.scope_id("SESSION"), limit=min(32, limit))
+    messages = [message for row in rows for message in row["messages"]]
+    return {"messages": messages[offset:offset+limit]}
 
 
 @app.get("/api/search")
@@ -4058,36 +4071,22 @@ async def search_endpoint(
     ],
     request: Request,
 ):
-    """根据关键词搜索持久化消息。"""
-    require_role(request.state.principal, "ADMIN")
-    service = require_service()
-    result = service.search_memory(keyword)
-    if inspect.isawaitable(result):
-        result = await result
-    return {"results": result}
+    raise HTTPException(status_code=410, detail="MEMORY_GLOBAL_ACCESS_UNSUPPORTED")
 
 
 @app.get("/api/memory")
 async def get_all_memory_endpoint(request: Request):
-    """返回记忆管理弹窗使用的消息集合。"""
-    require_role(request.state.principal, "ADMIN")
-    service = require_service()
-    result = service.get_all_memory()
-    if inspect.isawaitable(result):
-        result = await result
-    return result
+    raise HTTPException(status_code=410, detail="MEMORY_GLOBAL_ACCESS_UNSUPPORTED")
 
 
 @app.delete("/api/memory")
 async def delete_memory_endpoint(request: Request, payload: DeleteMemoryRequest):
-    """删除指定消息或清空全部记忆。"""
-    require_role(request.state.principal, "ADMIN")
-    service = require_service()
-    result = service.delete_memory(message_ids=payload.message_ids, delete_all=payload.delete_all)
-    if inspect.isawaitable(result):
-        result = await result
-    return result
+    raise HTTPException(status_code=410, detail="MEMORY_GLOBAL_ACCESS_UNSUPPORTED")
 
+
+from core.agent_platform.memory_api import register_memory_api
+
+register_memory_api(app, require_service=require_service, authorize_run=_authorize_run)
 
 from core.agent_platform.agent_loop_evaluation import register_agent_loop_evaluation
 

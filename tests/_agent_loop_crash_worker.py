@@ -109,6 +109,14 @@ class RepeatObservationTool(ObservationTool):
 
 
 async def main():
+    if sys.argv[1].startswith("scoped-formation-"):
+        from tests.test_scoped_memory_lifecycle import formation_crash_worker
+        await formation_crash_worker(*sys.argv[1:])
+        return
+    if sys.argv[1].startswith("scoped-memory-"):
+        from tests.test_scoped_memory_lifecycle import memory_crash_worker
+        await memory_crash_worker(*sys.argv[1:])
+        return
     if sys.argv[1].startswith("context-"):
         from tests.test_context_compaction import context_crash_worker
         await context_crash_worker(*sys.argv[1:])

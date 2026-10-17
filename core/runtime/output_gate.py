@@ -25,6 +25,7 @@ from typing import Callable
 import asyncio
 import hashlib
 
+from core.runtime.memory_scope import MemoryContextError
 from core.runtime.event_channel import (
     EventChannelClosedError,
     EventPublicationError,
@@ -144,6 +145,7 @@ class OutputGate:
         metrics_recorder=None,
         fault_controller: FaultInjectionController | None = None,
         loop_context=None,
+        memory_context=None,
     ) -> None:
         if not isinstance(plan, Plan):
             raise TypeError("OutputGate 需要冻结的 Plan")
@@ -170,6 +172,7 @@ class OutputGate:
         self._metrics_recorder = metrics_recorder
         self._fault_controller = fault_controller
         self._loop_context = loop_context
+        self._memory_context = memory_context
         finals = tuple(
             step
             for step in plan.steps
@@ -237,6 +240,9 @@ class OutputGate:
                 self._stream_step_id = claim.step_id
             if self._event_emitter is None:
                 raise EventChannelClosedError("OutputGate 没有可用的 EventEmitter")
+            guard = getattr(self._memory_context, "memory_guard", None)
+            if guard is not None:
+                await guard.check_async()
             try:
                 await self._event_emitter.for_step(claim.step_id).emit(
                     RuntimeEventType.OUTPUT_DELTA,
@@ -408,6 +414,14 @@ class OutputGate:
                     raise RuntimeError("流式输出与最终 StepResult 不一致")
             else:
                 await self._publish_output(claim, result)
+        except MemoryContextError as exc:
+            with self._lock:
+                self._state = OutputGateState.FAILED
+                self._last_attempt = DeliveryAttempt(claim.step_id, output_policy,
+                    DeliveryStatus.FAILED, exc.error_code, "Memory 来源资格已失效，未发布 Final")
+            if delivery_span is not None:
+                delivery_span.end_error(exc.error_code)
+            raise
         except EventPublicationError as exc:
             partially_persisted = exc.partially_persisted
             status = (
@@ -568,6 +582,10 @@ class OutputGate:
                     client_event_feed=emitter.parent.channel._client_event_feed,
                     resume_generation=frame.resume_generation, row_version=frame.row_version)
                 return {"client_projection_persisted": True}
+        if self._loop_context is None and self._memory_context is not None:
+            guard = getattr(self._memory_context, "memory_guard", None)
+            if guard is not None:
+                await guard.check_async(admission=f"final:{claim.step_id}")
         await emitter.emit(
             RuntimeEventType.OUTPUT_DELTA,
             OutputDeltaPayload(result.content),

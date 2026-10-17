@@ -96,6 +96,7 @@ class RunFinalMemoryWriter:
         metrics_recorder=None,
         statement_timeout_ms: int | None = None,
         idempotent_replay: bool = False,
+        run_context=None,
     ) -> None:
         if not isinstance(entry_agent_id, str) or not entry_agent_id.strip():
             raise ValueError("entry_agent_id 不能为空")
@@ -111,7 +112,8 @@ class RunFinalMemoryWriter:
             raise ValueError("run_id 必须是非空字符串")
         self._router = router
         self._entry_agent_id = entry_agent_id.strip()
-        self._requester = requester or MemoryAccessPrincipal(self._entry_agent_id)
+        self._requester = requester
+        self._run_context = run_context
         self._authorizer = MemoryAccessAuthorizer()
         self._user_request = user_request
         self._persist = persist
@@ -158,134 +160,23 @@ class RunFinalMemoryWriter:
                 )
             self._written = True
         content = store.read_final_content(final_step_id)
+        from core.runtime.memory_scope import MemoryContextError
+        context = self._run_context
+        if context is None or context.memory_access_context is None or context.memory_service is None:
+            raise MemoryContextError("MEMORY_PRINCIPAL_REQUIRED")
+        submit = getattr(getattr(context, "event_emitter", None), "submit_coroutine_from_worker", None)
+        # Bridge 的 event loop 与 PG engine 共用应用生命周期。
         memory = getattr(self._router, "memory_manager", None)
-        if memory is None:
-            self._record_memory_outcome(
-                status=FinalMemoryCommitStatus.FAILED,
-                error_code="MEMORY_MANAGER_UNAVAILABLE",
-                duration_ms=0,
-                span=None,
-                user_write_status="FAILED",
-                assistant_write_status="NOT_ATTEMPTED",
-            )
-            raise RuntimeError("router 没有可用的 memory_manager")
-        scope = getattr(self._router, "DIRECT_MEMORY_SCOPE", "direct")
-        authorization = self._authorizer.authorize_private_create(
-            self._requester,
-            self._entry_agent_id,
-            scope,
-            requested_memory_scope=scope,
-        )
-        if not authorization.allowed:
-            self._record_memory_outcome(
-                status=FinalMemoryCommitStatus.FAILED,
-                error_code=authorization.reason,
-                duration_ms=0,
-                span=None,
-                user_write_status="NOT_ATTEMPTED",
-                assistant_write_status="NOT_ATTEMPTED",
-            )
-            raise MemoryAuthorizationError(authorization)
-        started = time.monotonic()
-        span = None
-        if self._span_recorder is not None:
-            parent = current_trace_context()
-            span = start_span_safely(
-                self._span_recorder,
-                trace_id=(
-                    parent.trace_id
-                    if parent is not None
-                    else (self._run_id or "unknown")
-                ),
-                run_id=(
-                    parent.run_id
-                    if parent is not None
-                    else (self._run_id or "unknown")
-                ),
-                component="final_memory",
-                operation=RUNTIME_FINAL_MEMORY_COMMIT_SPAN,
-                step_id=final_step_id,
-                parent_context=parent,
-            )
-        user_write_status = "NOT_ATTEMPTED"
-        assistant_write_status = "NOT_ATTEMPTED"
-        transaction_used = True
-        exchange_id = (
-            self._run_id
-            if self._run_id is not None
-            else "exchange-" + str(uuid4().hex)
-        )
-        try:
-            exchange_kwargs = {
-                "run_id": self._run_id,
-                "exchange_id": exchange_id,
-            }
-            if self._statement_timeout_ms is not None:
-                exchange_kwargs["statement_timeout_ms"] = self._statement_timeout_ms
-            if self._idempotent_replay:
-                exchange_kwargs["idempotent_replay"] = True
-            memory.append_exchange_atomic(
-                self._entry_agent_id, scope, self._user_request, content,
-                **exchange_kwargs,
-            )
-            user_write_status = "WRITTEN"
-            assistant_write_status = "WRITTEN"
-        except MemoryExchangeError as exc:
-            duration_ms = max(
-                0, int((time.monotonic() - started) * 1000)
-            )
-            self._record_memory_outcome(
-                status=FinalMemoryCommitStatus.FAILED,
-                error_code=exc.error_code,
-                duration_ms=duration_ms,
-                span=span,
-                user_write_status=user_write_status,
-                assistant_write_status=assistant_write_status,
-                transaction_used=transaction_used,
-            )
-            raise
-        except BaseException:
-            duration_ms = max(
-                0, int((time.monotonic() - started) * 1000)
-            )
-            self._record_memory_outcome(
-                status=FinalMemoryCommitStatus.FAILED,
-                error_code="FINAL_OUTPUT_MEMORY_COMMIT_FAILED",
-                duration_ms=duration_ms,
-                span=span,
-                user_write_status=user_write_status,
-                assistant_write_status=assistant_write_status,
-                transaction_used=transaction_used,
-            )
-            raise
-        duration_ms = max(0, int((time.monotonic() - started) * 1000))
-        if span is not None:
-            set_span_attributes(
-                span,
-                persist_enabled=self._persist,
-                entry_agent_id=self._entry_agent_id,
-                memory_scope=scope,
-                delivery_status="DELIVERED",
-                user_write_status=user_write_status,
-                assistant_write_status=assistant_write_status,
-                transaction_used=transaction_used,
-            )
-            span.end_ok()
-        self._record_memory_outcome(
-            status=FinalMemoryCommitStatus.SUCCEEDED,
-            error_code="OK",
-            duration_ms=duration_ms,
-            span=None,
-            user_write_status=user_write_status,
-            assistant_write_status=assistant_write_status,
-            transaction_used=transaction_used,
-        )
-        return CommittedExchangeReceipt(
-            run_id=self._run_id,
-            exchange_id=exchange_id,
-            entry_agent_id=self._entry_agent_id,
-            memory_scope=scope,
-        )
+        bridge = getattr(memory, "_bridge", None)
+        if bridge is None:
+            raise MemoryContextError("MEMORY_CONTEXT_UNVERIFIABLE")
+        receipt = bridge.run(lambda: context.memory_service.repository.append_exchange(
+            context.memory_access_context, run_id=self._run_id,
+            user_text=self._user_request, final_text=content), operation="memory.scoped_exchange")
+        if receipt["state"] != "ACTIVE":
+            return None
+        return CommittedExchangeReceipt(run_id=self._run_id, exchange_id=receipt["exchange_id"],
+            entry_agent_id=self._entry_agent_id, memory_scope="direct")
 
     def _record_memory_outcome(
         self,

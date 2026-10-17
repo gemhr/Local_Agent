@@ -1,3 +1,5 @@
+"""仅保留仍有效的纯合同/本地测试与共享 fixture；废弃 agent-only 节点见 .ai/archive/tests/scoped_memory_lifecycle/。"""
+
 from __future__ import annotations
 
 import sqlite3
@@ -154,55 +156,7 @@ def test_incomplete_exchange_is_filtered_from_history(tmp_path):
     assert all_messages == []
 
 
-def test_writer_is_write_once_and_never_retries_after_failure(tmp_path):
-    manager = MemoryManager(str(tmp_path / "memory.db"))
 
-    class FailingMemoryManager(MemoryManager):
-        def append_exchange_atomic(self, *args, **kwargs):
-            raise MemoryExchangeError(
-                MemoryExchangeErrorCode.EXCHANGE_FAILED,
-                "simulated failure",
-            )
-
-    writer = RunFinalMemoryWriter(
-        StubRouter(FailingMemoryManager(str(tmp_path / "failing.db"))),
-        entry_agent_id="core_router",
-        user_request="user-request",
-        persist=True,
-        run_id="run-1",
-    )
-    store = make_store()
-    with pytest.raises(MemoryExchangeError):
-        writer.write_delivered(final_step_id="answer", store=store)
-    assert writer.written is True
-    # 失败后同一 Run 不得自动重试 / 不得再次写入。
-    with pytest.raises(RuntimeError, match="只能写入一次"):
-        writer.write_delivered(final_step_id="answer", store=store)
-    assert manager.count_messages("core_router") == 0
-
-
-def test_writer_commits_delivered_exchange_only(tmp_path):
-    manager = MemoryManager(str(tmp_path / "memory.db"))
-    writer = RunFinalMemoryWriter(
-        StubRouter(manager),
-        entry_agent_id="core_router",
-        user_request="SECRET_USER_INSTRUCTION",
-        persist=True,
-        run_id="run-1",
-    )
-    writer.write_delivered(final_step_id="answer", store=make_store())
-    history = manager.get_chat_history("core_router", ascending=True)
-    assert [message["role"] for message in history] == [
-        "user",
-        "assistant",
-    ]
-    assert history[0]["content"] == "SECRET_USER_INSTRUCTION"
-    assert history[1]["content"] == "FINAL"
-    # specialist raw 永不写入：Memory 只保存 delivered exchange。
-    assert all(
-        "SECRET_SPECIALIST" not in message["content"]
-        for message in history
-    )
 
 
 def test_writer_respects_persist_disabled(tmp_path):

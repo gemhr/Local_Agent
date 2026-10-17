@@ -14,6 +14,7 @@ import time
 from typing import Callable
 from uuid import uuid4
 
+from core.runtime.memory_scope import MemoryContextError
 from core.runtime.budget import (
     BudgetExceededError,
     BudgetLedger,
@@ -496,6 +497,9 @@ class ToolAttemptExecutor:
                 remaining_seconds=context.remaining_seconds,
             )
             context.raise_if_cancelled()
+            memory_guard = getattr(run_context, "memory_guard", None)
+            if memory_guard is not None:
+                await memory_guard.check_async()
             if durable_invocation_service is not None:
                 if run_context.durable_lease is None:
                     raise RuntimeError("durable Tool invocation requires current Run lease")
@@ -513,6 +517,8 @@ class ToolAttemptExecutor:
                     **budget_kwargs,
                 )
                 durable_started = True
+            if memory_guard is not None:
+                await memory_guard.check_async()
             provider_started = True
             try:
                 response = await self._invoke_adapter(
@@ -888,6 +894,14 @@ class ToolAttemptExecutor:
                     fault_controller=fault_controller,
                 )
             raise ToolAttemptFailed(error) from None
+        except MemoryContextError:
+            if durable_started:
+                await mark_durable_unknown("MEMORY_CONTEXT_REVOKED")
+                budget_ledger.commit(reservation, usage, usage_source=UsageSource.ESTIMATED)
+            else:
+                budget_ledger.release(reservation)
+            reservation = None
+            raise
         except ToolAttemptFailed:
             raise
         except BaseException:
@@ -1619,6 +1633,8 @@ class ToolExecutionService:
                 raise
 
         def category_of(exc: BaseException) -> ModelFailureCategory:
+            if isinstance(exc, MemoryContextError):
+                raise exc  # 使用资格拒绝不进入 Tool retry 分类，也不丢失 UNKNOWN 原事实。
             if isinstance(exc, ToolAttemptFailed):
                 return _model_category(exc.error.category)
             return ModelFailureCategory.UNKNOWN_FAILURE

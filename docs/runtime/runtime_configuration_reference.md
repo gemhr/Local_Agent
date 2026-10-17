@@ -375,3 +375,7 @@ Loop 模型必须提供已冻结的 `cost_profile` 和明确完成状态；同�
 默认 Profile 仍为 HEURISTIC，新 Policy 会以 `CONTEXT_BUDGET_UNCERTAIN` 拒绝调用；旧路径不受影响。完整请求包括 tools/tool_choice/response_format/JSON schema，不重复统计已存在于 Seed 的 schema；reserve 不得超过 Profile 输出上限。安全余量至少10%且不小于 Selection 的既有比例；fallback 前重新验证。软阈值没有可压缩组或没有新模型额度时，可靠且可容纳的 RAW 可继续；硬超限为 `LOOP_CONTEXT_EXHAUSTED`。每 Run 至多2个压缩 operation，每 operation 的首次、传输 Retry 和 crash Retry 合计至多2个真实 Attempt；无递归压缩或摘要 repair。
 
 压缩摘要的完整 JSON schema 位于 code-owned prompt，使用严格解析器验证 plain JSON；不会向未声明 Provider structured output 的 Engine 强制发送 `response_format`。该 schema 已计入 messages，不再作为独立 options 重复计算。
+
+## Scoped Memory 准入与 TTL
+
+Memory 不新增环境开关：persist=True 需要独立 typed MemoryAccessContext；persist=False 显式 STATELESS。HTTP session_id 缺省为各用户自己的 default，不共享 tenant/user。SESSION 默认24h、USER 默认30天、INFERENCE 30分钟；来源 TTL 也约束派生使用。PROJECT 必须由受信 Composition 调用 configure_project 持久配置 grant/TTL，默认关闭共享。scoped 路径禁用滚动 summary，上述历史 summary 参数不授权使用全局摘要。旧全局 Memory UI/API 不再支持。详见 [合同](scoped_memory_lifecycle_v1.md)。

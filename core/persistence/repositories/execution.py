@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from dataclasses import asdict, is_dataclass
 from uuid import NAMESPACE_URL, uuid5
@@ -127,6 +127,9 @@ class DurableExecutionRepository:
                     last_committed_fencing_token=token,
                 ))
                 await session.flush()
+                if lease is not None:
+                    await self._memory_admission(session, lease, seed_digest=canonical_payload_digest(seed))
+
 
     async def load(self, run_id: str, *, session: AsyncSession | None = None) -> RecoveryImage | None:
         """Load all recovery sub-aggregates from one DB transaction snapshot."""
@@ -365,7 +368,15 @@ class DurableExecutionRepository:
             await session.flush()
             return True
 
-    async def start_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, request_digest: str, provider_kind: str, profile_identity: str, journal_append: JournalAppend | None = None, loop_frame_id: str | None = None, loop_iteration_no: int | None = None, resume_generation: int | None = None, invocation_group: str | None = None, operation_id: str | None = None, reserved_usage: Any = None, purpose: str = "DECISION", context_snapshot_id: str | None = None, request_assessment: dict | None = None, compaction_operation_id: str | None = None) -> None:
+    async def _memory_admission(self, session, lease, admission=None, seed_digest=None):
+        from core.persistence.repositories.memory_lifecycle import MemoryLifecycleRepository
+        from core.runtime.memory_scope import MemoryContextError
+        code = await MemoryLifecycleRepository(self.database).guard_in_transaction(
+            session, lease, admission=admission, seed_digest=seed_digest)
+        if code:
+            raise MemoryContextError(code)
+
+    async def start_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, request_digest: str, provider_kind: str, profile_identity: str, journal_append: JournalAppend | None = None, loop_frame_id: str | None = None, loop_iteration_no: int | None = None, resume_generation: int | None = None, invocation_group: str | None = None, operation_id: str | None = None, reserved_usage: Any = None, purpose: str = "DECISION", context_snapshot_id: str | None = None, request_assessment: dict | None = None, compaction_operation_id: str | None = None, memory_operation_id: str | None = None) -> None:
         """Fenced NOT_STARTED -> STARTED transition before provider I/O."""
         async with self.database.transaction() as session:
             if self.run_control is not None:
@@ -373,7 +384,7 @@ class DurableExecutionRepository:
             if loop_frame_id is not None:
                 _, frame = await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
                 iteration = await session.get(RuntimeLoopIterationRow, (loop_frame_id, loop_iteration_no), with_for_update=True) if loop_iteration_no is not None else None
-                if frame.step_id != step_id or frame.phase != "NEED_DECISION":
+                if frame.step_id != step_id or frame.phase != ("RESULT_READY" if purpose == "FORMATION" else "NEED_DECISION"):
                     raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
                 if purpose == "COMPACTION":
                     operation = await session.get(RuntimeContextOperationRow, compaction_operation_id, with_for_update=True)
@@ -387,11 +398,13 @@ class DurableExecutionRepository:
                     if completed is not None:
                         raise RuntimeError("CONTEXT_OPERATION_ALREADY_STARTED")
                     operation.attempt_count += 1
+                elif purpose == "FORMATION":
+                    pass
                 elif iteration is None or iteration.state != "OPEN":
                     raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
                 elif invocation_group != f"{loop_frame_id}:{loop_iteration_no}":
                     raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
-                if frame.context_policy:
+                if frame.context_policy and purpose != "FORMATION":
                     from core.runtime.agent_loop.context import ContextSnapshotV1
                     if not request_assessment or not request_assessment.get("admissible") or request_assessment.get("request_digest") != request_digest:
                         raise RuntimeError("CONTEXT_BUDGET_UNCERTAIN")
@@ -407,6 +420,28 @@ class DurableExecutionRepository:
                 if operation_id is None or reserved_usage is None:
                     raise ValueError("Loop model requires budget reservation")
                 await self.reserve_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=reserved_usage, kind="MODEL", resume_generation=resume_generation, frame_id=loop_frame_id)
+            if loop_frame_id is None:
+                await session.get(RuntimeRunExecutionRow, lease.run_id, with_for_update=True)
+            await self._memory_admission(session, lease, f"model:{step_id}:{attempt}:{model_attempt}")
+            if purpose == "FORMATION":
+                from core.persistence.models import MemoryOperationRow, RuntimeMemoryBindingRow
+                from core.persistence.repositories.memory_lifecycle import MemoryLifecycleRepository
+                from core.runtime.memory_scope import MemoryAccessContext, MemoryContextError
+                operation = await session.get(MemoryOperationRow, memory_operation_id)
+                binding = await session.get(RuntimeMemoryBindingRow, lease.run_id)
+                if operation is None or operation.state != "PREPARED" or binding is None or binding.mode != "SCOPED":
+                    raise MemoryContextError("MEMORY_SOURCE_INVALID")
+                memory = MemoryLifecycleRepository(self.database)
+                await memory._locks(session, [operation.scope_id, *(d["scope_id"] for d in operation.dependencies)])
+                await memory._scope(session, MemoryAccessContext.from_dict(binding.access), operation.scope_id, "WRITE")
+                await memory._dependencies(session, operation.dependencies)
+                from core.persistence.models import MessageExchangeRow
+                source = await session.scalar(select(MessageExchangeRow.exchange_id).where(
+                    MessageExchangeRow.source_identity == operation.source_identity,
+                    MessageExchangeRow.access_scope_id == MemoryAccessContext.from_dict(binding.access).scope_id("SESSION"),
+                    MessageExchangeRow.run_id == lease.run_id))
+                if source is None:
+                    raise MemoryContextError("MEMORY_SOURCE_INVALID")
             row = (await session.execute(select(RuntimeModelInvocationRow).where(
                 RuntimeModelInvocationRow.run_id == lease.run_id,
                 RuntimeModelInvocationRow.step_id == step_id,
@@ -422,7 +457,7 @@ class DurableExecutionRepository:
                     last_committed_fencing_token=lease.fencing_token,
                     loop_frame_id=loop_frame_id, loop_iteration_no=loop_iteration_no,
                     resume_generation=resume_generation, invocation_group=invocation_group,
-                    purpose=purpose, compaction_operation_id=compaction_operation_id,
+                    purpose=purpose, compaction_operation_id=compaction_operation_id, memory_operation_id=memory_operation_id,
                     context_snapshot_id=context_snapshot_id,
                     context_snapshot_version=snapshot.version if context_snapshot_id else None,
                     context_snapshot_digest=snapshot.snapshot_digest if context_snapshot_id else None,
@@ -665,6 +700,7 @@ class DurableExecutionRepository:
         async with self.database.transaction() as session:
             _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
             rows = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id).order_by(RuntimeLoopIterationRow.iteration_no).with_for_update())).scalars().all())
+            await self._memory_admission(session, lease)
             current = rows[-1] if rows and rows[-1].state == "OPEN" else None
             artifact = ContextSnapshotV1.create(candidate)
             if current and current.context_snapshot_digest == artifact.digest:
@@ -767,6 +803,7 @@ class DurableExecutionRepository:
         async with self.database.transaction() as session:
             _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
             row = (await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id, RuntimeLoopIterationRow.iteration_no == iteration_no).with_for_update())).scalar_one()
+            await self._memory_admission(session, lease)
             if row.decision_id is not None:
                 if (row.decision_id, row.decision_digest) != (decision_id, decision_digest):
                     raise RuntimeError("LOOP_DECISION_CONFLICT")
@@ -990,6 +1027,7 @@ class DurableExecutionRepository:
             if frame.phase != "RESULT_READY" or frame.result_decision_id != decision_id:
                 raise RuntimeError("LOOP_FINAL_NOT_READY")
             iteration = (await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id, RuntimeLoopIterationRow.decision_id == decision_id).with_for_update())).scalar_one()
+            await self._memory_admission(session, lease)
             model = await session.get(RuntimeModelInvocationRow, (lease.run_id, frame.step_id, iteration.accepted_model_attempt, iteration.accepted_model_attempt_number), with_for_update=True)
             if model is None or model.state != "COMPLETED":
                 raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
@@ -1025,7 +1063,9 @@ class DurableExecutionRepository:
             if root.status == "ACTIVE":
                 raise RuntimeError("CONTEXT_EVIDENCE_NOT_READY")
             image = await self.load(run_id, session=session)
-            body = build_context_evidence(image)
+            # 冻结 Context 协议只覆盖上下文决策/压缩；post-delivery Formation 留在独立 Memory Evidence。
+            context_image = replace(image, models=tuple(r for r in image.models if r.purpose in {"DECISION","COMPACTION"}))
+            body = build_context_evidence(context_image)
             frame.sealed_context_evidence = {"body": body, "digest": canonical_payload_digest(body)}
             await session.flush()
             return frame.sealed_context_evidence

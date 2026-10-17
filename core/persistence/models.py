@@ -862,6 +862,7 @@ class RuntimeModelInvocationRow(PersistenceBase):
     invocation_group: Mapped[str | None] = mapped_column(String(255))
     resume_generation: Mapped[int | None] = mapped_column(BigInteger)
     purpose: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'DECISION'"))
+    memory_operation_id: Mapped[str | None] = mapped_column(String(255))
     context_snapshot_id: Mapped[str | None] = mapped_column(String(255))
     context_snapshot_version: Mapped[int | None] = mapped_column(Integer)
     context_snapshot_digest: Mapped[str | None] = mapped_column(CHAR(64))
@@ -884,10 +885,11 @@ class RuntimeModelInvocationRow(PersistenceBase):
     updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     __table_args__ = (
         ForeignKeyConstraint(["loop_frame_id", "loop_iteration_no"], ["runtime_loop_iterations.frame_id", "runtime_loop_iterations.iteration_no"], name="fk_runtime_model_loop_iteration", use_alter=True),
-        CheckConstraint("(loop_frame_id IS NULL AND loop_iteration_no IS NULL AND invocation_group IS NULL AND resume_generation IS NULL) OR (loop_frame_id IS NOT NULL AND ((purpose = 'DECISION' AND loop_iteration_no IS NOT NULL AND loop_iteration_no > 0) OR (purpose = 'COMPACTION' AND loop_iteration_no IS NULL)) AND invocation_group IS NOT NULL AND resume_generation IS NOT NULL AND resume_generation >= 0)", name="ck_runtime_model_loop_binding"),
+        CheckConstraint("(loop_frame_id IS NULL AND loop_iteration_no IS NULL AND invocation_group IS NULL AND resume_generation IS NULL) OR (loop_frame_id IS NOT NULL AND ((purpose = 'DECISION' AND loop_iteration_no IS NOT NULL AND loop_iteration_no > 0) OR (purpose IN ('COMPACTION','FORMATION') AND loop_iteration_no IS NULL)) AND invocation_group IS NOT NULL AND resume_generation IS NOT NULL AND resume_generation >= 0)", name="ck_runtime_model_loop_binding"),
+        ForeignKeyConstraint(["memory_operation_id"], ["memory_operations.operation_id"], name="fk_model_memory_operation", use_alter=True),
         ForeignKeyConstraint(["loop_frame_id", "context_snapshot_id", "context_snapshot_version", "context_snapshot_digest"], ["runtime_context_snapshots.frame_id", "runtime_context_snapshots.snapshot_id", "runtime_context_snapshots.version", "runtime_context_snapshots.snapshot_digest"], name="fk_model_context_snapshot", use_alter=True),
         ForeignKeyConstraint(["loop_frame_id", "compaction_operation_id"], ["runtime_context_operations.frame_id", "runtime_context_operations.operation_id"], name="fk_model_context_operation", use_alter=True),
-        CheckConstraint("(purpose = 'DECISION' AND compaction_operation_id IS NULL) OR (purpose = 'COMPACTION' AND compaction_operation_id IS NOT NULL AND loop_frame_id IS NOT NULL AND loop_iteration_no IS NULL AND context_snapshot_id IS NULL)", name="ck_model_context_purpose"),
+        CheckConstraint("(purpose = 'FORMATION' AND compaction_operation_id IS NULL AND context_snapshot_id IS NULL) OR (purpose = 'DECISION' AND compaction_operation_id IS NULL) OR (purpose = 'COMPACTION' AND compaction_operation_id IS NOT NULL AND loop_frame_id IS NOT NULL AND loop_iteration_no IS NULL AND context_snapshot_id IS NULL)", name="ck_model_context_purpose"),
         CheckConstraint("(context_snapshot_id IS NULL AND context_snapshot_version IS NULL AND context_snapshot_digest IS NULL) OR (context_snapshot_id IS NOT NULL AND context_snapshot_version IS NOT NULL AND context_snapshot_version > 0 AND context_snapshot_digest IS NOT NULL)", name="ck_model_context_tuple"),
         CheckConstraint("attempt_number > 0", name="ck_runtime_model_attempt_number"),
         CheckConstraint("model_attempt_number > 0", name="ck_runtime_model_model_attempt_number"),
@@ -1108,6 +1110,79 @@ _EXCHANGE_STATES = ("PENDING", "COMMITTED")
 _SEMANTIC_STATUSES = ("ACTIVE", "SUPERSEDED", "DELETED")
 
 
+class MemoryScopeRow(PersistenceBase):
+    """Scope 是分区及 mutation 锁，不是独立 Memory 服务。"""
+    __tablename__ = "memory_scopes"
+    scope_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.tenant_id"), nullable=False)
+    scope_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    owner_user_id: Mapped[object | None] = mapped_column(Uuid(as_uuid=True))
+    session_id: Mapped[str | None] = mapped_column(String(255))
+    agent_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'ACTIVE'"))
+    authz_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    row_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    grants: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    policy: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    __table_args__ = (
+        ForeignKeyConstraint(["owner_user_id", "tenant_id"], ["users.id", "users.tenant_id"], name="fk_memory_scope_owner"),
+        CheckConstraint("(scope_kind = 'SESSION' AND owner_user_id IS NOT NULL AND session_id IS NOT NULL AND project_id IS NULL) OR (scope_kind = 'USER' AND owner_user_id IS NOT NULL AND session_id IS NULL AND project_id IS NULL) OR (scope_kind = 'PROJECT' AND owner_user_id IS NULL AND session_id IS NULL AND project_id IS NOT NULL)", name="ck_memory_scope_partition"),
+        CheckConstraint("authz_epoch > 0 AND row_version > 0 AND status IN ('ACTIVE','REVOKED')", name="ck_memory_scope_state"),
+        Index("uq_memory_scope_partition", "tenant_id", "scope_kind", "agent_id", text("COALESCE(owner_user_id::text, '')"), text("COALESCE(session_id, '')"), text("COALESCE(project_id, '')"), unique=True),
+    )
+
+
+class MemoryOperationRow(PersistenceBase):
+    """Formation/Mutation 身份及抑制凭据；不另建执行队列。"""
+    __tablename__ = "memory_operations"
+    operation_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    scope_id: Mapped[str] = mapped_column(ForeignKey("memory_scopes.scope_id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    source_identity: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    request_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    candidate_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    candidate_body: Mapped[dict | None] = mapped_column(JSONB)
+    dependencies: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    expected_version: Mapped[int | None] = mapped_column(BigInteger)
+    result_version: Mapped[int | None] = mapped_column(BigInteger)
+    record_id: Mapped[str | None] = mapped_column(String(255))
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    receipt: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    __table_args__ = (
+        UniqueConstraint("scope_id", "operation_id", name="uq_memory_operation_scope"),
+        Index("ix_memory_operation_source", "scope_id", "source_identity"),
+        Index("uq_memory_source_suppression", "scope_id", "source_identity", unique=True, postgresql_where=text("kind = 'SUPPRESS'")),
+        CheckConstraint("state IN ('PREPARED','CANDIDATE','COMMITTED','CONFLICT','REJECTED','UNKNOWN','SUPPRESSED','SKIPPED_REVOKED')", name="ck_memory_operation_state"),
+    )
+
+
+class RuntimeMemoryBindingRow(PersistenceBase):
+    """Planner 之前可保存；不依赖尚未建立的 execution root。"""
+    __tablename__ = "runtime_memory_bindings"
+    run_id: Mapped[str] = mapped_column(ForeignKey("runtime_run_control.run_id", ondelete="CASCADE"), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    access: Mapped[dict | None] = mapped_column(JSONB)
+    scopes: Mapped[list] = mapped_column(JSONB, nullable=False)
+    manifest: Mapped[list] = mapped_column(JSONB, nullable=False)
+    manifest_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    earliest_expiry: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    seed_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'ACTIVE'"))
+    invalid_code: Mapped[str | None] = mapped_column(String(64))
+    admissions: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    row_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    last_fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    evidence: Mapped[dict | None] = mapped_column(JSONB)
+    evidence_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    __table_args__ = (
+        CheckConstraint("mode IN ('SCOPED','STATELESS') AND status IN ('ACTIVE','INVALID') AND row_version > 0", name="ck_runtime_memory_binding"),
+    )
+
+
 class MessageRow(PersistenceBase):
     """对话消息；``timestamp`` 由数据库 Authority 产生。"""
 
@@ -1140,7 +1215,20 @@ class MessageRow(PersistenceBase):
         nullable=True,
     )
 
+    access_scope_id: Mapped[str | None] = mapped_column(String(255))
+    record_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    expires_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    lifecycle_status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'REVOKED'"))
+    body_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'PRESENT'"))
+    body_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    source_identity: Mapped[str | None] = mapped_column(CHAR(64))
+    source_dependencies: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    epistemic_kind: Mapped[str | None] = mapped_column(String(32))
+    memory_policy_version: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (
+        ForeignKeyConstraint(["access_scope_id"], ["memory_scopes.scope_id"], name="fk_messagerow_access_scope", use_alter=True),
+        CheckConstraint("record_version > 0 AND lifecycle_status IN ('ACTIVE','EXPIRED','REVOKED','DELETED','SUPERSEDED','CANDIDATE') AND body_state IN ('PRESENT','REDACTED')", name="ck_messagerow_lifecycle"),
+
         CheckConstraint(
             "role IN ('user', 'assistant', 'system')",
             name="ck_messages_role",
@@ -1174,7 +1262,8 @@ class ConversationSummaryRow(PersistenceBase):
 
     __tablename__ = "conversation_summaries"
 
-    agent_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    summary_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String(255), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     last_message_id: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")
@@ -1183,6 +1272,20 @@ class ConversationSummaryRow(PersistenceBase):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("now()"),
+    )
+    access_scope_id: Mapped[str | None] = mapped_column(String(255))
+    record_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    expires_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    lifecycle_status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'REVOKED'"))
+    body_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'PRESENT'"))
+    body_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    source_identity: Mapped[str | None] = mapped_column(CHAR(64))
+    source_dependencies: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    epistemic_kind: Mapped[str | None] = mapped_column(String(32))
+    memory_policy_version: Mapped[int | None] = mapped_column(Integer)
+    __table_args__ = (
+        ForeignKeyConstraint(["access_scope_id"], ["memory_scopes.scope_id"], name="fk_conversationsummaryrow_access_scope", use_alter=True),
+        CheckConstraint("record_version > 0 AND lifecycle_status IN ('ACTIVE','EXPIRED','REVOKED','DELETED','SUPERSEDED','CANDIDATE') AND body_state IN ('PRESENT','REDACTED')", name="ck_conversationsummaryrow_lifecycle"),
     )
 
 
@@ -1210,7 +1313,20 @@ class MessageExchangeRow(PersistenceBase):
         server_default=text("now()"),
     )
 
+    access_scope_id: Mapped[str | None] = mapped_column(String(255))
+    record_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    expires_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    lifecycle_status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'REVOKED'"))
+    body_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'PRESENT'"))
+    body_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    source_identity: Mapped[str | None] = mapped_column(CHAR(64))
+    source_dependencies: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    epistemic_kind: Mapped[str | None] = mapped_column(String(32))
+    memory_policy_version: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (
+        ForeignKeyConstraint(["access_scope_id"], ["memory_scopes.scope_id"], name="fk_messageexchangerow_access_scope", use_alter=True),
+        CheckConstraint("record_version > 0 AND lifecycle_status IN ('ACTIVE','EXPIRED','REVOKED','DELETED','SUPERSEDED','CANDIDATE') AND body_state IN ('PRESENT','REDACTED')", name="ck_messageexchangerow_lifecycle"),
+
         CheckConstraint(
             "state IN ('PENDING', 'COMMITTED')",
             name="ck_message_exchanges_state",
@@ -1253,7 +1369,20 @@ class LongTermMemoryRow(PersistenceBase):
         String(255), nullable=True
     )
 
+    access_scope_id: Mapped[str | None] = mapped_column(String(255))
+    record_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    expires_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    lifecycle_status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'REVOKED'"))
+    body_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'PRESENT'"))
+    body_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    source_identity: Mapped[str | None] = mapped_column(CHAR(64))
+    source_dependencies: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    epistemic_kind: Mapped[str | None] = mapped_column(String(32))
+    memory_policy_version: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (
+        ForeignKeyConstraint(["access_scope_id"], ["memory_scopes.scope_id"], name="fk_longtermmemoryrow_access_scope", use_alter=True),
+        CheckConstraint("record_version > 0 AND lifecycle_status IN ('ACTIVE','EXPIRED','REVOKED','DELETED','SUPERSEDED','CANDIDATE') AND body_state IN ('PRESENT','REDACTED')", name="ck_longtermmemoryrow_lifecycle"),
+
         Index("ix_long_term_memory_agent_scope", "agent_id", "memory_scope"),
         Index(
             "ix_long_term_memory_episodic_active_scope",
@@ -1327,7 +1456,20 @@ class ProjectSemanticMemoryRow(PersistenceBase):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
+    access_scope_id: Mapped[str | None] = mapped_column(String(255))
+    record_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    expires_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    lifecycle_status: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'REVOKED'"))
+    body_state: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'PRESENT'"))
+    body_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    source_identity: Mapped[str | None] = mapped_column(CHAR(64))
+    source_dependencies: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    epistemic_kind: Mapped[str | None] = mapped_column(String(32))
+    memory_policy_version: Mapped[int | None] = mapped_column(Integer)
     __table_args__ = (
+        ForeignKeyConstraint(["access_scope_id"], ["memory_scopes.scope_id"], name="fk_projectsemanticmemoryrow_access_scope", use_alter=True),
+        CheckConstraint("record_version > 0 AND lifecycle_status IN ('ACTIVE','EXPIRED','REVOKED','DELETED','SUPERSEDED','CANDIDATE') AND body_state IN ('PRESENT','REDACTED')", name="ck_projectsemanticmemoryrow_lifecycle"),
+
         Index(
             "ix_project_semantic_active_scope",
             "project_id",
@@ -1380,6 +1522,9 @@ CANONICAL_TABLES = (
     "runtime_model_invocations",
     "runtime_context_operations",
     "runtime_context_snapshots",
+    "memory_operations",
+    "memory_scopes",
+    "runtime_memory_bindings",
     "runtime_loop_frames",
     "runtime_loop_iterations",
     "runtime_snapshots",

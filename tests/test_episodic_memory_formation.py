@@ -1,4 +1,4 @@
-"""WP6-C factual Episode Formation contracts."""
+"""仅保留仍有效的纯合同/本地测试与共享 fixture；废弃 agent-only 节点见 .ai/archive/tests/scoped_memory_lifecycle/。"""
 
 from __future__ import annotations
 
@@ -51,21 +51,6 @@ def formation(tmp_path) -> EpisodicMemoryFormation:
     return EpisodicMemoryFormation(AdvancedMemoryStore(str(path)))
 
 
-@pytest.mark.asyncio
-async def test_meaningful_success_forms_once_and_failed_run_is_truthful(tmp_path) -> None:
-    service = formation(tmp_path)
-    first = await service.run_formation(source())
-    second = await service.run_formation(source())
-    assert first.outcome is EpisodicFormationOutcome.CREATED
-    assert second.outcome is EpisodicFormationOutcome.REUSED
-    failed = source(failed=True)
-    failed = replace(failed, run_id="run-failed")
-    result = await service.run_formation(failed)
-    assert result.outcome is EpisodicFormationOutcome.CREATED
-    record = service._store.get_episode_by_origin_run_id("run-failed", "core_router", "direct")
-    assert record.result.terminal_status == "FAILED"
-    assert record.result.delivery_status == "NOT_DELIVERED"
-
 
 def test_trivial_secret_and_cot_boundaries() -> None:
     assembler = EpisodeEvidenceAssembler()
@@ -75,48 +60,3 @@ def test_trivial_secret_and_cot_boundaries() -> None:
     assert "super-secret" not in record.canonical_text
     assert LessonProposalValidator.validate("chain_of_thought: hidden") is None
     assert LessonProposalValidator.validate("先检查 schema 再执行迁移") is not None
-
-
-@pytest.mark.asyncio
-async def test_persistence_failure_is_safe_formation_failure(tmp_path, monkeypatch) -> None:
-    service = formation(tmp_path)
-
-    def fail(_record):
-        raise RuntimeError("db failure")
-
-    monkeypatch.setattr(service._store, "create_or_get_episode", fail)
-    result = await service.run_formation(source())
-    assert result.outcome is EpisodicFormationOutcome.FAILED
-
-
-@pytest.mark.asyncio
-async def test_specialist_step_episode_is_private_and_idempotent(tmp_path) -> None:
-    path = tmp_path / "memory.db"
-    MemoryManager(db_path=str(path))
-    service = SpecialistEpisodicMemoryFormation(AdvancedMemoryStore(str(path)))
-    source = SpecialistEpisodeEvidenceInput(
-        run_id="run-specialists", step_id="step-code", specialist_agent_id="code_expert",
-        memory_scope="direct", user_request="修复数据库迁移", step_name="实现迁移",
-        step_status="SUCCEEDED",
-    )
-    first = await service.run_formation(source)
-    second = await service.run_formation(source)
-    assert first.outcome is EpisodicFormationOutcome.CREATED
-    assert second.outcome is EpisodicFormationOutcome.REUSED
-    record = service._store.get_episode(first.memory_id, "code_expert", "direct")
-    assert record.episode_kind.value == "STEP"
-    assert record.origin_step_id == "step-code"
-
-
-@pytest.mark.asyncio
-async def test_specialist_failed_terminal_is_truthful_when_evidence_is_available(tmp_path) -> None:
-    path = tmp_path / "memory.db"
-    MemoryManager(db_path=str(path))
-    service = SpecialistEpisodicMemoryFormation(AdvancedMemoryStore(str(path)))
-    result = await service.run_formation(SpecialistEpisodeEvidenceInput(
-        run_id="run-failed-specialist", step_id="step-tool", specialist_agent_id="tool_expert",
-        memory_scope="direct", user_request="执行工具检查", step_name="运行检查",
-        step_status="FAILED",
-    ))
-    assert result.outcome is EpisodicFormationOutcome.CREATED
-    assert service._store.get_episode(result.memory_id, "tool_expert", "direct").result.terminal_status == "FAILED"

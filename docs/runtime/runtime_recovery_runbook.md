@@ -74,3 +74,9 @@ Loop 的 `persist` 意图随 root 冻结。交付后 Conversation exchange 仍�
 NEED_DECISION 先重建/验证原提交源并检查 no-progress；已有 OPEN 使用原 Snapshot、先恢复 completed DECISION winner。压缩先保存 PREPARED operation（精确 request/source/parent/cursor），原 Model Owner 提交响应/结算，再保存 RESULT_READY 验证候选，接受时原子推进不可变 Snapshot + Frame 引用 + Iteration 绑定。接管不创造新内容版本；completed COMPACTION 响应由新 Owner 校验复用，不重新调用/收费。旧 generation 的 finish/validate/accept 被拒绝；未完成压缩 Attempt 按原 UNKNOWN 保守结算，剩余额度最多一次，不增加业务 Iteration 的 model_recovery_count。
 
 只有带可靠显式 Provider context 拒绝事实的窄 REJECTED 状态允许原 OPEN Iteration 一次安全重绑定；STARTED/UNKNOWN/COMPLETED 均不能据此重绑定。第二次拒绝停止，不新建 Iteration 规避预算；单纯413/超时仍属不确定。实际 usage 超出 Run 上限时保留原 Attempt 的 reported usage 与 budget failure，保守结算、不产生 winner。Snapshot/summary 不改写已接受 Decision、Observation、工具、Final Receipt 或 terminal。停止新 admission 不代表旧 Snapshot Run 可以交给不支持新 schema 的 worker。
+
+## Memory 来源撤销后的恢复
+
+恢复只读原 runtime_memory_bindings，验证当前 User/Scope/epoch/version/TTL；不得用当前用户猜旧 Seed 归属，不重新检索或修改 Seed/Snapshot。新 Model/Tool dispatch、Decision 接受和未提交 Final 被拒绝；原 Coordinator typed stop。STARTED/UNKNOWN 沿原 Owner 结算/reconcile/suspend，不重发。已有 Final receipt 保持 event/cursor；失效源 Exchange/Formation 跳过。pre-root Planner 缺可恢复正文时停止为 UNVERIFIABLE，不重新收费。旧无 Binding Run 先 drain，不能补造 STATELESS。灾备开放 Memory 前必须核验 operation/source suppression；未知删除水位的备份禁止直接启用 Memory。见 [合同](scoped_memory_lifecycle_v1.md)。
+
+已提交 FORMATION 模型响应、候选尚未保存的进程退出窗口：rehydrated Step completion 重新装配原 SemanticMemoryFormation，按相同 operation 复用完成响应，不派发新模型或重复结算。USER_ASSERTION 独立来源由代码保证提取请求仅含原始用户消息；操作准入仍核验完整 Run 依赖，不以新 UUID 绕过已撤销来源。

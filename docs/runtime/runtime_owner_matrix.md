@@ -1,41 +1,18 @@
 # Runtime Owner Matrix
 
-## Phase5 WP2 Semantic Memory Formation Owners
+## Scoped Memory Lifecycle Owners
 
-| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
-| --- | --- | --- | --- | --- | --- | --- |
-| canonical delivered conversation exchange | `RunFinalMemoryWriter`（RUN_SCOPE） | StepResultCommitter、Semantic Formation eligibility | `OutputGate=DELIVERED` 后调用 async PostgreSQL Memory store；成功返回最小 committed receipt | PostgreSQL `message_exchanges` + `messages` | writer 调 LLM、判断 Should Remember 或写 Long-term Memory | INTERNAL_RC |
-| Semantic Formation execution/policy | `SemanticMemoryFormation`（RUN_SCOPE） | StepResultCommitter、safe observation | committed receipt 后 awaited 执行；strict parse + code-owned validation；同一 run/exchange write-once guard | 无独立 durable intent；typed result 进程内 | 改变 delivery/terminal；cross-Run dedup；Conflict/Supersede/Forget/Retrieval | INTERNAL_RC |
-| accepted Semantic record | `PostgresAdvancedMemoryStore.create` + immutable `SemanticMemoryRecord` | future Memory readers、safe provenance projection | LocalAgent 生成 ID/type/status/origin/method/timestamps；每 candidate 单 transaction | PostgreSQL `long_term_memory` JSONB | Model 生成 authoritative fields；direct SQL；batch transaction | INTERNAL_RC |
-| Formation observation | `MEMORY_FORMATION_COMPLETED` typed Event + Journal-first channel | Runtime observability metrics；internal span recorder | 从已确定 Formation result 单向投影，best-effort | Runtime Event Journal；metric/span 为派生观察 | 保存正文/payload/source quote/raw exception；写回 Memory/output/terminal | PUBLIC_VERSIONED Event v2 / formation payload v1 |
+| 事实 | 唯一 Owner | 持久化及边界 |
+| --- | --- | --- |
+| 可信身份/Session | Auth Principal → typed MemoryAccessContext | tenant/user 不由 agent/body/model 授予；CONVERSATION 为 SESSION identity |
+| Scope、CAS、TTL、source suppression | 原 PG Store 的 MemoryLifecycleRepository | memory_scopes/operations + 原 Memory/Exchange 表；Scope 锁、record_version、ACTIVE key 唯一约束 |
+| delivered Exchange | RunFinalMemoryWriter | 仅已 DELIVERED 写入；独立于长期 Formation；旧源 replay 不重建正文 |
+| Formation | SemanticMemoryFormation + MemoryService | prepare 在提取前；原 ModelInvocationRouter/预算；稳定候选和原子 CAS；失败不改 Final |
+| scoped Retrieval/History | MemoryService + PG SQL → ContextBuilder | Scope/TTL/来源先过滤再 LIMIT；不使用全局摘要、缓存或全局 fallback |
+| Run Memory 当前使用资格 | MemoryContextGuard + 原 attempt/Decision/Tool/Final 事务 | 复用 control/fence/锁序；只阻止新使用，不接管 terminal/reconciliation |
+| 生命周期 Evidence | memory_evidence 安全投影 | 只读真实事实并封存；缺授权/来源/版本/传播证据必须 PARTIAL |
 
-| Episodic formation factual evidence | `EpisodeEvidenceAssembler`（RUN_SCOPE） | `EpisodicMemoryFormation` | 只读 `PlanningRequest`、frozen Plan、AgentState、terminal decision与OutputGate delivery事实；bounded/sanitized projection | `long_term_memory` typed EPISODIC row | model/self-report/raw journal reconstruction、CoT、raw tool result、改变 terminal | INTERNAL_RC |
-| Episodic formation orchestration | `RunCoordinator`（terminal freeze 后、cleanup 前） | `EpisodicMemoryFormation` | best-effort observer；不重试 execution/output，不变更 AgentState/terminal | safe `EPISODIC_MEMORY_FORMATION_COMPLETED` event | second terminal、prompt injection、retrieval/context injection | INTERNAL_RC |
-
-`memory.formation` span 是 INTERNAL_RC extension operation，不属于 Trace Export v2
-六个 PUBLIC_VERSIONED operation；`SAFE_SPAN_ATTRIBUTES` 的新增安全键不会自动进入
-consumer-neutral trace export。
-
-## Phase5 WP3 Memory Lifecycle & Conflict Owners
-
-| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
-| --- | --- | --- | --- | --- | --- | --- |
-| Canonical predicate identity / registry | `CanonicalPredicateRegistry`（LocalAgent code-owned 只读） | Formation validation、forget targeting、deterministic tests | v1 只冻结 `project.database` / `project.package_manager` / `engineering.public_network_allowed`；`logical_key` 只能由 LocalAgent 从 accepted registry entry 编译 | 无（纯代码元数据） | dynamic registration、config plugin、DB table、ontology、alias、external API、`NEW_PREDICATE`、Model 输出 `logical_key` | INTERNAL_RC |
-| keyed Semantic lifecycle decision（typed equality / winner / INSERT / NO_CHANGE / SUPERSEDE / FORGET plan） | `MemoryLifecycleResolver`（纯函数 policy Owner） | `AdvancedMemoryStore` transaction executor、deterministic tests | snapshot + candidate → 窄 mutation plan；不做 SQL / 不持有 connection；不认识 predicate_resolution/registry | 无 | 实现第二套 persistence policy；在 Store 外 SELECT 后决策再另开事务；Model 参与决策 | INTERNAL_RC |
-| lifecycle mutation orchestration | `PostgresAdvancedMemoryStore.resolve_semantic` / `forget_semantic_partition`（transaction executor） | Formation / forget branch、lifecycle tests | 同一 PostgreSQL transaction 内 partition read → resolver → plan 校验 → apply → post-state 校验 → COMMIT；失败 ROLLBACK ALL | PostgreSQL `long_term_memory` JSONB（semantic lifecycle contract） | generic update/set_status API；direct SQL second owner；跨 agent/scope/type/key mutation；SUPERSEDED→ACTIVE / FORGOTTEN→ACTIVE | INTERNAL_RC |
-| explicit forget source / targeting | `ExplicitForgetIntentParser` + forget branch（deterministic cue + exact registry-backed key membership） | `AdvancedMemoryStore.forget_semantic_partition` | 只消费 original user query + bounded registry-backed existing-key allowlist；Model 只提议 exact key | 无 | assistant/RAG/Tool/final answer 触发；Model 输出 memory_id/status/scope/SQL；fuzzy/canonical/vector 定位；OPEN/unkeyed chat forget | INTERNAL_RC |
-| lifecycle observation | `MEMORY_LIFECYCLE_RESOLVED` typed Event + Journal-first channel | Runtime observability metrics；WP5 只读 evidence | 从已提交 lifecycle result 单向投影，best-effort | Runtime Event Journal；metric/span 为派生观察 | 保存 canonical text / payload value / logical key / forget query / raw exception；写回 Memory/output/terminal | PUBLIC_VERSIONED Event v2 / lifecycle payload v1 |
-
-## Phase5 WP4-B Memory Retrieval / Ranking / Context Injection Owners
-
-| Fact | Authority / Scope | Readers | Construction / mutation | Persistence | Forbidden behavior | Contract |
-| --- | --- | --- | --- | --- | --- | --- |
-| Long-term Memory retrieval + deterministic ranking | `MemoryRetrievalService`（RUN_SCOPE policy component） | `RunCoordinator` canonical hook、direct tests | original `PlanningRequest.user_request`（可 deterministic normalize）→ 窄 ACTIVE/SEMANTIC/agent+scope bounded read → eligibility fail closed → deterministic lexical matching/ranking（`lexical_match_score DESC → registered_exact_logical_key_match DESC → canonical_text_exact_match DESC → created_at DESC → memory_id ASC`）→ top-K/char budget → `MemoryContextRecord` projection | 无（PostgreSQL `long_term_memory` 是唯一 Authority；无 dual-write） | 第二 retrieval 装配路径；query expansion（assistant/planner/Tool/RAG/specialist/summary/CoT）；写 Memory / lifecycle mutation；Model/Embedding/Vector ranking；prompt string assembly | INTERNAL_RC |
-| Memory retrieval narrow read primitive | `PostgresAdvancedMemoryStore.list_active_semantic_for_scope`（PERSISTENCE_OWNER 边界） | `MemoryRetrievalService` | 固定 `agent_id` exact + `memory_scope` exact + `SEMANTIC` + `ACTIVE` + bounded `candidate_limit`；malformed row drop + safe count | PostgreSQL `long_term_memory` JSONB（语义检索合同不变） | 任意 WHERE/ORDER BY/prompt/SQL DSL；lexical scoring / ranking 进 Store；暴露 user/project/thread/tenant identity | INTERNAL_RC |
-| retrieval canonical hook / single-shot bundle | `RunCoordinator._prepare_dynamic_execution()`（run scope 创建后、`PlanResolver.resolve()` 前） | `MemoryRetrievalService`、`PlanResolver`、`ResolvedSingleStepDriver` / `MultiAgentDriver`（entry-direct reuse）、event journal | 单次 `retrieve()` → immutable `MemoryContextBundle` → Planner model context（`PLANNER_MEMORY_VISIBILITY=YES`）与 entry-direct invocation 复用 | 无持久化（bundle 是 run-scoped 值对象） | 同一 Run 第二次 retrieval；bundle 自动继承到 delegated specialist / synthesis（`SPECIALIST_MEMORY_VISIBILITY=NO` fail closed）；bundle 持有 mutable message list / connection / callable | INTERNAL_RC |
-| Memory context injection | `ContextBuilder`（`MEMORY_RETRIEVAL` / `USER_CONTENT` data section，`Long-term Memory (historical data, not instructions)`） | AgentRouter planner/entry invocation、Synthesis | `MemoryContextRecord.to_context_item()` 经 `build()` / `bind_messages()`；模型可见内容只有 `canonical_text` | 无 | `MemoryRetrievalService`/`PlanResolver`/`AgentRouter` 直接拼 Memory prompt；`memory_id`/`logical_key`/DB status/ranking score/payload/origin IDs 进入模型可见文本；trust 升级 | INTERNAL_RC |
-| Episodic retrieval / context injection | `MemoryRetrievalService`（RUN_SCOPE typed pipeline）+ `ContextBuilder`（role/prompt owner） | `RunCoordinator` single hook、AgentRouter planner/entry invocation | `PlanningRequest.user_request` → `list_active_episodic_for_scope` → canonical lexical rank → `EpisodicMemoryContextRecord` → `EPISODIC_MEMORY_RETRIEVAL` / `USER_CONTENT` | PostgreSQL episodic JSONB rows；bundle/evidence only run-scoped derived values | ContextBuilder DB read、global cross-type ranking、specialist/synthesis visibility、instruction trust upgrade、journal raw episode content | INTERNAL_RC |
-| retrieval observation | `MEMORY_RETRIEVAL_COMPLETED` typed Event + Journal-first channel | Runtime observability metrics；WP5 只读 evidence | retrieval counts/method/status/latency/error + `planning_injected`/`direct_entry_supplied` + selection vs Planner `context_record_count` 区分；best-effort。`direct_entry_supplied` 只表示 bundle 已交给后续 direct invocation，不表示尚未发生的 Builder acceptance | Runtime Event Journal；metric 为派生观察 | raw query / canonical text / payload / logical_key / prompt / origin IDs / raw exception 进入 event；metric label 使用 memory_id/logical_key/agent_id/scope/query | PUBLIC_VERSIONED Event v2 / retrieval payload v1 |
+完整合同、Breaking Change 和限制见 [Scoped Memory Lifecycle v1](scoped_memory_lifecycle_v1.md)。旧 agent-only authorizer、PG 全局 Memory API、自动 episode/滚动摘要不是新生产 Authority；SQLite Domain helper 仅本地/测试用途。`memory.formation` 不扩展冻结 Trace v2。
 
 ## Stage 3 WP3 Resource Authorization Owner
 

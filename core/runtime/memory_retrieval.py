@@ -195,6 +195,7 @@ class MemoryContextBundle:
     project_candidate_count: int = 0
     project_selected_count: int = 0
     authorization: MemoryAuthorizationResult | None = None
+    scoped_history: tuple = ()
 
     @property
     def record_count(self) -> int:

@@ -11,6 +11,7 @@ def test_postgres_production_sql_uses_static_or_expression_construction():
         root / "core/persistence/database.py",
         root / "core/persistence/memory.py",
         root / "core/persistence/repositories/runtime.py",
+        root / "core/persistence/repositories/memory_lifecycle.py",
     )
     assert scan_paths(paths) == ()
 

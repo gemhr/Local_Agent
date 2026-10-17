@@ -1,4 +1,4 @@
-"""WP7-B Agent-private Memory requester/owner authorization contracts。"""
+"""仅保留仍有效的纯合同/本地测试与共享 fixture；废弃 agent-only 节点见 .ai/archive/tests/scoped_memory_lifecycle/。"""
 
 from __future__ import annotations
 
@@ -57,41 +57,6 @@ def _record(memory_id: str = "mem-a", *, agent_id: str = "agent_A") -> SemanticM
         updated_at=now,
     )
 
-
-def test_private_policy_is_typed_owner_requester_and_fail_closed() -> None:
-    policy = MemoryAccessAuthorizer()
-    owner = MemoryAccessPrincipal("agent_A")
-    allowed = policy.authorize_private_read(owner, "agent_A", "direct")
-    assert allowed.decision is MemoryAuthorizationDecision.ALLOW
-    assert allowed.reason_code is MemoryAuthorizationReason.OWNER_MATCH
-
-    foreign = policy.authorize_private_read(
-        MemoryAccessPrincipal("agent_B"), "agent_A", "direct"
-    )
-    assert foreign.decision is MemoryAuthorizationDecision.DENY
-    assert foreign.error_code == MemoryAuthorizationErrorCode.PRIVATE_MEMORY_ACCESS_DENIED
-
-    missing = policy.authorize_private_read(None, "agent_A", "direct")
-    assert missing.decision is MemoryAuthorizationDecision.DENY
-    assert missing.reason_code is MemoryAuthorizationReason.UNKNOWN_REQUESTER
-    assert missing.error_code == MemoryAuthorizationErrorCode.MEMORY_REQUESTER_MISSING
-
-    mismatch = policy.authorize_private_read(
-        owner, "agent_A", "direct", requested_memory_scope="other"
-    )
-    assert mismatch.decision is MemoryAuthorizationDecision.DENY
-    assert mismatch.reason_code is MemoryAuthorizationReason.SCOPE_MISMATCH
-    assert mismatch.error_code == MemoryAuthorizationErrorCode.PRIVATE_MEMORY_SCOPE_MISMATCH
-
-    project = policy.authorize_private_read(
-        owner, "agent_A", "direct", visibility="PROJECT"
-    )
-    assert project.decision is MemoryAuthorizationDecision.DENY
-    assert project.error_code == MemoryAuthorizationErrorCode.UNSUPPORTED_MEMORY_VISIBILITY
-
-    unsupported = policy.authorize("DELETE", owner, "agent_A", "direct")
-    assert unsupported.decision is MemoryAuthorizationDecision.DENY
-    assert unsupported.reason_code is MemoryAuthorizationReason.UNSUPPORTED_OPERATION
 
 
 class _CountingStore(AdvancedMemoryStore):

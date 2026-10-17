@@ -147,6 +147,8 @@ class SemanticFormationStatus(str, Enum):
 class SemanticFormationErrorCode(str, Enum):
     """安全错误码；不含 provider/SQL/路径/正文。"""
 
+    EXPLICIT_MUTATION_REQUIRED = "FORMATION_EXPLICIT_MUTATION_REQUIRED"
+
     MODEL_FAILED = "FORMATION_MODEL_FAILED"
     OUTPUT_INVALID = "FORMATION_OUTPUT_INVALID"
     OUTPUT_UNKNOWN_FIELD = "FORMATION_OUTPUT_UNKNOWN_FIELD"
@@ -651,6 +653,7 @@ class SemanticMemoryFormation:
         metrics_recorder=None,
         event_emitter=None,
         forget_model: Optional[ForgetProposalModel] = None,
+        run_context=None,
     ) -> None:
         if not isinstance(entry_agent_id, str) or not entry_agent_id.strip():
             raise ValueError("entry_agent_id 不能为空")
@@ -675,7 +678,8 @@ class SemanticMemoryFormation:
         if not isinstance(memory_scope, str) or not memory_scope.strip():
             raise ValueError("memory_scope 不能为空")
         self._entry_agent_id = entry_agent_id.strip()
-        self._requester = requester or MemoryAccessPrincipal(self._entry_agent_id)
+        self._requester = requester
+        self._run_context = run_context
         self._authorizer = MemoryAccessAuthorizer()
         self._user_request = user_request
         self._memory_store = memory_store
@@ -833,17 +837,8 @@ class SemanticMemoryFormation:
             return self._immediate_failure(
                 receipt, SemanticFormationErrorCode.IDENTITY_INVALID
             )
-        authorization = self._authorizer.authorize_private_create(
-            self._requester,
-            self._entry_agent_id,
-            self._memory_scope,
-            requested_memory_scope=receipt.memory_scope,
-        )
-        if not authorization.allowed:
-            return self._immediate_failure(
-                receipt,
-                SemanticFormationErrorCode.PRIVATE_MEMORY_ACCESS_DENIED,
-            )
+        if self._run_context is None or self._run_context.memory_access_context is None:
+            return self._immediate_failure(receipt, SemanticFormationErrorCode.PRIVATE_MEMORY_ACCESS_DENIED)
         if _is_obviously_non_persistent_source(self._user_request):
             return self._build_result(
                 run_id=receipt.run_id,
@@ -889,6 +884,21 @@ class SemanticMemoryFormation:
         timings: _FormationTimings,
         total_started: float,
     ) -> SemanticFormationResult:
+        context = self._run_context
+        if context is not None and context.memory_service is not None:
+            receipt_body = await context.memory_service.form(access=context.memory_access_context,
+                receipt=receipt, user_request=self._user_request,
+                final_answer=store.read_final_content(final_step_id), extraction_model=self._extraction_model)
+            succeeded = receipt_body.get("outcome") == "COMMITTED"
+            outcomes = tuple(FormationCandidateOutcome(index, FormationCandidateOutcomeCode.PERSISTED,
+                "SCOPED_CAS_COMMITTED", memory_id=item["record_id"])
+                for index,item in enumerate(receipt_body.get("records", [])))
+            return self._build_result(run_id=receipt.run_id, exchange_id=receipt.exchange_id,
+                status=SemanticFormationStatus.SUCCEEDED if succeeded else SemanticFormationStatus.FAILED,
+                error_code=None if succeeded else (SemanticFormationErrorCode.EXPLICIT_MUTATION_REQUIRED
+                    if receipt_body.get("outcome")=="EXPLICIT_MUTATION_REQUIRED" else SemanticFormationErrorCode.PRIVATE_MEMORY_ACCESS_DENIED),
+                outcomes=outcomes, proposed=len(outcomes), accepted=len(outcomes),
+                extraction_ms=0, persistence_ms=0, total_duration_ms=max(0, int((time.monotonic()-total_started)*1000)))
         # WP3-B：explicit forget 与 remember Formation 对同一 exchange 互斥。
         # deterministic forget cue 命中即进入独立 forget branch，本 exchange 不再
         # 形成任何新的 Semantic Memory。

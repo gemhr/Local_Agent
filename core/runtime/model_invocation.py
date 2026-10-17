@@ -12,6 +12,7 @@ import inspect
 import time
 from typing import Awaitable, Callable, Mapping, Protocol, Sequence
 
+from core.runtime.memory_scope import MemoryContextError
 from core.runtime.budget import (
     BudgetExceededError,
     BudgetLedger,
@@ -716,6 +717,9 @@ class ModelInvocationRouter:
         while index < len(candidates):
             candidate = candidates[index]
             retry_index = retry_indexes.get(candidate.profile_id, 0)
+            guard = getattr(run_context, "memory_guard", None)
+            if guard is not None:
+                await guard.check_async()
             run_context.raise_if_inactive()
             self._check_deadline(run_context, candidate, index)
             breaker = circuit_breaker_registry.get(candidate.breaker_key)
@@ -733,6 +737,8 @@ class ModelInvocationRouter:
                     reservation_type="model_invocation",
                 )
                 adapter = adapter_resolver.resolve(candidate.profile_id)
+                if guard is not None:
+                    await guard.check_async(admission=f"async-model:{len(attempts)+1}")
 
                 async def accept_delta(_text: str) -> None:
                     nonlocal accepted_output
@@ -798,6 +804,11 @@ class ModelInvocationRouter:
                     model_identity=candidate.profile.model_identity,
                 )
             except asyncio.CancelledError:
+                if reservation is not None:
+                    budget_ledger.release(reservation)
+                permit.abandon()
+                raise
+            except MemoryContextError:
                 if reservation is not None:
                     budget_ledger.release(reservation)
                 permit.abandon()
@@ -904,6 +915,13 @@ class ModelInvocationRouter:
             raise ModelInvocationConfirmationRequired()
         if token_estimate < 0:
             raise ValueError("token_estimate 必须是非负整数")
+        guard = getattr(run_context, "memory_guard", None)
+        preplan_invocation = None
+        if guard is not None:
+            guard.check(async_submit)
+            if isinstance(event_emitter, RunEventEmitter):
+                preplan_invocation = getattr(run_context, "memory_preplan_invocation_no", 0) + 1
+                run_context.memory_preplan_invocation_no = preplan_invocation
         restored = self.restore_completed_loop_result(
             run_context=run_context, routing_decision=routing_decision, messages=messages,
             max_tokens=max_tokens, generation_options=generation_options, async_submit=async_submit,
@@ -922,6 +940,9 @@ class ModelInvocationRouter:
         retry_indexes: dict[ModelProfileId, int] = {}
         accepted_output = bool(output_started)
         for index, candidate in enumerate(candidates):
+            guard = getattr(run_context, "memory_guard", None)
+            if guard is not None:
+                guard.check(async_submit)
             retry_index = retry_indexes.get(candidate.profile_id, 0)
             if candidate.profile_id in seen and retry_index == 0:
                 raise RuntimeError("Routing Chain 不允许重复 Profile")
@@ -1065,6 +1086,7 @@ class ModelInvocationRouter:
             try:
                 started_event_emitted = False
                 durable_attempt = None
+                preplan_admission = None
                 adapter = adapter_resolver.resolve(candidate.profile_id)
                 self._execute_fault_point(
                     fault_controller,
@@ -1084,10 +1106,15 @@ class ModelInvocationRouter:
                         attempts=attempts,
                         reserved_usage=usage,
                     )
+                except MemoryContextError:
+                    raise
                 except Exception as exc:
                     raise DurableModelLifecycleError(
                         "MODEL_DURABLE_START_FAILED"
                     ) from exc
+                preplan_admission = f"preplan:{preplan_invocation}:{len(attempts)+1}" if preplan_invocation is not None else None
+                if guard is not None:
+                    guard.check(async_submit, admission=preplan_admission)
                 attempt_started_monotonic = time.monotonic()
                 # Candidate、Context、Circuit、Budget、Cancellation/Deadline 与
                 # Adapter resolution 均已成功；进入 invoke 前由 Router 发布唯一
@@ -1106,6 +1133,8 @@ class ModelInvocationRouter:
                     # 这里只确认事实，不重复发布第二个 MODEL_STARTED。
                     return None
 
+                if guard is not None:
+                    guard.check(async_submit)
                 if isinstance(adapter, GeneratorModelAdapter) and async_submit is not None:
                     async def accept_delta(text: str) -> None:
                         nonlocal accepted_output
@@ -1140,6 +1169,17 @@ class ModelInvocationRouter:
                     response = adapter.invoke_request(messages, max_tokens=max_tokens, generation_options=generation_options, run_context=run_context)
                 else:
                     response = adapter.invoke(messages, max_tokens=max_tokens)
+            except MemoryContextError:
+                if durable_attempt is not None:
+                    self._finish_durable_model_attempt(run_context=run_context, durable_attempt=durable_attempt,
+                        state=ModelAttemptState.UNKNOWN, async_submit=async_submit, safe_error="MEMORY_CONTEXT_REVOKED")
+                    budget_ledger.commit(reservation, None, usage_source=UsageSource.ESTIMATED)
+                else:
+                    budget_ledger.release(reservation)
+                permit.abandon()
+                attempt_span.end_error("MEMORY_CONTEXT_REVOKED")
+                reset_trace_context(attempt_trace_token)
+                raise
             except DurableModelLifecycleError:
                 # A durable STARTED marker is a precondition for provider I/O;
                 # repository failure must not be interpreted as a provider
@@ -1178,6 +1218,9 @@ class ModelInvocationRouter:
                 reset_trace_context(attempt_trace_token)
                 raise
             except Exception as exc:
+                if preplan_admission is not None and guard is not None:
+                    async_submit(guard.repository.finish_admission(run_context.durable_lease,
+                        f"preplan:{preplan_invocation}:{len(attempts)+1}", state="UNKNOWN"))
                 category = classify_model_failure(exc)
                 last_category = category
                 started = bool(getattr(exc, "provider_started", True))
@@ -1333,6 +1376,11 @@ class ModelInvocationRouter:
                 attempt_span.end_cancelled("MODEL_ATTEMPT_ABORTED")
                 reset_trace_context(attempt_trace_token)
                 raise
+            if preplan_invocation is not None and guard is not None:
+                async_submit(guard.repository.finish_admission(run_context.durable_lease,
+                    f"preplan:{preplan_invocation}:{len(attempts)+1}", state="COMPLETED",
+                    result_digest=self._durable_model_request_digest([{"role":"assistant","content":response.output}],
+                        max_tokens=max_tokens, generation_options=None)))
             actual = response.actual_usage
             if getattr(run_context, "loop_frame_id", None) is not None and actual is not None:
                 actual = replace(actual, model_calls=usage.model_calls, remote_model_calls=usage.remote_model_calls, retries=usage.retries, cost_units=actual.cost_units or usage.cost_units)
@@ -1554,6 +1602,8 @@ class ModelInvocationRouter:
         routing_decision=None, profiles=(), step_id=None, requires_structured_output=False,
     ) -> ModelInvocationResult | None:
         frame_id = getattr(run_context, "loop_frame_id", None)
+        if getattr(run_context, "memory_formation_operation_id", None):
+            return None
         if frame_id is None:
             return None
         if not callable(async_submit) or run_context.execution_repository is None:
@@ -1738,6 +1788,14 @@ class ModelInvocationRouter:
                     compaction_operation_id=run_context.loop_compaction_operation_id if purpose == "COMPACTION" else None)
                 if purpose == "COMPACTION":
                     loop_kwargs.update(loop_iteration_no=None, invocation_group=f"context:{run_context.loop_compaction_operation_id}")
+        formation_operation = getattr(run_context, "memory_formation_operation_id", None)
+        if formation_operation:
+            operation_id = f"formation:{formation_operation}:{model_attempt}" if loop_frame_id else None
+            loop_kwargs = dict(purpose="FORMATION", memory_operation_id=formation_operation)
+            if loop_frame_id:
+                loop_kwargs.update(loop_frame_id=loop_frame_id, loop_iteration_no=None,
+                    resume_generation=run_context.loop_resume_generation, invocation_group=f"memory:{formation_operation}",
+                    operation_id=operation_id, reserved_usage=self._durable_usage(reserved_usage))
         async_submit(
             start(
                 lease,

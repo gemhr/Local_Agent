@@ -12,6 +12,7 @@ import time
 from collections.abc import Mapping
 from types import SimpleNamespace
 
+from core.runtime.memory_scope import MemoryAccessContext
 from core.runtime.application_services import (
     ApplicationRuntimeServices,
     RuntimeLifecycleState,
@@ -705,6 +706,7 @@ class CoordinatedRuntimeFactory:
         execution_policy: str | None = None,
         loop_policy: LoopPolicyV1 | None = None,
         loop_correlation: dict | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
     ) -> CoordinatedRunScope:
         """默认 Coordinated 入口：始终经过动态 PlanResolver。"""
         return await self._create_run_scope(
@@ -728,6 +730,7 @@ class CoordinatedRuntimeFactory:
             execution_policy=execution_policy,
             loop_policy=loop_policy,
             loop_correlation=loop_correlation,
+            memory_access_context=memory_access_context,
         )
 
     async def create_static_run_scope(
@@ -742,6 +745,7 @@ class CoordinatedRuntimeFactory:
         timeout_seconds: float | None = None,
         budget: RunBudget | None = None,
         persist: bool = True,
+        memory_access_context: MemoryAccessContext | None = None,
         fault_controller: FaultInjectionController | None = None,
         episodic_evaluation_observer=None,
         project_identity: ProjectIdentity | None = None,
@@ -769,6 +773,7 @@ class CoordinatedRuntimeFactory:
             timeout_seconds=timeout_seconds,
             budget=budget,
             persist=persist,
+            memory_access_context=memory_access_context,
             fault_controller=fault_controller,
             episodic_evaluation_observer=episodic_evaluation_observer,
             project_identity=project_identity,
@@ -988,6 +993,7 @@ class CoordinatedRuntimeFactory:
         execution_policy: str | None = None,
         loop_policy: LoopPolicyV1 | None = None,
         loop_correlation: dict | None = None,
+        memory_access_context: MemoryAccessContext | None = None,
     ) -> CoordinatedRunScope:
         """Create one identity set and clean up any partially built transport."""
         if self._services.lifecycle_state is not RuntimeLifecycleState.READY:
@@ -1099,6 +1105,39 @@ class CoordinatedRuntimeFactory:
             )
             if repository is not None:
                 run_context.attach_execution_repository(repository)
+            from core.runtime.memory_service import MemoryService
+            from core.runtime.memory_context_guard import MemoryContextGuard
+            from core.runtime.memory_scope import MemoryAccessContext, MemoryContextError
+            from core.runtime.memory_retrieval import MemoryContextBundle
+            from core.persistence.repositories.memory_lifecycle import MemoryLifecycleRepository
+            run_context.memory_access_context = None
+            run_context.memory_service = None
+            run_context.memory_guard = None
+            run_context.scoped_memory_bundle = MemoryContextBundle.empty(agent_id, "STATELESS")
+            if repository is not None:
+                memory_repository = MemoryLifecycleRepository(repository.database)
+                run_context.memory_service = MemoryService(memory_repository)
+                if rehydrated_root is not None:
+                    binding = await memory_repository.binding(run_context.run_id)
+                    if binding is not None and binding.mode == "SCOPED":
+                        memory_access_context = MemoryAccessContext.from_dict(binding.access)
+                    # 恢复只使用原 Seed；没有可信 binding 的旧 Run 不补造 STATELESS。
+                else:
+                    if persist and memory_access_context is None:
+                        raise MemoryContextError("MEMORY_PRINCIPAL_REQUIRED")
+                    scopes, manifest = [], []
+                    if memory_access_context is not None and persist:
+                        if memory_access_context.agent_id != agent_id or memory_access_context.session_id != session_id:
+                            raise MemoryContextError("MEMORY_IDENTITY_CONFLICT")
+                        bundle, scopes, manifest = await run_context.memory_service.load_context(memory_access_context, query)
+                        run_context.scoped_memory_bundle = bundle
+                    else:
+                        memory_access_context = None
+                    await memory_repository.bind_run(durable_lease, memory_access_context, scopes, manifest)
+                run_context.memory_access_context = memory_access_context
+                run_context.memory_guard = MemoryContextGuard(memory_repository, durable_lease)
+            elif persist or memory_access_context is not None:
+                raise MemoryContextError("MEMORY_CONTEXT_UNVERIFIABLE")
             run_context.attach_project_memory_access(project_identity, project_grants)
             prepare_tool_snapshot = getattr(
                 self._router, "prepare_tool_resolution_snapshot", None
@@ -1286,6 +1325,7 @@ class CoordinatedRuntimeFactory:
                         metrics_recorder=self._services.runtime_metrics_recorder,
                         fault_controller=fault_controller,
                         loop_context=run_context if selected_policy == LOOP_POLICY else None,
+                        memory_context=run_context,
                     )
                     rehydrated_committer = StepResultCommitter(
                         store=rehydrated_store,
@@ -1303,7 +1343,16 @@ class CoordinatedRuntimeFactory:
                             self._router, entry_agent_id=agent_id, user_request=query,
                             persist=bool((rehydrated_root.resume_input.get("agent_loop") or {}).get("persist", persist)),
                             run_id=run_context.run_id, span_recorder=span_recorder,
-                            metrics_recorder=self._services.runtime_metrics_recorder, idempotent_replay=True)
+                            metrics_recorder=self._services.runtime_metrics_recorder, idempotent_replay=True,
+                            run_context=run_context)
+                        memory_store = getattr(getattr(self._router, "memory_manager", None), "advanced_store", None)
+                        if memory_store is not None and run_context.memory_access_context is not None:
+                            from core.runtime.semantic_memory_formation import SemanticMemoryFormation, UnifiedFormationExtractionAdapter
+                            rehydrated_committer._semantic_memory_formation = SemanticMemoryFormation(
+                                entry_agent_id=agent_id, user_request=query, memory_store=memory_store,
+                                extraction_model=UnifiedFormationExtractionAdapter(self._router,run_context=run_context,event_emitter=emitter),
+                                run_id=run_context.run_id,run_context=run_context,event_emitter=emitter,
+                                span_recorder=span_recorder,metrics_recorder=self._services.runtime_metrics_recorder)
                     rehydrated_bindings = _rehydrated_bindings(static_plan)
                     rehydrated_driver = MultiAgentDriver(
                         router=self._router,

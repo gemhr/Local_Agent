@@ -74,3 +74,7 @@ PASS 不等于生产容量验证、真实外部依赖验证、跨进程容灾、
 ## Derived Assessment
 
 `ReleaseGateAssessment` 是测试辅助派生值，不是 Runtime Owner。它只保存固定 ID、计数和布尔检查结果，不保存路径、业务正文或原始异常。当前最终数值见第二轮结果文档；任何检查变化都必须重新计算，不能读取本文勾选项。
+
+## Scoped Memory 最小 Gate
+
+按 [Scoped Memory Lifecycle v1](scoped_memory_lifecycle_v1.md) 核查 Scope 隔离、真实 PG 并发 CAS、TTL/删除传播、冻结上下文撤销后的真实进程恢复。实施八个聚焦节点在 tests/test_scoped_memory_lifecycle.py；不要为本 WP 重跑旧 WP1–WP3 矩阵。已废弃的 agent-only/default-self-authorized/global-history 节点已从默认发现移除，原文及节点清单位于 .ai/archive/tests/scoped_memory_lifecycle/。纯 Parser/ContextBuilder/本地 SQLite 原子存储测试仍有效。
