@@ -737,6 +737,9 @@ class Settings:
     agentevalops_project_id: str = ""
     loop_evaluation_project_id: str = ""
     loop_evaluation_service_principal_id: str = ""
+    quality_evaluation_project_id: str = ""
+    quality_evaluation_service_principal_id: str = ""
+    quality_evaluation_configuration_path: str = ""
     agentevalops_connect_timeout_seconds: float = 0.5
     agentevalops_total_deadline_seconds: float = 3.0
     evaluation_mode: bool = False
@@ -1243,6 +1246,18 @@ class Settings:
                 except ValueError:
                     raise SettingsValidationError(STARTUP_CONFIGURATION_ERROR, key, "invalid_uuid") from None
 
+        quality_values = [os.getenv(key, "").strip() for key in (
+            "LOCAL_AGENT_QUALITY_EVALUATION_PROJECT_ID", "LOCAL_AGENT_QUALITY_EVALUATION_SERVICE_PRINCIPAL_ID",
+            "LOCAL_AGENT_QUALITY_EVALUATION_CONFIGURATION_PATH")]
+        if any(quality_values) and not all(quality_values):
+            raise SettingsValidationError(STARTUP_CONFIGURATION_ERROR, "LOCAL_AGENT_QUALITY_EVALUATION_PROJECT_ID", "requires_complete_quality_configuration")
+        for value in quality_values[:2]:
+            if value:
+                try:
+                    uuid.UUID(value)
+                except ValueError:
+                    raise SettingsValidationError(STARTUP_CONFIGURATION_ERROR, "LOCAL_AGENT_QUALITY_EVALUATION_PROJECT_ID", "invalid_uuid") from None
+
         return cls(
             project_root=project_root,
             environment_profile=environment_profile,
@@ -1446,6 +1461,9 @@ class Settings:
             agentevalops_project_id=agentevalops_project_id,
             loop_evaluation_project_id=loop_evaluation_project_id,
             loop_evaluation_service_principal_id=loop_evaluation_service_principal_id,
+            quality_evaluation_project_id=quality_values[0],
+            quality_evaluation_service_principal_id=quality_values[1],
+            quality_evaluation_configuration_path=quality_values[2],
             agentevalops_connect_timeout_seconds=agentevalops_connect_timeout_seconds,
             agentevalops_total_deadline_seconds=agentevalops_total_deadline_seconds,
             evaluation_mode=evaluation_mode,

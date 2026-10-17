@@ -96,6 +96,17 @@ class DurableExecutionRepository:
         async with self.database.transaction() as session:
             if self.run_control is not None:
                 await self.run_control.assert_current_in_transaction(session, lease)
+            from core.persistence.models import RuntimeAgentEvaluationReceiptRow
+            quality_receipt = await session.get(RuntimeAgentEvaluationReceiptRow, root.run_id)
+            if quality_receipt is not None:
+                from core.runtime.agent_loop.quality_contract import quality_runtime_config_digest
+                loop = root.resume_input.get("agent_loop") or {}
+                agent_id = quality_receipt.correlation["agent_id"]
+                pin = quality_receipt.execution_manifest["agents"][agent_id]
+                if (values.get("execution_policy") != pin["execution_policy"]
+                        or loop.get("memory_effect_policy") != quality_receipt.execution_manifest.get("memory_effect_policy")
+                        or quality_runtime_config_digest(loop.get("pinned_config")) != pin["runtime_config_digest"]):
+                    raise ValueError("QUALITY_RUNTIME_PIN_INVALID")
             session.add(RuntimeRunExecutionRow(**values))
             for step in root.plan.steps:
                 session.add(RuntimeStepExecutionRow(
@@ -385,7 +396,7 @@ class DurableExecutionRepository:
         if code:
             raise MemoryContextError(code)
 
-    async def start_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, request_digest: str, provider_kind: str, profile_identity: str, journal_append: JournalAppend | None = None, loop_frame_id: str | None = None, loop_iteration_no: int | None = None, resume_generation: int | None = None, invocation_group: str | None = None, operation_id: str | None = None, reserved_usage: Any = None, purpose: str = "DECISION", context_snapshot_id: str | None = None, request_assessment: dict | None = None, compaction_operation_id: str | None = None, memory_operation_id: str | None = None) -> None:
+    async def start_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, request_digest: str, provider_kind: str, profile_identity: str, journal_append: JournalAppend | None = None, loop_frame_id: str | None = None, loop_iteration_no: int | None = None, resume_generation: int | None = None, invocation_group: str | None = None, operation_id: str | None = None, reserved_usage: Any = None, purpose: str = "DECISION", context_snapshot_id: str | None = None, request_assessment: dict | None = None, compaction_operation_id: str | None = None, memory_operation_id: str | None = None, evaluation_messages=None, evaluation_memory=None) -> None:
         """Fenced NOT_STARTED -> STARTED transition before provider I/O."""
         async with self.database.transaction() as session:
             if self.run_control is not None:
@@ -482,6 +493,46 @@ class DurableExecutionRepository:
                 row.last_committed_fencing_token = lease.fencing_token
             else:
                 raise RuntimeError("model attempt is not startable")
+            # 已有 Runtime / Memory 锁之后才取 Receipt；事务内仅存安全投影。
+            from core.persistence.models import RuntimeAgentEvaluationReceiptRow
+            receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id, with_for_update=True)
+            if receipt is not None:
+                from core.runtime.agent_loop.quality_capture import request_capture
+                from core.runtime.agent_loop.quality_contract import canonical_bytes
+                capture = dict(receipt.evaluation_capture)
+                key = f"model:{step_id}:{attempt}:{model_attempt}"
+                if evaluation_messages is not None and receipt.sealed_response is None:
+                    capture[key] = request_capture(evaluation_messages, profile=receipt.capture_profile,
+                        request_digest=request_digest, purpose=purpose, snapshot_id=context_snapshot_id)
+                    if evaluation_memory is not None:
+                        from core.persistence.models import RuntimeMemoryBindingRow
+                        from core.runtime.agent_loop.quality_capture import scan_facts
+                        binding = await session.get(RuntimeMemoryBindingRow, lease.run_id)
+                        records = {d["id"]: d for d in binding.manifest if d["kind"] == "RECORD"} if binding else {}
+                        input_texts = [m.get("content", "") for m in evaluation_messages if isinstance(m.get("content"), str)]
+                        actual_memory = []
+                        for selected in evaluation_memory:
+                            source = records.get(selected["record_id"])
+                            # 检查真实请求正文包含完整 selected 内容，不能把 Manifest 当成使用证明。
+                            if source is not None and any(selected["content"] in text for text in input_texts):
+                                ref = canonical_payload_digest(selected["record_id"])
+                                facts, scanned = scan_facts(selected["content"], receipt.capture_profile, "memory:" + ref)
+                                actual_memory.append({"record_ref": ref, "kind": "RECORD", "version": source["version"],
+                                    "source_digest": source["digest"], "facts": facts, "scan_complete": scanned})
+                                from core.persistence.models import LongTermMemoryRow, ProjectSemanticMemoryRow
+                                epistemic = None
+                                for record_model in (LongTermMemoryRow, ProjectSemanticMemoryRow):
+                                    epistemic = await session.scalar(select(record_model.epistemic_kind).where(
+                                        record_model.memory_id == selected["record_id"], record_model.record_version == source["version"],
+                                        record_model.body_digest == source["digest"]))
+                                    if epistemic is not None:
+                                        break
+                                actual_memory[-1]["epistemic_kind"] = epistemic
+                        capture[key]["memory"] = actual_memory
+                    if len(canonical_bytes(capture)) <= 480 * 1024:
+                        receipt.evaluation_capture = capture
+                    else:
+                        receipt.evaluation_capture = {**receipt.evaluation_capture, "limit_reached": True}
             if journal_append is not None:
                 if not callable(journal_append):
                     raise TypeError("journal_append must be callable")
@@ -744,7 +795,7 @@ class DurableExecutionRepository:
             await session.flush()
             return row
 
-    async def accept_context_and_open_iteration(self, lease, frame_id, *, resume_generation, row_version, candidate, validation, operation_id=None, rebind=False):
+    async def accept_context_and_open_iteration(self, lease, frame_id, *, resume_generation, row_version, candidate, validation, operation_id=None, rebind=False, quality_comparison=None):
         from core.runtime.agent_loop.context import ContextSnapshotV1, context_sources, snapshot_candidate
         async with self.database.transaction() as session:
             _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
@@ -805,6 +856,11 @@ class DurableExecutionRepository:
                 step_id=frame.step_id, version=version, snapshot_digest=artifact.digest, payload=candidate, validation=validation,
                 created_generation=operation.created_generation if operation else resume_generation,
                 accepted_generation=resume_generation, accepted_fence=lease.fencing_token)
+            if quality_comparison is not None:
+                from core.persistence.models import RuntimeAgentEvaluationReceiptRow
+                receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id, with_for_update=True)
+                if receipt is not None and receipt.sealed_response is None:
+                    receipt.evaluation_capture = {**receipt.evaluation_capture, "context:"+snapshot_id: quality_comparison}
             session.add(snapshot)
             await session.flush()
             current.context_snapshot_id, current.context_snapshot_version, current.context_snapshot_digest = snapshot_id, version, artifact.digest

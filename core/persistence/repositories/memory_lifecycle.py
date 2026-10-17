@@ -654,7 +654,7 @@ class MemoryLifecycleRepository:
                 expected_version=expected_version, result_version=row.record_version, state="COMMITTED", receipt=receipt))
             return receipt
 
-    async def evidence(self, access, run_id):
+    async def evidence(self, access, run_id, *, operation_limit=None):
         from core.persistence.models import RuntimeRunExecutionRow
 
         from core.runtime.memory_evidence import build_memory_evidence
@@ -685,9 +685,14 @@ class MemoryLifecycleRepository:
             records=[]
             for model in (LongTermMemoryRow,ProjectSemanticMemoryRow):
                 records.extend((await session.execute(select(model).where(or_(model.memory_id.in_(record_ids),and_(model.origin_run_id==run_id,model.access_scope_id.in_(ids)))).order_by(model.memory_id))).scalars().all())
-            operations=(await session.execute(select(MemoryOperationRow).where(MemoryOperationRow.scope_id.in_(ids),
+            operation_query=select(MemoryOperationRow).where(MemoryOperationRow.scope_id.in_(ids),
                 or_(MemoryOperationRow.record_id.in_(record_ids),MemoryOperationRow.source_identity.in_([r.source_identity for r in records]),
-                    MemoryOperationRow.source_identity.in_(select(MessageExchangeRow.source_identity).where(MessageExchangeRow.run_id==run_id)))).order_by(MemoryOperationRow.operation_id))).scalars().all()
+                    MemoryOperationRow.source_identity.in_(select(MessageExchangeRow.source_identity).where(MessageExchangeRow.run_id==run_id)))).order_by(MemoryOperationRow.operation_id)
+            if operation_limit is not None:
+                operation_query=operation_query.limit(operation_limit+1)
+            operations=(await session.execute(operation_query)).scalars().all()
+            if operation_limit is not None and len(operations)>operation_limit:
+                raise ValueError("MEMORY_EVIDENCE_SOURCE_LIMIT")
             snapshots=(await session.execute(select(RuntimeContextSnapshotRow).where(RuntimeContextSnapshotRow.run_id==run_id).order_by(RuntimeContextSnapshotRow.version))).scalars().all()
             refs=[{"snapshot_ref":r.snapshot_id,"digest":r.snapshot_digest} for r in snapshots]
             body=build_memory_evidence(binding,scopes,records,operations,refs)

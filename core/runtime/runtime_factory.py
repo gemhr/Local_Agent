@@ -1112,6 +1112,16 @@ class CoordinatedRuntimeFactory:
             )
             if repository is not None:
                 run_context.attach_execution_repository(repository)
+            from core.persistence.repositories.agent_quality import AgentQualityReceiptRepository
+            quality_receipt = await AgentQualityReceiptRepository(repository.database).read(run_context.run_id) if repository else None
+            frozen_effect = ((rehydrated_root.resume_input.get("agent_loop") or {}).get("memory_effect_policy")
+                             if rehydrated_root is not None else
+                             quality_receipt.execution_manifest.get("memory_effect_policy") if quality_receipt else None)
+            if frozen_effect is not None:
+                if (frozen_effect != "SERVICE_PROJECT_READ_ONLY.v1" or quality_receipt is None
+                        or quality_receipt.execution_manifest.get("memory_effect_policy") != frozen_effect or not persist):
+                    raise ValueError("QUALITY_MEMORY_EFFECT_PIN_INVALID")
+                run_context.memory_effect_policy = frozen_effect
             from core.runtime.memory_service import MemoryService
             from core.runtime.memory_context_guard import MemoryContextGuard
             from core.runtime.memory_scope import MemoryAccessContext, MemoryContextError
@@ -1142,6 +1152,11 @@ class CoordinatedRuntimeFactory:
                         memory_access_context = None
                     await memory_repository.bind_run(durable_lease, memory_access_context, scopes, manifest)
                 run_context.memory_access_context = memory_access_context
+                if run_context.memory_effect_policy is not None and (
+                        memory_access_context is None or memory_access_context.principal_kind != "SERVICE"
+                        or memory_access_context.user_id != quality_receipt.principal_id
+                        or memory_access_context.tenant_id != quality_receipt.tenant_id):
+                    raise MemoryContextError("MEMORY_IDENTITY_CONFLICT")
                 run_context.memory_guard = MemoryContextGuard(memory_repository, durable_lease)
             elif persist or memory_access_context is not None:
                 raise MemoryContextError("MEMORY_CONTEXT_UNVERIFIABLE")
@@ -1348,12 +1363,12 @@ class CoordinatedRuntimeFactory:
                         from core.runtime.final_memory_writer import RunFinalMemoryWriter
                         rehydrated_committer._final_memory_writer = RunFinalMemoryWriter(
                             self._router, entry_agent_id=agent_id, user_request=query,
-                            persist=bool((rehydrated_root.resume_input.get("agent_loop") or {}).get("persist", persist)),
+                            persist=bool((rehydrated_root.resume_input.get("agent_loop") or {}).get("persist", persist)) and run_context.memory_effect_policy is None,
                             run_id=run_context.run_id, span_recorder=span_recorder,
                             metrics_recorder=self._services.runtime_metrics_recorder, idempotent_replay=True,
                             run_context=run_context)
                         memory_store = getattr(getattr(self._router, "memory_manager", None), "advanced_store", None)
-                        if memory_store is not None and run_context.memory_access_context is not None:
+                        if memory_store is not None and run_context.memory_access_context is not None and run_context.memory_effect_policy is None:
                             from core.runtime.semantic_memory_formation import SemanticMemoryFormation, UnifiedFormationExtractionAdapter
                             rehydrated_committer._semantic_memory_formation = SemanticMemoryFormation(
                                 entry_agent_id=agent_id, user_request=query, memory_store=memory_store,

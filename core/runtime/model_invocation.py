@@ -1817,6 +1817,10 @@ class ModelInvocationRouter:
                 provider_kind=candidate.profile.provider_kind,
                 profile_identity=candidate.profile.model_identity
                 or candidate.profile_id.value,
+                evaluation_messages=list(messages),
+                evaluation_memory=[{"record_id": r.provenance.record_id, "content": r.content}
+                    for r in getattr(getattr(run_context, "scoped_memory_bundle", None), "records", ())]
+                    if getattr(run_context, "memory_access_context", None) is not None else None,
                 **loop_kwargs,
             )
         )

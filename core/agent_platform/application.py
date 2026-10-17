@@ -344,6 +344,7 @@ class AgentApplicationService:
         execution_policy=None,
         loop_policy=None,
         loop_correlation=None,
+        memory_access_context: MemoryAccessContext | None = None,
     ) -> ExecutionResult:
         """受信任评测入口；控制 seam 不属于 PUBLIC ExecutionRequest。"""
         _registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
@@ -362,6 +363,7 @@ class AgentApplicationService:
             execution_policy=execution_policy,
             loop_policy=loop_policy,
             loop_correlation=loop_correlation,
+            memory_access_context=memory_access_context,
             session_id=request.session_id,
             agent_version=definition.agent_version,
             workflow_id=workflow_id,

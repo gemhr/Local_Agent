@@ -754,7 +754,7 @@ class RunCoordinator:
                 ),
                 user_request=self._planning_request.user_request,
                 run_context=self.run_context,
-                persist=self._persist,
+                persist=self._persist and self.run_context.memory_effect_policy is None,
                 run_id=self.run_context.run_id,
                 span_recorder=self.span_recorder,
                 metrics_recorder=self._metrics_recorder,
@@ -764,7 +764,7 @@ class RunCoordinator:
         # WP2: run-scoped post-delivery Semantic Formation component，与 final
         # writer 并列注入；持久化 Owner 来自 application-scoped PG stores。
         semantic_formation: SemanticMemoryFormation | None = None
-        if memory_writer is not None and self._persist:
+        if memory_writer is not None and self._persist and self.run_context.memory_effect_policy is None:
             router = self._multi_agent_driver._router
             memory_manager = getattr(router, "memory_manager", None)
             memory_store = getattr(memory_manager, "advanced_store", None)
@@ -1320,6 +1320,8 @@ class RunCoordinator:
             resume_input["agent_loop"] = {"context_seed": seed, "pinned_config": config,
                 "loop_policy": self.run_context.loop_policy.to_dict(),
                 "correlation": self.run_context.loop_correlation, "persist": self._persist}
+            if self.run_context.memory_effect_policy is not None:
+                resume_input["agent_loop"]["memory_effect_policy"] = self.run_context.memory_effect_policy
             snapshot = self.budget_ledger.snapshot()
         root = ExecutionRootInput(
             run_id=self.run_context.run_id,

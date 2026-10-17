@@ -168,6 +168,8 @@ def pinned_loop_config(router, agent_id, run_context):
         "estimator": type(router.context_builder.estimator).__module__ + "." + type(router.context_builder.estimator).__qualname__,
     }
     # 旧 Run 的 profile 序列化不能因新增默认字段而改变冻结身份。
+    if getattr(run_context, "memory_effect_policy", None) is not None:
+        config["memory_effect_policy"] = run_context.memory_effect_policy
     policy = definition.business_options.get("context_policy")
     if policy is not None:
         config["context_policy"] = (ContextPolicyV2 if run_context.execution_policy == "durable-agent-loop.v2" else ContextPolicyV1)(**dict(policy)).to_dict()

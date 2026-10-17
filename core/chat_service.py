@@ -427,6 +427,7 @@ class ChatService:
             project_identity=project_identity,
             project_grants=project_grants,
             session_id=session_id or "default",
+            memory_access_context=memory_access_context,
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,

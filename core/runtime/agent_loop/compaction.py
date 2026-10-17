@@ -292,9 +292,28 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
     if validation is None:
         validation = validate_candidate(frame, groups, candidate, raw_assessments, raw_assessments)
     refreshed, _ = submit(repo.load_loop(lease, claim.step_id, frame.frame_id))
+    quality_comparison = None
+    if getattr(context, "memory_effect_policy", None) is not None and candidate.payload["kind"] == "COMPACTED":
+        compact, effective_options = request_assessments(router, candidate.payload["messages"], options, router.max_tokens, claim.capability_requirements, definition)
+        raw_by_profile = {a.profile_id: a for a in raw_assessments}
+        quality_comparison = []
+        for after in compact:
+            before = raw_by_profile.get(after.profile_id)
+            if (before and before.reliable and after.reliable and after.admissible
+                    and before.mode == after.mode and before.counting_version == after.counting_version
+                    and before.output_reserve == after.output_reserve):
+                profile = next(p for p in router.model_profiles if p.profile_id.value == after.profile_id)
+                quality_comparison.append({"profile_digest": canonical_payload_digest([profile.provider_kind, profile.model_identity or after.profile_id]),
+                    "mode": after.mode, "counting_version": after.counting_version,
+                    "options_digest": canonical_payload_digest(effective_options[after.profile_id]),
+                    "output_reserve": after.output_reserve, "cursor": frame.committed_observation_cursor,
+                    "raw_request_digest": before.request_digest, "compacted_request_digest": after.request_digest,
+                    "raw_required_window": before.required_window, "compacted_required_window": after.required_window,
+                    "bound_delta": before.required_window-after.required_window})
     iteration = submit(repo.accept_context_and_open_iteration(lease, frame.frame_id, resume_generation=frame.resume_generation,
         row_version=refreshed.row_version, candidate=candidate.payload, validation=validation,
-        operation_id=operation.operation_id if candidate.payload["kind"] == "COMPACTED" else None, rebind=force_compaction))
+        operation_id=operation.operation_id if candidate.payload["kind"] == "COMPACTED" else None, rebind=force_compaction,
+        quality_comparison=quality_comparison))
     context.loop_context_snapshot_id = iteration.context_snapshot_id
     context.loop_iteration_no = iteration.iteration_no
     context.loop_model_purpose = "DECISION"

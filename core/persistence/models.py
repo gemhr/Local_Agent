@@ -1552,7 +1552,33 @@ class ProjectSemanticMemoryRow(PersistenceBase):
 
 
 # Alembic 与 readiness 共用的 Canonical 表清单（不含 alembic_version）。
+class RuntimeAgentEvaluationReceiptRow(PersistenceBase):
+    """评测准入幂等事实；不授予 Runtime 恢复或执行租约。"""
+    __tablename__ = "runtime_agent_evaluation_receipts"
+    remote_run_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    attempt_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    request_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluation_project_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    evaluation_run_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    correlation: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    execution_manifest: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    capture_profile: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    evaluation_capture: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    received_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    sealed_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sealed_digest: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    __table_args__ = (
+        CheckConstraint("octet_length(correlation::text) <= 16384 AND octet_length(execution_manifest::text) <= 65536 AND octet_length(capture_profile::text) <= 16384 AND octet_length(evaluation_capture::text) <= 524288", name="ck_quality_receipt_metadata_limit"),
+        CheckConstraint("(sealed_response IS NULL) = (sealed_digest IS NULL)", name="ck_quality_receipt_seal_pair"),
+        CheckConstraint("sealed_response IS NULL OR octet_length(sealed_response) <= 2097152", name="ck_quality_receipt_response_limit"),
+    )
+
+
 CANONICAL_TABLES = (
+    "runtime_agent_evaluation_receipts",
     "stage8_feature_test_missions",
     "stage8_mission_run_refs",
     "stage8_business_reviews",
