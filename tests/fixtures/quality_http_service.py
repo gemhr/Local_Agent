@@ -15,7 +15,8 @@ from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-import tests.conftest  # 只加载既有未提交的测试环境，不输出凭据。
+if "--capacity" not in sys.argv:
+    import tests.conftest  # 原功能fixture保留既有环境；容量模式仅用显式隔离配置。
 from tests._pg_fixtures import test_database_url, _alembic
 from tests.test_agent_loop_runtime import assembly, native, ObservationTool
 from tests.test_agent_batch_handoff import batch, handoff
@@ -98,7 +99,7 @@ class PublicProvider:
         return replace(response, actual_usage=BudgetUsage(input_tokens=10, output_tokens=2, total_tokens=12))
 
 
-async def serve(directory, project, drain=False):
+async def serve(directory, project, drain=False, capacity=False):
     from fastapi import FastAPI
     from fastapi.responses import JSONResponse
     import uvicorn
@@ -120,7 +121,13 @@ async def serve(directory, project, drain=False):
     migration = await asyncio.to_thread(_alembic, "upgrade", "head")
     if migration.returncode:
         raise RuntimeError("QUALITY_TEST_SCHEMA_UNAVAILABLE")
-    database = Database(DatabaseConfig(url=test_database_url(), use_null_pool=True))
+    if capacity:
+        from tests.fixtures.quality_capacity_support import capacity_database, CapacityProbe
+        database = await capacity_database(test_database_url())
+        probe = CapacityProbe(directory, database)
+        probe.install()
+    else:
+        database = Database(DatabaseConfig(url=test_database_url(), use_null_pool=True))
     owner = await actor(database)
     uid = uuid4()
     async with database.transaction() as session:
@@ -142,9 +149,12 @@ async def serve(directory, project, drain=False):
     app, configs = FastAPI(), {}
     sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]
     memory = PostgresMemoryManagerBridge(PostgresMemoryManager(database), SyncPersistenceBridge(asyncio.get_running_loop()))
-    for variant in (("baseline", "drain") if drain else ("baseline", "candidate", "regression", "unknown", "invalid")):
+    for variant in (("baseline",) if capacity else (("baseline", "drain") if drain else ("baseline", "candidate", "regression", "unknown", "invalid"))):
         provider = PublicProvider(variant)
         tools = [PublicTool(n) for n in ("loop_a", "loop_b")]
+        if capacity:
+            provider = probe.provider(provider)
+            tools = [probe.tool(tool) for tool in tools]
         if drain:
             from tests._agent_loop_crash_worker import BusinessReceiptTool
             tools = [BusinessReceiptTool(directory, "normal"), PublicTool("loop_b")]
@@ -153,6 +163,8 @@ async def serve(directory, project, drain=False):
             owner="quality-"+variant, memory_manager=memory, context_model=provider,
             context_policy={"version": 2, "trigger_percent": 45, "target_percent": 35}, context_window=40000, delegation_target="reader")
         router = factory._router
+        if capacity:
+            probe.attach(factory)
         registry = AgentRegistry(replace(r, definition=replace(r.definition, agent_version="quality-"+variant))
             for r in (factory._agent_registry.resolve(n) for n in factory._agent_registry.agent_ids))
         factory._agent_registry = registry; router.agent_registry = registry
@@ -177,6 +189,8 @@ async def serve(directory, project, drain=False):
                 if request.headers.get("Authorization") != "Bearer public-quality-test-token":
                     return JSONResponse(status_code=401, content={"code": "AUTH_INVALID_TOKEN"})
                 request.state.principal = principal
+                if capacity:
+                    probe.enter_request()
                 if drain and request.method == "POST":
                     with (directory / (variant + "-posts.jsonl")).open("a", encoding="utf-8") as stream:
                         stream.write("{}\n")
@@ -219,7 +233,15 @@ async def serve(directory, project, drain=False):
             require_service=lambda service=service: service, bind_run=bind, authorize_run=authorize, final_answer_capture=final_capture)
         app.mount("/" + variant, child)
         configs[variant] = {"base_url": f"http://127.0.0.1:{port}/{variant}", "token_env": "PUBLIC_QUALITY_TEST_TOKEN", "trusted_project_id": project,
-            "max_response_bytes": 2*1024*1024, "call_milliseconds": 90000, "execution_manifest": manifest, "capture_profile": profile}
+            "max_response_bytes": 2*1024*1024, "call_milliseconds": 30000 if capacity else 90000, "execution_manifest": manifest, "capture_profile": profile}
+    if capacity:
+        from core.runtime.shutdown import GracefulShutdownCoordinator
+        @app.post("/capacity-drain")
+        async def capacity_drain():
+            report = await GracefulShutdownCoordinator(factory.services, shutdown_grace_seconds=5,
+                component_timeout_seconds=5).shutdown()
+            return {"orchestration_completed": report.orchestration_completed, "fully_closed": report.fully_closed}
+        sampling = asyncio.create_task(probe.sample())
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off"))
     task = asyncio.create_task(server.serve(sockets=[sock]))
     while not server.started:
@@ -228,6 +250,10 @@ async def serve(directory, project, drain=False):
     try:
         await task
     finally:
+        if capacity:
+            sampling.cancel()
+            await asyncio.gather(sampling, return_exceptions=True)
+            probe.save()
         await database.dispose()
 
 
@@ -236,5 +262,6 @@ if __name__ == "__main__":
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--drain", action="store_true")
+    parser.add_argument("--capacity", action="store_true")
     args = parser.parse_args()
-    asyncio.run(serve(args.directory, args.project_id, args.drain))
+    asyncio.run(serve(args.directory, args.project_id, args.drain, args.capacity))
