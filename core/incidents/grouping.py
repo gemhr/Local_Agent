@@ -8,6 +8,26 @@ from core.incidents.models import IncidentRow, IncidentGroupRow as Group, Incide
 from core.runtime.snapshot_serialization import sha256_digest
 
 RULE = "parser-compatibility.v1"
+OFFLINE_RULE = "parser-compatibility.v2"
+
+
+def pair_candidate(left, right, rule_version=RULE):
+    """离线配对；不改变在线 signature/observe 的 v1 签名与写入路径。"""
+    if rule_version not in {RULE, OFFLINE_RULE}:
+        raise CIError("CI_QUALITY_RULE_UNSUPPORTED", 422)
+    a, a_reason, a_refs = signature(left)
+    b, b_reason, b_refs = signature(right)
+    if a is None or b is None:
+        return dict(candidate=False, reason="INSUFFICIENT_EVIDENCE" if "INSUFFICIENT_EVIDENCE" in (a_reason, b_reason) else "DIFFERENT_FAILURE_MECHANISM", evidence_refs=a_refs + b_refs)
+    same_environment = left.environment_id == right.environment_id
+    if rule_version == OFFLINE_RULE:
+        supported = {"product-2.0", "product-2.1", "product-2.1.1"}
+        if a["software_version"] not in supported or b["software_version"] not in supported:
+            return dict(candidate=False, reason="UNSUPPORTED_COMPATIBILITY_DOMAIN", evidence_refs=a_refs + b_refs)
+        a, b = dict(a), dict(b)
+        # 这些受支持产品版本的字段兼容合同均为 revision 2；其余证据检查不变。
+        a["software_version"] = b["software_version"] = "product-field-contract-2"
+    return dict(candidate=not same_environment and a == b, reason="SAME_OBSERVABLE_MECHANISM" if not same_environment and a == b else "DIFFERENT_SIGNATURE_OR_ENVIRONMENT", evidence_refs=a_refs + b_refs)
 
 
 def signature(execution):

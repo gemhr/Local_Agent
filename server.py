@@ -1712,6 +1712,8 @@ from core.incidents.http import router as ci_incident_router
 app.include_router(ci_incident_router)
 from core.incidents.nightly_http import router as ci_nightly_router
 app.include_router(ci_nightly_router)
+from core.incidents.quality_http import router as ci_quality_router
+app.include_router(ci_quality_router)
 from core.stage13.triage_http import router as stage13_router
 app.include_router(stage13_router)
 from core.stage13.delivery_http import router as stage13_delivery_router
@@ -2232,6 +2234,8 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                 require_role(request.state.principal, "ADMIN")
             elif request.url.path.startswith("/api/runtime/evaluation-execute/"):
                 require_scope(request.state.principal, EVALUATION_EXECUTE_SCOPE)
+            elif request.url.path == "/api/ci/quality/evaluate" and request.method == "POST":
+                require_scope(request.state.principal, "localagent:ci-business:evaluate")
             elif _is_stage8_result_callback_path(request.url.path):
                 require_scope(
                     request.state.principal, STAGE8_RESULT_CALLBACK_SCOPE
