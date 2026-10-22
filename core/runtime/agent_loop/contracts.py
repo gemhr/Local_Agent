@@ -199,13 +199,15 @@ class LoopDecisionV2:
                 raise ValueError("tool count mismatch")
             if protocol_mode == "native":
                 if calls:
-                    if not 1 <= len(calls) <= 4 or response.output.strip() or response.refusal or response.finish_reason != "tool_calls":
+                    if not isinstance(response.output, str) or not 1 <= len(calls) <= 4 or response.refusal or response.finish_reason != "tool_calls":
                         raise ValueError("contradictory batch")
                     expected = [{"id": c.provider_tool_call_id, "type": "function",
                         "function": {"name": c.tool_name, "arguments": c.arguments_json}} for c in calls]
                     assistant = response.assistant_message
-                    if (not assistant or set(assistant) - {"role", "content", "tool_calls"}
-                            or assistant.get("role") != "assistant" or assistant.get("content") not in {None, ""}
+                    if (not isinstance(assistant, dict) or set(assistant) - {"role", "content", "tool_calls"}
+                            or assistant.get("role") != "assistant"
+                            or (assistant.get("content") is not None and not isinstance(assistant.get("content"), str))
+                            or (assistant.get("content") if assistant.get("content") is not None else "") != response.output
                             or assistant.get("tool_calls") != expected):
                         raise ValueError("native binding mismatch")
                     ids = [c.provider_tool_call_id for c in calls]

@@ -503,6 +503,9 @@ def _build_tool_governance(
             agent_id for agent_id in agent_registry.agent_ids
             if policy.tool_name in agent_registry.resolve(agent_id).actual_allowed_tools
         )))
+    from core.agent_platform.ci_diagnosis_tools import register_policies
+    if "ci_get_execution_context" in tool_registry.registered_names:
+        register_policies(catalog)
     catalog.freeze()
     return ToolGovernanceService(catalog, agent_registry)
 
@@ -1208,6 +1211,11 @@ async def lifespan(app: FastAPI):
         ),
         component="tool_registry",
     )
+    from core.incidents.service import IncidentService
+    from core.agent_platform.ci_diagnosis_tools import register_tools
+    incident_service = IncidentService(persistence_database)
+    app.state.incident_service = incident_service
+    register_tools(tool_registry, incident_service, persistence_bridge)
     registered_agent_ids = frozenset(DEFAULT_AGENT_REGISTRY.agent_ids) | frozenset(
         item.definition.agent_id for item in BUSINESS_REGISTRATION_BUNDLE.registrations
     )
@@ -1615,6 +1623,12 @@ async def lifespan(app: FastAPI):
         metrics=observability_service,
     )
     app.state.client_event_feed = runtime_services.client_event_feed
+    from core.agent_platform.ci_diagnosis import CIInvestigationService
+    app.state.ci_investigation_service = CIInvestigationService(
+        incident_service, agent_application_service, execution_repository,
+        app.state.run_execution_supervisor, app.state.authorization_service,
+        real_model=settings.llm_backend in {"remote", "hybrid", "local"},
+    )
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
     initialization_stack.release()
     await recovery_coordinator.start()
@@ -1694,6 +1708,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
+from core.incidents.http import router as ci_incident_router
+app.include_router(ci_incident_router)
 from core.stage13.triage_http import router as stage13_router
 app.include_router(stage13_router)
 from core.stage13.delivery_http import router as stage13_delivery_router

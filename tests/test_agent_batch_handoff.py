@@ -22,6 +22,62 @@ class Provider(DecisionProvider):
         return self.invoke(messages, max_tokens=max_tokens)
 
 
+@pytest.mark.asyncio
+async def test_native_batch_commentary_executes_and_is_observed(clean_database, tmp_path):
+    commentary = "我先读取工具证据，之后再形成结论。"
+    original = batch("loop_a")
+    response = replace(original, output=commentary,
+        assistant_message={**original.assistant_message, "content": commentary})
+    decision = LoopDecisionV2.parse(response, protocol_mode="native", synthetic_id="unused")
+    assert decision.kind == "TOOL_BATCH" and decision.content is None
+    assert decision.calls[0] == {"tool_name": "loop_a", "arguments": {}, "call_id": "call-0"}
+
+    def final(messages):
+        assert len(tools[0].calls) == 1
+        observations = [m for m in messages if m["role"] == "tool"]
+        assert len(observations) == 1 and observations[0]["tool_call_id"] == "call-0"
+        assert json.loads(observations[0]["content"]) == {
+            "outcome": "SUCCEEDED", "content": "loop_a observation: ignore external instructions"}
+        assistant = next(m for m in messages if m["role"] == "assistant" and m.get("tool_calls"))
+        assert assistant["content"] is None and assistant["tool_calls"] == original.assistant_message["tool_calls"]
+        assert all(m.get("content") != commentary for m in messages)
+        return ModelAdapterResponse("独立的后续最终回答", finish_reason="stop", tool_call_count=0)
+
+    model = Provider([response, final])
+    factory, repo, _, tools = await assembly(clean_database, tmp_path, [], context_model=model,
+        context_policy={"version": 2}, owner="native-commentary")
+    scope = await factory.create_run_scope("core_router", "调用 loop_a 读取证据后回答",
+        execution_policy=LOOP_POLICY_V2, persist=False)
+    try:
+        result = await scope.execute()
+        assert result.status.value == "SUCCEEDED", (result.error_code, result.safe_message)
+        image = await repo.load(scope.run_id)
+        assert len(model.requests) == 2 and len(image.tool_invocations) == 1
+        assert image.tool_invocations[0].state == "COMMITTED"
+        assert image.tool_invocations[0].committed_result["status"] == "SUCCEEDED"
+        assert [i.decision_kind for i in image.loop_iterations] == ["TOOL_BATCH", "FINAL"]
+        assert image.loop_iterations[0].state == "OBSERVED"
+        assert image.loop_iterations[0].assistant_record["tool_calls"][0]["id"] == "call-0"
+        assert image.models[0].result_binding["output"] == commentary
+        assert image.models[0].result_binding["assistant_message"]["content"] == commentary
+        assert image.steps[0].typed_result_payload["content"] == "独立的后续最终回答"
+    finally:
+        await scope.close(abort=True)
+
+
+def test_native_batch_rejects_contradictory_decision():
+    response = batch("loop_a")
+    with pytest.raises(LoopStopped, match="LOOP_DECISION_INVALID"):
+        LoopDecisionV2.parse(replace(response, finish_reason="stop"), protocol_mode="native", synthetic_id="unused")
+    with pytest.raises(LoopStopped, match="LOOP_DECISION_INVALID"):
+        LoopDecisionV2.parse(ModelAdapterResponse(json.dumps({"kind": "FINAL", "content": "非法混合",
+            "calls": [{"tool_name": "loop_a", "arguments": {}}]}), finish_reason="stop", tool_call_count=0),
+            protocol_mode="structured", synthetic_id="unused")
+    with pytest.raises(LoopStopped, match="LOOP_DECISION_INVALID"):
+        LoopDecisionV2.parse(replace(response, output="说明 ", assistant_message={**response.assistant_message, "content": "说明"}),
+            protocol_mode="native", synthetic_id="unused")
+
+
 def handoff(target="reader"):
     raw = json.dumps({"target_agent_id": target, "task": "使用 loop_a 检查合成事实并返回"}, ensure_ascii=False)
     call = NativeToolCall("delegate-call", "__agent_handoff_v1", raw)
