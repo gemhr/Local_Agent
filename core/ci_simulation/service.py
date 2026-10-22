@@ -49,3 +49,21 @@ async def execute_instance(session, principal, instance_id, request_id, *, case_
     session.add(execution)
     await session.flush()
     return execution, True
+
+
+async def persist_nightly_case(session, batch, version, slot):
+    """仅供已授权夜间事务使用；归属来自冻结计划，实际 actor 由版次记录。"""
+    instance = ScenarioInstanceRow(instance_id=str(uuid4()), tenant_id=batch.tenant_id,
+        owner_user_id=version.owner_user_id, request_id="nightly:" + version.version_execution_id + ":" + slot["case_id"],
+        scenario_key="nightly-case", template_version="1", state_revision=1,
+        current_state=slot["initial_state"], created_at=datetime.now(timezone.utc))
+    session.add(instance)
+    await session.flush()
+    result = execute(instance.current_state, str(uuid4()))
+    execution = CIExecutionRow(execution_id=result["summary"]["execution_id"], instance_id=instance.instance_id,
+        request_id="nightly-original", environment_id=version.environment_id, case_id=slot["case_id"],
+        feature_id=result["execution_snapshot"]["test_case"]["feature_id"], state_revision=1,
+        nightly_version_execution_id=version.version_execution_id, business_completed_at=batch.simulated_now, **result)
+    session.add(execution)
+    await session.flush()
+    return execution

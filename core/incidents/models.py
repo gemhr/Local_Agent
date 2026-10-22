@@ -1,5 +1,5 @@
 """Incident 业务事实；不复制 Runtime 状态。"""
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Text, UniqueConstraint, Uuid
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from core.persistence.models import PersistenceBase
@@ -86,3 +86,45 @@ class IncidentVerificationRow(PersistenceBase):
     __table_args__ = (UniqueConstraint("incident_id", "request_id"), CheckConstraint("mode IN ('SINGLE','GROUP')"),
         CheckConstraint("state_revision > 0"),
         CheckConstraint("(mode = 'SINGLE' AND jsonb_array_length(items) = 1 AND jsonb_array_length(requested_case_ids) = 1) OR (mode = 'GROUP' AND jsonb_array_length(items) = 2 AND jsonb_array_length(requested_case_ids) = 2)"))
+
+
+class IncidentGroupRow(PersistenceBase):
+    __tablename__ = "incident_groups"
+    group_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("nightly_ci_batches.batch_id"))
+    rule_version: Mapped[str] = mapped_column(Text)
+    signature_digest: Mapped[str] = mapped_column(Text)
+    signature_payload: Mapped[dict] = mapped_column(JSONB)
+    kind: Mapped[str] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True))
+    history: Mapped[list] = mapped_column(JSONB)
+    __table_args__ = (CheckConstraint("kind IN ('AUTO','MANUAL_SPLIT')"), CheckConstraint("revision > 0"),
+        Index("uq_incident_auto_signature", "batch_id", "rule_version", "signature_digest", unique=True, postgresql_where=text("kind = 'AUTO'")))
+
+
+class IncidentGroupMembershipRow(PersistenceBase):
+    __tablename__ = "incident_group_memberships"
+    group_id: Mapped[str] = mapped_column(ForeignKey("incident_groups.group_id"), primary_key=True)
+    incident_id: Mapped[str] = mapped_column(ForeignKey("incidents.incident_id"), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(ForeignKey("ci_executions.execution_id"))
+    evidence_refs: Mapped[list] = mapped_column(JSONB)
+    decision: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    decided_by_user_id: Mapped[object | None] = mapped_column(Uuid, ForeignKey("users.id"))
+    __table_args__ = (CheckConstraint("decision IN ('CANDIDATE','CONFIRMED','EXCLUDED')"),
+        Index("uq_incident_current_group", "incident_id", unique=True, postgresql_where=text("decision <> 'EXCLUDED'")))
+
+
+class UserNotificationRow(PersistenceBase):
+    __tablename__ = "user_notifications"
+    notification_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.tenant_id"))
+    recipient_user_id: Mapped[object] = mapped_column(Uuid, ForeignKey("users.id"))
+    batch_id: Mapped[str] = mapped_column(ForeignKey("nightly_ci_batches.batch_id"))
+    kind: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True))
+    read_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("batch_id", "recipient_user_id", "kind"),
+        CheckConstraint("kind IN ('INCREMENTAL_FAILURE','FINAL_SUMMARY')"))

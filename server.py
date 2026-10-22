@@ -1710,6 +1710,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Local Agent API", lifespan=lifespan)
 from core.incidents.http import router as ci_incident_router
 app.include_router(ci_incident_router)
+from core.incidents.nightly_http import router as ci_nightly_router
+app.include_router(ci_nightly_router)
 from core.stage13.triage_http import router as stage13_router
 app.include_router(stage13_router)
 from core.stage13.delivery_http import router as stage13_delivery_router

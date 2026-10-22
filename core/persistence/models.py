@@ -1578,6 +1578,11 @@ class RuntimeAgentEvaluationReceiptRow(PersistenceBase):
 
 
 CANONICAL_TABLES = (
+    "nightly_ci_batches",
+    "nightly_version_executions",
+    "incident_groups",
+    "incident_group_memberships",
+    "user_notifications",
     "incident_actions",
     "incident_verifications",
     "ci_scenario_instances",

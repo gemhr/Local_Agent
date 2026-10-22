@@ -49,6 +49,8 @@ def initial_state(key):
 def case_catalog(state):
     """旧实例按实际主用例识别关联检查，不回填过去执行。"""
     primary = deepcopy(state["test_case"])
+    if "regression_companion" in state:
+        return [primary, deepcopy(state["regression_companion"])]
     if primary["case_id"] == "case-legacy-buffer":
         related_id, feature, revision = "case-modern-buffer", "feature-modern-buffer", 2
     elif primary["case_id"] == "case-report-compare":
@@ -71,7 +73,7 @@ def execute(state, execution_id, case_id=None):
         raise ValueError("CI_CASE_UNKNOWN")
     snapshot["test_case"] = deepcopy(selected)
     if selected["case_id"] != state["test_case"]["case_id"]:
-        snapshot["report"] = dict(report_artifact_id="report-input", field_revision=selected["required_field_revision"],
+        snapshot["report"] = dict(report_artifact_id="report-input", field_revision=selected.get("report_field_revision", selected["required_field_revision"]),
             payload_matches_golden=selected["payload_matches_golden"])
     env, case, artifact = snapshot["environment"], snapshot["test_case"], snapshot["report"]
     release = PRODUCT_RELEASES[env["software_version"]]

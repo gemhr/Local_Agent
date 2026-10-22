@@ -1,5 +1,6 @@
 """窄业务请求和严格诊断 DTO。"""
 from typing import Literal
+from datetime import date, datetime
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from core.ci_simulation.service import CIError
@@ -12,6 +13,71 @@ class StrictDTO(BaseModel):
 class Intent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: UUID
+
+
+class NightlyEnvironment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    environment_id: Literal["env-parser-a", "env-parser-b", "env-config", "env-input", "env-buffer", "env-evidence"]
+    profile_key: Literal["parser", "configuration", "input", "buffer", "missing"]
+    owner_user_id: UUID
+    duration_profile: Literal["normal", "slow"] = "normal"
+
+
+class CreateNightly(Intent):
+    business_date: date
+    plan_key: Literal["small-nightly"] = "small-nightly"
+    environments: list[NightlyEnvironment] = Field(min_length=4, max_length=6)
+
+    @model_validator(mode="after")
+    def unique_environments(self):
+        if len({e.environment_id for e in self.environments}) != len(self.environments):
+            raise ValueError("CI_NIGHTLY_DUPLICATE_ENVIRONMENT")
+        if len({e.owner_user_id for e in self.environments}) != 2:
+            raise ValueError("CI_NIGHTLY_TWO_OWNERS_REQUIRED")
+        return self
+
+
+class NightlyClock(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_business_time: datetime
+
+    @field_validator("target_business_time")
+    @classmethod
+    def explicit_offset(cls, value):
+        if value.utcoffset() is None:
+            raise ValueError("CI_NIGHTLY_OFFSET_REQUIRED")
+        return value
+
+
+class NightlyStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version_execution_id: str = Field(min_length=1, max_length=100)
+    kind: Literal["START", "COMPLETE_CASE"]
+    case_id: str | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def concrete_target(self):
+        if (self.kind == "COMPLETE_CASE") != bool(self.case_id):
+            raise ValueError("CI_NIGHTLY_STEP_TARGET_REQUIRED")
+        return self
+
+
+class AdvanceNightly(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    steps: list[NightlyStep] = Field(min_length=1, max_length=6)
+
+
+class GroupDecision(Intent):
+    expected_group_revision: int = Field(ge=1, strict=True)
+    kind: Literal["CONFIRM", "EXCLUDE", "SPLIT"]
+    incident_ids: list[str] = Field(min_length=1, max_length=36)
+    reason: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def valid_selection(self):
+        if not self.reason.strip() or len(set(self.incident_ids)) != len(self.incident_ids):
+            raise ValueError("CI_GROUP_SELECTION_INVALID")
+        return self
 
 
 class CreateScenario(Intent):
