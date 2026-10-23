@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from core.persistence.models import PersistenceBase  # noqa: E402
 from core.ci_simulation import models as ci_models  # noqa: E402,F401
 from core.incidents import models as ci_incident_models  # noqa: E402,F401
+from core.feature_impact import models as feature_impact_models  # noqa: E402,F401
 from core.stage13.store import ProviderBase  # noqa: E402
 from core.stage13.guardian_models import GuardianBase  # noqa: E402
 from core.stage13 import incident_models  # noqa: E402,F401

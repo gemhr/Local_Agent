@@ -506,6 +506,9 @@ def _build_tool_governance(
     from core.agent_platform.ci_diagnosis_tools import register_policies
     if "ci_get_execution_context" in tool_registry.registered_names:
         register_policies(catalog)
+    from core.feature_impact.tools import register_policies as register_feature_policies
+    if "search_feature_history" in tool_registry.registered_names:
+        register_feature_policies(catalog)
     catalog.freeze()
     return ToolGovernanceService(catalog, agent_registry)
 
@@ -1216,6 +1219,10 @@ async def lifespan(app: FastAPI):
     incident_service = IncidentService(persistence_database)
     app.state.incident_service = incident_service
     register_tools(tool_registry, incident_service, persistence_bridge)
+    from core.feature_impact.service import FeatureImpactService
+    from core.feature_impact.tools import register_tools as register_feature_tools
+    app.state.feature_impact_service = FeatureImpactService(persistence_database)
+    register_feature_tools(tool_registry, app.state.feature_impact_service, persistence_bridge)
     registered_agent_ids = frozenset(DEFAULT_AGENT_REGISTRY.agent_ids) | frozenset(
         item.definition.agent_id for item in BUSINESS_REGISTRATION_BUNDLE.registrations
     )
@@ -1629,6 +1636,11 @@ async def lifespan(app: FastAPI):
         app.state.run_execution_supervisor, app.state.authorization_service,
         real_model=settings.llm_backend in {"remote", "hybrid", "local"},
     )
+    from core.feature_impact.agent import FeatureInvestigationService
+    app.state.feature_investigation_service = FeatureInvestigationService(
+        app.state.feature_impact_service, agent_application_service, app.state.authorization_service,
+        execution_repository, app.state.run_execution_supervisor, execute_models=False,
+    )
     app.state.runtime_lifecycle_state = RuntimeLifecycleState.READY
     initialization_stack.release()
     await recovery_coordinator.start()
@@ -1714,6 +1726,8 @@ from core.incidents.nightly_http import router as ci_nightly_router
 app.include_router(ci_nightly_router)
 from core.incidents.quality_http import router as ci_quality_router
 app.include_router(ci_quality_router)
+from core.feature_impact.http import router as feature_impact_router
+app.include_router(feature_impact_router)
 from core.stage13.triage_http import router as stage13_router
 app.include_router(stage13_router)
 from core.stage13.delivery_http import router as stage13_delivery_router
@@ -2236,6 +2250,8 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                 require_scope(request.state.principal, EVALUATION_EXECUTE_SCOPE)
             elif request.url.path == "/api/ci/quality/evaluate" and request.method == "POST":
                 require_scope(request.state.principal, "localagent:ci-business:evaluate")
+            elif request.url.path == "/api/feature-impact/quality/evaluate" and request.method == "POST":
+                require_scope(request.state.principal, "localagent:feature-impact:evaluate")
             elif _is_stage8_result_callback_path(request.url.path):
                 require_scope(
                     request.state.principal, STAGE8_RESULT_CALLBACK_SCOPE
