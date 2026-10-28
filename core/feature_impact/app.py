@@ -23,6 +23,8 @@ def create_app(settings=None):
             if not readiness.ready:
                 raise RuntimeError("FEATURE_DATABASE_NOT_READY")
             app.state.feature_impact_service = FeatureImpactService(database)
+            from core.persistence.repositories.execution import DurableExecutionRepository
+            app.state.loop_execution_repository = DurableExecutionRepository(database)
             app.state.auth_service = AuthService(database, settings)
             app.state.rate_limiter = RedisTokenBucketRateLimiter(redis.client, settings)
             yield

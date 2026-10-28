@@ -43,14 +43,23 @@ class FeatureImpactService:
             raise BusinessError("FEATURE_NOT_FOUND", 404)
         return row
 
-    async def create(self, principal, request_id):
+    async def create(self, principal, request_id, *, public_task=None):
         human(principal)
+        if public_task is not None:
+            if not principal.roles.intersection({'OPERATOR', 'ADMIN'}):
+                raise BusinessError('FEATURE_EXPERIMENT_ROLE_REQUIRED', 403)
+            from core.feature_impact.public_tasks import load_public_task
+            snapshot = load_public_task(public_task)
+        else:
+            snapshot = development_input()
         async with self.database.transaction() as session:
             await session.execute(insert(TaskRow).values(task_id=str(uuid4()), tenant_id=principal.tenant_id,
-                owner_user_id=principal.user_id, request_id=request_id, snapshot=development_input(), created_at=datetime.now(timezone.utc))
+                owner_user_id=principal.user_id, request_id=request_id, snapshot=snapshot, created_at=datetime.now(timezone.utc))
                 .on_conflict_do_nothing(index_elements=["tenant_id", "owner_user_id", "request_id"]))
             row = (await session.execute(select(TaskRow).where(TaskRow.tenant_id == principal.tenant_id,
                 TaskRow.owner_user_id == principal.user_id, TaskRow.request_id == request_id))).scalar_one()
+            if row.snapshot['input_digest'] != snapshot['input_digest']:
+                raise BusinessError('REQUEST_CONFLICT')
             return self.task_payload(row)
 
     @staticmethod
@@ -94,17 +103,15 @@ class FeatureImpactService:
                 raw = json.dumps(value, ensure_ascii=False, sort_keys=True)
             try:
                 if agent_result:
-                    from core.feature_impact.agent import validate_result
+                    from core.feature_impact.agent_reports import validated_agent_report, require_binding_owner
                     kind = "AGENT"
                     binding, image, actions = agent_result
                     from core.feature_impact.models import InvestigationRow
-                    from core.persistence.models import ObjectOwnershipRow
                     trusted = await session.get(InvestigationRow, binding.run_id)
-                    owner = await session.get(ObjectOwnershipRow, ("RUN", binding.run_id))
-                    if (trusted is None or trusted.task_id != task_id or trusted.session_id != binding.session_id
-                            or owner is None or owner.tenant_id != task.tenant_id or owner.owner_user_id != task.owner_user_id):
+                    if (trusted is None or trusted.task_id != task_id or trusted.session_id != binding.session_id):
                         raise ValueError("AGENT_RUN_OWNER_INVALID")
-                    raw, source = validate_result(binding, image, actions, task.snapshot)
+                    await require_binding_owner(session, trusted, task)
+                    raw, _, source = validated_agent_report(trusted, image, actions, task)
                 elif not rule:
                     source = dict(task_input_sources=[d["source_ref"] for d in task.snapshot["documents"]], submitted_by=str(principal.user_id))
                 parsed = validate(strict_object(raw), task.snapshot, kind=kind, reads=source.get("read_sources", []), task_inputs=source.get("task_input_sources", []))
@@ -114,7 +121,7 @@ class FeatureImpactService:
             report_id = str(uuid4())
             envelope = dict(schema_version="feature-impact-report.v1", report_id=report_id, report_version=version + 1,
                 task_id=task_id, task_version=task.snapshot["task_version"], input_digest=task.snapshot["input_digest"],
-                corpus_digest=task.snapshot["corpus_digest"], candidate_kind=kind, candidate_version="1.0.0" if agent_result else RULE_VERSION if rule else "human.v1",
+                corpus_digest=task.snapshot["corpus_digest"], candidate_kind=kind, candidate_version="1.1.0" if agent_result else RULE_VERSION if rule else "human.v1",
                 run_id=agent_result[0].run_id if agent_result else None, sealed_at=now(), report_digest=digest(parsed if parsed else raw),
                 discovery_origins={f["finding_id"]: ("DEVELOPER_KNOWN" if f["historical_feature_id"] in task.snapshot["known_impacts"] else "UNPROMPTED_CANDIDATE") for f in (parsed or {}).get("findings", [])})
             row = ReportRow(report_id=report_id, task_id=task_id, request_id=request_id, intent_digest=intent, report_version=version + 1,
@@ -217,17 +224,25 @@ class FeatureImpactService:
     async def bound_evidence(self, context, arguments):
         from core.feature_impact.models import InvestigationRow
         from core.feature_impact.tools import AGENT_ID
-        from core.persistence.models import ObjectOwnershipRow
+        from core.feature_impact.agent_reports import require_binding_owner
+        from sqlalchemy.exc import SQLAlchemyError
+        if (set(arguments) not in ({'query'}, {'source_ref'}) or
+                any(not isinstance(v, str) or len(v) > 300 for v in arguments.values())):
+            raise BusinessError('FEATURE_TOOL_INPUT_INVALID', 422)
         async with self.database.session() as session:
             binding = await session.get(InvestigationRow, context.run_id)
             if binding is None:
                 raise BusinessError("FEATURE_SCOPE_DENIED", 403)
             task = await session.get(TaskRow, binding.task_id)
-            owner = await session.get(ObjectOwnershipRow, ("RUN", context.run_id))
             access = context.memory_access_context
-            if (owner is None or owner.tenant_id != task.tenant_id or owner.owner_user_id != task.owner_user_id
+            if (task is None
                     or access is None or access.tenant_id != task.tenant_id or access.user_id != str(task.owner_user_id)
-                    or context.data.entry_agent_id != AGENT_ID or context.data.agent_version != "1.0.0"
+                    or access.agent_id != AGENT_ID or access.session_id != binding.session_id
+                    or context.data.entry_agent_id != AGENT_ID or context.data.agent_version != "1.1.0"
                     or context.session_id != binding.session_id or task.exposed_at is not None):
                 raise BusinessError("FEATURE_SCOPE_DENIED", 403)
+            try:
+                await require_binding_owner(session, binding, task)
+            except (ValueError, SQLAlchemyError):
+                raise BusinessError("FEATURE_SCOPE_DENIED", 403) from None
             return read(task.snapshot, arguments["source_ref"]) if "source_ref" in arguments else dict(items=search(task.snapshot, arguments["query"]))

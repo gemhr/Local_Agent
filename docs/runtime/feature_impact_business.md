@@ -50,3 +50,13 @@ uv run uvicorn core.feature_impact.app:create_app --factory --host 127.0.0.1 --p
 Go Target 使用 `feature-impact-request.v1` / `feature-impact-output.v1`。冻结 Case 输入为 `{task_id,snapshot,candidate_kind,candidate_version,report}`；RULE 的 report 为 null，HUMAN 使用本人已封存输出，AGENT 本轮不进入该薄 Target。独立参考 `feature-impact-truth.v1` 仅在 EO Case GroundTruth 保存，不向业务 HTTP 发送。评分按特性+机制+条件匹配，分别保存必测发现/可操作性、开发未提示发现、确认、澄清、无效/重复和证据真实性。原始计数在 ResultValue provenance，Score 为 null；语义支持待审为 INCONCLUSIVE，不能自动 PASS。
 
 前端地址 `/feature-impact`，经现有 Next.js rewrite 转发到 `LOCAL_AGENT_API_URL`。凭据仅保存在当前页面内存。无真人效率实验、真实 Agent、最终 Holdout 或 Agent 增量价值结论。
+
+## 公开实验绑定与 AGENT 报告评分
+
+`POST /api/feature-impact/public-experiment-tasks` 接受 `{request_id, public_task}`，public_task 仅为 T2/T3/T5/T6；仅同 tenant 的 HUMAN OPERATOR/ADMIN 可创建，普通 USER 返回 403。服务器只读取随业务部署的 `public_tasks/` 固定文件，并核验已批准 input/corpus/manifest/digest/cutoff；不接受上传、文件路径或正文。任务沿用原有 owner/tenant/不可变 PG 约束，同 request_id 选择不同快照返回 409。原 `/tasks` 不变。
+
+调查沿用 `prepare`、ObjectAuthorizationService、ExecutionRequest、既有单 Agent Loop v2 与两项只读 Tool。AgentDefinition 业务版本为 `1.1.0`：完整相同公开 snapshot 预装到输入，Tool 可按需核对；不强制重复读取，不代表动态自主检索。序列化排序消除 JSONB 键顺序差异。模型执行默认继续关闭。
+
+AGENT 评分仍用 `/quality/evaluate`，`candidate_version=1.1.0`，`report` 只能是 `{report_id, run_id}` 选择器。SERVICE 必须有原 evaluate scope 且 tenant 匹配；不能附带候选正文、receipt 或读取清单。AgentCore 从自身 PG Report/Investigation/Run/Conversation owner 记录和 DurableExecutionRepository 重验同任务、Session、AgentDefinition、SUCCEEDED FINAL/DELIVERED receipt、seed、COMMITTED/OBSERVED 工具原文。无运行事实、错绑定或摘要返回 422，不降级 HUMAN。
+
+返回既有 report/output 格式，source_record 使用 `feature-impact-agent-source.v1` 元数据，分开保留 task_input_sources/read_sources、Run/Session/owner/tenant、FINAL receipt 摘要、原始 raw_output 及其摘要。转换器不增加业务主张；PG 原始文本、封存 payload/source_record 与当前权威事实必须一致。TASK_INPUT 不要求伪造 Tool 调用；EVIDENCE_READ 必须有同 Run/action/Observation 证明。该入口只重验既有封存输出，不触发模型或执行模拟器。

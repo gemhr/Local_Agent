@@ -1,0 +1,270 @@
+{
+  "task_id": "40b9ab4a-3b04-5d33-adcf-1c70deb6de7a",
+  "snapshot": {
+    "task_version": 1,
+    "title": "事件视图槽位提前复用：覆盖复用对照",
+    "feature_id": "T6-change",
+    "planning_cutoff": "2026-10-02T00:00:00Z",
+    "known_impacts": [
+      "summary"
+    ],
+    "documents": [
+      {
+        "source_ref": "T6:design:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "DESIGN",
+        "content_digest": "ae307ec51f3b8e6f2157174cee24544b6355e6c90c1f7a579d480e925654db90",
+        "title": "事件视图槽位提前复用：覆盖复用对照",
+        "content": "两个共享延迟消费者使用同一资源链，但用例覆盖不同；不要按 coverage 标签判断。 公共槽位从共享消费者结束后释放改为生产完成后释放；释放不清空，允许其他业务提交不同内容。",
+        "facts": {
+          "changed_resource": "event-slot",
+          "reclamation": "producer-complete",
+          "subsequent_writes": true
+        }
+      },
+      {
+        "source_ref": "T6:index:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "DEPENDENCY",
+        "content_digest": "ff397c9ccec7d49f38054b7d4cdf879399528d0bff472c0f1cb13ae1780db123",
+        "title": "发布方完整公开依赖索引",
+        "content": "本索引列出所有依赖边，原始资料见 edge_sources；只记录依赖，不标注影响结论。",
+        "facts": {
+          "dependencies": {
+            "replay-summary": "event-view",
+            "alert-window": "event-view",
+            "event-view": "event-slot"
+          },
+          "edge_sources": {
+            "replay-summary": "T6:module-notes:v1",
+            "alert-window": "T6:module-notes:v1",
+            "event-view": "T6:module-notes:v1"
+          }
+        }
+      },
+      {
+        "source_ref": "T6:known:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CLARIFICATION",
+        "content_digest": "8376e938088fa2be78075eb7356fae08f80e77832ff70000555ff53cac5d7ae2",
+        "title": "开发已知关联与操作控制",
+        "content": "可控制交付、生产完成、后续写入和消费顺序。已知关联：summary。",
+        "facts": {
+          "known_impacts": [
+            "summary"
+          ]
+        }
+      },
+      {
+        "source_ref": "T6:module-notes:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "RESOURCE",
+        "content_digest": "702fbcfbb8168970d9ac613dbb9cb8e94185e551ca7782cd48884858ab815784",
+        "title": "事件视图依赖说明",
+        "content": "replay-summary 和 alert-window 经 event-view 读取 event-slot，视图不复制输入。",
+        "facts": {
+          "edges": [
+            [
+              "replay-summary",
+              "event-view"
+            ],
+            [
+              "alert-window",
+              "event-view"
+            ],
+            [
+              "event-view",
+              "event-slot"
+            ]
+          ]
+        }
+      },
+      {
+        "source_ref": "T6:history-summary:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "HISTORY",
+        "content_digest": "bf367ca8ce07fd9424f6eb6749a579190d0e7a2f4dfd9c80462e511c85779040",
+        "title": "重放汇总",
+        "content": "汇总保留共享事件视图，批次结束后延迟上报，已有时序用例可控制插入其他业务。",
+        "facts": {
+          "feature_id": "summary",
+          "module": "replay-summary",
+          "ownership": "SHARED",
+          "delayed": true
+        }
+      },
+      {
+        "source_ref": "T6:history-alert:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "HISTORY",
+        "content_digest": "11fd0380396bf0d0cb0e86d6b336d95fc4e948ed5b4bc5959170d79a685fdfd0",
+        "title": "告警窗口",
+        "content": "告警窗口读取同一共享槽位；历史用例列出了覆盖顺序，但只观察生产结束日志。",
+        "facts": {
+          "feature_id": "alert",
+          "module": "alert-window",
+          "ownership": "SHARED",
+          "delayed": true
+        }
+      },
+      {
+        "source_ref": "T6:case-summary-reuse:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "9a7d303c872e3da30d36d0c019e166a7bcfe1a4d36adbef0bd708926661c13df",
+        "title": "summary-reuse",
+        "content": "真实步骤完整，标签过时仍写 PARTIAL；必须根据内容复用。",
+        "facts": {
+          "feature_id": "summary",
+          "operations": [
+            {
+              "action": "SUBMIT",
+              "request_id": "original",
+              "payload": {
+                "sample": 23
+              }
+            },
+            {
+              "action": "DELIVER",
+              "request_id": "original",
+              "mode": "SHARED"
+            },
+            {
+              "action": "COMPLETE",
+              "request_id": "original"
+            },
+            {
+              "action": "SUBMIT",
+              "request_id": "maintenance",
+              "payload": {
+                "sample": 88
+              }
+            },
+            {
+              "action": "CONSUME",
+              "request_id": "original"
+            }
+          ],
+          "observation": "report output",
+          "expected": "report equals input",
+          "coverage": "PARTIAL"
+        }
+      },
+      {
+        "source_ref": "T6:case-alert-reuse:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "fc0f252b33dd50554b8251aad9bb8a002914a837deafb9dfa15c3db719594fc0",
+        "title": "alert-reuse",
+        "content": "虽然标签 FULL 且列出判据，但未观察业务上报，须补真实观察点。",
+        "facts": {
+          "feature_id": "alert",
+          "operations": [
+            {
+              "action": "SUBMIT",
+              "request_id": "original",
+              "payload": {
+                "sample": 23
+              }
+            },
+            {
+              "action": "DELIVER",
+              "request_id": "original",
+              "mode": "SHARED"
+            },
+            {
+              "action": "COMPLETE",
+              "request_id": "original"
+            },
+            {
+              "action": "SUBMIT",
+              "request_id": "maintenance",
+              "payload": {
+                "sample": 88
+              }
+            },
+            {
+              "action": "CONSUME",
+              "request_id": "original"
+            }
+          ],
+          "observation": "producer completed log",
+          "expected": "report equals input",
+          "coverage": "FULL"
+        }
+      }
+    ],
+    "manifest": [
+      {
+        "source_ref": "T6:design:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "ae307ec51f3b8e6f2157174cee24544b6355e6c90c1f7a579d480e925654db90"
+      },
+      {
+        "source_ref": "T6:index:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "ff397c9ccec7d49f38054b7d4cdf879399528d0bff472c0f1cb13ae1780db123"
+      },
+      {
+        "source_ref": "T6:known:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "8376e938088fa2be78075eb7356fae08f80e77832ff70000555ff53cac5d7ae2"
+      },
+      {
+        "source_ref": "T6:module-notes:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "702fbcfbb8168970d9ac613dbb9cb8e94185e551ca7782cd48884858ab815784"
+      },
+      {
+        "source_ref": "T6:history-summary:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "bf367ca8ce07fd9424f6eb6749a579190d0e7a2f4dfd9c80462e511c85779040"
+      },
+      {
+        "source_ref": "T6:history-alert:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "11fd0380396bf0d0cb0e86d6b336d95fc4e948ed5b4bc5959170d79a685fdfd0"
+      },
+      {
+        "source_ref": "T6:case-summary-reuse:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "9a7d303c872e3da30d36d0c019e166a7bcfe1a4d36adbef0bd708926661c13df"
+      },
+      {
+        "source_ref": "T6:case-alert-reuse:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "fc0f252b33dd50554b8251aad9bb8a002914a837deafb9dfa15c3db719594fc0"
+      }
+    ],
+    "corpus_digest": "53db5a3916da01d5f6b3b0a6c96858507513677d7d799b1d4ee18b98111a440d",
+    "development_exposed": true,
+    "input_digest": "59bd0a56bd9110b58f8d9b9aecf42fe9f9a4ddfaa2a3c367e9ad2103dccfd120"
+  },
+  "candidate_kind": "RULE",
+  "candidate_version": "dependency-lifecycle.v1",
+  "report": null
+}

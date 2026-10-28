@@ -1,0 +1,225 @@
+{
+  "task_id": "9a6b18f7-b769-57e4-a8eb-533c5e5b99ea",
+  "snapshot": {
+    "task_version": 1,
+    "title": "批量路由缓冲区提前回收",
+    "feature_id": "T2-change",
+    "planning_cutoff": "2026-10-02T00:00:00Z",
+    "known_impacts": [
+      "audit"
+    ],
+    "documents": [
+      {
+        "source_ref": "T2:design:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "DESIGN",
+        "content_digest": "7ecc138b2b7aeb876c4dd5bb73a81b68d2b52e873c0eb1843b64d1b6150c28d4",
+        "title": "批量路由缓冲区提前回收",
+        "content": "批量路由释放点提前，需核对下游结算与审计的数据持有方式。 公共槽位从共享消费者结束后释放改为生产完成后释放；释放不清空，允许其他业务提交不同内容。",
+        "facts": {
+          "changed_resource": "route-slot",
+          "reclamation": "producer-complete",
+          "subsequent_writes": true
+        }
+      },
+      {
+        "source_ref": "T2:index:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "DEPENDENCY",
+        "content_digest": "f241b5b366c63ca21b87c4175e1aab7899bd1b62f285cb928ea57c0f10075575",
+        "title": "发布方完整公开依赖索引",
+        "content": "本索引列出所有依赖边，原始资料见 edge_sources；只记录依赖，不标注影响结论。",
+        "facts": {
+          "dependencies": {
+            "daily-ledger": "batch-view",
+            "batch-view": "router",
+            "router": "route-slot",
+            "audit-export": "batch-view"
+          },
+          "edge_sources": {
+            "daily-ledger": "T2:module-notes:v1",
+            "batch-view": "T2:module-notes:v1",
+            "router": "T2:module-notes:v1",
+            "audit-export": "T2:module-notes:v1"
+          }
+        }
+      },
+      {
+        "source_ref": "T2:known:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CLARIFICATION",
+        "content_digest": "ad8311cf113339b71b41879396458af04c9c98246b12b56282b1c0762ea77477",
+        "title": "开发已知关联与操作控制",
+        "content": "可控制交付、生产完成、后续写入和消费顺序。已知关联：audit。",
+        "facts": {
+          "known_impacts": [
+            "audit"
+          ]
+        }
+      },
+      {
+        "source_ref": "T2:module-notes:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "RESOURCE",
+        "content_digest": "86c58b591f2184640ff9e989c79c29c3c5b4fad0cd8e59a690096c1a3f721c46",
+        "title": "路由与批量视图发布说明",
+        "content": "daily-ledger→batch-view→router→route-slot；audit-export→batch-view。视图透传引用，不复制；审计端自行复制。",
+        "facts": {
+          "edges": [
+            [
+              "daily-ledger",
+              "batch-view"
+            ],
+            [
+              "batch-view",
+              "router"
+            ],
+            [
+              "router",
+              "route-slot"
+            ],
+            [
+              "audit-export",
+              "batch-view"
+            ]
+          ]
+        }
+      },
+      {
+        "source_ref": "T2:history-ledger:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "HISTORY",
+        "content_digest": "e0b951b53e1efad18c1a2a2dc934a02cb4b7947b7da126b8822326eaa11c5910",
+        "title": "日结账本",
+        "content": "账本通过批量视图和路由器取得槽位引用，结算窗口结束时才上报。",
+        "facts": {
+          "feature_id": "ledger",
+          "module": "daily-ledger",
+          "ownership": "SHARED",
+          "delayed": true
+        }
+      },
+      {
+        "source_ref": "T2:history-audit:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "HISTORY",
+        "content_digest": "e54c7f3ff4b379d5779e3c3c55b03241d99fa238be7bdcc218920fc680489360",
+        "title": "审计归档",
+        "content": "审计也经批量视图取数，但交付时完整复制，归档延后只读取副本。",
+        "facts": {
+          "feature_id": "audit",
+          "module": "audit-export",
+          "ownership": "COPY",
+          "delayed": true
+        }
+      },
+      {
+        "source_ref": "T2:case-daily-smoke:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "ffad3880a8c5ad3d46c65a9ba07ead5fa2f0ea79b31a2dda3ceae3214440f6e4",
+        "title": "daily-smoke",
+        "content": "旧用例在生产完成前消费；虽然标签 FULL，未覆盖结算窗口内的后续写入。",
+        "facts": {
+          "feature_id": "ledger",
+          "operations": [
+            {
+              "action": "SUBMIT",
+              "request_id": "original",
+              "payload": {
+                "sample": 23
+              }
+            },
+            {
+              "action": "DELIVER",
+              "request_id": "original",
+              "mode": "SHARED"
+            },
+            {
+              "action": "CONSUME",
+              "request_id": "original"
+            },
+            {
+              "action": "COMPLETE",
+              "request_id": "original"
+            },
+            {
+              "action": "SUBMIT",
+              "request_id": "maintenance",
+              "payload": {
+                "sample": 88
+              }
+            }
+          ],
+          "observation": "report output",
+          "expected": "report equals input",
+          "coverage": "FULL"
+        }
+      }
+    ],
+    "manifest": [
+      {
+        "source_ref": "T2:design:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "7ecc138b2b7aeb876c4dd5bb73a81b68d2b52e873c0eb1843b64d1b6150c28d4"
+      },
+      {
+        "source_ref": "T2:index:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "f241b5b366c63ca21b87c4175e1aab7899bd1b62f285cb928ea57c0f10075575"
+      },
+      {
+        "source_ref": "T2:known:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "ad8311cf113339b71b41879396458af04c9c98246b12b56282b1c0762ea77477"
+      },
+      {
+        "source_ref": "T2:module-notes:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "86c58b591f2184640ff9e989c79c29c3c5b4fad0cd8e59a690096c1a3f721c46"
+      },
+      {
+        "source_ref": "T2:history-ledger:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "e0b951b53e1efad18c1a2a2dc934a02cb4b7947b7da126b8822326eaa11c5910"
+      },
+      {
+        "source_ref": "T2:history-audit:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "e54c7f3ff4b379d5779e3c3c55b03241d99fa238be7bdcc218920fc680489360"
+      },
+      {
+        "source_ref": "T2:case-daily-smoke:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "ffad3880a8c5ad3d46c65a9ba07ead5fa2f0ea79b31a2dda3ceae3214440f6e4"
+      }
+    ],
+    "corpus_digest": "a1b0a2a1645a39bb69e5e295191765835c5460a5665fd5ae3fb42c12dace301a",
+    "development_exposed": true,
+    "input_digest": "be188c4cf395286ad272a0556485b513279e387c6098499133646fb7e185140a"
+  },
+  "candidate_kind": "RULE",
+  "candidate_version": "dependency-lifecycle.v1",
+  "report": null
+}

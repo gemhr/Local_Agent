@@ -1,0 +1,208 @@
+{
+  "task_id": "29d482ba-e4a8-54f4-92ef-ad751bfe3839",
+  "snapshot": {
+    "task_version": 1,
+    "title": "批处理暂存区回收调整：缺资料子型",
+    "feature_id": "T5-change",
+    "planning_cutoff": "2026-10-02T00:00:00Z",
+    "known_impacts": [],
+    "documents": [
+      {
+        "source_ref": "T5:design:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "DESIGN",
+        "content_digest": "4c6ab86a7e057a548f364226642d8290c6f5d96f0d45e78482000c55f3bd7d0e",
+        "title": "批处理暂存区回收调整：缺资料子型",
+        "content": "不能以历史“借用”或“延后”任一单独线索补齐另一个缺失条件。 公共槽位从共享消费者结束后释放改为生产完成后释放；释放不清空，允许其他业务提交不同内容。",
+        "facts": {
+          "changed_resource": "staging-slot",
+          "reclamation": "producer-complete",
+          "subsequent_writes": true
+        }
+      },
+      {
+        "source_ref": "T5:index:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "DEPENDENCY",
+        "content_digest": "f0aeb3055e1af173245aaf45f96d3da7f4a290fb0e065b758db1b88ae61390d6",
+        "title": "发布方完整公开依赖索引",
+        "content": "本索引列出所有依赖边，原始资料见 edge_sources；只记录依赖，不标注影响结论。",
+        "facts": {
+          "dependencies": {
+            "archive-reader": "staging-slot",
+            "billing-reader": "staging-slot"
+          },
+          "edge_sources": {
+            "archive-reader": "T5:module-notes:v1",
+            "billing-reader": "T5:module-notes:v1"
+          }
+        }
+      },
+      {
+        "source_ref": "T5:known:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CLARIFICATION",
+        "content_digest": "029705ef877193686b3686ba91ceee320711a28785b5e6a49af830876773f835",
+        "title": "开发已知关联与操作控制",
+        "content": "可控制交付、生产完成、后续写入和消费顺序。已知关联：本次未提示具体历史业务。",
+        "facts": {
+          "known_impacts": []
+        }
+      },
+      {
+        "source_ref": "T5:module-notes:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "RESOURCE",
+        "content_digest": "aeb84de0d5a6b9f1ff3143ee2c1e78d6184d7a0ebb57c03684b4ebfbfee05415",
+        "title": "暂存接口公开说明",
+        "content": "归档与结算都读取 staging-slot；发布说明只确认生产完成可回收，未补充归档所有权与结算消费时点。",
+        "facts": {
+          "edges": [
+            [
+              "archive-reader",
+              "staging-slot"
+            ],
+            [
+              "billing-reader",
+              "staging-slot"
+            ]
+          ]
+        }
+      },
+      {
+        "source_ref": "T5:history-archive:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "HISTORY",
+        "content_digest": "ec3c0c725a4f567c6a53ed79964bbe35018501d048d52549b3957dfe1843ad9b",
+        "title": "回执延后归档",
+        "content": "明确在下一批提交后读取，但接口契约没有说明交付是副本还是引用。",
+        "facts": {
+          "feature_id": "archive",
+          "module": "archive-reader",
+          "ownership": "UNKNOWN",
+          "delayed": true
+        }
+      },
+      {
+        "source_ref": "T5:history-billing:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "HISTORY",
+        "content_digest": "ac5832321c965b4bb48beeb82410cca02b6a00663ad6eb4367365a335063f657",
+        "title": "结算借用读取",
+        "content": "明确持有暂存区借用引用；消费是否在生产完成前未记录，无法确认时间交集。",
+        "facts": {
+          "feature_id": "billing",
+          "module": "billing-reader",
+          "ownership": "SHARED",
+          "delayed": null
+        }
+      },
+      {
+        "source_ref": "T5:case-archive-inventory:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "7d2c34fe262370d41a6127ef5cc5a50983890764dfffbfb371408f64189f6fba",
+        "title": "archive-inventory",
+        "content": "归档用例只登记目的，前置和操作缺失。",
+        "facts": {
+          "feature_id": "archive",
+          "operations": null,
+          "observation": "report output",
+          "expected": "report equals input",
+          "coverage": "UNKNOWN"
+        }
+      },
+      {
+        "source_ref": "T5:case-billing-single:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "b6bbdbb8eb82e2cb3fe82b31c0a56fddadc2beb6525b2587c34f317b7c3f5e93",
+        "title": "billing-single",
+        "content": "单请求用例不说明完成与消费之间的顺序保证。",
+        "facts": {
+          "feature_id": "billing",
+          "operations": [
+            "SUBMIT",
+            "DELIVER",
+            "CONSUME"
+          ],
+          "observation": "report output",
+          "expected": "report equals input",
+          "coverage": "PARTIAL"
+        }
+      }
+    ],
+    "manifest": [
+      {
+        "source_ref": "T5:design:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "4c6ab86a7e057a548f364226642d8290c6f5d96f0d45e78482000c55f3bd7d0e"
+      },
+      {
+        "source_ref": "T5:index:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "f0aeb3055e1af173245aaf45f96d3da7f4a290fb0e065b758db1b88ae61390d6"
+      },
+      {
+        "source_ref": "T5:known:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "029705ef877193686b3686ba91ceee320711a28785b5e6a49af830876773f835"
+      },
+      {
+        "source_ref": "T5:module-notes:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "aeb84de0d5a6b9f1ff3143ee2c1e78d6184d7a0ebb57c03684b4ebfbfee05415"
+      },
+      {
+        "source_ref": "T5:history-archive:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "ec3c0c725a4f567c6a53ed79964bbe35018501d048d52549b3957dfe1843ad9b"
+      },
+      {
+        "source_ref": "T5:history-billing:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "ac5832321c965b4bb48beeb82410cca02b6a00663ad6eb4367365a335063f657"
+      },
+      {
+        "source_ref": "T5:case-archive-inventory:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "7d2c34fe262370d41a6127ef5cc5a50983890764dfffbfb371408f64189f6fba"
+      },
+      {
+        "source_ref": "T5:case-billing-single:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "b6bbdbb8eb82e2cb3fe82b31c0a56fddadc2beb6525b2587c34f317b7c3f5e93"
+      }
+    ],
+    "corpus_digest": "7961f3c1d15954719ac189e95133da20e3864323ffaac3a70469a588d4be3fcd",
+    "development_exposed": true,
+    "input_digest": "e6ac66135bba5be333a9ad0febea8b0382c762897ffaed6654aa3f6a77c59dc7"
+  },
+  "candidate_kind": "RULE",
+  "candidate_version": "dependency-lifecycle.v1",
+  "report": null
+}

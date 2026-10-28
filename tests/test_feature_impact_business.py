@@ -122,7 +122,7 @@ async def test_frozen_scope_review_and_real_http_pg(clean_database, tmp_path):
     async with clean_database.transaction() as session:
         session.add(InvestigationRow(run_id=run_id, task_id=tid, session_id=sid, request_id=str(uuid4())))
         session.add(ObjectOwnershipRow(object_type="RUN", object_id=run_id, owner_user_id=owner.user_id, tenant_id=owner.tenant_id))
-    context = SimpleNamespace(run_id=run_id, session_id=sid, data=SimpleNamespace(entry_agent_id=AGENT_ID, agent_version="1.0.0"), memory_access_context=MemoryAccessContext.from_principal(owner, AGENT_ID, sid))
+    context = SimpleNamespace(run_id=run_id, session_id=sid, data=SimpleNamespace(entry_agent_id=AGENT_ID, agent_version="1.1.0"), memory_access_context=MemoryAccessContext.from_principal(owner, AGENT_ID, sid))
     assert "slot" not in json.dumps(await service.bound_evidence(context, {"query": "statistics"}))
     from core.feature_impact.tools import register_tools, register_policies
     from core.feature_impact.agent import definition
@@ -251,13 +251,14 @@ def test_rule_and_report_evidence_contract():
     text_output = json.dumps(raw_task_input)
     binding = SimpleNamespace(run_id="fixture-run", session_id="fixture-session")
     payload = dict(content=text_output, producer_agent_id=AGENT_ID)
-    frame = SimpleNamespace(frame_id="f", frame_role="ROOT", step_id="s", execution_agent_id=AGENT_ID, result_decision_id="final",
+    frame = SimpleNamespace(run_id=binding.run_id, frame_id="f", frame_role="ROOT", step_id="s", execution_agent_id=AGENT_ID, result_decision_id="final",
         context_seed=dict(messages=[dict(role="user", content=task_prompt(task))]),
         final_delivery_receipt=dict(status="DELIVERED", decision_id="final", result_digest=text_digest(text_output)))
+    frame.seed_digest = sha256_digest(frame.context_seed)
     image = SimpleNamespace(root=SimpleNamespace(run_id=binding.run_id, status="SUCCEEDED", execution_policy="durable-agent-loop.v2",
-        resume_input=dict(resolved_agent_id=AGENT_ID, agent_version="1.0.0", session_id=binding.session_id, user_query=task_prompt(task))),
-        loop_frames=[frame], steps=[SimpleNamespace(status="SUCCEEDED", step_id="s", typed_result_payload=payload, result_digest=sha256_digest(payload))],
-        loop_iterations=[SimpleNamespace(frame_id="f", decision_id="final", decision_kind="FINAL", iteration_no=1, state="CLOSED")], tool_invocations=[])
+        resume_input=dict(resolved_agent_id=AGENT_ID, agent_version="1.1.0", session_id=binding.session_id, user_query=task_prompt(task))),
+        loop_frames=[frame], steps=[SimpleNamespace(run_id=binding.run_id, status="SUCCEEDED", step_id="s", typed_result_payload=payload, result_digest=sha256_digest(payload))],
+        loop_iterations=[SimpleNamespace(run_id=binding.run_id, step_id='s', frame_id="f", decision_id="final", decision_kind="FINAL", iteration_no=1, state="CLOSED")], tool_invocations=[])
     final_raw, proofs = validate_result(binding, image, [], task)
     validate(json.loads(final_raw), task, kind="AGENT", reads=proofs["read_sources"], task_inputs=proofs["task_input_sources"])
     with pytest.raises(ValueError):

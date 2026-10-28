@@ -1,0 +1,266 @@
+{
+  "task_id": "7121270f-17b6-5ef2-99b0-9545d26fba58",
+  "snapshot": {
+    "task_version": 1,
+    "title": "遥测帧租约释放点调整",
+    "feature_id": "T3-change",
+    "planning_cutoff": "2026-10-02T00:00:00Z",
+    "known_impacts": [
+      "panel"
+    ],
+    "documents": [
+      {
+        "source_ref": "T3:design:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "DESIGN",
+        "content_digest": "8586b82c7d095fcf300fcd7b8e97b5ced5497b3d10a3152a61eaf816e0a6d326",
+        "title": "遥测帧租约释放点调整",
+        "content": "归还租约后允许下一帧写入。术语表及规范事实向所有候选同时公开。 公共槽位从共享消费者结束后释放改为生产完成后释放；释放不清空，允许其他业务提交不同内容。",
+        "facts": {
+          "changed_resource": "frame-slot",
+          "reclamation": "producer-complete",
+          "subsequent_writes": true
+        }
+      },
+      {
+        "source_ref": "T3:index:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "DEPENDENCY",
+        "content_digest": "037601550c76dc767efe3576bc5ad873a71372cd4cc3b3e6d657f676a164b57e",
+        "title": "发布方完整公开依赖索引",
+        "content": "本索引列出所有依赖边，原始资料见 edge_sources；只记录依赖，不标注影响结论。",
+        "facts": {
+          "dependencies": {
+            "deferred-panel": "frame-reader",
+            "frozen-export": "frame-reader",
+            "frame-reader": "frame-slot"
+          },
+          "edge_sources": {
+            "deferred-panel": "T3:module-notes:v1",
+            "frozen-export": "T3:module-notes:v1",
+            "frame-reader": "T3:module-notes:v1"
+          }
+        }
+      },
+      {
+        "source_ref": "T3:known:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CLARIFICATION",
+        "content_digest": "2591dd18e84b238b75073818b78947d6e4b262ab784364f39dfa9c24e0bfd85e",
+        "title": "开发已知关联与操作控制",
+        "content": "可控制交付、生产完成、后续写入和消费顺序。已知关联：panel。",
+        "facts": {
+          "known_impacts": [
+            "panel"
+          ]
+        }
+      },
+      {
+        "source_ref": "T3:module-notes:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "RESOURCE",
+        "content_digest": "9db8f0d4681a62deb0f7f72a9dbce744b5a28feeba3738fcfc4904489a0afe17",
+        "title": "帧读取链说明",
+        "content": "窗口与留档都经 frame-reader 使用 frame-slot，所有权分别由消费者交付语义确定。",
+        "facts": {
+          "edges": [
+            [
+              "deferred-panel",
+              "frame-reader"
+            ],
+            [
+              "frozen-export",
+              "frame-reader"
+            ],
+            [
+              "frame-reader",
+              "frame-slot"
+            ]
+          ]
+        }
+      },
+      {
+        "source_ref": "T3:terms:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "GLOSSARY",
+        "content_digest": "5cf36b6abaceb37ea290d15eac0c0cfa9f52b8e1b23a8102923a073aa5126630",
+        "title": "遥测产品术语公开对照",
+        "content": "快照句柄=共享借用 SHARED；窗口关闭=延迟 CONSUME；租约归还=COMPLETE；封帧=交付时 COPY。名称中的快照并不保证复制。",
+        "facts": {
+          "terms": {
+            "快照句柄": "SHARED",
+            "窗口关闭": "CONSUME",
+            "租约归还": "COMPLETE",
+            "封帧": "COPY"
+          }
+        }
+      },
+      {
+        "source_ref": "T3:history-panel:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "HISTORY",
+        "content_digest": "7ad30df7bcaa7ff1c2bf220d06cd38561d37feb53d2d59597785d40f9d12c54f",
+        "title": "窗口快照句柄",
+        "content": "本产品“快照句柄”指借用同一帧内存，非复制；窗口关闭才解引用上报。",
+        "facts": {
+          "feature_id": "panel",
+          "module": "deferred-panel",
+          "ownership": "SHARED",
+          "delayed": true
+        }
+      },
+      {
+        "source_ref": "T3:history-export:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "HISTORY",
+        "content_digest": "bb38547e8c9113f2a90d4ac44daa8a6f8d719cb775e6c20f0ab790bb7a17b56d",
+        "title": "封帧留档",
+        "content": "“封帧”指交付时物化独立副本，后台队列稍后上报。",
+        "facts": {
+          "feature_id": "export",
+          "module": "frozen-export",
+          "ownership": "COPY",
+          "delayed": true
+        }
+      },
+      {
+        "source_ref": "T3:case-panel-normal:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "68a5d455895a8f73ef9f1c60cde81bf3c84812bd0ae0b4c823df7495047b27fe",
+        "title": "panel-normal",
+        "content": "只验证窗口立即关闭，缺少后续不同帧写入。",
+        "facts": {
+          "feature_id": "panel",
+          "operations": [
+            {
+              "action": "SUBMIT",
+              "request_id": "original",
+              "payload": {
+                "sample": 23
+              }
+            },
+            {
+              "action": "DELIVER",
+              "request_id": "original",
+              "mode": "SHARED"
+            },
+            {
+              "action": "CONSUME",
+              "request_id": "original"
+            },
+            {
+              "action": "COMPLETE",
+              "request_id": "original"
+            },
+            {
+              "action": "SUBMIT",
+              "request_id": "maintenance",
+              "payload": {
+                "sample": 88
+              }
+            }
+          ],
+          "observation": "report output",
+          "expected": "report equals input",
+          "coverage": "PARTIAL"
+        }
+      },
+      {
+        "source_ref": "T3:case-export-legacy:v1",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "a7901c82ab910fc4323f3f3dd84f7be5e7f759489fffa223ead34408c2ca41d7",
+        "title": "export-legacy",
+        "content": "历史用例迁移后只剩观察和预期，操作记录未保留。",
+        "facts": {
+          "feature_id": "export",
+          "operations": null,
+          "observation": "report output",
+          "expected": "report equals input",
+          "coverage": "UNKNOWN"
+        }
+      }
+    ],
+    "manifest": [
+      {
+        "source_ref": "T3:design:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "8586b82c7d095fcf300fcd7b8e97b5ced5497b3d10a3152a61eaf816e0a6d326"
+      },
+      {
+        "source_ref": "T3:index:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "037601550c76dc767efe3576bc5ad873a71372cd4cc3b3e6d657f676a164b57e"
+      },
+      {
+        "source_ref": "T3:known:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "2591dd18e84b238b75073818b78947d6e4b262ab784364f39dfa9c24e0bfd85e"
+      },
+      {
+        "source_ref": "T3:module-notes:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "9db8f0d4681a62deb0f7f72a9dbce744b5a28feeba3738fcfc4904489a0afe17"
+      },
+      {
+        "source_ref": "T3:terms:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "5cf36b6abaceb37ea290d15eac0c0cfa9f52b8e1b23a8102923a073aa5126630"
+      },
+      {
+        "source_ref": "T3:history-panel:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "7ad30df7bcaa7ff1c2bf220d06cd38561d37feb53d2d59597785d40f9d12c54f"
+      },
+      {
+        "source_ref": "T3:history-export:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "bb38547e8c9113f2a90d4ac44daa8a6f8d719cb775e6c20f0ab790bb7a17b56d"
+      },
+      {
+        "source_ref": "T3:case-panel-normal:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "68a5d455895a8f73ef9f1c60cde81bf3c84812bd0ae0b4c823df7495047b27fe"
+      },
+      {
+        "source_ref": "T3:case-export-legacy:v1",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "a7901c82ab910fc4323f3f3dd84f7be5e7f759489fffa223ead34408c2ca41d7"
+      }
+    ],
+    "corpus_digest": "83c1e3070eccd088261fd10cbc744f5f3945fb67b3868d20303737552891785c",
+    "development_exposed": true,
+    "input_digest": "60c39e7217e6d32a8dc725f052a9e6b327517eae1bed0a124a05fb59e7e2651a"
+  },
+  "candidate_kind": "RULE",
+  "candidate_version": "dependency-lifecycle.v1",
+  "report": null
+}

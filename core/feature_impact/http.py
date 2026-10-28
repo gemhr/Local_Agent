@@ -13,6 +13,10 @@ class Intent(Strict):
     request_id: UUID
 
 
+class PublicTaskIntent(Intent):
+    public_task: Literal['T2', 'T3', 'T5', 'T6']
+
+
 class Submission(Intent):
     raw_output: str = Field(max_length=100000)
 
@@ -37,7 +41,7 @@ class Execution(Intent):
 class QualityInput(Strict):
     task_id: str
     snapshot: dict
-    candidate_kind: Literal["RULE", "HUMAN"]
+    candidate_kind: Literal["RULE", "HUMAN", "AGENT"]
     candidate_version: str
     report: dict | None = None
 
@@ -59,9 +63,16 @@ async def quality(body: QualityRequest, request: Request):
     from core.feature_impact.quality import evaluate
     try:
         require_scope(request.state.principal, "localagent:feature-impact:evaluate")
-        return evaluate(body.model_dump(mode="json"))
+        value = body.model_dump(mode='json')
+        if body.input.candidate_kind == 'AGENT':
+            from core.feature_impact.agent_reports import evaluate_agent_report
+            return await evaluate_agent_report(request.app.state.feature_impact_service,
+                request.app.state.loop_execution_repository, request.state.principal, value)
+        return evaluate(value)
     except AuthError as exc:
         raise HTTPException(exc.status_code, exc.code) from None
+    except BusinessError as exc:
+        raise HTTPException(exc.status, exc.code) from None
     except (ValueError, KeyError, TypeError):
         raise HTTPException(422, "FEATURE_QUALITY_INPUT_INVALID") from None
 
@@ -87,6 +98,11 @@ async def tasks(request: Request):
 @router.post("/tasks")
 async def create(body: Intent, request: Request):
     return await call(request, "create", str(body.request_id))
+
+
+@router.post('/public-experiment-tasks')
+async def create_public_task(body: PublicTaskIntent, request: Request):
+    return await call(request, 'create', str(body.request_id), public_task=body.public_task)
 
 
 @router.get("/tasks/{task_id}")
