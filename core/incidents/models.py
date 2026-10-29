@@ -128,3 +128,19 @@ class UserNotificationRow(PersistenceBase):
     read_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (UniqueConstraint("batch_id", "recipient_user_id", "kind"),
         CheckConstraint("kind IN ('INCREMENTAL_FAILURE','FINAL_SUMMARY')"))
+
+
+class InvestigationFeedbackRow(PersistenceBase):
+    """追加式人工反馈；binding 为服务端核实的稳定引用快照。"""
+    __tablename__ = "incident_investigation_feedback"
+    feedback_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    incident_id: Mapped[str] = mapped_column(ForeignKey("incidents.incident_id"), index=True)
+    investigation_id: Mapped[str] = mapped_column(ForeignKey("incident_investigations.investigation_id"))
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.tenant_id"))
+    created_by_user_id: Mapped[object] = mapped_column(Uuid, ForeignKey("users.id"))
+    request_id: Mapped[str] = mapped_column(Text)
+    request_payload: Mapped[dict] = mapped_column(JSONB)
+    binding: Mapped[dict] = mapped_column(JSONB)
+    supersedes: Mapped[str | None] = mapped_column(ForeignKey("incident_investigation_feedback.feedback_id"), unique=True)
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("tenant_id", "created_by_user_id", "request_id"),)

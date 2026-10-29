@@ -3,7 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from core.ci_simulation.execution import SCENARIOS
 from core.incidents.contracts import (CIError, CreateScenario, Intent, ExecutionIntent, ActionIntent,
     ConfirmAction, VerificationIntent, CloseIncident)
-from core.incidents import operations, verification
+from core.incidents import operations, verification, feedback
+from core.incidents.feedback import FeedbackIntent
 
 
 def human(request: Request):
@@ -112,3 +113,21 @@ async def execution_evidence(incident_id: str, execution_id: str, evidence_id: s
 @router.post("/incidents/{incident_id}/close")
 async def close(incident_id: str, body: CloseIncident, request: Request):
     return await call(verification.close_incident(request.app.state.incident_service, human(request), incident_id, body))
+
+
+@router.post("/incidents/{incident_id}/feedback")
+async def create_feedback(incident_id: str, body: FeedbackIntent, request: Request, response: Response):
+    result, created = await call(feedback.submit(request.app.state.incident_service, human(request), incident_id, body))
+    response.status_code = 201 if created else 200
+    return result
+
+
+@router.get("/incidents/{incident_id}/feedback")
+async def feedback_history(incident_id: str, request: Request):
+    return await call(feedback.history(request.app.state.incident_service, human(request), incident_id))
+
+
+@router.get("/incidents/{incident_id}/feedback/{feedback_id}/projection")
+async def feedback_projection(incident_id: str, feedback_id: str, request: Request):
+    from core.incidents.feedback_projection import project
+    return await call(project(request.app.state.incident_service, human(request), incident_id, feedback_id))

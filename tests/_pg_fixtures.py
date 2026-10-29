@@ -114,6 +114,7 @@ async def _drop_all(database: Database) -> None:
             await connection.execute(text("DROP FUNCTION IF EXISTS stage13_incident_immutable_guard()"))
             await connection.execute(text("DROP FUNCTION IF EXISTS stage13_delivery_guard()"))
             await connection.execute(text("DROP FUNCTION IF EXISTS feature_impact_frozen_guard()"))
+            await connection.execute(text("DROP FUNCTION IF EXISTS incident_feedback_frozen_guard()"))
     finally:
         # 必须清空 pool：这些连接绑定在 asyncio.run 的临时 loop 上，
         # 复用它们会让后续测试拿到已死 loop 的连接。
