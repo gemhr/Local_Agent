@@ -1595,6 +1595,7 @@ CANONICAL_TABLES = (
     "incidents",
     "incident_investigations",
     "incident_investigation_feedback",
+    "ci_synthetic_evaluation_bindings",
     "runtime_agent_evaluation_receipts",
     "stage8_feature_test_missions",
     "stage8_mission_run_refs",

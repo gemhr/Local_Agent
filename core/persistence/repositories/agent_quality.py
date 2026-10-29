@@ -11,6 +11,11 @@ class AgentQualityReceiptRepository:
         self.database = database
 
     async def admit(self, *, correlation, principal, manifest, profile):
+        async with self.database.transaction() as session:
+            return await self.admit_in_transaction(session, correlation=correlation, principal=principal,
+                manifest=manifest, profile=profile)
+
+    async def admit_in_transaction(self, session, *, correlation, principal, manifest, profile):
         identity = {"principal_id": str(principal.user_id), "tenant_id": principal.tenant_id,
                     "correlation": correlation, "execution_manifest": manifest, "capture_profile": profile}
         fingerprint = catalog_digest(identity)
@@ -19,19 +24,18 @@ class AgentQualityReceiptRepository:
             evaluation_project_id=correlation["evaluation_project_id"], evaluation_run_id=correlation["evaluation_run_id"],
             request_fingerprint=fingerprint, correlation=correlation, execution_manifest=manifest,
             capture_profile=profile, evaluation_capture={})
-        async with self.database.transaction() as session:
-            winner = (await session.execute(insert(Receipt).values(**values).on_conflict_do_nothing()
-                .returning(Receipt.remote_run_id))).scalar_one_or_none()
-            if winner is not None:
-                from core.persistence.models import RunControlRow
-                if await session.get(RunControlRow, correlation["run_id"]) is not None:
-                    raise ValueError("QUALITY_REQUEST_CONFLICT")
-            rows = tuple((await session.execute(select(Receipt).where(or_(
-                Receipt.remote_run_id == values["remote_run_id"], Receipt.attempt_id == values["attempt_id"],
-                Receipt.request_id == values["request_id"])))).scalars())
-            if len(rows) != 1 or rows[0].request_fingerprint != fingerprint:
+        winner = (await session.execute(insert(Receipt).values(**values).on_conflict_do_nothing()
+            .returning(Receipt.remote_run_id))).scalar_one_or_none()
+        if winner is not None:
+            from core.persistence.models import RunControlRow
+            if await session.get(RunControlRow, correlation["run_id"]) is not None:
                 raise ValueError("QUALITY_REQUEST_CONFLICT")
-            return winner is not None, rows[0]
+        rows = tuple((await session.execute(select(Receipt).where(or_(
+            Receipt.remote_run_id == values["remote_run_id"], Receipt.attempt_id == values["attempt_id"],
+            Receipt.request_id == values["request_id"])))).scalars())
+        if len(rows) != 1 or rows[0].request_fingerprint != fingerprint:
+            raise ValueError("QUALITY_REQUEST_CONFLICT")
+        return winner is not None, rows[0]
 
     async def read(self, run_id):
         async with self.database.session() as session:

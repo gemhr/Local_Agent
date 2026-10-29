@@ -504,6 +504,11 @@ class DurableExecutionRepository:
                 if evaluation_messages is not None and receipt.sealed_response is None:
                     capture[key] = request_capture(evaluation_messages, profile=receipt.capture_profile,
                         request_digest=request_digest, purpose=purpose, snapshot_id=context_snapshot_id)
+                    if loop_frame_id is not None and purpose == 'DECISION':
+                        from core.runtime.agent_loop.quality_capture import capture_ci_prompt_request
+                        prompt_binding = capture_ci_prompt_request(frame.pinned_config, evaluation_messages, request_digest)
+                        if prompt_binding is not None:
+                            capture[key]['ci_prompt_binding'] = prompt_binding
                     if evaluation_memory is not None:
                         from core.persistence.models import RuntimeMemoryBindingRow
                         from core.runtime.agent_loop.quality_capture import scan_facts

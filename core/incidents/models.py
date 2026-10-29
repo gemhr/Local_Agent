@@ -5,6 +5,22 @@ from sqlalchemy.orm import Mapped, mapped_column
 from core.persistence.models import PersistenceBase
 
 
+class SyntheticEvaluationBindingRow(PersistenceBase):
+    """不可变业务准备引用及首次封存 sidecar；不拥有 Run 状态。"""
+    __tablename__ = 'ci_synthetic_evaluation_bindings'
+    run_id: Mapped[str] = mapped_column(ForeignKey('runtime_agent_evaluation_receipts.remote_run_id'), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey('tenants.tenant_id'))
+    principal_id: Mapped[object] = mapped_column(Uuid, ForeignKey('users.id'))
+    project_id: Mapped[str] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSONB)
+    investigation_id: Mapped[str] = mapped_column(ForeignKey('incident_investigations.investigation_id'), unique=True)
+    instance_id: Mapped[str] = mapped_column(ForeignKey('ci_scenario_instances.instance_id'), unique=True)
+    execution_id: Mapped[str] = mapped_column(ForeignKey('ci_executions.execution_id'), unique=True)
+    incident_id: Mapped[str] = mapped_column(ForeignKey('incidents.incident_id'), unique=True)
+    sidecar: Mapped[str | None] = mapped_column(Text)
+
+
 class IncidentRow(PersistenceBase):
     __tablename__ = "incidents"
     incident_id: Mapped[str] = mapped_column(Text, primary_key=True)

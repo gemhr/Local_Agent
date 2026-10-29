@@ -56,7 +56,7 @@ def load_configuration(path):
     if len(raw) > 80 * 1024:
         raise ValueError("QUALITY_CONFIGURATION_LIMIT")
     data = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
-    if type(data) is not dict or set(data) != {"manifest", "capture_profile"}:
+    if type(data) is not dict or not {'manifest','capture_profile'} <= set(data) or set(data) - {'manifest','capture_profile','ci_prompt','ci_synthetic'}:
         raise ValueError("QUALITY_CONFIGURATION_INVALID")
     manifest = Manifest.model_validate(data["manifest"]).model_dump()
     profile = CaptureProfile.model_validate(data["capture_profile"]).model_dump()

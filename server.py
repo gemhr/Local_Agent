@@ -622,6 +622,9 @@ async def lifespan(app: FastAPI):
     Yields:
         None: 启动阶段创建服务，关闭阶段释放引用。
     """
+    from core.agent_platform.ci_prompt_candidate import configured_bundle
+    business_registration_bundle = configured_bundle(BUSINESS_REGISTRATION_BUNDLE, settings.quality_evaluation_configuration_path)
+    app.state.ci_evaluation_only = any(r.definition.business_options.get("ci_prompt_selection") for r in business_registration_bundle.registrations)
     global evaluation_generation_pin, evaluation_rewrite_fixture, evaluation_hybrid_rrf_profile, evaluation_validated_generation
 
     evaluation_generation_pin = None
@@ -1209,7 +1212,7 @@ async def lifespan(app: FastAPI):
         lambda: _populate_tool_registry(
             mcp_registrations,
             stage8_platform=stage8_platform,
-            business_tool_definitions=BUSINESS_REGISTRATION_BUNDLE.tools,
+            business_tool_definitions=business_registration_bundle.tools,
             freeze=False,
         ),
         component="tool_registry",
@@ -1224,7 +1227,7 @@ async def lifespan(app: FastAPI):
     app.state.feature_impact_service = FeatureImpactService(persistence_database)
     register_feature_tools(tool_registry, app.state.feature_impact_service, persistence_bridge)
     registered_agent_ids = frozenset(DEFAULT_AGENT_REGISTRY.agent_ids) | frozenset(
-        item.definition.agent_id for item in BUSINESS_REGISTRATION_BUNDLE.registrations
+        item.definition.agent_id for item in business_registration_bundle.registrations
     )
     permission_seed = dict(builtin_tool_permission_seed(
         tool_registry.registered_names, registered_agent_ids
@@ -1237,7 +1240,7 @@ async def lifespan(app: FastAPI):
         permission_limits[policy.tool_name] = permission_seed[policy.tool_name]
     compiled_agent_catalog = await initialization_stack.run(
         lambda: compile_agent_catalog(
-            BUSINESS_REGISTRATION_BUNDLE,
+            business_registration_bundle,
             builtin_registrations=tuple(
                 DEFAULT_AGENT_REGISTRY.resolve(agent_id)
                 for agent_id in DEFAULT_AGENT_REGISTRY.agent_ids
@@ -1265,7 +1268,7 @@ async def lifespan(app: FastAPI):
             tool_registry,
             agent_registry,
             tool_grants=compiled_agent_catalog.tool_grants,
-            business_tool_definitions=BUSINESS_REGISTRATION_BUNDLE.tools,
+            business_tool_definitions=business_registration_bundle.tools,
             mcp_policies=mcp_policies,
         ),
         component="tool_governance",
@@ -2244,6 +2247,8 @@ async def request_id_and_auth_middleware(request: Request, call_next):
             if not isinstance(service, AuthService):
                 return _api_error(request, AUTH_INVALID_TOKEN, 401)
             request.state.principal = await service.authenticate(request.headers.get("Authorization"))
+            if (getattr(request.app.state, "ci_evaluation_only", False) and request.state.principal.principal_kind == "HUMAN"):
+                raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
             if request.url.path in _ADMIN_ONLY_API_PATHS:
                 require_role(request.state.principal, "ADMIN")
             elif request.url.path.startswith("/api/runtime/evaluation-execute/"):
@@ -2257,7 +2262,7 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                     request.state.principal, STAGE8_RESULT_CALLBACK_SCOPE
                 )
             elif request.state.principal.principal_kind == "SERVICE" and not (
-                (request.url.path.startswith("/api/runtime/runs/") and request.url.path.endswith(("/loop-evidence/v1", "/agent-quality-evidence/v1")))
+                (request.url.path.startswith("/api/runtime/runs/") and request.url.path.endswith(("/loop-evidence/v1", "/agent-quality-evidence/v1", "/ci-synthetic-evidence/v1")))
                 or
                 (request.url.path.startswith("/api/runtime/runs/") and request.url.path.endswith("/cancel"))
                 or (request.url.path.startswith("/api/v1/runs/") and request.url.path.endswith("/cancel"))

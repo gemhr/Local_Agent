@@ -106,6 +106,10 @@ def register_agent_quality_evaluation(app, *, settings, require_service, bind_ru
         encoded = await receipts.capture(execution, run_id, final_answer=answer)
         return wire(encoded) if encoded is not None else pending(run_id)
 
+    from core.agent_platform.ci_synthetic_evaluation import register
+    register(app,settings=settings,trusted=trusted,repository=repository,wire=wire,require_service=require_service,
+        bind_run=bind_run,authorize_existing=authorize_existing,final_answer_capture=final_answer_capture)
+
     @app.get("/api/runtime/runs/{run_id}/agent-quality-evidence/v1")
     async def read(run_id: str, request: Request):
         principal = trusted(request)

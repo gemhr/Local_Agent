@@ -50,3 +50,18 @@ def parameter_projection(arguments, paths):
     except ValueError:
         digest = None
     return digest, projections
+
+def capture_ci_prompt_request(config, messages, request_digest):
+    """原模型准入事务使用的最终 messages 检查，不生成发送成功结论。"""
+    agent = config.get('agent', {})
+    pin = agent.get('business_options', {}).get('ci_prompt_selection')
+    if pin is None:
+        return None
+    instructions = agent['instructions']
+    if agent['agent_id'] != 'ci_incident_investigator' or catalog_digest(instructions) != pin['prompt_digest']:
+        raise ValueError('CI_PROMPT_PIN_INVALID')
+    system = [m['content'] for m in messages if m.get('role') == 'system' and isinstance(m.get('content'), str)]
+    if sum(instructions in text for text in system) != 1:
+        raise ValueError('CI_PROMPT_ACTUAL_INSTRUCTIONS_MISMATCH')
+    return dict(**pin, model_request_digest=request_digest, messages_digest=catalog_digest(messages),
+        system_digest=catalog_digest(system), evidence_scope='DURABLE_REQUEST_PREPARED')
