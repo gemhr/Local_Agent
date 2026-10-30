@@ -624,6 +624,14 @@ async def lifespan(app: FastAPI):
     """
     from core.agent_platform.ci_prompt_candidate import configured_bundle
     business_registration_bundle = configured_bundle(BUSINESS_REGISTRATION_BUNDLE, settings.quality_evaluation_configuration_path)
+    from core.agent_platform.quality_configuration import load_request_counting_exception
+    app.state.request_counting_exception = load_request_counting_exception(settings.quality_evaluation_configuration_path)
+    if app.state.request_counting_exception is not None and (
+            settings.remote_timeout_seconds != 120 or settings.remote_enable_thinking or not settings.remote_verify_tls
+            or settings.llm_backend != "remote"
+            or app.state.request_counting_exception.policy["project_id"] != settings.quality_evaluation_project_id
+            or app.state.request_counting_exception.policy["principal_id"] != settings.quality_evaluation_service_principal_id):
+        raise ValueError("E2E_ADMISSION_DEPLOYMENT_CONFIGURATION_INVALID")
     app.state.ci_evaluation_only = any(r.definition.business_options.get("ci_prompt_selection") for r in business_registration_bundle.registrations)
     global evaluation_generation_pin, evaluation_rewrite_fixture, evaluation_hybrid_rrf_profile, evaluation_validated_generation
 
@@ -1479,6 +1487,7 @@ async def lifespan(app: FastAPI):
             step_result_run_total_chars=settings.step_result_run_total_chars,
             step_result_max_entries=settings.step_result_max_entries,
             execution_repository=execution_repository,
+            request_counting_exception=app.state.request_counting_exception,
         ),
     )
 

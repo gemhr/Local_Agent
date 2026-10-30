@@ -16,7 +16,7 @@ def frozen_input():
     return dict(template_id=TEMPLATE, template_version='2', input_digest=catalog_digest(initial_state(TEMPLATE)))
 
 
-async def prepare(service, principal, request, definition, manifest, profile):
+async def prepare(service, principal, request, definition, manifest, profile, *, request_counting_exception=None):
     quality = request.quality
     run = str(quality.run_id)
     normalized = request.model_dump(mode='json')
@@ -67,5 +67,11 @@ async def prepare(service, principal, request, definition, manifest, profile):
             project_id=str(quality.evaluation_project_id),fingerprint=fingerprint,payload=binding,
             investigation_id=investigation.investigation_id,instance_id=instance.instance_id,
             execution_id=execution.execution_id,incident_id=incident.incident_id))
+        if request_counting_exception is not None:
+            from core.runtime.request_counting_admission import match_request, issue_record
+            trusted=match_request(request_counting_exception,request,principal,definition)
+            receipt=await session.get(RuntimeAgentEvaluationReceiptRow,run)
+            receipt.evaluation_capture={**receipt.evaluation_capture,
+                'e2e_test_admission':issue_record(trusted,binding,receipt)}
         await session.flush()
         return True, binding

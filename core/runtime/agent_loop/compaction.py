@@ -4,6 +4,7 @@ import json
 
 from .context import snapshot_candidate
 from .contracts import LoopStopped
+from core.runtime.request_counting_admission import context_eligible, context_record, reference
 
 SUMMARY_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["version", "groups"],
     "properties": {"version": {"const": 1}, "groups": {"type": "array", "minItems": 1, "maxItems": 64,
@@ -62,12 +63,13 @@ def parse_summary(response, groups, selected_refs=None):
         raise LoopStopped("CONTEXT_VALIDATION_FAILED") from exc
 
 
-def validate_candidate(frame, groups, candidate, assessments, raw_assessments):
+def validate_candidate(frame, groups, candidate, assessments, raw_assessments, *, context=None, profiles=()):
     payload = candidate.payload
     expected = snapshot_candidate(frame, groups, payload["options"], payload["output_reserve"], summary=payload["summary"], kind=payload["kind"])
     if expected.digest != candidate.digest:
         raise LoopStopped("CONTEXT_VALIDATION_FAILED")
-    reliable = [a for a in assessments if a.admissible]
+    reliable = [a for a in assessments if a.admissible or (context is not None
+        and context_eligible(a, context, profiles, frame=frame, purpose="DECISION"))]
     if not reliable:
         raise LoopStopped("LOOP_CONTEXT_EXHAUSTED")
     if payload["summary"]:
@@ -78,8 +80,11 @@ def validate_candidate(frame, groups, candidate, assessments, raw_assessments):
         if payload["kind"] == "COMPACTED" and not any(a.required_window < raw[a.profile_id].required_window
                 and a.required_window * 100 <= a.window * frame.context_policy["target_percent"] for a in reliable):
             raise LoopStopped("CONTEXT_VALIDATION_FAILED")
-    return {"version": f"context-validator.v{getattr(frame, 'schema_version', 1)}", "source": True, "mandatory": True, "roles": True,
-        "pairs": True, "budget": True, "semantic_preservation": "NOT_PROVEN", "reason": "VALID"}
+    validation = {"version": f"context-validator.v{getattr(frame, 'schema_version', 1)}", "source": True, "mandatory": True, "roles": True,
+        "pairs": True, "budget": any(a.admissible for a in assessments), "semantic_preservation": "NOT_PROVEN", "reason": "VALID"}
+    if not validation["budget"]:
+        validation["e2e_test_admission"] = reference(context_record(context))
+    return validation
 
 
 def request_assessments(router, messages, options, reserve, capabilities, definition=None):
@@ -115,7 +120,7 @@ def invoke_context_model(router, agent_id, messages, context, capabilities, rese
         step_id=emitter.step_id, async_submit=emitter.parent.submit_coroutine_from_worker)
     if restored is not None:
         return restored
-    eligible_ids = {a.profile_id for a in assessments if a.admissible}
+    eligible_ids = {a.profile_id for a in assessments if context_eligible(a, context, router.model_profiles)}
     if getattr(context, "loop_allowed_model_profiles", None) is not None:
         eligible_ids &= set(context.loop_allowed_model_profiles)
     if context.loop_model_purpose == "DECISION":
@@ -128,7 +133,7 @@ def invoke_context_model(router, agent_id, messages, context, capabilities, rese
     if not profiles:
         reliable = any(a.reliable for a in assessments)
         raise LoopStopped("LOOP_CONTEXT_EXHAUSTED" if reliable else "CONTEXT_BUDGET_UNCERTAIN")
-    minimal = min((a for a in assessments if a.admissible), key=lambda a: a.required_window)
+    minimal = min((a for a in assessments if a.profile_id in eligible_ids), key=lambda a: a.required_window)
     from core.runtime.budget import BudgetExceededError
     budget = context.budget_ledger.snapshot(getattr(context, "delegation_id", None))
     costs = [p.cost_profile.fixed_call_cost_units
@@ -197,9 +202,9 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
     raw = snapshot_candidate(frame, groups, options, router.max_tokens, summary=prior_summary, kind="RAW")
     assess = lambda artifact: request_assessments(router, artifact.payload["messages"], options, router.max_tokens, claim.capability_requirements, definition)[0]
     raw_assessments = assess(raw)
-    valid = [a for a in raw_assessments if a.admissible]
+    valid = [a for a in raw_assessments if context_eligible(a, context, router.model_profiles, frame=frame, purpose="DECISION")]
     reliable = [a for a in raw_assessments if a.reliable]
-    if not reliable:
+    if not reliable and not valid:
         raise LoopStopped("CONTEXT_BUDGET_UNCERTAIN")
     target = current.iteration_no if current else frame.current_iteration + 1
     operation = next((o for o in image.context_operations if o.frame_id == frame.frame_id and o.target_iteration == target), None)
@@ -224,7 +229,7 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
             assessments, _ = request_assessments(router, summary_messages, summary_options, summary_reserve, claim.capability_requirements, definition)
             feasible = []
             for assessment in assessments:
-                if not assessment.admissible:
+                if not context_eligible(assessment, context, router.model_profiles, frame=frame, purpose="COMPACTION"):
                     continue
                 profile = next(p for p in router.model_profiles if p.profile_id.value == assessment.profile_id)
                 costs = profile.cost_profile
@@ -270,7 +275,8 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
                                 max_tokens=operation.prepared["reserve"], event_emitter=emitter, generation_options=operation.prepared["options"], business_definition=definition).response
                         summary = parse_summary(response, groups)
                         candidate = snapshot_candidate(frame, groups, options, router.max_tokens, summary=summary)
-                        validation = validate_candidate(frame, groups, candidate, assess(candidate), raw_assessments)
+                        validation = validate_candidate(frame, groups, candidate, assess(candidate), raw_assessments,
+                            context=context, profiles=router.model_profiles)
                         reason = "VALID"
                     except (LoopStopped, ModelInvocationChainError, ModelSelectionError) as exc:
                         validation = {"version": f"context-validator.v{getattr(frame, 'schema_version', 1)}", "reason": "CONTEXT_COMPACTION_FAILED"}
@@ -290,7 +296,8 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
     if force_compaction and (candidate is raw or candidate.payload["kind"] != "COMPACTED"):
         raise LoopStopped("LOOP_CONTEXT_EXHAUSTED")
     if validation is None:
-        validation = validate_candidate(frame, groups, candidate, raw_assessments, raw_assessments)
+        validation = validate_candidate(frame, groups, candidate, raw_assessments, raw_assessments,
+            context=context, profiles=router.model_profiles)
     refreshed, _ = submit(repo.load_loop(lease, claim.step_id, frame.frame_id))
     quality_comparison = None
     if getattr(context, "memory_effect_policy", None) is not None and candidate.payload["kind"] == "COMPACTED":

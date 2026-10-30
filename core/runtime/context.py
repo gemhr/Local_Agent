@@ -220,6 +220,7 @@ class RunContext:
         # 仅由可信 Factory/LoopDriver 从持久 aggregate 绑定。
         self.execution_policy = "fixed-plan.v1"
         self.memory_effect_policy = None
+        self.request_counting_admission = None
         self.loop_frame_id = None
         self.loop_context_snapshot_id = None
         self.loop_model_purpose = "DECISION"

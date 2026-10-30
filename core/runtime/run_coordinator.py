@@ -1322,6 +1322,10 @@ class RunCoordinator:
                 "correlation": self.run_context.loop_correlation, "persist": self._persist}
             if self.run_context.memory_effect_policy is not None:
                 resume_input["agent_loop"]["memory_effect_policy"] = self.run_context.memory_effect_policy
+            from core.runtime.request_counting_admission import context_record
+            admission = context_record(self.run_context)
+            if admission is not None:
+                resume_input["agent_loop"]["e2e_test_admission"] = admission
             snapshot = self.budget_ledger.snapshot()
         root = ExecutionRootInput(
             run_id=self.run_context.run_id,

@@ -1014,7 +1014,8 @@ class ModelInvocationRouter:
                 prior = context_assessments[candidate.profile_id.value]
                 current_assessment = assess_request(messages, generation_options, max_tokens, candidate.profile,
                     exact_counter=getattr(adapter, "count_request_tokens", None))
-                if (not current_assessment.admissible or current_assessment.request_digest != prior.request_digest
+                from core.runtime.request_counting_admission import context_eligible
+                if (not context_eligible(current_assessment, run_context, (candidate.profile,)) or current_assessment.request_digest != prior.request_digest
                         or current_assessment.input_bound != prior.input_bound):
                     permit.abandon()
                     raise LoopStopped("CONTEXT_BUDGET_UNCERTAIN")
@@ -1793,6 +1794,10 @@ class ModelInvocationRouter:
                     request_assessment=asdict(run_context.loop_request_assessments[candidate.profile_id.value]),
                     context_snapshot_id=run_context.loop_context_snapshot_id if purpose == "DECISION" else None,
                     compaction_operation_id=run_context.loop_compaction_operation_id if purpose == "COMPACTION" else None)
+                from core.runtime.request_counting_admission import context_record, reference, context_eligible
+                assessment = run_context.loop_request_assessments[candidate.profile_id.value]
+                if not assessment.admissible and context_eligible(assessment, run_context, (candidate.profile,), purpose=purpose):
+                    loop_kwargs["request_assessment"]["e2e_test_admission"] = reference(context_record(run_context))
                 if purpose == "COMPACTION":
                     loop_kwargs.update(loop_iteration_no=None, invocation_group=f"context:{run_context.loop_compaction_operation_id}")
         formation_operation = getattr(run_context, "memory_formation_operation_id", None)

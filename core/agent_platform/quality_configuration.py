@@ -58,6 +58,8 @@ def load_configuration(path):
     data = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs)
     if type(data) is not dict or not {'manifest','capture_profile'} <= set(data) or set(data) - {'manifest','capture_profile','ci_prompt','ci_synthetic'}:
         raise ValueError("QUALITY_CONFIGURATION_INVALID")
+    from core.runtime.request_counting_admission import compile_exception
+    compile_exception(data.get("ci_synthetic", {}).get("request_counting_exception"))
     manifest = Manifest.model_validate(data["manifest"]).model_dump()
     profile = CaptureProfile.model_validate(data["capture_profile"]).model_dump()
     canonical_bytes(data)
@@ -75,6 +77,18 @@ def load_configuration(path):
            for paths in profile["parameter_paths"].values()):
         raise ValueError("QUALITY_CAPTURE_PROFILE_INVALID")
     return manifest, profile
+
+
+def load_request_counting_exception(path):
+    """Composition Root 只加载一次；离线工件可直接 compile 静态 policy。"""
+    if not path:
+        return None
+    from core.runtime.agent_loop.quality_contract import parse_quality_json
+    from core.runtime.request_counting_admission import compile_exception
+    raw = Path(path).read_bytes()
+    if len(raw) > 80 * 1024:
+        raise ValueError("QUALITY_CONFIGURATION_LIMIT")
+    return compile_exception(parse_quality_json(raw).get("ci_synthetic", {}).get("request_counting_exception"))
 
 
 def check_agent(manifest, definition):

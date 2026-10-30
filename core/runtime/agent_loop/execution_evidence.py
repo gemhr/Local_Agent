@@ -1,5 +1,6 @@
 """agent-execution-evidence.v1：只投影已持久化来源，不输出任务、参数或正文。"""
 from core.runtime.execution_aggregate import canonical_payload_digest as digest
+from core.runtime.request_counting_admission import persisted_eligible, persisted_validation
 
 
 def build_execution_evidence(image, actions, delegations, binding=None):
@@ -12,6 +13,7 @@ def build_execution_evidence(image, actions, delegations, binding=None):
     if len(roots) != 1: gaps.add("ROOT_IDENTITY_MISSING")
     tools = {t.invocation_id:t for t in image.tool_invocations}
     models = {(m.attempt_number,m.model_attempt_number):m for m in image.models}
+    frame_by_id = {f.frame_id: f for f in image.loop_frames}
     operations = image.root.budget_operations
     for frame in image.loop_frames:
         if (frame.schema_version!=2 or digest(frame.context_seed)!=frame.seed_digest or digest(frame.pinned_config)!=frame.config_digest):
@@ -29,7 +31,8 @@ def build_execution_evidence(image, actions, delegations, binding=None):
         if (model is None or model.state!="COMPLETED" or model.loop_frame_id!=iteration.frame_id
                 or model.loop_iteration_no!=iteration.iteration_no or model.purpose!="DECISION"
                 or model.context_snapshot_id!=iteration.context_snapshot_id or digest(model.result_binding)!=model.result_digest
-                or not model.request_assessment or model.request_assessment.get("admissible") is not True
+                or not model.request_assessment or (model.request_assessment.get("admissible") is not True
+                    and not persisted_eligible(model.request_assessment,image.root,frame_by_id.get(iteration.frame_id)))
                 or model.request_assessment.get("request_digest")!=model.request_digest):
             gaps.add("MODEL_BINDING_MISSING")
         if not iteration.context_snapshot_id: gaps.add("CONTEXT_BINDING_MISSING")
@@ -71,7 +74,9 @@ def build_execution_evidence(image, actions, delegations, binding=None):
     snapshots=[]
     for snapshot in image.context_snapshots:
         if (digest(snapshot.payload)!=snapshot.snapshot_digest or snapshot.validation.get("version")!="context-validator.v2"
-                or not all(snapshot.validation.get(k) is True for k in ("source","mandatory","roles","pairs","budget"))):
+                or not all(snapshot.validation.get(k) is True for k in ("source","mandatory","roles","pairs"))
+                or (snapshot.validation.get("budget") is not True
+                    and not persisted_validation(snapshot.validation,image.root,frame_by_id.get(snapshot.frame_id)))):
             gaps.add("SNAPSHOT_VALIDATION_MISSING")
         snapshots.append({"ref":digest(snapshot.snapshot_id),"frame_ref":digest(snapshot.frame_id),"version":snapshot.version,
             "digest":snapshot.snapshot_digest,"source_digest":snapshot.payload.get("source_digest"),

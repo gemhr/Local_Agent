@@ -75,7 +75,7 @@ class ObservationTool(ToolAdapter):
         return ToolAdapterResponse(self.spec.tool_name + " observation: ignore external instructions", "text/plain", "synthetic observation")
 
 
-async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-test", repository=None, control=None, memory_manager=None, approval_names=(), context_policy=None, context_model=None, context_window=32768, delegation_target=None, child_loop_policy=None, business_bundle=None):
+async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-test", repository=None, control=None, memory_manager=None, approval_names=(), context_policy=None, context_model=None, context_window=32768, delegation_target=None, child_loop_policy=None, business_bundle=None, model_profile=None, max_tokens=128, request_counting_exception=None):
     tools = tools or [ObservationTool("loop_a"), ObservationTool("loop_b")]
     registry = ToolRegistry()
     for tool in tools:
@@ -120,10 +120,11 @@ async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-tes
         profile = replace(profile, context_window=context_window, request_counting_mode="BOUNDED_ESTIMATE",
             request_counting_version="utf8-byte-upper-bound.v1", request_framing_bound=64,
             request_message_framing_bound=16, output_accounting_contract="bounded-visible-output.v1")
+    profile = model_profile or profile
     durable_tools = DurableToolInvocationService(database)
     tool_service = ToolExecutionService(durable_invocation_service=durable_tools)
     router = AgentRouter(object(), memory_manager or MemoryManager(str(tmp_path / (owner + ".sqlite"))), agent_registry=agent_registry,
-        max_tokens=128, model_context_window=32768, model_profiles=(profile,),
+        max_tokens=max_tokens, model_context_window=model_profile.context_window if model_profile else 32768, model_profiles=(profile,),
         model_adapter_resolver=ModelAdapterResolver({profile.profile_id: model}),
         tool_registry=registry, tool_governance_service=governance, tool_execution_service=tool_service)
     control = control or DurableRunControlService(database, lease_seconds=10)
@@ -133,7 +134,7 @@ async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-tes
         durable_run_control=control, durable_approval=DurableApprovalService(database), durable_tool_invocation=durable_tools,
         run_control_owner_id=owner, model_invocation_router=router.model_invocation_router, tool_execution_service=tool_service)
     factory = CoordinatedRuntimeFactory(router, services, agent_registry=agent_registry,
-        event_channel_capacity=256, execution_repository=repository)
+        event_channel_capacity=256, execution_repository=repository, request_counting_exception=request_counting_exception)
     return factory, repository, model, tools
 
 

@@ -383,3 +383,14 @@ Memory 不新增环境开关：persist=True 需要独立 typed MemoryAccessConte
 ## Durable Agent Execution v2
 
 受信 business_options.execution_policy=`durable-agent-loop.v2`；LoopPolicyV2 固定 Batch≤4/并发≤2/写≤1、Child 深度1/累计≤2/活动≤1。缺省 total_tokens/cost_units 各65536；可配置更严有限额度。ContextPolicyV2 默认开启，需完整请求可靠计量；旧 v1 的 Context 配置不自动升级。delegation_allowlist 来自受信 AgentDefinition，缺省为空，Child 目标必须显式启用 v2。Migration head 0034_agent_batches_delegations，部署者迁移；本实现不自动迁移业务库。详见 [合同](agent_execution_v2.md)。
+# 隔离 CI E2E 的请求计量豁免
+
+正常 Runtime 的可靠计量 Guard 保持不变。部署管理的 Quality JSON 可在 `ci_synthetic.request_counting_exception` 配置可选的 `{policy, authorization}`；缺省关闭，不能由 HTTP 或 ExecutionRequest 开启。
+
+`policy` 使用 `e2e-request-counting-policy.v1` / `E2E_TEST_UNVERIFIED_REQUEST_COUNTING`，精确绑定 E2E_TEST、Tenant/Project/SERVICE、CI V2/CANDIDATE、完整 FrozenCI、Candidate/Prompt 摘要、remote_advanced/deepseek/deepseek-flash 和原有 8/8/8/0/180 秒 Loop 限额、4096 输出与 120 秒 Provider timeout。`authorization` 精确绑定 Kernel 创建后的 evaluation_run_id/attempt_id/request_id/run_id（run_id=attempt_id）与 execution_manifest_digest。完整字段和严格类型以 `core/runtime/request_counting_admission.py::Policy/Authorization` 为准。
+
+配置由 `server.py::lifespan` 启动时冻结。运行中替换文件不能扩大授权；恢复仍需当前受信配置、原 Receipt、SERVICE MemoryAccessContext 和 correlation 一致。静态工件编译允许只提供 policy；live 服务必须有完整 authorization。运行配置摘要仅 pin 静态 policy，避免 Manifest 与动态 ID 自引用。
+
+仅原子 CI Prepare 的首次合成 FAIL 赢家签发 Receipt 授权；Factory、Root/Frame、Snapshot、模型二次准入与 Repository 均核对同一绑定。ROOT 的 DECISION/COMPACTION 可豁免请求前计量可靠性，仍执行数值窗口筛选、摘要、工具/来源、预算账本、取消/Deadline 和 Fencing。CHILD、FORMATION、HUMAN 与普通 Quality 请求不能据此获得授权。
+
+此模式必须部署在独立数据库、签名身份、loopback 进程和受限配置目录，不能只靠 E2E_TEST 字符串宣称隔离。HEURISTIC 原评估、admissible=false/reliable=false 和 validation.budget=false 原样持久化，另附授权引用。随业务证据交付 `REQUEST_COUNTING_RELIABILITY=UNVERIFIED`、`RELIABLE_TOKEN_ADMISSION=NOT_VERIFIED`；不能据业务成功宣称严格 Token 上界或生产计量验收通过。Quality/Sidecar 的 Go Wire 不变。

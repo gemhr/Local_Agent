@@ -609,6 +609,7 @@ class CoordinatedRuntimeFactory:
         "_step_result_max_entries",
         "_execution_repository",
         "_agent_registry",
+        "_request_counting_exception",
     )
 
     def __init__(
@@ -624,6 +625,7 @@ class CoordinatedRuntimeFactory:
         step_result_run_total_chars: int = 60_000,
         step_result_max_entries: int = 16,
         execution_repository=None,
+        request_counting_exception=None,
     ) -> None:
         if not isinstance(services, ApplicationRuntimeServices):
             raise TypeError("services must be ApplicationRuntimeServices")
@@ -673,6 +675,19 @@ class CoordinatedRuntimeFactory:
         self._step_result_max_entries = step_result_max_entries
         self._execution_repository = execution_repository
         self._agent_registry = agent_registry
+        self._request_counting_exception = request_counting_exception
+        if request_counting_exception is not None:
+            from core.runtime.request_counting_admission import TrustedException, AGENT, LIMITS
+            if not isinstance(request_counting_exception, TrustedException) or request_counting_exception.authorization is None:
+                raise ValueError("E2E_ADMISSION_CONFIGURATION_INVALID")
+            p = request_counting_exception.policy
+            definition = agent_registry.resolve(AGENT).definition
+            profile = next((m for m in router.model_profiles if m.profile_id.value == p["profile_id"]), None)
+            if (router.max_tokens != p["max_tokens"] or profile is None or not profile.effective_is_remote
+                    or profile.request_counting_mode != "HEURISTIC" or profile.provider_kind != p["provider_kind"]
+                    or profile.model_identity != p["model_identity"] or profile.max_output_tokens < p["max_tokens"]
+                    or dict(definition.business_options.get("loop_policy", {})) != LIMITS):
+                raise ValueError("E2E_ADMISSION_RUNTIME_CONFIGURATION_INVALID")
         self._adapter_factory = AgentAdapterFactory(
             agent_registry,
             (
@@ -1096,7 +1111,8 @@ class CoordinatedRuntimeFactory:
             durable_control = self._services.durable_run_control
             run_context.execution_policy = selected_policy
             run_context.loop_policy = loop_policy
-            run_context.loop_correlation = loop_correlation or {}
+            run_context.loop_correlation = ((rehydrated_root.resume_input.get("agent_loop") or {}).get("correlation", {})
+                if rehydrated_root is not None else loop_correlation or {})
             durable_lease = existing_lease or await durable_control.claim(
                 run_context.run_id,
                 self._services.run_control_owner_id,
@@ -1160,6 +1176,9 @@ class CoordinatedRuntimeFactory:
                 run_context.memory_guard = MemoryContextGuard(memory_repository, durable_lease)
             elif persist or memory_access_context is not None:
                 raise MemoryContextError("MEMORY_CONTEXT_UNVERIFIABLE")
+            from core.runtime.request_counting_admission import bind_context
+            run_context.request_counting_admission = bind_context(self._request_counting_exception,
+                quality_receipt, run_context, memory_access_context, rehydrated_root=rehydrated_root)
             run_context.attach_project_memory_access(project_identity, project_grants)
             prepare_tool_snapshot = getattr(
                 self._router, "prepare_tool_resolution_snapshot", None

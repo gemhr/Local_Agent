@@ -98,6 +98,12 @@ class DurableExecutionRepository:
                 await self.run_control.assert_current_in_transaction(session, lease)
             from core.persistence.models import RuntimeAgentEvaluationReceiptRow
             quality_receipt = await session.get(RuntimeAgentEvaluationReceiptRow, root.run_id)
+            loop = root.resume_input.get("agent_loop") or {}
+            admission = loop.get("e2e_test_admission")
+            if admission is not None or loop.get("pinned_config", {}).get("request_counting_exception") is not None:
+                from core.runtime.request_counting_admission import validate_record
+                if quality_receipt is None or not validate_record(admission, root=root, receipt=quality_receipt):
+                    raise ValueError("E2E_ADMISSION_ROOT_MISMATCH")
             if quality_receipt is not None:
                 from core.runtime.agent_loop.quality_contract import quality_runtime_config_digest
                 loop = root.resume_input.get("agent_loop") or {}
@@ -402,7 +408,7 @@ class DurableExecutionRepository:
             if self.run_control is not None:
                 await self.run_control.assert_current_in_transaction(session, lease)
             if loop_frame_id is not None:
-                _, frame = await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
+                root, frame = await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
                 if frame.frame_role == "CHILD" and purpose == "FORMATION":
                     raise RuntimeError("DELEGATION_FORMATION_DENIED")
                 iteration = await session.get(RuntimeLoopIterationRow, (loop_frame_id, loop_iteration_no), with_for_update=True) if loop_iteration_no is not None else None
@@ -428,7 +434,13 @@ class DurableExecutionRepository:
                     raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
                 if frame.context_policy and purpose != "FORMATION":
                     from core.runtime.agent_loop.context import ContextSnapshotV1
-                    if not request_assessment or not request_assessment.get("admissible") or request_assessment.get("request_digest") != request_digest:
+                    counting_eligible = bool(request_assessment and request_assessment.get("admissible") is True)
+                    if request_assessment and not counting_eligible:
+                        from core.runtime.request_counting_admission import persisted_eligible
+                        from core.persistence.models import RuntimeAgentEvaluationReceiptRow
+                        receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id)
+                        counting_eligible = receipt is not None and persisted_eligible(request_assessment, root, frame, receipt, purpose=purpose)
+                    if not counting_eligible or request_assessment.get("request_digest") != request_digest:
                         raise RuntimeError("CONTEXT_BUDGET_UNCERTAIN")
                     if purpose == "DECISION":
                         snapshot = await session.get(RuntimeContextSnapshotRow, context_snapshot_id)
@@ -803,7 +815,7 @@ class DurableExecutionRepository:
     async def accept_context_and_open_iteration(self, lease, frame_id, *, resume_generation, row_version, candidate, validation, operation_id=None, rebind=False, quality_comparison=None):
         from core.runtime.agent_loop.context import ContextSnapshotV1, context_sources, snapshot_candidate
         async with self.database.transaction() as session:
-            _, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+            root, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
             rows = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id).order_by(RuntimeLoopIterationRow.iteration_no).with_for_update())).scalars().all())
             await self._memory_admission(session, lease)
             current = rows[-1] if rows and rows[-1].state == "OPEN" else None
@@ -826,7 +838,14 @@ class DurableExecutionRepository:
             if candidate["options"] != expected_options or candidate["output_reserve"] != frame.pinned_config["max_tokens"]:
                 raise RuntimeError("CONTEXT_VALIDATION_FAILED")
             expected = snapshot_candidate(frame, groups, candidate["options"], candidate["output_reserve"], summary=candidate["summary"], kind=candidate["kind"])
-            if expected.digest != artifact.digest or validation.get("reason") != "VALID" or not all(validation.get(k) is True for k in ("source", "mandatory", "roles", "pairs", "budget")):
+            budget_valid = validation.get("budget") is True
+            if not budget_valid:
+                from core.runtime.request_counting_admission import persisted_validation
+                from core.persistence.models import RuntimeAgentEvaluationReceiptRow
+                receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id)
+                budget_valid = receipt is not None and persisted_validation(validation, root, frame, receipt)
+            if (expected.digest != artifact.digest or validation.get("reason") != "VALID" or not budget_valid
+                    or not all(validation.get(k) is True for k in ("source", "mandatory", "roles", "pairs"))):
                 raise RuntimeError("CONTEXT_REJECTED_STALE")
             operation = await session.get(RuntimeContextOperationRow, operation_id, with_for_update=True) if operation_id else None
             if candidate["kind"] == "COMPACTED" and (operation is None or operation.state != "RESULT_READY" or operation.candidate != candidate):

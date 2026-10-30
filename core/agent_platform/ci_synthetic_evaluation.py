@@ -43,7 +43,7 @@ def validate_request(payload, settings, principal, definition, selection):
     require_scope(principal,EVALUATION_EXECUTE_SCOPE)
     require_scope(principal,CI_SYNTHETIC_EVALUATE_SCOPE)
     config=parse_quality_json(Path(settings.quality_evaluation_configuration_path).read_bytes())['ci_synthetic']
-    if set(config) != {'tenant_id','frozen_ci','attempts'}:
+    if set(config) - {'tenant_id','frozen_ci','attempts','request_counting_exception'} or not {'tenant_id','frozen_ci','attempts'} <= set(config):
         raise ValueError('CI_SYNTHETIC_CONFIGURATION_INVALID')
     q=payload.quality
     pin=definition.business_options.get('ci_prompt_selection',{})
@@ -59,6 +59,14 @@ def validate_request(payload, settings, principal, definition, selection):
             or pin.get('manifest_digest')!=payload.candidate_manifest_digest
             or config['attempts'].get(payload.mode)!=str(q.attempt_id)):
         raise ValueError('CI_SYNTHETIC_PIN_INVALID')
+    from core.runtime.request_counting_admission import match_request
+    if config.get('request_counting_exception') is not None and selection is None:
+        raise ValueError('E2E_ADMISSION_STARTUP_CONFIGURATION_REQUIRED')
+    if selection is not None:
+        from core.runtime.request_counting_admission import compile_exception
+        if compile_exception(config.get('request_counting_exception')) != selection:
+            raise ValueError('E2E_ADMISSION_CONFIGURATION_CHANGED')
+    return match_request(selection,payload,principal,definition)
 
 
 def register(app, *, settings, trusted, repository, wire, require_service, bind_run, authorize_existing, final_answer_capture):
@@ -121,7 +129,8 @@ def register(app, *, settings, trusted, repository, wire, require_service, bind_
             probe=ExecutionRequest(agent_id=q.agent_id,input=QUERY)
             _,definition,_,_,_=service._resolve_request(probe)
             pin=check_agent(manifest,definition)
-            validate_request(payload,settings,principal,definition,None)
+            exception=getattr(request.app.state,'request_counting_exception',None)
+            admission=validate_request(payload,settings,principal,definition,exception)
             if (pin['execution_policy']!='durable-agent-loop.v2' or q.execution_manifest_digest!=catalog_digest(manifest)
                     or (q.capture_profile_id,q.capture_profile_version,q.capture_profile_digest)!=(profile['id'],profile['version'],catalog_digest(profile))):
                 raise ValueError('CI_SYNTHETIC_QUALITY_PIN_INVALID')
@@ -135,7 +144,8 @@ def register(app, *, settings, trusted, repository, wire, require_service, bind_
             receipts,execution=repository(request)
             try:
                 with service._chat_service.admission_gate.admission():
-                    winner,binding=await prepare(request.app.state.incident_service,principal,payload,definition,manifest,profile)
+                    winner,binding=await prepare(request.app.state.incident_service,principal,payload,definition,manifest,profile,
+                        request_counting_exception=admission)
             except RuntimeAdmissionRejectedError:
                 raise HTTPException(503,'RUNTIME_SHUTTING_DOWN') from None
             except ValueError:

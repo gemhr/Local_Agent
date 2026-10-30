@@ -139,7 +139,7 @@ def _pin_value(value):
     return to_primitive(value)
 
 
-def pinned_loop_config(router, agent_id, run_context):
+def pinned_loop_config(router, agent_id, run_context, *, request_counting_policy=None):
     """冻结非 secret 内容身份；名字相同但内容变化也会拒绝恢复。"""
     from core.runtime.snapshot_serialization import to_primitive
     definition = router.agent_registry.resolve(agent_id).definition
@@ -170,6 +170,14 @@ def pinned_loop_config(router, agent_id, run_context):
     # 旧 Run 的 profile 序列化不能因新增默认字段而改变冻结身份。
     if getattr(run_context, "memory_effect_policy", None) is not None:
         config["memory_effect_policy"] = run_context.memory_effect_policy
+    from core.runtime.request_counting_admission import context_record
+    admission = context_record(run_context)
+    if admission is not None:
+        config["request_counting_exception"] = admission["policy"]
+    elif request_counting_policy is not None:
+        # 仅供离线静态 pins 编译；不能替代 Root/Receipt 的运行授权。
+        from core.runtime.request_counting_admission import Policy
+        config["request_counting_exception"] = Policy.model_validate(request_counting_policy).model_dump()
     policy = definition.business_options.get("context_policy")
     if policy is not None:
         config["context_policy"] = (ContextPolicyV2 if run_context.execution_policy == "durable-agent-loop.v2" else ContextPolicyV1)(**dict(policy)).to_dict()
