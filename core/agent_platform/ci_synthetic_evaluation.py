@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, StrictStr
+from typing import Literal
+from core.incidents.evaluation_input import FrozenPair, Digest
 from fastapi import Request, HTTPException
 from fastapi.responses import Response
 from sqlalchemy import select
@@ -39,6 +41,34 @@ class CIRequest(BaseModel):
     mode: StrictStr
 
 
+PROTOCOL_V2='ci-synthetic-evaluation-execute.v2'
+QUERY_V2='请调查本次冻结的 CI 执行，使用授权工具取证。'
+class CIRequestV2(BaseModel):
+    model_config=ConfigDict(extra='forbid',strict=True)
+    contract_version: Literal['ci-synthetic-evaluation-execute.v2']
+    quality: QualityEvaluationRequest
+    frozen_ci: FrozenPair
+    plan_digest: Digest
+    candidate_manifest_digest: Digest
+    mode: Literal['BASELINE','CANDIDATE']
+
+def validate_pair_request(payload,settings,principal,definition,selection):
+    require_scope(principal,EVALUATION_EXECUTE_SCOPE)
+    require_scope(principal,CI_SYNTHETIC_EVALUATE_SCOPE)
+    config=parse_quality_json(Path(settings.quality_evaluation_configuration_path).read_bytes())['ci_synthetic']
+    if set(config)!={'contract_version','tenant_id','frozen_ci','request_counting_exception'} or config['contract_version']!=PROTOCOL_V2:
+        raise ValueError('CI_PAIR_CONFIGURATION_INVALID')
+    from core.runtime.request_counting_admission import compile_exception,match_request
+    q=payload.quality
+    if (selection is None or compile_exception(config['request_counting_exception'])!=selection
+            or principal.principal_kind!='SERVICE' or str(principal.user_id)!=settings.quality_evaluation_service_principal_id
+            or principal.tenant_id!=config['tenant_id'] or str(q.evaluation_project_id)!=settings.quality_evaluation_project_id
+            or q.run_id!=q.attempt_id or q.query!=QUERY_V2
+            or payload.frozen_ci.model_dump(exclude_none=True)!=config['frozen_ci']):
+        raise ValueError('CI_PAIR_AUTHORIZATION_INVALID')
+    return match_request(selection,payload,principal,definition)
+
+
 def validate_request(payload, settings, principal, definition, selection):
     require_scope(principal,EVALUATION_EXECUTE_SCOPE)
     require_scope(principal,CI_SYNTHETIC_EVALUATE_SCOPE)
@@ -70,7 +100,7 @@ def validate_request(payload, settings, principal, definition, selection):
 
 
 def register(app, *, settings, trusted, repository, wire, require_service, bind_run, authorize_existing, final_answer_capture):
-    async def finish(request,run):
+    async def finish(request,run,protocol=PROTOCOL):
         principal=trusted(request)
         require_scope(principal,CI_SYNTHETIC_EVALUATE_SCOPE)
         receipts,execution=repository(request)
@@ -80,6 +110,7 @@ def register(app, *, settings, trusted, repository, wire, require_service, bind_
                     or binding.project_id!=settings.quality_evaluation_project_id):
                 raise HTTPException(404,'CI_SYNTHETIC_BINDING_MISSING')
             payload=binding.payload
+            if payload['contract_version']!=protocol:raise HTTPException(409,'CI_SYNTHETIC_VERSION_MISMATCH')
             sealed=binding.sidecar
         receipt=await receipts.read(run)
         await authorize_existing(request,execution,receipt)
@@ -89,7 +120,7 @@ def register(app, *, settings, trusted, repository, wire, require_service, bind_
         await investigator.project_if_terminal(payload['investigation_id'])
         quality=receipt.sealed_response or await receipts.capture(execution,run)
         if quality is None:
-            return wire(canonical_bytes({'contract_version':PROTOCOL,'run_id':run,'status':'PENDING','reconciliation':'QUERY_ONLY_NO_REEXECUTE'}),202)
+            return wire(canonical_bytes({'contract_version':protocol,'run_id':run,'status':'PENDING','reconciliation':'QUERY_ONLY_NO_REEXECUTE'}),202)
         receipt=await receipts.read(run)
         image=await execution.load(run)
         if (image is None or image.root.run_id!=run or image.root.resume_input.get('session_id')!=payload['session_id']
@@ -107,16 +138,40 @@ def register(app, *, settings, trusted, repository, wire, require_service, bind_
             investigation=await session.get(InvestigationRow,payload['investigation_id'])
             b=await session.get(Binding,run,with_for_update=True)
             if b.sidecar is None:
-                sidecar=dict(schema_version='ci-synthetic-evidence.v1',binding=payload,models=models,
+                sidecar=dict(schema_version='ci-synthetic-evidence.v2' if protocol==PROTOCOL_V2 else 'ci-synthetic-evidence.v1',binding=payload,models=models,
                     quality_digest=receipt.sealed_digest,report_digest=investigation.runtime_result_digest,
                     runtime_status=image.root.status)
-                b.sidecar=canonical_bytes(dict(contract_version=PROTOCOL,quality=json.loads(quality),
+                if protocol==PROTOCOL_V2:
+                    from core.incidents.evaluation_sources import build_source_binding
+                    from core.ci_simulation.models import CIExecutionRow,ScenarioInstanceRow
+                    from core.persistence.models import RuntimeLoopActionRow
+                    persisted=await execution.load(run,session=session)
+                    ci=await session.get(CIExecutionRow,b.execution_id)
+                    instance=await session.get(ScenarioInstanceRow,b.instance_id)
+                    from core.incidents.models import IncidentRow
+                    incident=await session.get(IncidentRow,b.incident_id)
+                    if (ci is None or instance is None or persisted is None or incident is None
+                            or persisted.root.status not in {'SUCCEEDED','FAILED','CANCELLED'}
+                            or instance.tenant_id!=principal.tenant_id or instance.owner_user_id!=principal.user_id
+                            or ci.instance_id!=instance.instance_id
+                            or incident.tenant_id!=principal.tenant_id or incident.owner_user_id!=principal.user_id
+                            or incident.execution_id!=ci.execution_id
+                            or investigation.run_id!=run or investigation.incident_id!=b.incident_id
+                            or investigation.session_id!=payload['session_id']
+                            or investigation.agent_id!=payload['agent_id']
+                            or investigation.report_version!=payload['report_version']):
+                        raise HTTPException(409,'CI_SOURCE_SCOPE_INVALID')
+                    actions=tuple((await session.execute(select(RuntimeLoopActionRow).where(RuntimeLoopActionRow.run_id==run))).scalars())
+                    try:source=build_source_binding(payload,ci,persisted,actions)
+                    except ValueError:raise HTTPException(409,'CI_SOURCE_UNAVAILABLE') from None
+                    sidecar.update(source_binding=source,source_binding_digest=catalog_digest(source))
+                b.sidecar=canonical_bytes(dict(contract_version=protocol,quality=json.loads(quality),
                     sidecar=sidecar,sidecar_digest=catalog_digest(sidecar))).decode('utf-8')
             return wire(b.sidecar)
 
-    @app.post('/api/runtime/evaluation-execute/ci-synthetic/v1')
-    async def execute(payload:CIRequest,request:Request):
+    async def execute_core(payload,request):
         q=payload.quality
+        query=QUERY_V2 if payload.contract_version==PROTOCOL_V2 else QUERY
         principal=trusted(request,str(q.evaluation_project_id))
         require_scope(principal,CI_SYNTHETIC_EVALUATE_SCOPE)
         raw=await request.body()
@@ -126,11 +181,13 @@ def register(app, *, settings, trusted, repository, wire, require_service, bind_
         try:
             parse_quality_json(raw)
             manifest,profile=load_configuration(settings.quality_evaluation_configuration_path)
-            probe=ExecutionRequest(agent_id=q.agent_id,input=QUERY)
+            probe=ExecutionRequest(agent_id=q.agent_id,input=query)
             _,definition,_,_,_=service._resolve_request(probe)
             pin=check_agent(manifest,definition)
             exception=getattr(request.app.state,'request_counting_exception',None)
-            admission=validate_request(payload,settings,principal,definition,exception)
+            admission=(validate_pair_request if payload.contract_version==PROTOCOL_V2 else validate_request)(payload,settings,principal,definition,exception)
+            if (payload.contract_version==PROTOCOL_V2 and (admission.authorization['runtime_config_digest']!=pin['runtime_config_digest'] or admission.authorization['definition_digest']!=pin['definition_digest'])):
+                raise ValueError('CI_PAIR_RUNTIME_PIN_INVALID')
             if (pin['execution_policy']!='durable-agent-loop.v2' or q.execution_manifest_digest!=catalog_digest(manifest)
                     or (q.capture_profile_id,q.capture_profile_version,q.capture_profile_digest)!=(profile['id'],profile['version'],catalog_digest(profile))):
                 raise ValueError('CI_SYNTHETIC_QUALITY_PIN_INVALID')
@@ -151,23 +208,38 @@ def register(app, *, settings, trusted, repository, wire, require_service, bind_
             except ValueError:
                 raise HTTPException(409,'CI_SYNTHETIC_PREPARE_CONFLICT') from None
             if not winner:
-                return await finish(request,str(q.run_id))
+                return await finish(request,str(q.run_id),payload.contract_version)
             await bind_run(request,run_id=str(q.run_id),agent_id=q.agent_id,session_id=binding['session_id'])
             access=MemoryAccessContext.from_principal(principal,agent_id=q.agent_id,session_id=binding['session_id'])
-            execution_request=ExecutionRequest(agent_id=q.agent_id,input=QUERY,run_id=str(q.run_id),
+            execution_request=ExecutionRequest(agent_id=q.agent_id,input=query,run_id=str(q.run_id),
                 session_id=binding['session_id'],timeout_seconds=q.timeout_milliseconds/1000)
             try:
                 result=await service.execute_evaluation(execution_request,execution_policy=pin['execution_policy'],
                     loop_correlation={'evaluation_run_id':str(q.evaluation_run_id),'attempt_id':str(q.attempt_id),'request_id':str(q.request_id)},
                     memory_access_context=access)
             except LoopSuspended:
-                return await finish(request,str(q.run_id))
+                return await finish(request,str(q.run_id),payload.contract_version)
             status,_,answer=final_answer_capture(output=result.output,result=result)
             await receipts.capture(execution,str(q.run_id),final_answer=answer if status=='COMPLETE' else None)
-            return await finish(request,str(q.run_id))
+            return await finish(request,str(q.run_id),payload.contract_version)
 
         finally:
             supervisor.release_slot(reserved)
+
+    @app.post('/api/runtime/evaluation-execute/ci-synthetic/v1')
+    async def execute_v1(payload:CIRequest,request:Request):
+        if payload.contract_version!=PROTOCOL:raise HTTPException(422,'CI_SYNTHETIC_VERSION_MISMATCH')
+        return await execute_core(payload,request)
+
+    @app.post('/api/runtime/evaluation-execute/ci-synthetic/v2')
+    async def execute_v2(payload:CIRequestV2,request:Request):
+        return await execute_core(payload,request)
+
+    @app.get('/api/runtime/runs/{run_id}/ci-synthetic-evidence/v2')
+    async def read_v2(run_id:str,request:Request):
+        try:UUID(run_id)
+        except ValueError:raise HTTPException(422,'INVALID_RUN_ID') from None
+        return await finish(request,run_id,PROTOCOL_V2)
 
     @app.get('/api/runtime/runs/{run_id}/ci-synthetic-evidence/v1')
     async def read(run_id:str,request:Request):

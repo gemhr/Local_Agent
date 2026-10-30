@@ -77,6 +77,54 @@ class Authorization(_Strict):
         return self
 
 
+class PairPolicy(_Strict):
+    schema_version: Literal['e2e-request-counting-policy.v2']
+    strategy: Literal['E2E_TEST_UNVERIFIED_REQUEST_COUNTING']
+    execution_env: Literal['E2E_TEST']
+    tenant_id: StrictStr
+    project_id: StrictStr
+    principal_id: StrictStr
+    operator_id: StrictStr = Field(min_length=1,max_length=255)
+    execution_source: Literal['OPERATOR_FROZEN_CI']
+    plan_id: StrictStr
+    plan_version: StrictStr
+    agent_id: Literal['ci_incident_investigator']
+    execution_policy: Literal['durable-agent-loop.v2']
+    profile_id: Literal['remote_advanced']
+    provider_kind: Literal['deepseek']
+    model_identity: Literal['deepseek-flash']
+    loop_limits: dict
+    max_tokens: Literal[4096]
+    provider_timeout_seconds: Literal[120]
+    @model_validator(mode='after')
+    def exact_limits(self):
+        if self.loop_limits != LIMITS or any(type(self.loop_limits[k]) is not type(v) for k,v in LIMITS.items()):
+            raise ValueError('E2E_ADMISSION_LIMITS_INVALID')
+        for value in (self.project_id,self.principal_id,self.plan_id):
+            if str(UUID(value))!=value: raise ValueError('E2E_ADMISSION_ID_INVALID')
+        return self
+
+class PairAuthorization(Authorization):
+    plan_digest: Digest
+    mode: Literal['BASELINE','CANDIDATE']
+    frozen_ci: dict
+    candidate_id: StrictStr
+    candidate_manifest_digest: Digest
+    prompt_digest: Digest
+    runtime_config_digest: Digest
+    definition_digest: Digest
+    @model_validator(mode='after')
+    def exact_case(self):
+        from core.incidents.evaluation_input import FrozenPair
+        frozen=FrozenPair.model_validate(self.frozen_ci)
+        for value in (frozen.case_id,frozen.dataset_id,frozen.plan_id):
+            if str(UUID(value))!=value: raise ValueError('E2E_ADMISSION_ID_INVALID')
+        return self
+
+def compile_policy(value):
+    return (PairPolicy if value.get('schema_version')=='e2e-request-counting-policy.v2' else Policy).model_validate(value).model_dump()
+
+
 def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -110,8 +158,8 @@ def compile_exception(value, *, live=True):
         return None
     if type(value) is not dict or set(value) - {"policy", "authorization"} or "policy" not in value:
         raise ValueError("E2E_ADMISSION_CONFIGURATION_INVALID")
-    policy = Policy.model_validate(value["policy"]).model_dump()
-    authorization = Authorization.model_validate(value["authorization"]).model_dump() if value.get("authorization") is not None else None
+    policy = compile_policy(value["policy"])
+    authorization = (PairAuthorization if policy["schema_version"]=="e2e-request-counting-policy.v2" else Authorization).model_validate(value["authorization"]).model_dump() if value.get("authorization") is not None else None
     if live and authorization is None:
         raise ValueError("E2E_ADMISSION_AUTHORIZATION_REQUIRED")
     return TrustedException(_json(policy), _json(authorization) if authorization else None)
@@ -125,6 +173,8 @@ def match_request(trusted, request, principal, definition):
     from core.runtime.agent_loop.quality_contract import catalog_digest
     require_scope(principal, EVALUATION_EXECUTE_SCOPE)
     require_scope(principal, CI_SYNTHETIC_EVALUATE_SCOPE)
+    if trusted.policy['schema_version']=='e2e-request-counting-policy.v2':
+        return match_pair_request(trusted,request,principal,definition)
     p, a, q = trusted.policy, trusted.authorization, request.quality
     selection = definition.business_options.get("ci_prompt_selection", {})
     if (a is None or principal.principal_kind != "SERVICE" or str(principal.user_id) != p["principal_id"]
@@ -147,7 +197,7 @@ def match_request(trusted, request, principal, definition):
 
 def issue_record(trusted, binding, receipt):
     p, a = trusted.policy, trusted.authorization
-    record = dict(schema_version="e2e-request-counting-admission.v1", policy=p, policy_digest=digest(p),
+    record = dict(schema_version="e2e-request-counting-admission.v2" if p["schema_version"]=="e2e-request-counting-policy.v2" else "e2e-request-counting-admission.v1", policy=p, policy_digest=digest(p),
         authorization=a, session_id=binding["session_id"], binding=binding,
         receipt_correlation_digest=digest(receipt.correlation),
         REQUEST_COUNTING_RELIABILITY="UNVERIFIED", RELIABLE_TOKEN_ADMISSION="NOT_VERIFIED")
@@ -167,17 +217,22 @@ def validate_record(record, *, root=None, frame=None, receipt=None):
     try:
         trusted = compile_exception({"policy": record["policy"], "authorization": record["authorization"]})
         p, a, b = trusted.policy, trusted.authorization, record["binding"]
+        pair=p['schema_version']=='e2e-request-counting-policy.v2'
+        if pair:
+            if not validate_pair_binding(p,a,b):return False
+            compared={**p,'mode':a['mode'],'candidate_manifest_digest':a['candidate_manifest_digest'],'frozen_ci':a['frozen_ci']}
+        else:compared=p
         expected = dict(record)
         expected.pop("admission_digest")
         if (set(record) != {"schema_version", "policy", "policy_digest", "authorization", "session_id", "binding",
                 "receipt_correlation_digest", "REQUEST_COUNTING_RELIABILITY", "RELIABLE_TOKEN_ADMISSION", "admission_digest"}
-                or record["schema_version"] != "e2e-request-counting-admission.v1"
+                or record["schema_version"] != ("e2e-request-counting-admission.v2" if pair else "e2e-request-counting-admission.v1")
                 or record["REQUEST_COUNTING_RELIABILITY"] != "UNVERIFIED" or record["RELIABLE_TOKEN_ADMISSION"] != "NOT_VERIFIED"
                 or digest(expected) != record["admission_digest"] or digest(p) != record["policy_digest"]
-                or b["run_id"] != a["run_id"] or b["agent_id"] != p["agent_id"] or b["mode"] != p["mode"]
-                or b["manifest_digest"] != p["candidate_manifest_digest"] or b["frozen_ci"] != p["frozen_ci"]
+                or b["run_id"] != a["run_id"] or b["agent_id"] != p["agent_id"] or b["mode"] != compared["mode"]
+                or b["manifest_digest"] != compared["candidate_manifest_digest"] or b["frozen_ci"] != compared["frozen_ci"]
                 or record["session_id"] != b["session_id"] or b["source_type"] != "SYNTHETIC"
-                or any(str(b["quality_correlation"].get(k)) != v for k, v in a.items())
+                or any(str(b["quality_correlation"].get(k)) != a[k] for k in ("evaluation_run_id","attempt_id","request_id","run_id","execution_manifest_digest"))
                 or digest(b["quality_correlation"]) != record["receipt_correlation_digest"]):
             return False
         if receipt is not None and (receipt.evaluation_capture.get("e2e_test_admission") != record
@@ -196,6 +251,9 @@ def validate_record(record, *, root=None, frame=None, receipt=None):
                 or frame.run_id != a["run_id"] or frame.execution_agent_id != p["agent_id"]
                 or frame.pinned_config.get("request_counting_exception") != p):
             return False
+        if pair and frame is not None:
+            from core.runtime.agent_loop.quality_contract import quality_runtime_config_digest
+            if quality_runtime_config_digest(frame.pinned_config)!=a['runtime_config_digest']:return False
         return True
     except (ValueError, KeyError, TypeError, AttributeError):
         return False
@@ -283,3 +341,36 @@ def persisted_validation(validation, root, frame, receipt=None):
     record = (root.resume_input.get("agent_loop") or {}).get("e2e_test_admission")
     return (validation.get("budget") is False and validate_record(record, root=root, frame=frame, receipt=receipt)
         and validation.get("e2e_test_admission") == reference(record))
+
+
+def validate_pair_binding(p,a,b):
+    f=a['frozen_ci']
+    q=b['quality_correlation']
+    return (b['contract_version']=='ci-synthetic-evaluation-execute.v2' and f['plan_id']==p['plan_id']
+        and f['plan_version']==p['plan_version'] and b['plan_digest']==a['plan_digest'] and b['frozen_ci']==f and b['mode']==a['mode']
+        and q['evaluation_project_id']==p['project_id'] and q['agent_id']==p['agent_id']
+        and (q['case_id'],q['case_version'],q['case_digest'])==(f['case_id'],f['case_version'],f['case_digest']))
+
+def match_pair_request(trusted,request,principal,definition):
+    from core.runtime.agent_loop.quality_contract import catalog_digest
+    p,a,q=trusted.policy,trusted.authorization,request.quality
+    pin=definition.business_options.get('ci_prompt_selection',{})
+    frozen=request.frozen_ci.model_dump(exclude_none=True)
+    if (a is None or request.contract_version!='ci-synthetic-evaluation-execute.v2'
+            or principal.principal_kind!='SERVICE' or str(principal.user_id)!=p['principal_id']
+            or principal.tenant_id!=p['tenant_id'] or str(q.evaluation_project_id)!=p['project_id']
+            or definition.agent_id!=p['agent_id'] or q.agent_id!=p['agent_id']
+            or definition.business_options.get('execution_policy')!=p['execution_policy']
+            or dict(definition.business_options.get('loop_policy',{}))!=p['loop_limits']
+            or frozen!=a['frozen_ci'] or frozen['plan_id']!=p['plan_id'] or frozen['plan_version']!=p['plan_version']
+            or request.plan_digest!=a['plan_digest'] or request.mode!=a['mode'] or request.candidate_manifest_digest!=a['candidate_manifest_digest']
+            or any(pin.get(k)!=a[{'manifest_digest':'candidate_manifest_digest'}.get(k,k)] for k in ('candidate_id','manifest_digest','mode','prompt_digest'))
+            or catalog_digest(definition.instructions)!=a['prompt_digest']
+            or any(str(getattr(q,k))!=a[k] for k in ('evaluation_run_id','attempt_id','request_id','run_id','execution_manifest_digest'))
+            or (str(q.case_id),q.case_version,q.case_digest)!=(frozen['case_id'],frozen['case_version'],frozen['case_digest'])
+            or q.timeout_milliseconds>p['loop_limits']['max_elapsed_seconds']*1000):
+        raise ValueError('E2E_PAIR_ADMISSION_REQUEST_MISMATCH')
+    from core.runtime.agent_loop.context import _pin_value
+    if catalog_digest(_pin_value(definition))!=a['definition_digest']:
+        raise ValueError('E2E_PAIR_DEFINITION_MISMATCH')
+    return trusted

@@ -394,3 +394,11 @@ Memory 不新增环境开关：persist=True 需要独立 typed MemoryAccessConte
 仅原子 CI Prepare 的首次合成 FAIL 赢家签发 Receipt 授权；Factory、Root/Frame、Snapshot、模型二次准入与 Repository 均核对同一绑定。ROOT 的 DECISION/COMPACTION 可豁免请求前计量可靠性，仍执行数值窗口筛选、摘要、工具/来源、预算账本、取消/Deadline 和 Fencing。CHILD、FORMATION、HUMAN 与普通 Quality 请求不能据此获得授权。
 
 此模式必须部署在独立数据库、签名身份、loopback 进程和受限配置目录，不能只靠 E2E_TEST 字符串宣称隔离。HEURISTIC 原评估、admissible=false/reliable=false 和 validation.budget=false 原样持久化，另附授权引用。随业务证据交付 `REQUEST_COUNTING_RELIABILITY=UNVERIFIED`、`RELIABLE_TOKEN_ADMISSION=NOT_VERIFIED`；不能据业务成功宣称严格 Token 上界或生产计量验收通过。Quality/Sidecar 的 Go Wire 不变。
+
+### 冻结 CI 成对协议 v2
+
+新协议只使用 `ci-synthetic-evaluation-execute.v2` 与独立 `/api/runtime/evaluation-execute/ci-synthetic/v2`、`/api/runtime/runs/{run_id}/ci-synthetic-evidence/v2` 路由。Quality JSON 的 `ci_synthetic` 精确包含 `contract_version`、`tenant_id`、`frozen_ci`、`request_counting_exception`，不接受旧 `attempts` 字段。`frozen_ci` 的严格字段以 `core/incidents/evaluation_input.py::FrozenPair/CaseInput` 为准；只允许 primary CI 业务初态，不接收 EO GT、评分条件或执行代码。
+
+`e2e-request-counting-policy.v2` 保持原模型及预算限额，静态绑定 Project/Tenant/SERVICE、Operator、执行来源和 plan_id/version；不包含未来 Attempt、逐次 Case 或 mode。`PairAuthorization` 动态精确绑定完整 FrozenPair、plan_digest、当前 BASELINE/CANDIDATE、Prompt/Candidate/Manifest/Definition/Runtime 摘要及原五项 Run/Request 关联。每进程只装载当前一条授权；两侧隔离进程串行执行，同 plan_id/version + case_id/version + mode 不可更换 Attempt 或 digest 刷新额度。完整 plan_digest 不进入预冻结 Target/Runtime pin，避免摘要自引用。
+
+新 Sidecar 为 `ci-synthetic-evidence.v2`，附 `ci-runtime-source-binding.v1` 及其 catalog 摘要；原 Quality/Observations/Execution/Prompt Proof 版本不变。来源由原 CI Owner 在首次封存时读取，后续 GET 返回原字节。原工具输出仍限16 KiB、最多8次调用，Source Binding 上限768 KiB、单条原结果字节上限128 KiB；超限失败关闭。旧协议、v1 policy、CANDIDATE-only 限制及旧 Wire 原样保留，新版本不授予数据库、模型或真实评测资源权限。

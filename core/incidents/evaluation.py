@@ -17,9 +17,10 @@ def frozen_input():
 
 
 async def prepare(service, principal, request, definition, manifest, profile, *, request_counting_exception=None):
+    pair=request.contract_version=="ci-synthetic-evaluation-execute.v2"
     quality = request.quality
     run = str(quality.run_id)
-    normalized = request.model_dump(mode='json')
+    normalized = request.model_dump(mode='json',exclude_none=pair)
     fingerprint = catalog_digest(normalized)
     repository = AgentQualityReceiptRepository(service.database)
     async with service.database.transaction() as session:
@@ -35,15 +36,25 @@ async def prepare(service, principal, request, definition, manifest, profile, *,
         # User 锁使同 principal 的配额与准备串行；同模式仅一次新准入。
         rows = (await session.execute(select(Binding).where(Binding.tenant_id==principal.tenant_id,
             Binding.principal_id==principal.user_id, Binding.project_id==str(quality.evaluation_project_id)))).scalars().all()
-        if any(r.payload['mode']==request.mode for r in rows):
+        from core.incidents.evaluation_input import same_intent
+        if any(same_intent(r.payload,request) if pair else r.payload['mode']==request.mode for r in rows):
             raise ValueError('CI_SYNTHETIC_ATTEMPT_LIMIT')
         winner, _ = await repository.admit_in_transaction(session, correlation=quality.correlation(),
             principal=principal, manifest=manifest, profile=profile)
         if not winner:
             raise ValueError('CI_SYNTHETIC_REQUEST_CONFLICT')
-        instance,_ = await simulation.create_instance(session, principal, TEMPLATE, 'ci-evaluation:'+run)
+        if pair:
+            from core.ci_simulation.models import ScenarioInstanceRow
+            instance=ScenarioInstanceRow(instance_id=str(uuid4()),tenant_id=principal.tenant_id,
+                owner_user_id=principal.user_id,request_id='ci-evaluation:'+run,scenario_key='operator-frozen-ci',
+                template_version='2',state_revision=1,current_state=request.frozen_ci.visible_input.state(),
+                created_at=datetime.now(timezone.utc))
+            session.add(instance)
+            await session.flush()
+        else:
+            instance,_ = await simulation.create_instance(session, principal, TEMPLATE, 'ci-evaluation:'+run)
         execution,_ = await simulation.execute_instance(session, principal, instance.instance_id, 'ci-evaluation:'+run)
-        if execution.outcome != 'FAIL':
+        if not pair and execution.outcome != 'FAIL':
             raise ValueError('CI_SYNTHETIC_EXPECTED_FAIL')
         now = datetime.now(timezone.utc)
         session_id = str(uuid5(NAMESPACE_URL, 'agent-quality-session:'+run))
@@ -61,8 +72,9 @@ async def prepare(service, principal, request, definition, manifest, profile, *,
             session_id=session_id,agent_id=definition.agent_id,agent_version=definition.agent_version,
             instance_id=instance.instance_id,execution_id=execution.execution_id,incident_id=incident.incident_id,
             investigation_id=investigation.investigation_id,report_version=1,
-            frozen_ci=request.frozen_ci.model_dump(mode='json'),manifest_digest=request.candidate_manifest_digest,
+            frozen_ci=request.frozen_ci.model_dump(mode='json',exclude_none=pair),manifest_digest=request.candidate_manifest_digest,
             mode=request.mode,quality_correlation=quality.correlation())
+        if pair:binding['plan_digest']=request.plan_digest
         session.add(Binding(run_id=run,tenant_id=principal.tenant_id,principal_id=principal.user_id,
             project_id=str(quality.evaluation_project_id),fingerprint=fingerprint,payload=binding,
             investigation_id=investigation.investigation_id,instance_id=instance.instance_id,

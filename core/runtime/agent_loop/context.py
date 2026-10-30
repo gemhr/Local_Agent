@@ -176,8 +176,8 @@ def pinned_loop_config(router, agent_id, run_context, *, request_counting_policy
         config["request_counting_exception"] = admission["policy"]
     elif request_counting_policy is not None:
         # 仅供离线静态 pins 编译；不能替代 Root/Receipt 的运行授权。
-        from core.runtime.request_counting_admission import Policy
-        config["request_counting_exception"] = Policy.model_validate(request_counting_policy).model_dump()
+        from core.runtime.request_counting_admission import compile_policy
+        config["request_counting_exception"] = compile_policy(request_counting_policy)
     policy = definition.business_options.get("context_policy")
     if policy is not None:
         config["context_policy"] = (ContextPolicyV2 if run_context.execution_policy == "durable-agent-loop.v2" else ContextPolicyV1)(**dict(policy)).to_dict()

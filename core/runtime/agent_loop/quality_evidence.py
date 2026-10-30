@@ -6,6 +6,7 @@ from .quality_contract import (BUNDLE_SCHEMA, OBSERVATIONS_SCHEMA, PRODUCER, CAP
     COMPONENT_LIMIT, OBSERVATIONS_LIMIT, BUNDLE_LIMIT, canonical_bytes, catalog_digest)
 from .quality_capture import scan_facts, parameter_projection
 from core.runtime.execution_aggregate import canonical_payload_digest as internal_digest
+from core.runtime.tool_contract import canonical_json_digest
 
 
 def _ref(value):
@@ -50,7 +51,7 @@ def observations(image, actions, delegations, binding, receipt):
             if state not in {"COMMITTED", "NOT_EXECUTED"}:
                 gaps.add("TOOL_OUTCOME_UNCONFIRMED")
             if tool is not None and (tool.arguments_digest != recipe.get("arguments_digest")
-                    or result is not None and internal_digest(result) != tool.committed_result_digest):
+                    or result is not None and canonical_json_digest(result) != tool.committed_result_digest):
                 gaps.add("TOOL_SOURCE_INVALID")
             source_ref = "tool:" + _ref(invocation_id or action_id)
             extracted, scanned = scan_facts(result, profile, source_ref)
