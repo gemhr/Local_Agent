@@ -71,7 +71,7 @@ def public_vector(*,include_owner=False):
             content=json.dumps(value,ensure_ascii=False,allow_nan=False)
             n=len(content.encode());now=datetime.now(timezone.utc)
             output=ToolOutput('application/json',content,n,n,False,hashlib.sha256(content.encode()).hexdigest())
-            completed=ToolExecutionResult(invocation,str(uuid4()),name,ToolExecutionStatus.SUCCEEDED,output,'公开中文来源',
+            completed=ToolExecutionResult(invocation,uuid4().hex,name,ToolExecutionStatus.SUCCEEDED,output,'公开中文来源',
                 ToolSideEffectState.NOT_STARTED,False,RetryDisposition.UNSAFE,None,now,now,0)
             payload,owner_digest=_committed_result_payload(completed)
             recipe=dict(tool_name=name,arguments=args)
