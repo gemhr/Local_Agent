@@ -22,8 +22,10 @@ class AgentLoopDriverV2:
         submit = emitter.parent.submit_coroutine_from_worker
         load = lambda: submit(repo.load_loop(lease, claim.step_id, frame_id))
         frame, iterations = load()
-        if frame.schema_version != 2 or digest(pinned_loop_config(self.router, claim.preferred_agent, context)) != frame.config_digest:
+        if frame.schema_version != 2 or digest(pinned_loop_config(self.router, claim.preferred_agent, context, frozen_config=frame.pinned_config)) != frame.config_digest:
             raise LoopStopped("LOOP_PINNED_CONFIG_UNAVAILABLE")
+        context.loop_skill_identity = frame.pinned_config.get("skills", {})
+        context.loop_skill_agent_id = claim.preferred_agent
         policy = LoopPolicyV2(**frame.loop_policy)
         definition = self.router.agent_registry.resolve(claim.preferred_agent).definition
         context.loop_frame_id, context.loop_resume_generation = frame.frame_id, frame.resume_generation

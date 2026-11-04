@@ -45,7 +45,7 @@ class FeatureEvidenceTool(ToolAdapter):
 
 
 def register_tools(registry, service, bridge):
-    for name, description in zip(TOOL_NAMES, ("搜索当前冻结任务的公开历史资料、用例和依赖", "精确读取当前冻结任务的公开证据版本")):
+    for name, description in zip(TOOL_NAMES, ("搜索当前冻结任务的公开历史资料、用例和依赖", "按 source_ref 精确读取当前冻结任务的公开证据版本")):
         registry.register(ToolRegistration(ToolDescriptor(name=name, description=description), FeatureEvidenceTool(name, service, bridge)))
 
 

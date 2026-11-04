@@ -1665,6 +1665,20 @@ class AgentRouter:
         )
         return self._parse_tool_call(planner_response)
 
+    def _discover_run_tools(self, user_query, agent_id, run_context):
+        candidates = self.tool_discovery.discover_tools(user_query, agent_id, run_context)
+        definition = self.agent_registry.resolve(agent_id).definition
+        catalog = getattr(self, "skill_catalog", None)
+        if definition is not None and catalog is not None and catalog.for_agent(definition):
+            from core.skills.tool_adapter import TOOL_NAMES
+            selected = {item.descriptor.name: item for item in candidates}
+            for name in TOOL_NAMES:
+                for item in self.tool_discovery.discover_tools(name, agent_id, run_context):
+                    if item.descriptor.name == name:
+                        selected[name] = item
+            return tuple(selected.values())
+        return candidates
+
     def _tool_registrations_for_run(
         self, agent_id: str, user_query: str, run_context: RunContext | None
     ):
@@ -1684,9 +1698,7 @@ class AgentRouter:
                 raise RuntimeError(
                     "durable ToolResolutionSnapshot 必须在 planning 前完成 hydration"
                 )
-            candidates = self.tool_discovery.discover_tools(
-                user_query, agent_id, run_context
-            )
+            candidates = self._discover_run_tools(user_query, agent_id, run_context)
             snapshot = self.tool_discovery.create_tool_snapshot(
                 run_context.run_id, candidates, selection_query=user_query
             )
@@ -1702,9 +1714,7 @@ class AgentRouter:
         if self.tool_snapshot_store is not None:
             snapshot = await self.tool_snapshot_store.load(run_context.run_id)
             if snapshot is None:
-                candidates = self.tool_discovery.discover_tools(
-                    user_query, agent_id, run_context
-                )
+                candidates = self._discover_run_tools(user_query, agent_id, run_context)
                 candidate = self.tool_discovery.create_tool_snapshot(
                     run_context.run_id,
                     candidates,
@@ -1714,9 +1724,7 @@ class AgentRouter:
                 snapshot = await self.tool_snapshot_store.save(candidate)
             snapshot = hydrate_tool_snapshot(snapshot, self.tool_registry)
         else:
-            candidates = self.tool_discovery.discover_tools(
-                user_query, agent_id, run_context
-            )
+            candidates = self._discover_run_tools(user_query, agent_id, run_context)
             snapshot = self.tool_discovery.create_tool_snapshot(
                 run_context.run_id, candidates, selection_query=user_query
             )

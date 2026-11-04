@@ -509,6 +509,9 @@ def _build_tool_governance(
     from core.feature_impact.tools import register_policies as register_feature_policies
     if "search_feature_history" in tool_registry.registered_names:
         register_feature_policies(catalog)
+    from core.skills.tool_adapter import register_policies as register_skill_policies
+    if "load_skill" in tool_registry.registered_names:
+        register_skill_policies(catalog, tool_grants or {})
     catalog.freeze()
     return ToolGovernanceService(catalog, agent_registry)
 
@@ -1234,6 +1237,10 @@ async def lifespan(app: FastAPI):
     from core.feature_impact.tools import register_tools as register_feature_tools
     app.state.feature_impact_service = FeatureImpactService(persistence_database)
     register_feature_tools(tool_registry, app.state.feature_impact_service, persistence_bridge)
+    from core.skills.catalog import SkillCatalog
+    from core.skills.tool_adapter import register_tools as register_skill_tools
+    skill_catalog = SkillCatalog.discover(settings.skill_roots)
+    register_skill_tools(tool_registry, skill_catalog)
     registered_agent_ids = frozenset(DEFAULT_AGENT_REGISTRY.agent_ids) | frozenset(
         item.definition.agent_id for item in business_registration_bundle.registrations
     )
@@ -1269,6 +1276,13 @@ async def lifespan(app: FastAPI):
     tool_registry.freeze()
     app.state.agent_catalog = compiled_agent_catalog
     app.state.agent_registry = agent_registry
+    # 空目录是可选能力关闭；非空目录中的配置引用必须可解析。
+    if skill_catalog.list():
+        for agent_id in agent_registry.agent_ids:
+            definition = agent_registry.resolve(agent_id).definition
+            if definition is not None:
+                skill_catalog.for_agent(definition)
+    app.state.skill_catalog = skill_catalog
     # WP2-B Tool Governance：Registry freeze 后构造/校验/冻结 ToolPolicyCatalog
     # 并创建唯一 Service；任一 policy 校验失败 -> startup fail（never READY）。
     tool_governance_service = await initialization_stack.run(
@@ -1324,6 +1338,7 @@ async def lifespan(app: FastAPI):
             agent_registry=agent_registry,
         ),
     )
+    router.skill_catalog = skill_catalog
     router.tool_execution_service.attach_durable_invocation_service(
         durable_tool_invocation
     )

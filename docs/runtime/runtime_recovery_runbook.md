@@ -86,3 +86,12 @@ NEED_DECISION 先重建/验证原提交源并检查 no-progress；已有 OPEN �
 停机时先同步关闭新任务准入并调用原 Coordinator 的 `request_stop()`，再等待 `stop()` 排空。发现返回、候选循环、claim/prepare 返回以及任务开始边界均检查停止状态；生产 Tool 对账 handler 在 claim 返回后再次检查。竞争中尚未派发的 lease 由原 RunControl 释放或自然过期，不制造业务失败、不耗尽恢复次数。已开始或 UNKNOWN 的工作保留原事实，由原 Owner 收口；停止发现不等于所有任务已完成，应读取 ShutdownReport 的真实排空字段。
 
 复用原 RecoveryCoordinator/Run lease；一次接管在唯一 ROOT 与绑定 Child 树上使用同一新 generation，旧 Owner 拒绝。已接受 Batch 不重选，COMMITTED 工具不重做，UNKNOWN/审批等待仍沿原 lane，完整组确认后才继续模型。WAIT_CHILD 优先推进原 Child，已有 ChildResult 直接消费；根 OutputGate 保持原 event/cursor。DELEGATION_ALLOCATION 未使用部分保持预留，不能当成崩溃 I/O 消费；安全收口后释放。详见 [合同](agent_execution_v2.md)。
+
+
+## Loop v2 Skill 恢复
+
+恢复沿用原 Frame.pinned_config.skills；当前 Agent/工具/模型等其余配置仍按原 digest 校验。
+原 COMMITTED Skill Tool Result/Observation 是正文来源，不要求再次读取原 SKILL.md。
+首次正文 mandatory 及重复加载去重从当前 Frame 的原已提交调用参数、成功结果与冻结 SHA-256 重建；不新增 loaded Registry。
+尚未提交的正文或 reference 仍由 Reader 对当前文件与原冻结身份比较，变化/缺失明确拒绝，不静默换版。
+source_manifest.skill_loads 是 name/sha256/first 的派生投影，不拥有加载状态。

@@ -730,6 +730,7 @@ class Settings:
     otel_exporter_otlp_endpoint: str = field(repr=False)
     otel_trace_sample_ratio: float
     health_check_timeout_seconds: float
+    skill_roots: tuple[str, ...] = ()
     tool_allowed_read_roots: tuple[str, ...] = ()
     agentevalops_trace_export_enabled: bool = False
     agentevalops_base_url: str = ""
@@ -1454,6 +1455,8 @@ class Settings:
             otel_exporter_otlp_endpoint=otel_exporter_otlp_endpoint,
             otel_trace_sample_ratio=otel_trace_sample_ratio,
             health_check_timeout_seconds=health_check_timeout_seconds,
+            skill_roots=tuple(str((Path(project_root) / item.strip()).resolve())
+                for item in os.getenv("LOCAL_AGENT_SKILL_ROOTS", "skills").split(os.pathsep) if item.strip()),
             tool_allowed_read_roots=tool_allowed_read_roots,
             agentevalops_trace_export_enabled=agentevalops_trace_export_enabled,
             agentevalops_base_url=agentevalops_base_url,

@@ -338,3 +338,13 @@ Snapshot final messages、工具原始来源、压缩请求和摘要正文仅存
 ## Batch / Handoff 使用边界
 
 v2 整批 typed 校验及持久接受先于 dispatch；control function 不是真实工具。Child 工具/模型为 Registry、父权限和根调用者的交集，只使用有界委派数据及根 MemoryGuard，不检索/写入自己的 Memory 或执行 Formation。所有新尝试、retry/fallback 继续检查原身份/撤销/取消；Child 结果保持 AGENT_DERIVED_DATA，不能提权为 system/developer 授权。旧 Evidence 对 v2 明确不支持，不过滤后伪造 COMPLETE。详见 [合同](agent_execution_v2.md)。
+
+
+## Skill 方法资源边界
+
+Loop v2 的可见目录来自当前 AgentDefinition 与有效 Reader 工具集合；Child 使用自身定义和父子工具权限交集，不继承父正文。
+`load_skill` / `read_skill_resource` 复用 ToolRegistry、Governance、ToolExecutionService、取消/超时及 Observation 提交。
+Reader 只返回冻结名称下的 SKILL.md 或 references Markdown；拒绝绝对路径、resolved 越界、未冻结资源及摘要变化，不执行 scripts。
+`allowed-tools` 不授予 Runtime 权限。宿主允许按需采用方法，但 Skill 原文作为 tool data 回填，不提升到 system authority，不覆盖业务输出合同。
+文件正文仅进入既有受控 Tool Result/Observation/ContextSnapshot，沿原 Run 数据访问边界保留；Journal/Trace 不增加正文或内部包路径。
+冻结配置仅记录逻辑名称、描述及文件相对路径/摘要；没有独立 loaded 状态或 Skill 数据库。首次成功正文组的保留资格由当前 Frame 已提交 Observation 派生；重复正文与 references 不额外提升为永久 mandatory。恢复读取历史已提交正文，不以当前磁盘内容重写历史；未加载内容继续校验原摘要。

@@ -139,7 +139,7 @@ def _pin_value(value):
     return to_primitive(value)
 
 
-def pinned_loop_config(router, agent_id, run_context, *, request_counting_policy=None):
+def pinned_loop_config(router, agent_id, run_context, *, request_counting_policy=None, frozen_config=None):
     """冻结非 secret 内容身份；名字相同但内容变化也会拒绝恢复。"""
     from core.runtime.snapshot_serialization import to_primitive
     definition = router.agent_registry.resolve(agent_id).definition
@@ -167,6 +167,12 @@ def pinned_loop_config(router, agent_id, run_context, *, request_counting_policy
         "security_prompt": router._build_system_prompt(agent_id, business_definition=definition),
         "estimator": type(router.context_builder.estimator).__module__ + "." + type(router.context_builder.estimator).__qualname__,
     }
+    from core.skills.catalog import freeze_skills
+    skills = (deepcopy(frozen_config.get("skills", {})) if frozen_config is not None else
+        freeze_skills(getattr(router, "skill_catalog", None), definition,
+            (item.descriptor.name for item in registrations)))
+    if skills:
+        config["skills"] = skills
     # 旧 Run 的 profile 序列化不能因新增默认字段而改变冻结身份。
     if getattr(run_context, "memory_effect_policy", None) is not None:
         config["memory_effect_policy"] = run_context.memory_effect_policy
@@ -191,7 +197,8 @@ def pinned_loop_config(router, agent_id, run_context, *, request_counting_policy
         config["allowed_model_profiles"] = list(run_context.loop_allowed_model_profiles)
     if run_context.execution_policy == "durable-agent-loop.v2" and not getattr(run_context, "delegation_id", None):
         from .handoff import freeze_targets
-        config["delegation_targets"] = freeze_targets(router, agent_id, run_context)
+        config["delegation_targets"] = freeze_targets(router, agent_id, run_context,
+            frozen_targets=frozen_config.get("delegation_targets", {}) if frozen_config is not None else None)
     return config
 
 
@@ -207,6 +214,8 @@ def prepare_loop_seed(router, agent_id, instruction, run_context, *, event_emitt
         business_definition=definition,
     )
     config = pinned_loop_config(router, agent_id, run_context)
+    from core.skills.catalog import skill_instructions
+    messages[0]["content"] += skill_instructions(config.get("skills", {}))
     if "context_policy" in config:
         messages = router.context_builder.ensure_canonical_security_instruction(messages)
     # 同一 Frame 不允许 native/structured 间 fallback；混合能力采用通用严格 JSON。
@@ -273,7 +282,7 @@ def context_sources_v2(frame, iterations):
     observed = [i for i in iterations if i.state == "OBSERVED"]
     if [i.observation_cursor for i in observed] != list(range(1, frame.committed_observation_cursor + 1)):
         raise LoopStopped("CONTEXT_VALIDATION_FAILED")
-    groups, seen = [], set()
+    groups, seen, loaded_skills = [], set(), set()
     for index, item in enumerate(observed):
         if (item.schema_version != 2 or (item.frame_id, item.run_id, item.step_id) != (frame.frame_id, frame.run_id, frame.step_id)
                 or item.decision_kind not in {"TOOL_BATCH", "HANDOFF"} or not item.observation_source_digest
@@ -292,11 +301,28 @@ def context_sources_v2(frame, iterations):
         else:
             messages = [{"role": "assistant", "content": json.dumps({"kind": item.decision_kind, "calls": calls}, ensure_ascii=False)},
                 {"role": "user", "content": json.dumps(item.observation, ensure_ascii=False, sort_keys=True)}]
+        skill_loads = []
+        for call, result in zip(calls, results):
+            if call["function"]["name"] != "load_skill" or result["result"].get("outcome") != "SUCCEEDED":
+                continue
+            try:
+                name = json.loads(call["function"]["arguments"])["name"]
+                content = json.loads(result["result"]["content"])
+                expected = frame.pinned_config["skills"][name]["files"]["SKILL.md"]
+                from hashlib import sha256
+                if (content["name"] != name or content["sha256"] != expected
+                        or sha256(content["content"].encode("utf-8")).hexdigest() != expected):
+                    raise ValueError("Skill 正文身份不符")
+            except (KeyError, TypeError, ValueError):
+                raise LoopStopped("CONTEXT_VALIDATION_FAILED") from None
+            key = (name, expected)
+            skill_loads.append({"name": name, "sha256": expected, "first": key not in loaded_skills})
+            loaded_skills.add(key)
         read_only = item.observation.get("all_read_only") is True
-        mandatory = (item.decision_kind == "HANDOFF" or not read_only or index >= len(observed) - policy.recent_pairs
+        mandatory = (any(s["first"] for s in skill_loads) or item.decision_kind == "HANDOFF" or not read_only or index >= len(observed) - policy.recent_pairs
             or item.iteration_no in policy.mandatory_iterations)
         groups.append({"ref": f"source:{item.iteration_no}", "iteration": item.iteration_no,
             "decision_id": item.decision_id, "action_id": None, "source_digest": item.observation_source_digest,
             "observation_digest": item.observation_digest, "pair_digest": canonical_payload_digest(messages),
-            "mandatory": mandatory, "trust": "AGENT_DERIVED_DATA" if item.decision_kind == "HANDOFF" else "UNTRUSTED_TOOL_DATA", "messages": messages})
+            "skill_loads": skill_loads, "mandatory": mandatory, "trust": "AGENT_DERIVED_DATA" if item.decision_kind == "HANDOFF" else "UNTRUSTED_TOOL_DATA", "messages": messages})
     return groups

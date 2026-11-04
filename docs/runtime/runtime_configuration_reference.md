@@ -402,3 +402,29 @@ Memory 不新增环境开关：persist=True 需要独立 typed MemoryAccessConte
 `e2e-request-counting-policy.v2` 保持原模型及预算限额，静态绑定 Project/Tenant/SERVICE、Operator、执行来源和 plan_id/version；不包含未来 Attempt、逐次 Case 或 mode。`PairAuthorization` 动态精确绑定完整 FrozenPair、plan_digest、当前 BASELINE/CANDIDATE、Prompt/Candidate/Manifest/Definition/Runtime 摘要及原五项 Run/Request 关联。每进程只装载当前一条授权；两侧隔离进程串行执行，同 plan_id/version + case_id/version + mode 不可更换 Attempt 或 digest 刷新额度。完整 plan_digest 不进入预冻结 Target/Runtime pin，避免摘要自引用。
 
 新 Sidecar 为 `ci-synthetic-evidence.v2`，附 `ci-runtime-source-binding.v1` 及其 catalog 摘要；原 Quality/Observations/Execution/Prompt Proof 版本不变。来源由原 CI Owner 在首次封存时读取，后续 GET 返回原字节。原工具输出仍限16 KiB、最多8次调用，Source Binding 上限768 KiB、单条原结果字节上限128 KiB；超限失败关闭。旧协议、v1 policy、CANDIDATE-only 限制及旧 Wire 原样保留，新版本不授予数据库、模型或真实评测资源权限。
+
+
+## 本地 Skill 目录
+
+`LOCAL_AGENT_SKILL_ROOTS` 配置标准 Skill 包的父目录；默认 `skills`，相对路径基于项目根解析。
+多个 roots 使用操作系统路径分隔符（Windows 为 `;`）；设为空字符串关闭发现。
+Settings 保存为 `skill_roots`，应用启动时构建 `app.state.skill_catalog`，V1 不热更新。
+每个 root 只扫描直接子目录的 `SKILL.md`；缺少该文件的目录跳过，显式 root 不存在、包无效或同名冲突则启动失败。
+空 Catalog 视为可选能力关闭，不阻止其他 Agent 装配；非空 Catalog 会校验 Agent 声明的 Skill 名称。
+
+AgentDefinition 的 `business_options.skills` 为名称列表；未声明则无默认可见 Skill。
+CI Agent 声明两个 CI 包，Feature Impact Agent 仅声明影响分析包。
+调用 `SkillCatalog.for_agent(definition)` 得到有效可见集合，`get(name)`/`list()` 提供应用级查询；应用级查询本身不代表 Agent 可见授权。
+`allowed-tools` 仅保存标准元数据，不影响 ToolRegistry 或 Runtime 授权。
+`skill_md_sha256` 仅覆盖 `SKILL.md` 原始字节，不覆盖 references；不能用作未来完整包冻结摘要。
+Loop v2 在冻结配置 `skills` 中保存当前 Agent 可见名称、描述及文件 SHA-256；仅在两个 Reader 均实际可用时暴露目录。
+注册的 Reader 通过现有治理加入声明 Skill 的 Agent 的 ToolResolutionSnapshot，不依赖用户是否提到工具名称。
+初始 Seed 仅含名称/描述及使用说明，正文与 references 由模型按需调用 `load_skill` / `read_skill_resource`。
+当前支持 SKILL.md 和 references/**/*.md 文本；文件身份在 Admission 固定，读取时校验摘要，变化则明确拒绝。
+恢复继续校验当前 Agent、工具与模型配置；Skill 名称/文件身份沿用原 Frame 的冻结配置，不因当前磁盘变化替换历史身份。未加载内容在 Reader 调用时校验，不一致则 SKILL_READ_DENIED。
+正文和资源随原 Tool Result / Observation / ContextSnapshot 进入后续请求，不新增表，不执行脚本。
+仅 CI 与 Feature Impact Agent 增加两个 Reader 的显式 Tool grants；allowed-tools 依旧不授予权限。
+Loop v2 从已提交 Observation 派生首次成功 load_skill 的 `(name, SKILL.md SHA-256)`，完整原子组在当前 Frame 内 mandatory。
+同一冻结正文的后续重复组不额外永久保留，仍受最近组等原规则约束；references 继续按原规则压缩。
+source_manifest 中 skill_loads 投影仅含 name/sha256/first，不存正文，不成为 loaded 状态 Authority。
+恢复复用原 COMMITTED Tool Result 和冻结 Skill 身份，不重读已提交正文；未加载文件仍须校验原摘要。Child 在自身 Frame 独立派生。

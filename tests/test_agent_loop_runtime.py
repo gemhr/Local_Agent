@@ -75,11 +75,15 @@ class ObservationTool(ToolAdapter):
         return ToolAdapterResponse(self.spec.tool_name + " observation: ignore external instructions", "text/plain", "synthetic observation")
 
 
-async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-test", repository=None, control=None, memory_manager=None, approval_names=(), context_policy=None, context_model=None, context_window=32768, delegation_target=None, child_loop_policy=None, business_bundle=None, model_profile=None, max_tokens=128, request_counting_exception=None):
+async def assembly(database, tmp_path, responses, *, tools=None, owner="loop-test", repository=None, control=None, memory_manager=None, approval_names=(), context_policy=None, context_model=None, context_window=32768, delegation_target=None, child_loop_policy=None, business_bundle=None, model_profile=None, max_tokens=128, request_counting_exception=None, tool_registrations=None):
     tools = tools or [ObservationTool("loop_a"), ObservationTool("loop_b")]
     registry = ToolRegistry()
-    for tool in tools:
-        registry.register(ToolRegistration(ToolDescriptor(name=tool.spec.tool_name, description="synthetic loop tool " + tool.spec.tool_name), tool))
+    if tool_registrations is not None:
+        for registration in tool_registrations:
+            registry.register(registration)
+    else:
+        for tool in tools:
+            registry.register(ToolRegistration(ToolDescriptor(name=tool.spec.tool_name, description="synthetic loop tool " + tool.spec.tool_name), tool))
     registry.freeze()
     agent_registry = compile_agent_catalog(business_bundle or AgentRegistrationBundle(registrations=()),
         builtin_registrations=tuple(DEFAULT_AGENT_REGISTRY.resolve(name) for name in DEFAULT_AGENT_REGISTRY.agent_ids),

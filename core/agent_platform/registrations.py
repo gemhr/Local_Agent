@@ -18,7 +18,7 @@ BUSINESS_REGISTRATION_BUNDLE = AgentRegistrationBundle(
     model_profile_ids=frozenset({"default"}),
     retrieval_profile_ids=frozenset(),
     memory_profile_ids=frozenset(),
-    tool_grants={**{name: frozenset({AGENT_ID}) for name in TOOL_NAMES},
+    tool_grants={**{name: frozenset({AGENT_ID, FEATURE_AGENT}) for name in ("load_skill", "read_skill_resource")}, **{name: frozenset({AGENT_ID}) for name in TOOL_NAMES},
         **{name: frozenset({FEATURE_AGENT}) for name in FEATURE_TOOLS}},
 )
 

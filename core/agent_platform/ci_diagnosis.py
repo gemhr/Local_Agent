@@ -31,8 +31,8 @@ recommended_owner_role 为 TOOL_MAINTAINER/TEST_OWNER/UNKNOWN。
 
 def definition():
     return AgentDefinition(agent_id=AGENT_ID, agent_version=AGENT_VERSION, display_name="CI 故障调查助手",
-        role="CI 执行证据调查", instructions=INSTRUCTIONS, allowed_tools=frozenset(TOOL_NAMES),
-        business_options=dict(execution_policy="durable-agent-loop.v2", loop_policy=dict(max_iterations=8,
+        role="CI 执行证据调查", instructions=INSTRUCTIONS, allowed_tools=frozenset((*TOOL_NAMES, "load_skill", "read_skill_resource")),
+        business_options=dict(skills=("ci-failure-investigation", "ci-environment-check"), execution_policy="durable-agent-loop.v2", loop_policy=dict(max_iterations=8,
             max_model_calls=8, max_tool_calls=8, max_retries=0, max_elapsed_seconds=180,
             max_batch_size=2, max_batch_concurrency=1, failure_mode="FAIL_FAST", total_tokens=32768, cost_units=65536)))
 
