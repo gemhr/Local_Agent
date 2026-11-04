@@ -10,6 +10,7 @@ from .contracts import LoopDecisionV2, LoopStopped, LoopPolicyV2
 from .context import pinned_loop_config
 from .compaction import prepare_context
 from .batch import prepare_batch, advance_batch
+from .adaptive_stop import consider_stop, enforce_final_only
 
 
 class AgentLoopDriverV2:
@@ -40,8 +41,10 @@ class AgentLoopDriverV2:
                     raise LoopStopped("LOOP_ITERATION_LIMIT")
                 if context.memory_guard is not None:
                     context.memory_guard.check(submit, seed_digest=frame.seed_digest if frame.frame_role == "ROOT" else None)
+                consider_stop(repo, submit, frame, iterations, context, self.router.model_profiles)
+                frame, iterations = load()
                 observed = [i for i in iterations if i.state == "OBSERVED"]
-                if len(observed) >= 2:
+                if len(observed) >= 2 and frame.adaptive_decision is None:
                     left, right = observed[-2:]
                     if (not right.observation.get("has_bounded_polling") and left.observation.get("all_read_only") and right.observation.get("all_read_only")
                             and [r["result"] for r in left.observation["results"]] == [r["result"] for r in right.observation["results"]]
@@ -63,6 +66,7 @@ class AgentLoopDriverV2:
                     continue
                 decision = LoopDecisionV2.parse(result.response, protocol_mode=frame.context_seed["protocol_mode"],
                     synthetic_id=f"call_{frame.frame_id}_{current.iteration_no}", handoff_targets=frame.pinned_config.get("delegation_targets", {}))
+                enforce_final_only(frame, decision, current.iteration_no)
                 recipes, assistant = prepare_batch(frame, current, decision, context) if decision.kind == "TOOL_BATCH" else ([], None)
                 if decision.kind in {"FINAL", "REFUSAL"} and definition.output_schema is not None:
                     try:
@@ -100,6 +104,5 @@ class AgentLoopDriverV2:
                 decision = LoopDecisionV2.parse(restore_loop_model_response(row), protocol_mode=frame.context_seed["protocol_mode"], synthetic_id="unused")
                 if decision.digest != current.decision_digest or decision.kind not in {"FINAL", "REFUSAL"}:
                     raise LoopStopped("LOOP_RESULT_UNAVAILABLE")
-                content_type = ResultContentType.JSON if definition.output_schema is not None else ResultContentType.TEXT
-                return StepResult(claim.step_id, claim.preferred_agent, content_type, decision.content, True)
+                return StepResult(claim.step_id, claim.preferred_agent, ResultContentType.TEXT, decision.content, True)
             raise LoopStopped("LOOP_STATE_INVALID")

@@ -122,6 +122,7 @@ class ChatService:
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
+        adaptive_route: dict | None = None,
     ) -> tuple[str | None, RunCoordinatorResult]:
         """通过 RunCoordinator 执行一条真实的非流式单 Agent 路径。
 
@@ -142,6 +143,7 @@ class ChatService:
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
+            **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
             _result_out=results,
         ):
             events.append(event)
@@ -238,6 +240,7 @@ class ChatService:
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
+        adaptive_route: dict | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
         if self._coordinated_runtime_factory is None:
@@ -261,6 +264,7 @@ class ChatService:
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
+            **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
         )
         try:
             async for event in events:
@@ -288,6 +292,7 @@ class ChatService:
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
+        adaptive_route: dict | None = None,
         execution_policy=None,
         loop_policy=None,
         loop_correlation=None,
@@ -315,6 +320,7 @@ class ChatService:
                 agent_version=agent_version,
                 workflow_id=workflow_id,
                 workflow_version=workflow_version,
+            **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
                 **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation}
                    if execution_policy is not None else {}),
             )
@@ -354,6 +360,7 @@ class ChatService:
         agent_version: str | None = None,
         workflow_id: str | None = None,
         workflow_version: str | None = None,
+        adaptive_route: dict | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Run the sole production coordinated event path through the factory.
 
@@ -376,6 +383,7 @@ class ChatService:
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
+            **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
         )
         consumer = self._consume_scope_events(
             scope,

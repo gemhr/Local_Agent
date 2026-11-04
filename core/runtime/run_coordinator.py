@@ -696,7 +696,7 @@ class RunCoordinator:
         plan = self.plan
         if plan is None:
             return False
-        return self._dynamic or self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2}
+        return self._dynamic or self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2} or self.run_context.adaptive_route is not None
 
     def _typed_multi_step_enabled(self) -> bool:
         return (
@@ -1309,6 +1309,8 @@ class RunCoordinator:
                 key: dict(value) for key, value in self.run_context.data.performer_binding_identities.items()
             },
         }
+        if self.run_context.adaptive_route is not None:
+            resume_input["adaptive_route"] = self.run_context.adaptive_route
         if self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2}:
             from core.runtime.agent_loop.context import prepare_loop_seed
             router = self._multi_agent_driver._router

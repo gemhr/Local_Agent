@@ -542,7 +542,9 @@ class ToolAttemptExecutor:
                 tracker.resolve_authoritative(response.side_effect_state)
             else:
                 tracker.observe(response.side_effect_state)
-            if tracker.state is ToolSideEffectState.COMMITTED or (loop_frame_id is not None and spec.side_effect_kind.value == "NONE"):
+            from core.agent_platform.ci_status import durable_query
+            if tracker.state is ToolSideEffectState.COMMITTED or (
+                    spec.side_effect_kind.value == "NONE" and (loop_frame_id is not None or durable_query(run_context, spec.tool_name))):
                 if durable_started and durable_invocation_service is not None:
                     # 先构造完整 typed result，再与 COMMITTED 状态一次性持久化，
                     # 使恢复路径可直接复用 output content 而不再调用 provider。
@@ -1502,11 +1504,13 @@ class ToolExecutionService:
         durable_lease = run_context.durable_lease
         side_effecting = spec.side_effect_kind.value != "NONE"
         loop_enabled = getattr(run_context, "loop_frame_id", None) is not None
-        if (side_effecting or loop_enabled) and durable_lease is not None and durable_service is None:
+        from core.agent_platform.ci_status import durable_query
+        query_enabled = durable_query(run_context, spec.tool_name)
+        if (side_effecting or loop_enabled or query_enabled) and durable_lease is not None and durable_service is None:
             raise RuntimeError("durable Run 的 side-effect Tool 缺少 invocation service")
         durable_enabled = (
             durable_service is not None
-            and (side_effecting or loop_enabled)
+            and (side_effecting or loop_enabled or query_enabled)
         )
         if durable_enabled:
             if durable_lease is None:

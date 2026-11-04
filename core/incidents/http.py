@@ -110,6 +110,13 @@ async def execution_evidence(incident_id: str, execution_id: str, evidence_id: s
     return await call(request.app.state.incident_service.execution_detail(human(request), incident_id, execution_id, evidence_id))
 
 
+@router.post("/incidents/{incident_id}/executions/{execution_id}/status-query")
+async def query_status(incident_id: str, execution_id: str, request: Request):
+    result = await call(request.app.state.ci_status_service.execute(human(request), incident_id, execution_id))
+    return dict(run_id=result.run_id, trace_id=result.trace_id, status=result.status.value,
+        error_code=result.error_code, business_output_valid=result.business_output_valid, output=result.output)
+
+
 @router.post("/incidents/{incident_id}/close")
 async def close(incident_id: str, body: CloseIncident, request: Request):
     return await call(verification.close_incident(request.app.state.incident_service, human(request), incident_id, body))

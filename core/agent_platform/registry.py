@@ -195,6 +195,7 @@ def compile_agent_catalog(
         for name, granted_agents in grants.items()
     }
 
+    from core.agent_platform.ci_status import ADAPTER_ID, definition as status_definition
     compiled: list[CompiledAgentRegistration] = list(builtin)
     for definition in by_id.values():
         bound_workflow = (
@@ -226,7 +227,8 @@ def compile_agent_catalog(
             raise AgentRegistrationCompileError("Agent output type 当前不支持")
         compiled.append(CompiledAgentRegistration(
             agent_id=definition.agent_id,
-            execution_adapter_id="agent_router_adapter",
+            execution_adapter_id=(ADAPTER_ID if definition == status_definition()
+                else "agent_router_adapter"),
             display_name=definition.display_name,
             role=definition.role,
             avatar="avatar_router.png",

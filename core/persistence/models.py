@@ -934,6 +934,7 @@ class RuntimeLoopFrameRow(PersistenceBase):
     current_context_snapshot_version: Mapped[int | None] = mapped_column(Integer)
     current_context_snapshot_digest: Mapped[str | None] = mapped_column(CHAR(64))
     sealed_context_evidence: Mapped[dict | None] = mapped_column(JSONB)
+    adaptive_decision: Mapped[dict | None] = mapped_column(JSONB)
     stop_code: Mapped[str | None] = mapped_column(String(128))
     stop_details: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     result_decision_id: Mapped[str | None] = mapped_column(String(255))

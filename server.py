@@ -506,6 +506,9 @@ def _build_tool_governance(
     from core.agent_platform.ci_diagnosis_tools import register_policies
     if "ci_get_execution_context" in tool_registry.registered_names:
         register_policies(catalog)
+    from core.agent_platform.ci_status import register_policies as register_status_policies
+    if "ci_query_execution_status" in tool_registry.registered_names:
+        register_status_policies(catalog)
     from core.feature_impact.tools import register_policies as register_feature_policies
     if "search_feature_history" in tool_registry.registered_names:
         register_feature_policies(catalog)
@@ -1233,6 +1236,8 @@ async def lifespan(app: FastAPI):
     incident_service = IncidentService(persistence_database)
     app.state.incident_service = incident_service
     register_tools(tool_registry, incident_service, persistence_bridge)
+    from core.agent_platform.ci_status import register_tools as register_status_tools
+    register_status_tools(tool_registry, incident_service, persistence_bridge)
     from core.feature_impact.service import FeatureImpactService
     from core.feature_impact.tools import register_tools as register_feature_tools
     app.state.feature_impact_service = FeatureImpactService(persistence_database)
@@ -1658,6 +1663,8 @@ async def lifespan(app: FastAPI):
     )
     app.state.client_event_feed = runtime_services.client_event_feed
     from core.agent_platform.ci_diagnosis import CIInvestigationService
+    from core.agent_platform.ci_status import CIStatusService
+    app.state.ci_status_service = CIStatusService(incident_service, agent_application_service, app.state.authorization_service)
     app.state.ci_investigation_service = CIInvestigationService(
         incident_service, agent_application_service, execution_repository,
         app.state.run_execution_supervisor, app.state.authorization_service,

@@ -198,7 +198,8 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
         from .handoff import loop_options
         options = loop_options(frame)
     previous = next((s for s in image.context_snapshots if s.snapshot_id == frame.current_context_snapshot_id), None)
-    prior_summary = previous.payload["summary"] if previous else None
+    final_only = getattr(frame, "adaptive_decision", None) is not None
+    prior_summary = previous.payload["summary"] if previous and not final_only else None
     raw = snapshot_candidate(frame, groups, options, router.max_tokens, summary=prior_summary, kind="RAW")
     assess = lambda artifact: request_assessments(router, artifact.payload["messages"], options, router.max_tokens, claim.capability_requirements, definition)[0]
     raw_assessments = assess(raw)
@@ -206,11 +207,15 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
     reliable = [a for a in raw_assessments if a.reliable]
     if not reliable and not valid:
         raise LoopStopped("CONTEXT_BUDGET_UNCERTAIN")
+    if final_only and (force_compaction or not valid):
+        raise LoopStopped("LOOP_CONTEXT_EXHAUSTED")
     target = current.iteration_no if current else frame.current_iteration + 1
     operation = next((o for o in image.context_operations if o.frame_id == frame.frame_id and o.target_iteration == target), None)
     if force_compaction and operation is not None and operation.state == "ACCEPTED":
         raise LoopStopped("LOOP_CONTEXT_EXHAUSTED")
     trigger = force_compaction or not valid or all(a.required_window * 100 >= a.window * frame.context_policy["trigger_percent"] for a in valid)
+    if final_only:
+        trigger = False
     if previous and previous.payload["source_cursor"] == frame.committed_observation_cursor and prior_summary and not force_compaction:
         trigger = False
     eligible = [g for g in groups if not g["mandatory"]]

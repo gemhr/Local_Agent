@@ -219,6 +219,7 @@ class RunContext:
         self._tool_resolution_snapshot = None
         # 仅由可信 Factory/LoopDriver 从持久 aggregate 绑定。
         self.execution_policy = "fixed-plan.v1"
+        self.adaptive_route = None
         self.memory_effect_policy = None
         self.request_counting_admission = None
         self.loop_frame_id = None

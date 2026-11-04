@@ -884,6 +884,21 @@ drop 只使用 `worker_unavailable` reason（不得使用 `shutdown_timeout`）�
 WP4-A `PUBLIC_VERSIONED` Trace Export Contract；不修改
 `TraceExportEnvelope`/fingerprint/health schema/lifecycle。
 
+## CI 执行状态查询与准入选路
+
+`core/agent_platform/ci_status.py` 定义 `ci_execution_status`、只读 `ci_query_execution_status` 和 `ci_status_adapter`。
+入口为 HUMAN `POST /api/ci/incidents/{incident_id}/executions/{execution_id}/status-query`；原 GET 查询及诊断任务保持原语义。
+服务端 `CIStatusService(mode=...)` 控制 `FAST_PATH`（默认）或 `AGENT_LOOP`，不接收客户端模式/Adapter/options 覆盖。
+输入严格为 `{task_type: CI_EXECUTION_STATUS, incident_id, execution_id}`；输出 `ci-status.v1` 包含 `kind=STATUS`、incident_id、execution_id、state_revision、summary，后两项直接取 `IncidentService.execution_detail`，不创造 CI 状态。拒绝和失败不属于查询成功。
+
+两组共用 Definition、Schema 和无参 Tool（参数 `{}`），冻结相同工具可见范围；业务服务对两组都申请 180 秒总 Deadline。普通组走原 `durable-agent-loop.v2`；Fast Path 走 `fixed-plan.v1`、一个 final AGENT Step、原 AgentAdapterFactory/MultiAgentDriver、Completion/OutputGate，整条查询不调用模型。查询两组均关闭对话记忆写入及模型提炼（`persist=False`），Run/Tool 的原关系持久化仍启用。
+
+`resume_input.adaptive_route` 记录 `policy_version=ci-status-routing.v1`、canonical SHA-256 `policy_digest`、`mode`、`reason=EXPLICIT_STATUS_QUERY`、`query` 和最小 `principal`（user_id、subject、tenant_id、expires_at，无 token/密钥）。恢复只读原字段，核对原 execution_policy，不重新选路或替换用户输入；缺字段的旧非查询 Run 仍走原逻辑。原绝对 Deadline、Lease/Fencing、取消和 OutputGate 继续有效。
+
+Fast Path 复用 AgentRouter 的静态权限、参数构造、invocation 风险/审批、资源授权及 ToolExecutionService，稳定 Tool invocation_id 为 UUIDv5(`ci-status:{run_id}:{step_id}:{query digest}`)。仅该冻结模式下的查询 Tool 额外启用原 prepare/start/commit/replay；仍为 NONE/READ_ONLY。COMMITTED 重放原正文，STARTED/UNKNOWN 不重新读取、不伪造成功，不承诺 exactly-once execution。普通 Loop 使用原 action identity 与持久化机制。
+
+该普通查询 Loop 是新接线的对照；未测量性能收益。动态停止、跨路径升级和跨模式评测协议不属于当前能力。
+
 ## Durable Agent Loop v1
 
 显式 `durable-agent-loop.v1` 在一个既有 Step 内执行多轮模型决策，每轮至多一个工具调用；默认仍为 `fixed-plan.v1`。`core/runtime/agent_loop/` 拥有决策合同、有界推进和冻结上下文重建，复用既有 ModelInvocationRouter、ToolExecutionService、Step Completion 和 Terminal Owner；不增加 Scheduler 或工具执行 Authority。

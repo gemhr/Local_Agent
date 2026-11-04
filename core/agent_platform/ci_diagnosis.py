@@ -12,7 +12,6 @@ from core.ci_simulation.models import CIExecutionRow
 from core.persistence.models import RuntimeLoopActionRow, ObjectOwnershipRow
 from core.runtime.memory_scope import MemoryAccessContext
 from core.runtime.snapshot_serialization import sha256_digest, text_digest
-from core.runtime.tool_contract import canonical_json_digest
 
 INSTRUCTIONS = """你是 CI 执行证据调查助手。先查询执行上下文和证据目录，再读取相关原文，依据本次观察形成假设。
 调用工具时必须使用原生 tool_calls；如有伴随文本，仅为非终态说明，不能代替工具执行。最终报告须在工具完成并观察后独立输出。不要输出 DSML 或模拟工具调用文本。每轮最多调用两个工具。
@@ -32,7 +31,7 @@ recommended_owner_role 为 TOOL_MAINTAINER/TEST_OWNER/UNKNOWN。
 def definition():
     return AgentDefinition(agent_id=AGENT_ID, agent_version=AGENT_VERSION, display_name="CI 故障调查助手",
         role="CI 执行证据调查", instructions=INSTRUCTIONS, allowed_tools=frozenset((*TOOL_NAMES, "load_skill", "read_skill_resource")),
-        business_options=dict(skills=("ci-failure-investigation", "ci-environment-check"), execution_policy="durable-agent-loop.v2", loop_policy=dict(max_iterations=8,
+        business_options=dict(adaptive_stop="ci-investigation-stop.v1", skills=("ci-failure-investigation", "ci-environment-check"), execution_policy="durable-agent-loop.v2", loop_policy=dict(max_iterations=8,
             max_model_calls=8, max_tool_calls=8, max_retries=0, max_elapsed_seconds=180,
             max_batch_size=2, max_batch_concurrency=1, failure_mode="FAIL_FAST", total_tokens=32768, cost_units=65536)))
 
@@ -58,26 +57,9 @@ def validate_report(raw, row, incident, execution, image, actions):
             or sha256_digest(step.typed_result_payload) != step.result_digest
             or step.typed_result_payload.get("producer_agent_id") != AGENT_ID):
         raise CIError("CI_REPORT_RESULT_INVALID")
-    observed = {i.iteration_no: i for i in image.loop_iterations if i.frame_id == frame.frame_id
-        and i.state == "OBSERVED" and i.iteration_no < final.iteration_no and i.observation is not None}
-    tools = {t.invocation_id: t for t in image.tool_invocations if t.state == "COMMITTED"}
-    seen = {}
-    for action in actions:
-        tool = tools.get(action.invocation_id)
-        iteration = observed.get(action.iteration_no)
-        if (action.frame_id != frame.frame_id or iteration is None or tool is None or tool.tool_name != TOOL_NAMES[1]
-                or action.source_digest != tool.committed_result_digest or canonical_json_digest(tool.committed_result) != tool.committed_result_digest
-                or action.result_digest != sha256_digest(action.result_projection)):
-            continue
-        result = tool.committed_result
-        if result["status"] != "SUCCEEDED":
-            continue
-        projection = {"outcome": result["status"], "content": result["output"]["content"]}
-        if action.result_projection != projection or not any(r.get("result") == projection for r in iteration.observation.get("results", [])):
-            continue
-        evidence = strict_object(result["output"]["content"])
-        if evidence.get("incident_id") == incident.incident_id and evidence.get("execution_id") == execution.execution_id:
-            seen[evidence["evidence_id"]] = evidence
+    from core.agent_platform.ci_evidence import observed_sources, minimum_coverage
+    seen = observed_sources(image, actions, frame, incident.incident_id, execution.execution_id,
+        before_iteration=final.iteration_no)
     value = strict_object(raw)
     if isinstance(value, dict) and value.get("kind") == "REFUSAL":
         raise CIError("CI_REPORT_REFUSED")
@@ -85,18 +67,14 @@ def validate_report(raw, row, incident, execution, image, actions):
     if report.incident_id != row.incident_id or not seen:
         raise CIError("CI_REPORT_SOURCE_INVALID")
     originals = {e["evidence_id"]: e for e in execution.evidence_manifest}
-    kinds = set()
     for ref in report.supporting_evidence:
         original, read = originals.get(ref.evidence_id), seen.get(ref.evidence_id)
         if (original is None or read is None or original["availability"] != "AVAILABLE"
                 or original["digest"] != ref.digest or read != dict(incident_id=incident.incident_id, **original)):
             raise CIError("CI_REPORT_SOURCE_INVALID")
-        kinds.add(original["kind"])
-    if report.diagnosis_status == "SUPPORTED":
-        environment = next(e for e in execution.evidence_manifest if e["kind"] == "ENVIRONMENT_RECORD")["content"]
-        if not {"PARSER_LOG", "ENVIRONMENT_RECORD", "CASE_REQUIREMENTS"} <= kinds or any(
-                environment.get(k) is None for k in ("parser_supported_field_revision", "decoder_supported_field_revision")):
-            raise CIError("CI_REPORT_UNSUPPORTED")
+    if report.diagnosis_status == "SUPPORTED" and not minimum_coverage(
+            {ref.evidence_id: seen[ref.evidence_id] for ref in report.supporting_evidence}):
+        raise CIError("CI_REPORT_UNSUPPORTED")
     return report.model_dump()
 
 

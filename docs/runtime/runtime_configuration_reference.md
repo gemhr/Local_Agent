@@ -404,6 +404,11 @@ Memory 不新增环境开关：persist=True 需要独立 typed MemoryAccessConte
 新 Sidecar 为 `ci-synthetic-evidence.v2`，附 `ci-runtime-source-binding.v1` 及其 catalog 摘要；原 Quality/Observations/Execution/Prompt Proof 版本不变。来源由原 CI Owner 在首次封存时读取，后续 GET 返回原字节。原工具输出仍限16 KiB、最多8次调用，Source Binding 上限768 KiB、单条原结果字节上限128 KiB；超限失败关闭。旧协议、v1 policy、CANDIDATE-only 限制及旧 Wire 原样保留，新版本不授予数据库、模型或真实评测资源权限。
 
 
+## CI 调查停止策略（受信业务配置）
+
+`AgentDefinition.business_options.adaptive_stop="ci-investigation-stop.v1"` 仅由 CI 调查 Definition 声明，不从客户端 options 授权。只对该 Agent 的根 v2 Frame 生效；移除此可选键可在受控 Composition 中保留普通调查对照，不能运行中切换。
+冻结规则为最低已观察证据覆盖及保守的 15 秒最终生成余时阈值（同时参考原 Profile estimated_latency）；模型/Tool 剩余额度仍取原 BudgetLedger，不新增预算设置。规则和版本摘要进入原 Frame pinned_config；没有该冻结键的旧 Run 不补开。详见 [v2 合同](agent_execution_v2.md)。
+
 ## 本地 Skill 目录
 
 `LOCAL_AGENT_SKILL_ROOTS` 配置标准 Skill 包的父目录；默认 `skills`，相对路径基于项目根解析。

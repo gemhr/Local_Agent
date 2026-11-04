@@ -100,6 +100,11 @@ def context_sources(frame, iterations):
 def snapshot_candidate(frame, groups, options, reserve, *, summary=None, kind=None):
     from core.runtime.model_context import ContextBuilder
     seed = ContextBuilder.ensure_canonical_security_instruction(deepcopy(frame.context_seed["messages"]))
+    restriction = getattr(frame, "adaptive_decision", None)
+    if restriction is not None:
+        seed[0]["content"] += "\n执行限制 FINAL_ONLY：只允许 FINAL 或 REFUSAL，不得调用 Tool 或 Handoff。根据已观察原始来源形成报告，不把覆盖齐备当作根因正确。"
+        if restriction["insufficient"]:
+            seed[0]["content"] += "本轮必须生成 diagnosis_status=INSUFFICIENT_EVIDENCE 的报告，并在 uncertainties 明确缺失来源或不确定性。"
     messages = deepcopy(seed)
     summarized = {i["source_ref"] for i in summary["groups"]} if summary else set()
     for group in groups:
@@ -113,7 +118,8 @@ def snapshot_candidate(frame, groups, options, reserve, *, summary=None, kind=No
         {"ref": g["ref"], "digest": g["pair_digest"]} for g in groups if g["mandatory"]]
     version = getattr(frame, "schema_version", 1)
     artifact = ContextSnapshotV2 if version == 2 else ContextSnapshotV1
-    return artifact.create({"schema_version": f"context-snapshot.v{version}", "policy": frame.context_policy,
+    return artifact.create({**({"adaptive_decision": restriction} if restriction is not None else {}),
+        "schema_version": f"context-snapshot.v{version}", "policy": frame.context_policy,
         "validator_version": f"context-validator.v{version}", "renderer_version": f"context-renderer.v{version}",
         "parent_id": frame.current_context_snapshot_id, "parent_digest": frame.current_context_snapshot_digest,
         "parent_version": frame.current_context_snapshot_version, "seed_digest": frame.seed_digest,
@@ -167,6 +173,12 @@ def pinned_loop_config(router, agent_id, run_context, *, request_counting_policy
         "security_prompt": router._build_system_prompt(agent_id, business_definition=definition),
         "estimator": type(router.context_builder.estimator).__module__ + "." + type(router.context_builder.estimator).__qualname__,
     }
+    from .adaptive_stop import AGENT_ID, POLICY, POLICY_DIGEST
+    if agent_id == AGENT_ID and frozen_config is not None and "adaptive_stop" not in frozen_config:
+        # 旧 Run 未冻结该策略；只忽略本轮新增的可选键，不补开策略。
+        config["agent"]["business_options"].pop("adaptive_stop", None)
+    elif agent_id == AGENT_ID and definition.business_options.get("adaptive_stop") == POLICY["version"]:
+        config["adaptive_stop"] = {**POLICY, "digest": POLICY_DIGEST}
     from core.skills.catalog import freeze_skills
     skills = (deepcopy(frozen_config.get("skills", {})) if frozen_config is not None else
         freeze_skills(getattr(router, "skill_catalog", None), definition,

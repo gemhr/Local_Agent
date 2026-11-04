@@ -342,6 +342,25 @@ CAS/过期 parent/cursor/旧 generation 是内部拒绝，不能制造第二个 
 
 操作回执 VERSION_CONFLICT 是业务拒绝；UNKNOWN/PARTIAL 不是成功。完整边界见 [Scoped Memory Lifecycle v1](scoped_memory_lifecycle_v1.md)。
 
+## CI 状态查询
+
+| 代码 | 行为 |
+| --- | --- |
+| CI_STATUS_INPUT_INVALID | 可信查询与请求绑定不一致，或服务端查询模式/输入无效，拒绝准入 |
+| CI_STATUS_SCOPE_DENIED | 当前人类身份、RUN 归属、有效期或 incident/execution 范围不允许读取；工具不返回业务正文 |
+| CI_TOOL_INPUT_INVALID | 查询 Tool 参数不是空对象，调用前拒绝 |
+| CI_STATUS_RESULT_INVALID | Service/Adapter 的状态结果不符合共同 Schema，拒绝成功输出 |
+
+`CI_STATUS_ROUTE_INVALID` / `CI_STATUS_TRUSTED_BINDING_REQUIRED` / `CI_STATUS_DEFINITION_BINDING_INVALID` 是受信装配/恢复校验的内部异常原因；不作为新的公开 Runtime 错误码。Runtime 仍沿现有 Step/Tool 失败路径收敛；不把 REFUSAL 视作查询成功。
+
 ## v2 Batch / Handoff
+
+### CI 调查动态停止
+
+`LOOP_EVIDENCE_INSUFFICIENT`：到达最终生成预留边界但没有合法已读来源，不生成无来源报告。FINAL_ONLY 下仍请求 Tool/Handoff、越过生效轮次或把不足报告改成完整诊断，沿 `LOOP_DECISION_INVALID` 停止。原 `BUDGET_EXHAUSTED`、`LOOP_ITERATION_LIMIT`、`LOOP_CONTEXT_EXHAUSTED`、`DEADLINE_EXCEEDED` 不变，终结限制不授予额外额度。
+
+`LOOP_ADAPTIVE_POLICY_INVALID`、`LOOP_ADAPTIVE_DECISION_INVALID`、`LOOP_ADAPTIVE_SOURCE_INVALID` 为持久配置、决定或来源绑定无效的内部拒绝原因；`LOOP_ADAPTIVE_DECISION_IMMUTABLE` 为数据库拒绝重写已冻结决定的原因。它们不成为新的业务成功状态或可忽略的恢复 fallback。
+
+### 原有 Batch / Handoff 错误
 
 LOOP_BATCH_MULTIPLE_WRITES / LOOP_BATCH_INCOMPLETE / LOOP_NOT_EXECUTED_UNPROVEN：拒绝不合法安排或不完整来源；LOOP_DECISION_INVALID 仍表示协议/工具整轮非法。DELEGATION_TARGET_DENIED / DELEGATION_MODEL_DENIED / DELEGATION_DEPTH_LIMIT / DELEGATION_COUNT_LIMIT：受信授权及有限树准入拒绝。DELEGATION_BUDGET_EXHAUSTED / DELEGATION_BUDGET_INFLIGHT / DELEGATION_STOP_UNPROVEN：原预算或停止证明不足。DELEGATION_OUTCOME_UNKNOWN：非终态等待，不补造失败。DELEGATION_RESULT_INVALID / DELEGATION_SOURCE_INVALID：拒绝错误来源。UNSUPPORTED_EXECUTION_POLICY：旧 Loop/Context/Memory Evidence 不支持 v2，不能送入旧 Go Gate。固定原因保持安全代码，不输出异常正文。

@@ -12,6 +12,43 @@ def identity(frame_id, iteration, suffix):
     return uuid5(NAMESPACE_URL, f"{frame_id}:{iteration}:{suffix}").hex
 
 
+async def consider_final_only(repo, lease, frame_id, *, resume_generation, row_version, reserve):
+    from core.persistence.models import RuntimeAgentDelegationRow
+    from core.runtime.agent_loop.adaptive_stop import stop_policy, evidence_identity
+    from core.agent_platform.ci_evidence import investigation_evidence
+    from core.runtime.agent_loop.contracts import LoopStopped
+    async with repo.database.transaction() as session:
+        root, frame = await repo._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+        policy = stop_policy(frame)
+        if frame.adaptive_decision is not None:
+            return frame.adaptive_decision
+        repo._check_loop_version(frame, row_version)
+        image = await repo._load_in_session(session, lease.run_id)
+        rows = [i for i in image.loop_iterations if i.frame_id == frame_id]
+        if (policy is None or frame.phase != "NEED_DECISION" or not rows or rows[-1].state != "OBSERVED"
+                or rows[-1].iteration_no != frame.current_iteration or frame.current_iteration >= frame.loop_policy["max_iterations"]):
+            return None
+        actions = tuple((await session.scalars(select(RuntimeLoopActionRow).where(RuntimeLoopActionRow.frame_id == frame_id)
+            .order_by(RuntimeLoopActionRow.iteration_no, RuntimeLoopActionRow.ordinal))).all())
+        delegations = tuple((await session.scalars(select(RuntimeAgentDelegationRow).where(RuntimeAgentDelegationRow.run_id == lease.run_id))).all())
+        if (any(t.state in {"STARTED", "UNKNOWN"} for t in image.tool_invocations)
+                or any(a.state == "PENDING" for a in image.approvals) or any(d.result is None for d in delegations)
+                or any(a.result_projection is None and a.not_executed is None for a in actions)):
+            return None
+        seen, coverage = await investigation_evidence(session, root, frame, image, actions)
+        if not coverage and not reserve:
+            return None
+        if not seen:
+            raise LoopStopped("LOOP_EVIDENCE_INSUFFICIENT")
+        value = dict(version="final-only.v1", policy_digest=policy["digest"], observation_cursor=frame.committed_observation_cursor,
+            evidence_digest=evidence_identity(frame, rows, seen), effective_iteration=frame.current_iteration + 1,
+            allowed_actions="FINAL_ONLY", reason="COVERAGE_SUFFICIENT" if coverage else "BUDGET_RESERVE", insufficient=not coverage)
+        frame.adaptive_decision = {**value, "decision_id": digest(value)}
+        repo._touch_loop(frame, lease)
+        await session.flush()
+        return frame.adaptive_decision
+
+
 async def accept_batch(repo, lease, frame_id, iteration_no, *, resume_generation, row_version,
                        decision, model_attempt, recipes, assistant_record, delegation=None):
     async with repo.database.transaction() as session:
@@ -37,6 +74,13 @@ async def accept_batch(repo, lease, frame_id, iteration_no, *, resume_generation
             synthetic_id=f"call_{frame_id}_{iteration_no}", handoff_targets=frame.pinned_config.get("delegation_targets", {}))
         if restored.digest != decision.digest:
             raise RuntimeError("LOOP_DECISION_CONFLICT")
+        from core.runtime.agent_loop.adaptive_stop import enforce_final_only
+        enforce_final_only(frame, restored, iteration_no)
+        if frame.adaptive_decision is not None:
+            from core.persistence.models import RuntimeContextSnapshotRow
+            snapshot = await session.get(RuntimeContextSnapshotRow, iteration.context_snapshot_id)
+            if snapshot.payload.get("adaptive_decision") != frame.adaptive_decision:
+                raise RuntimeError("LOOP_ADAPTIVE_DECISION_INVALID")
         await repo._memory_admission(session, lease)
         earlier = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id==frame_id,
             RuntimeLoopIterationRow.decision_id.is_not(None)))).scalars())
@@ -213,6 +257,27 @@ async def recover_v2(repo, session, lease, root):
     if len(children) != len(delegations) or any(not any(d.child_frame_id==f.frame_id and d.parent_frame_id==roots[0].frame_id
         and d.delegation_id==f.delegation_id for d in delegations) for f in children):
         raise RuntimeError("DELEGATION_SOURCE_INVALID")
+    from core.runtime.agent_loop.adaptive_stop import evidence_identity
+    from core.agent_platform.ci_evidence import investigation_evidence
+    for frame in frames:
+        repo._validate_loop_frame(frame)
+        if frame.adaptive_decision is None:
+            continue
+        image = await repo._load_in_session(session, lease.run_id)
+        actions = tuple((await session.scalars(select(RuntimeLoopActionRow).where(RuntimeLoopActionRow.frame_id == frame.frame_id)
+            .order_by(RuntimeLoopActionRow.iteration_no, RuntimeLoopActionRow.ordinal))).all())
+        seen, coverage = await investigation_evidence(session, root, frame, image, actions)
+        value = frame.adaptive_decision
+        if (not seen or value["evidence_digest"] != evidence_identity(frame, image.loop_iterations, seen)
+                or value["reason"] == "COVERAGE_SUFFICIENT" and not coverage):
+            raise RuntimeError("LOOP_ADAPTIVE_SOURCE_INVALID")
+        snapshots = [s for s in image.context_snapshots if s.frame_id == frame.frame_id and s.payload.get("adaptive_decision") is not None]
+        for snapshot in snapshots:
+            from core.runtime.agent_loop.context import ContextSnapshotV2
+            from core.runtime.agent_loop.handoff import loop_options
+            if (snapshot.payload["adaptive_decision"] != value or snapshot.payload["options"] != loop_options(frame)
+                    or snapshot.snapshot_digest != ContextSnapshotV2.create(snapshot.payload).digest):
+                raise RuntimeError("LOOP_ADAPTIVE_DECISION_INVALID")
     if roots[0].last_committed_fencing_token == lease.fencing_token:
         return await repo._load_in_session(session, lease.run_id)
     generation = roots[0].resume_generation + 1

@@ -30,6 +30,22 @@ Child FINAL 只提交最多16KiB正文的内部 ChildResult，信任为 AGENT_DE
 
 正常维度满足 `allocation = consumed + inflight + unspent + released`，根 used 等于 Parent/Child Attempt 消耗之和。恢复只保守结算在途 MODEL/TOOL，绝不把未使用分配算作 I/O 消费；实际超额仍保留真实费用并停止后续准入。
 
+## CI 调查的受信动态停止
+
+仅 `ci_incident_investigator` 根 Frame 可冻结 `adaptive_stop=ci-investigation-stop.v1`。`CIInvestigationService` 使用的 canonical Definition 对新 Run 启用该可选策略；其他 Agent、查询 Fast Path 和没有该冻结配置的旧 Run 不启用。策略和 `coverage_rule=ci-observed-minimum.v1`、`reserve_seconds=15`、canonical SHA-256 digest 进入原 pinned_config/config_digest；旧 Run 恢复不从当前 Definition 补开新策略。
+
+只在上一批已 OBSERVED、NEED_DECISION、下一轮尚未 OPEN，且无未决 Tool/HITL/Child 时判断。`ci_evidence.py` 与最终 `validate_report` 共用已读来源提取：COMMITTED Tool 正文、Action projection/source/result digest、同 Frame OBSERVED、同 incident/execution、AVAILABLE 原 manifest 必须相符。必要覆盖为 PARSER_LOG、ENVIRONMENT_RECORD、CASE_REQUIREMENTS，环境能力字段非空。覆盖不是根因正确性或质量 verdict，不替代原报告 Validator/后续 GT 评测。
+
+Alembic `0042_loop_adaptive_decision` 为原 RuntimeLoopFrameRow 增加可空 JSONB `adaptive_decision`；原 LoopFrame DTO 同步支持。记录 version、policy_digest、observation_cursor、evidence_digest、effective_iteration、allowed_actions=FINAL_ONLY、reason、insufficient、decision_id。reason 为 COVERAGE_SUFFICIENT 或 BUDGET_RESERVE，decision_id 由其余字段的 canonical digest 派生。原 Repository 的锁、lease/fencing、resume_generation、row_version 先提交限制，再创建 Snapshot；重复提交读取原决定。数据库触发器禁止修改或清除非空决定，迁移不允许通过 downgrade 丢弃历史限制。
+
+余时小于等于 max(15秒、冻结 Profile 最大 estimated_latency 的两倍)，或只剩一次模型额度/无剩余工具额度时，策略可停止调查。这只是保守限制，不保证最终模型完成；不把 Tool timeout 当平均耗时。至少一个真实已读来源才能进入不足报告终结；零来源返回 LOOP_EVIDENCE_INSUFFICIENT。原模型、Token、成本、轮次和 Deadline 准入仍生效，不能补发额度或额外轮次。
+
+下一轮 Snapshot 保存同一 adaptive_decision，native options 为 `tools=[]/tool_choice=none`，structured 请求明确只允许 FINAL/REFUSAL；完整已观察组和来源保留。终结轮不新增压缩模型调用；无法容纳完整原始组时按原上下文失败合同停止。限制进入 messages/options/snapshot/request digest，不改已 OPEN 的快照。
+
+Driver 在 prepare_batch/prepare_handoff 前拒绝 TOOL_BATCH/HANDOFF；原 accept_batch 在模型响应与 Snapshot 绑定检查后再次拒绝，不能创建 Action/Child/Tool。非法输出沿 LOOP_DECISION_INVALID 停止，不循环重问。最多一个新的逻辑终结轮，Provider fallback/recovery attempt 仍使用原有限预算。insufficient=true 时 FINAL 必须明确 INSUFFICIENT_EVIDENCE 且 uncertainties 非空；REFUSAL 沿原拒绝分支，不伪造完整诊断成功。
+
+恢复校验决定/策略摘要、原 observation/source 及已冻结限制快照，继续使用原决定和绝对 Deadline。COMMITTED 结果不重读，STARTED/UNKNOWN 仍交原对账流程；到期优先失败。RESULT_READY 仍走原 StepCompletion/OutputGate，CI 业务报告在原投影流程校验。Runtime SUCCEEDED 不等于业务完整诊断成功，INSUFFICIENT_EVIDENCE 必须单独识别。
+
 ## Context / Evidence / 兼容
 
 ContextSnapshotV2 按完整 Batch assistant+全部 results 分组；最近两批、任何写/未知分类批次及所有 Handoff 组 mandatory。旧纯只读批次整体替换为低信任摘要，不留下孤立 result。Seed 原样保留；验证只证明来源/结构/覆盖/预算，不声称语义无损。根/Child 共用每 Run 两次压缩、每操作两次 Attempt 的上限。

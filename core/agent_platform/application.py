@@ -136,6 +136,8 @@ class AgentApplicationService:
         if request.expected_workflow_version is not None and request.expected_workflow_version != workflow_version:
             raise AgentApplicationError("WORKFLOW_VERSION_MISMATCH", "Workflow 版本与请求断言不一致")
         options = request.options or {}
+        if request.agent_id == "ci_execution_status" and options:
+            raise AgentApplicationError("BUSINESS_OPTION_UNKNOWN", "状态查询不接受客户端策略选项")
         if set(options) - set(definition.business_options):
             raise AgentApplicationError("BUSINESS_OPTION_UNKNOWN", "请求包含未声明的业务选项")
         if "text" not in definition.accepted_input_types:
@@ -303,9 +305,16 @@ class AgentApplicationService:
         *,
         retrieval_cache_authz_domain: str | None = None,
         memory_access_context: MemoryAccessContext | None = None,
+        adaptive_route: dict | None = None,
     ) -> ExecutionResult:
         registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
         runtime_options = {}
+        if adaptive_route is not None:
+            from core.agent_platform.ci_status import validate_route
+            route = validate_route(adaptive_route, agent_id=request.agent_id)
+            if route["query"] != json.loads(request.input):
+                raise AgentApplicationError("CI_STATUS_INPUT_INVALID", "查询与可信绑定不一致")
+            runtime_options["adaptive_route"] = route
         if definition.business_options.get("stage13_single_call") is True:
             from core.runtime.budget import RunBudget
             runtime_options = {"persist": False, "budget": RunBudget(

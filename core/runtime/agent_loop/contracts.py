@@ -78,6 +78,7 @@ class LoopFrame:
     committed_observation_cursor: int = 0
     resume_generation: int = 0
     row_version: int = 1
+    adaptive_decision: dict | None = None
 
 
 @dataclass(frozen=True)

@@ -702,6 +702,8 @@ class DurableExecutionRepository:
             raise RuntimeError("LOOP_VERSION_UNSUPPORTED")
         if canonical_payload_digest(frame.context_seed) != frame.seed_digest or canonical_payload_digest(frame.pinned_config) != frame.config_digest:
             raise RuntimeError("LOOP_PINNED_CONFIG_UNAVAILABLE")
+        from core.runtime.agent_loop.adaptive_stop import validate_restriction
+        validate_restriction(frame)
 
     @staticmethod
     def _touch_loop(frame: RuntimeLoopFrameRow, lease: RunLease) -> None:
@@ -726,6 +728,10 @@ class DurableExecutionRepository:
     async def accept_loop_batch(self, lease, frame_id, iteration_no, **kwargs):
         from .agent_loop import accept_batch
         return await accept_batch(self, lease, frame_id, iteration_no, **kwargs)
+
+    async def consider_loop_final_only(self, lease, frame_id, **kwargs):
+        from .agent_loop import consider_final_only
+        return await consider_final_only(self, lease, frame_id, **kwargs)
 
     async def load_loop_actions(self, lease, frame_id, iteration_no):
         from .agent_loop import load_actions
@@ -835,6 +841,8 @@ class DurableExecutionRepository:
             if frame.schema_version == 2:
                 from core.runtime.agent_loop.handoff import loop_options
                 expected_options = loop_options(frame)
+            if frame.adaptive_decision is not None and current is None and frame.current_iteration >= frame.adaptive_decision["effective_iteration"]:
+                raise RuntimeError("LOOP_DECISION_INVALID")
             if candidate["options"] != expected_options or candidate["output_reserve"] != frame.pinned_config["max_tokens"]:
                 raise RuntimeError("CONTEXT_VALIDATION_FAILED")
             expected = snapshot_candidate(frame, groups, candidate["options"], candidate["output_reserve"], summary=candidate["summary"], kind=candidate["kind"])

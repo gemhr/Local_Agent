@@ -1666,6 +1666,9 @@ class AgentRouter:
         return self._parse_tool_call(planner_response)
 
     def _discover_run_tools(self, user_query, agent_id, run_context):
+        if getattr(run_context, "adaptive_route", None) is not None:
+            from core.agent_platform.ci_status import TOOL_NAME
+            return self.tool_discovery.discover_tools(TOOL_NAME, agent_id, run_context)
         candidates = self.tool_discovery.discover_tools(user_query, agent_id, run_context)
         definition = self.agent_registry.resolve(agent_id).definition
         catalog = getattr(self, "skill_catalog", None)
@@ -1931,6 +1934,7 @@ class AgentRouter:
         tool_call: tuple[str, str] | None = None,
         native_assistant_message: dict[str, object] | None = None,
         validated_invocation: ToolInvocation | None = None,
+        tool_outcome_out: list | None = None,
         prompt_identity_out: list[PromptIdentity] | None = None,
         context_selection_records_out: list[ContextSelectionRecord] | None = None,
         business_definition=None,
@@ -2182,6 +2186,10 @@ class AgentRouter:
         )
         if isinstance(outcome, ToolExecutionError):
             raise ToolExecutionFailed(outcome)
+        if tool_outcome_out is not None:
+            active_context.raise_if_inactive()
+            tool_outcome_out.append(outcome)
+            return messages
         observation = self._bounded_tool_observation(outcome.output)
         if run_context is not None:
             run_context.raise_if_inactive()

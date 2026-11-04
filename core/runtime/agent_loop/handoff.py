@@ -57,6 +57,8 @@ def freeze_targets(router, parent_id, context, *, frozen_targets=None):
 def loop_options(frame):
     if frame.context_seed["protocol_mode"] != "native":
         return {}
+    if getattr(frame, "adaptive_decision", None) is not None:
+        return {"tools": [], "tool_choice": "none"}
     tools = [t["schema"] for t in frame.pinned_config["tools"]]
     targets = frame.pinned_config.get("delegation_targets", {}) if frame.frame_role == "ROOT" else {}
     if targets:

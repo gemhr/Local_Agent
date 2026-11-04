@@ -688,11 +688,13 @@ class CoordinatedRuntimeFactory:
                     or profile.model_identity != p["model_identity"] or profile.max_output_tokens < p["max_tokens"]
                     or dict(definition.business_options.get("loop_policy", {})) != LIMITS):
                 raise ValueError("E2E_ADMISSION_RUNTIME_CONFIGURATION_INVALID")
+        from core.agent_platform.ci_status import ADAPTER_ID, CIStatusAdapter
         self._adapter_factory = AgentAdapterFactory(
             agent_registry,
             (
                 ("agent_router_adapter", AgentRouterSingleAgentAdapter(router)),
                 ("synthesis_agent_adapter", SynthesisAgentAdapter(router)),
+                (ADAPTER_ID, CIStatusAdapter(router)),
             ),
         )
 
@@ -722,6 +724,7 @@ class CoordinatedRuntimeFactory:
         execution_policy: str | None = None,
         loop_policy: LoopPolicyV1 | None = None,
         loop_correlation: dict | None = None,
+        adaptive_route: dict | None = None,
         memory_access_context: MemoryAccessContext | None = None,
     ) -> CoordinatedRunScope:
         """默认 Coordinated 入口：始终经过动态 PlanResolver。"""
@@ -746,6 +749,7 @@ class CoordinatedRuntimeFactory:
             execution_policy=execution_policy,
             loop_policy=loop_policy,
             loop_correlation=loop_correlation,
+            adaptive_route=adaptive_route,
             memory_access_context=memory_access_context,
         )
 
@@ -822,7 +826,7 @@ class CoordinatedRuntimeFactory:
         if getattr(lease, "run_id", run_id) != run_id:
             raise ValueError("recovery lease run_id mismatch")
         is_loop = getattr(root, "execution_policy", "fixed-plan.v1") in {LOOP_POLICY, LOOP_POLICY_V2}
-        if is_loop and query is not None:
+        if (is_loop or root.resume_input.get("adaptive_route") is not None) and query is not None:
             raise ValueError("Loop recovery cannot override frozen input")
         payload = getattr(root, "plan_payload", None)
         plan = plan_from_payload(payload)
@@ -1009,6 +1013,7 @@ class CoordinatedRuntimeFactory:
         execution_policy: str | None = None,
         loop_policy: LoopPolicyV1 | None = None,
         loop_correlation: dict | None = None,
+        adaptive_route: dict | None = None,
         memory_access_context: MemoryAccessContext | None = None,
     ) -> CoordinatedRunScope:
         """Create one identity set and clean up any partially built transport."""
@@ -1017,6 +1022,21 @@ class CoordinatedRuntimeFactory:
         definition = self._agent_registry.resolve(agent_id).definition
         selected_policy = (getattr(rehydrated_root, "execution_policy", None)
                            or execution_policy or definition.business_options.get("execution_policy", "fixed-plan.v1"))
+        from core.agent_platform.ci_status import AGENT_ID as STATUS_AGENT, ADAPTER_ID as STATUS_ADAPTER, MODES, validate_route
+        if rehydrated_root is not None:
+            adaptive_route = rehydrated_root.resume_input.get("adaptive_route")
+        if adaptive_route is not None:
+            if self._agent_registry.resolve(agent_id).execution_adapter_id != STATUS_ADAPTER:
+                raise ValueError("CI_STATUS_DEFINITION_BINDING_INVALID")
+            adaptive_route = validate_route(adaptive_route, agent_id=agent_id,
+                execution_policy=selected_policy if rehydrated_root is not None else None)
+            # 查询两组均不写对话记忆/触发模型提炼；Run 与 Tool 持久化独立保留。
+            persist = False
+            selected_policy = MODES[adaptive_route["mode"]]
+            if rehydrated_root is None:
+                static_plan = self._router.build_single_agent_plan(agent_id, query)
+        elif agent_id == STATUS_AGENT:
+            raise ValueError("CI_STATUS_TRUSTED_BINDING_REQUIRED")
         if selected_policy not in {"fixed-plan.v1", LOOP_POLICY, LOOP_POLICY_V2}:
             raise ValueError("unsupported execution policy")
         if selected_policy in {LOOP_POLICY, LOOP_POLICY_V2}:
@@ -1026,7 +1046,7 @@ class CoordinatedRuntimeFactory:
                 raise ValueError("Loop policy requires pinned model cost metadata")
             if definition.output_schema is not None:
                 refusal_kinds = definition.output_schema.get("properties", {}).get("kind", {}).get("enum", ())
-                if "REFUSAL" not in refusal_kinds:
+                if "REFUSAL" not in refusal_kinds and adaptive_route is None:
                     raise ValueError("Loop output schema must explicitly declare a REFUSAL kind")
             loop_policy = loop_policy or (LoopPolicyV2 if selected_policy == LOOP_POLICY_V2 else LoopPolicyV1)(**dict(definition.business_options.get("loop_policy", {})))
             if selected_policy == LOOP_POLICY_V2 and not isinstance(loop_policy, LoopPolicyV2):
@@ -1110,6 +1130,7 @@ class CoordinatedRuntimeFactory:
                     register_delivery(run_context.run_id, definition.output_schema)
             durable_control = self._services.durable_run_control
             run_context.execution_policy = selected_policy
+            run_context.adaptive_route = adaptive_route
             run_context.loop_policy = loop_policy
             run_context.loop_correlation = ((rehydrated_root.resume_input.get("agent_loop") or {}).get("correlation", {})
                 if rehydrated_root is not None else loop_correlation or {})
@@ -1329,7 +1350,7 @@ class CoordinatedRuntimeFactory:
                         for performer_id in performer_ids
                     }
                     run_context.bind_performer_identities(performer_identities)
-                if selected_policy in {LOOP_POLICY, LOOP_POLICY_V2}:
+                if selected_policy in {LOOP_POLICY, LOOP_POLICY_V2} or adaptive_route is not None:
                     coordinator._planning_request = PlanningRequest(agent_id, query)
                     coordinator._persist = persist
                     coordinator._invocation_bindings = (StepInvocationBindings((AgentInvocationSpec(

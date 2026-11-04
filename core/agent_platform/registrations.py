@@ -5,6 +5,7 @@ from core.agent_platform.contracts import AgentRegistration
 from core.agent_platform.ci_diagnosis import definition
 from core.agent_platform.ci_diagnosis_tools import TOOL_NAMES
 from core.incidents.service import AGENT_ID
+from core.agent_platform.ci_status import definition as status_definition, AGENT_ID as STATUS_AGENT, TOOL_NAME as STATUS_TOOL
 from core.feature_impact.agent import definition as feature_definition
 from core.feature_impact.tools import TOOL_NAMES as FEATURE_TOOLS, AGENT_ID as FEATURE_AGENT
 
@@ -12,14 +13,14 @@ from core.feature_impact.tools import TOOL_NAMES as FEATURE_TOOLS, AGENT_ID as F
 # 新 Agent、Workflow、Tool 和符号 Provider 授权都在同一个 startup bundle
 # 中声明；内置 Agent 仍由平台 seed 提供。
 BUSINESS_REGISTRATION_BUNDLE = AgentRegistrationBundle(
-    registrations=(AgentRegistration(definition()), AgentRegistration(feature_definition())),
+    registrations=(AgentRegistration(definition()), AgentRegistration(feature_definition()), AgentRegistration(status_definition())),
     workflows=(),
     tools=(),
     model_profile_ids=frozenset({"default"}),
     retrieval_profile_ids=frozenset(),
     memory_profile_ids=frozenset(),
     tool_grants={**{name: frozenset({AGENT_ID, FEATURE_AGENT}) for name in ("load_skill", "read_skill_resource")}, **{name: frozenset({AGENT_ID}) for name in TOOL_NAMES},
-        **{name: frozenset({FEATURE_AGENT}) for name in FEATURE_TOOLS}},
+        **{name: frozenset({FEATURE_AGENT}) for name in FEATURE_TOOLS}, STATUS_TOOL: frozenset({STATUS_AGENT})},
 )
 
 

@@ -340,6 +340,12 @@ Snapshot final messages、工具原始来源、压缩请求和摘要正文仅存
 v2 整批 typed 校验及持久接受先于 dispatch；control function 不是真实工具。Child 工具/模型为 Registry、父权限和根调用者的交集，只使用有界委派数据及根 MemoryGuard，不检索/写入自己的 Memory 或执行 Formation。所有新尝试、retry/fallback 继续检查原身份/撤销/取消；Child 结果保持 AGENT_DERIVED_DATA，不能提权为 system/developer 授权。旧 Evidence 对 v2 明确不支持，不过滤后伪造 COMPLETE。详见 [合同](agent_execution_v2.md)。
 
 
+## CI 状态查询身份边界
+
+状态查询仅接受 HUMAN Principal，经 `IncidentService.execution_detail → related_execution → resolution_scope` 校验 incident 归属及原始/verification 执行关联，再冻结查询绑定。MemoryAccessContext 不用于构造人类授权。
+共享 Tool 不接收 incident/execution 参数，模型正文不能扩大 scope；新读取复核当前 UserRow（未禁用、HUMAN、同 subject/tenant）、RUN ObjectOwnership、原身份到期时间及现有 incident/execution scope。持久化绑定不授予新的读取权限；已提交结果恢复使用原结果。
+`adaptive_route` 只属于受信服务参数及既有受控 Run resume_input，不进入 Trace/Metric；查询 API 只返回已接受的业务输出和安全 Run 结果字段，不暴露内部 rejected_output。
+
 ## Skill 方法资源边界
 
 Loop v2 的可见目录来自当前 AgentDefinition 与有效 Reader 工具集合；Child 使用自身定义和父子工具权限交集，不继承父正文。
