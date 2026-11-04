@@ -179,6 +179,7 @@ class ChatService:
         execution_policy=None,
         loop_policy=None,
         loop_correlation=None,
+        adaptive_stop_enabled=None,
     ) -> tuple[str | None, RunCoordinatorResult]:
         """Isolated evaluation-only entry mirroring ``run_coordinated_agent``.
 
@@ -206,7 +207,7 @@ class ChatService:
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
-            **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation}
+            **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation, "adaptive_stop_enabled": adaptive_stop_enabled}
                if execution_policy is not None else {}),
             _result_out=results,
         ):
@@ -296,6 +297,7 @@ class ChatService:
         execution_policy=None,
         loop_policy=None,
         loop_correlation=None,
+        adaptive_stop_enabled=None,
     ):
         factory = self._coordinated_runtime_factory
         if factory is None:
@@ -321,7 +323,7 @@ class ChatService:
                 workflow_id=workflow_id,
                 workflow_version=workflow_version,
             **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
-                **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation}
+                **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation, "adaptive_stop_enabled": adaptive_stop_enabled}
                    if execution_policy is not None else {}),
             )
             scope.run_context.attach_retrieval_cache_access(
@@ -420,6 +422,7 @@ class ChatService:
         execution_policy=None,
         loop_policy=None,
         loop_correlation=None,
+        adaptive_stop_enabled=None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Isolated evaluation-only factory path (strict typed control only)."""
         scope = await self._create_coordinated_scope(
@@ -439,7 +442,7 @@ class ChatService:
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
-            **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation}
+            **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation, "adaptive_stop_enabled": adaptive_stop_enabled}
                if execution_policy is not None else {}),
         )
         consumer = self._consume_scope_events(
@@ -477,6 +480,7 @@ class ChatService:
         execution_policy=None,
         loop_policy=None,
         loop_correlation=None,
+        adaptive_stop_enabled=None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Isolated evaluation-only event stream mirroring the production path."""
         events = self._stream_factory_coordinated_events_evaluation(
@@ -498,7 +502,7 @@ class ChatService:
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
-            **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation}
+            **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation, "adaptive_stop_enabled": adaptive_stop_enabled}
                if execution_policy is not None else {}),
         )
         try:

@@ -353,6 +353,7 @@ class AgentApplicationService:
         execution_policy=None,
         loop_policy=None,
         loop_correlation=None,
+        adaptive_stop_enabled=None,
         memory_access_context: MemoryAccessContext | None = None,
     ) -> ExecutionResult:
         """受信任评测入口；控制 seam 不属于 PUBLIC ExecutionRequest。"""
@@ -372,6 +373,7 @@ class AgentApplicationService:
             execution_policy=execution_policy,
             loop_policy=loop_policy,
             loop_correlation=loop_correlation,
+            adaptive_stop_enabled=adaptive_stop_enabled,
             memory_access_context=memory_access_context,
             session_id=request.session_id,
             agent_version=definition.agent_version,

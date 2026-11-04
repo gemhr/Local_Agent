@@ -105,14 +105,19 @@ class DurableExecutionRepository:
                 if quality_receipt is None or not validate_record(admission, root=root, receipt=quality_receipt):
                     raise ValueError("E2E_ADMISSION_ROOT_MISMATCH")
             if quality_receipt is not None:
-                from core.runtime.agent_loop.quality_contract import quality_runtime_config_digest
-                loop = root.resume_input.get("agent_loop") or {}
-                agent_id = quality_receipt.correlation["agent_id"]
-                pin = quality_receipt.execution_manifest["agents"][agent_id]
-                if (values.get("execution_policy") != pin["execution_policy"]
-                        or loop.get("memory_effect_policy") != quality_receipt.execution_manifest.get("memory_effect_policy")
-                        or quality_runtime_config_digest(loop.get("pinned_config")) != pin["runtime_config_digest"]):
-                    raise ValueError("QUALITY_RUNTIME_PIN_INVALID")
+                adaptive = quality_receipt.execution_manifest.get("protocol_version") == "adaptive-execution-evaluate.v1"
+                if adaptive:
+                    from core.runtime.adaptive_execution_evidence import validate_admission
+                    validate_admission(root, quality_receipt)
+                else:
+                    from core.runtime.agent_loop.quality_contract import quality_runtime_config_digest
+                    loop = root.resume_input.get("agent_loop") or {}
+                    agent_id = quality_receipt.correlation["agent_id"]
+                    pin = quality_receipt.execution_manifest["agents"][agent_id]
+                    if (values.get("execution_policy") != pin["execution_policy"]
+                            or loop.get("memory_effect_policy") != quality_receipt.execution_manifest.get("memory_effect_policy")
+                            or quality_runtime_config_digest(loop.get("pinned_config")) != pin["runtime_config_digest"]):
+                        raise ValueError("QUALITY_RUNTIME_PIN_INVALID")
             session.add(RuntimeRunExecutionRow(**values))
             for step in root.plan.steps:
                 session.add(RuntimeStepExecutionRow(
@@ -508,7 +513,7 @@ class DurableExecutionRepository:
             # 已有 Runtime / Memory 锁之后才取 Receipt；事务内仅存安全投影。
             from core.persistence.models import RuntimeAgentEvaluationReceiptRow
             receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id, with_for_update=True)
-            if receipt is not None:
+            if receipt is not None and receipt.execution_manifest.get("protocol_version") != "adaptive-execution-evaluate.v1":
                 from core.runtime.agent_loop.quality_capture import request_capture
                 from core.runtime.agent_loop.quality_contract import canonical_bytes
                 capture = dict(receipt.evaluation_capture)

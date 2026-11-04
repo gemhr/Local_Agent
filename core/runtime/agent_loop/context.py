@@ -174,7 +174,15 @@ def pinned_loop_config(router, agent_id, run_context, *, request_counting_policy
         "estimator": type(router.context_builder.estimator).__module__ + "." + type(router.context_builder.estimator).__qualname__,
     }
     from .adaptive_stop import AGENT_ID, POLICY, POLICY_DIGEST
-    if agent_id == AGENT_ID and frozen_config is not None and "adaptive_stop" not in frozen_config:
+    selection = (frozen_config.get("adaptive_stop_enabled") if frozen_config is not None
+        else getattr(run_context, "adaptive_stop_enabled", None))
+    if selection is not None:
+        if agent_id != AGENT_ID or type(selection) is not bool:
+            raise ValueError("LOOP_ADAPTIVE_SELECTION_INVALID")
+        config["adaptive_stop_enabled"] = selection
+    if selection is False:
+        pass
+    elif agent_id == AGENT_ID and frozen_config is not None and "adaptive_stop" not in frozen_config:
         # 旧 Run 未冻结该策略；只忽略本轮新增的可选键，不补开策略。
         config["agent"]["business_options"].pop("adaptive_stop", None)
     elif agent_id == AGENT_ID and definition.business_options.get("adaptive_stop") == POLICY["version"]:

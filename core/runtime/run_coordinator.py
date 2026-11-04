@@ -1311,6 +1311,8 @@ class RunCoordinator:
         }
         if self.run_context.adaptive_route is not None:
             resume_input["adaptive_route"] = self.run_context.adaptive_route
+        if getattr(self.run_context, "adaptive_evaluation_environment", None) is not None:
+            resume_input["adaptive_evaluation_environment"] = self.run_context.adaptive_evaluation_environment
         if self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2}:
             from core.runtime.agent_loop.context import prepare_loop_seed
             router = self._multi_agent_driver._router

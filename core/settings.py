@@ -741,6 +741,7 @@ class Settings:
     quality_evaluation_project_id: str = ""
     quality_evaluation_service_principal_id: str = ""
     quality_evaluation_configuration_path: str = ""
+    adaptive_evaluation_configuration_path: str = ""
     agentevalops_connect_timeout_seconds: float = 0.5
     agentevalops_total_deadline_seconds: float = 3.0
     evaluation_mode: bool = False
@@ -1467,6 +1468,7 @@ class Settings:
             quality_evaluation_project_id=quality_values[0],
             quality_evaluation_service_principal_id=quality_values[1],
             quality_evaluation_configuration_path=quality_values[2],
+            adaptive_evaluation_configuration_path=os.getenv("LOCAL_AGENT_ADAPTIVE_EVALUATION_CONFIGURATION_PATH", "").strip(),
             agentevalops_connect_timeout_seconds=agentevalops_connect_timeout_seconds,
             agentevalops_total_deadline_seconds=agentevalops_total_deadline_seconds,
             evaluation_mode=evaluation_mode,

@@ -346,6 +346,10 @@ v2 整批 typed 校验及持久接受先于 dispatch；control function 不是�
 共享 Tool 不接收 incident/execution 参数，模型正文不能扩大 scope；新读取复核当前 UserRow（未禁用、HUMAN、同 subject/tenant）、RUN ObjectOwnership、原身份到期时间及现有 incident/execution scope。持久化绑定不授予新的读取权限；已提交结果恢复使用原结果。
 `adaptive_route` 只属于受信服务参数及既有受控 Run resume_input，不进入 Trace/Metric；查询 API 只返回已接受的业务输出和安全 Run 结果字段，不暴露内部 rejected_output。
 
+## 自适应评测边界
+
+CI 自适应评测的专用 HUMAN 入口、冻结 Case allowlist 与跨仓证据投影见 [自适应评测合同](adaptive_evaluation_contract.md)。该入口不改变原 SERVICE evaluation scope，不允许业务 options 覆盖策略；Run/工具/调查仍经原对象归属及安全 Owner。证据只带类型化状态、摘要、业务允许输出和调用计数，不输出原 Tool 参数、异常正文或本机路径。
+
 ## Skill 方法资源边界
 
 Loop v2 的可见目录来自当前 AgentDefinition 与有效 Reader 工具集合；Child 使用自身定义和父子工具权限交集，不继承父正文。

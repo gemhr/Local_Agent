@@ -128,7 +128,7 @@ class IncidentService:
             raise CIError("CI_EVIDENCE_SCOPE_DENIED", 404)
         return dict(incident_id=incident_id, **value)
 
-    async def admit(self, principal, incident_id, request_id):
+    async def admit(self, principal, incident_id, request_id, *, run_id=None, session_id=None):
         async with self.database.transaction() as session:
             incident = await self.owned_incident(session, principal, incident_id, lock=True)
             old = (await session.execute(select(InvestigationRow).where(InvestigationRow.incident_id == incident_id,
@@ -137,7 +137,7 @@ class IncidentService:
                 return old, False
             version = (await session.execute(select(func.max(InvestigationRow.report_version)).where(InvestigationRow.incident_id == incident_id))).scalar() or 0
             row = InvestigationRow(investigation_id=str(uuid4()), incident_id=incident_id, request_id=request_id,
-                report_version=version + 1, run_id=str(uuid4()), session_id=incident.session_id, agent_id=AGENT_ID,
+                report_version=version + 1, run_id=run_id or str(uuid4()), session_id=session_id or incident.session_id, agent_id=AGENT_ID,
                 agent_version=AGENT_VERSION, created_at=datetime.now(timezone.utc), projection_status="PENDING")
             session.add(row)
             await session.flush()

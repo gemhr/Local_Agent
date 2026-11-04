@@ -1670,6 +1670,12 @@ async def lifespan(app: FastAPI):
         app.state.run_execution_supervisor, app.state.authorization_service,
         real_model=settings.llm_backend in {"remote", "hybrid", "local"},
     )
+    from core.agent_platform.adaptive_evaluation import Configuration, AdaptiveEvaluationService
+    app.state.adaptive_evaluation_service = None
+    if settings.adaptive_evaluation_configuration_path:
+        adaptive_config = Configuration.model_validate_json(FilePath(settings.adaptive_evaluation_configuration_path).read_text(encoding="utf-8"))
+        app.state.adaptive_evaluation_service = AdaptiveEvaluationService(adaptive_config, incident_service,
+            agent_application_service, app.state.ci_investigation_service, execution_repository)
     from core.feature_impact.agent import FeatureInvestigationService
     app.state.feature_investigation_service = FeatureInvestigationService(
         app.state.feature_impact_service, agent_application_service, app.state.authorization_service,
@@ -2282,6 +2288,10 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                 raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
             if request.url.path in _ADMIN_ONLY_API_PATHS:
                 require_role(request.state.principal, "ADMIN")
+            elif request.url.path == "/api/runtime/evaluation-execute/adaptive/v1":
+                # CI 业务仍由原 HUMAN 身份及对象归属授权；具体冻结项目/Case 在受控入口校验。
+                if request.state.principal.principal_kind != "HUMAN":
+                    raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
             elif request.url.path.startswith("/api/runtime/evaluation-execute/"):
                 require_scope(request.state.principal, EVALUATION_EXECUTE_SCOPE)
             elif request.url.path == "/api/ci/quality/evaluate" and request.method == "POST":
@@ -4171,6 +4181,9 @@ from core.agent_platform.memory_api import register_memory_api
 register_memory_api(app, require_service=require_service, authorize_run=_authorize_run)
 
 from core.agent_platform.agent_loop_evaluation import register_agent_loop_evaluation
+from core.agent_platform.adaptive_evaluation import register as register_adaptive_evaluation
+
+register_adaptive_evaluation(app)
 
 register_agent_loop_evaluation(
     app, settings=settings, require_service=require_agent_application_service,

@@ -36,7 +36,7 @@ def public_response(run_id="11111111-1111-4111-8111-111111111111",
             observation_source_digest=digest(f"result-{number}") if action else None,
             observation_digest=digest(f"observation-{number}") if action else None,
             observation_cursor=number if action else None))
-        models.append(Row(attempt_number=1, model_attempt_number=number, state="COMPLETED",
+        models.append(Row(attempt_number=1, model_attempt_number=number, state="COMPLETED", purpose="DECISION",
                           loop_frame_id=frame.frame_id, loop_iteration_no=number))
         if action:
             tools.append(Row(invocation_id=f"action-{number}", tool_name=f"public_tool_{number}",

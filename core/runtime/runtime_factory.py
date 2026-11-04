@@ -724,6 +724,7 @@ class CoordinatedRuntimeFactory:
         execution_policy: str | None = None,
         loop_policy: LoopPolicyV1 | None = None,
         loop_correlation: dict | None = None,
+        adaptive_stop_enabled: bool | None = None,
         adaptive_route: dict | None = None,
         memory_access_context: MemoryAccessContext | None = None,
     ) -> CoordinatedRunScope:
@@ -749,6 +750,7 @@ class CoordinatedRuntimeFactory:
             execution_policy=execution_policy,
             loop_policy=loop_policy,
             loop_correlation=loop_correlation,
+            adaptive_stop_enabled=adaptive_stop_enabled,
             adaptive_route=adaptive_route,
             memory_access_context=memory_access_context,
         )
@@ -1013,6 +1015,7 @@ class CoordinatedRuntimeFactory:
         execution_policy: str | None = None,
         loop_policy: LoopPolicyV1 | None = None,
         loop_correlation: dict | None = None,
+        adaptive_stop_enabled: bool | None = None,
         adaptive_route: dict | None = None,
         memory_access_context: MemoryAccessContext | None = None,
     ) -> CoordinatedRunScope:
@@ -1131,6 +1134,7 @@ class CoordinatedRuntimeFactory:
             durable_control = self._services.durable_run_control
             run_context.execution_policy = selected_policy
             run_context.adaptive_route = adaptive_route
+            run_context.adaptive_stop_enabled = adaptive_stop_enabled
             run_context.loop_policy = loop_policy
             run_context.loop_correlation = ((rehydrated_root.resume_input.get("agent_loop") or {}).get("correlation", {})
                 if rehydrated_root is not None else loop_correlation or {})
@@ -1207,6 +1211,10 @@ class CoordinatedRuntimeFactory:
             if callable(prepare_tool_snapshot):
                 # Snapshot 持久化/兼容校验完成后，才允许 PlanResolver 或模型运行。
                 await prepare_tool_snapshot(run_context, agent_id, query)
+            if quality_receipt is not None and quality_receipt.execution_manifest.get("protocol_version") == "adaptive-execution-evaluate.v1":
+                from core.runtime.adaptive_execution_evidence import pin_environment
+                run_context.adaptive_evaluation_environment = (rehydrated_root.resume_input["adaptive_evaluation_environment"]
+                    if rehydrated_root is not None else pin_environment(self._router, run_context, quality_receipt))
             ledger = rehydrated_ledger or BudgetLedger(
                 budget or RunBudget(), deadline_remaining=run_context.remaining_seconds
             )
