@@ -31,6 +31,14 @@ Core Run ID 等于 Attempt ID；复用唯一准入 Receipt，重复请求只读�
 
 `fixed-plan.v1` / `durable-agent-loop.v2` 是 engine policy，`FAST_PATH` / `AGENT_LOOP` 是策略模式。路由取自原 `resume_input.adaptive_route`；FINAL_ONLY 逐字段复制原 `RuntimeLoopFrameRow.adaptive_decision`，不生成 CONTINUE 或新执行授权。
 
+CI Diagnosis 的可信 Definition 在原 business_options 中冻结 `final_report_schema`。Loop v2 仅对该 Agent 的 FINAL 复用原 Schema Guard，在接受决策前检查 JSON 对象、必需字段、类型和枚举；非法普通文本（含 DSML）沿原 LOOP_DECISION_INVALID 停止，不转换为 ToolCall，也不追加模型调用。Schema 只使用当前 matcher 支持的子集，完整 Pydantic、长度/条件及来源证据仍由原 validate_report 校验。REFUSAL 继续走原协议，非 CI Agent 继续使用原 output_schema；不把报告 Schema 安装到全局 OutputGate/客户端交付层。该定义变化进入新 Run 的原配置 digest，不能改写历史冻结记录或将历史失败改为成功。
+
+可信 CI Definition 的 `business_options.final_response_format={"type":"json_object"}` 仅在 native FINAL_ONLY 阶段生成 `response_format` 请求参数；调查阶段及非 CI Agent 不启用。该字段先进入 ContextSnapshot/options 及摘要，再贯通原 ModelInvocation、GeneratorModelAdapter 和 RemoteLLMEngine `_body`，实验字节预检与发送复用同一构造和 HTTPX 编码，32768 bytes 上限涵盖新增字段。默认普通请求不发送该参数，`supports_provider_structured_output` 仍为 false；JSON Object 不保证完整业务 Schema。空白或非法文本沿原失败路径处理，无重试/修补调用。原 native REFUSAL 保留，content 中的 JSON 拒答文本不会转换为原生拒答身份。
+
+Baseline 没有独立、可预先识别的最终生成请求；不为其新增阶段或调用。因此仅 B 的 FINAL_ONLY 会应用上述格式参数，未来 A/B 属于组合策略探索，不能将全部差异单独归因于 Adaptive Stop。
+
+Step 失败收尾仍由原 ExecutionRepository 在当前 lease/fence/attempt 下完成：Executor 的预算取消传递实际启动 attempt，Coordinator 的 LoopStopped 收尾在 Root 终结前原子更新 Step 并追加 STEP_COMPLETED。已终结 Step 不重复发布完成事件；事务失败进入原清理错误投影，不以单独 Journal 事件冒充 Step 已持久完成。
+
 ## 回执
 
 共同字段：`schema_version`、`identity`、`run_id`、`comparability`、`strategy`、`runtime`、`business`、`metrics`、`mode_evidence`。identity 保留 project、EvaluationRun、Attempt、request、Case ID/version/digest、Dataset digest、input digest 与 Core Run。
@@ -41,6 +49,12 @@ Core Run ID 等于 Attempt ID；复用唯一准入 Receipt，重复请求只读�
 - comparability 冻结实际模型 profiles/adapter/routing 配置、已解析工具 schema/spec/adapter 摘要、授权摘要、超时、业务输入摘要。调查另带真实初始 Seed digest。恢复读取原摘要，不重新选择策略。
 
 本协议不改变原 Journal、Trace、Snapshot、Loop 证据或业务状态机；复用原 Receipt 表，不新增评测数据库体系。
+
+## 标准模型计量准入
+
+临时 HUMAN 真实实验特批准入已撤销。服务端不再接受其配置字段，也不签发、绑定或恢复该实验授权。标准远程 Profile 的 HEURISTIC / reliable=false / admissible=false 继续由原 Request Assessment 和 Context Admission 拒绝，不发 HTTP、不启动 ModelAttempt；不得通过提高预算或标记可靠来绕过。既有受控 SERVICE/E2E 合同保持独立原条件，不属于普通远程准入。历史实验授权仅保留在归档证据中，不能用于新调用或恢复特批执行。
+
+原 Snapshot/options_digest、ModelInvocation 请求摘要、BudgetLedger、Deadline/Cancel、ModelAttempt 和 Retry 合同保持。仅为撤销的特批服务的32 KiB字节上限及其额外SHA-256审计一并移除，不将该实验上限宣称为正常模型请求的通用安全保证。
 
 ## 指标与缺失
 

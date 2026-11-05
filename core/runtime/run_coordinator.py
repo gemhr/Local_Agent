@@ -2177,6 +2177,23 @@ class RunCoordinator:
             return
         for step_id in tuple(sorted(self.agent_state.active_step_ids)):
             try:
+                atomic_mutation = None
+                durable_terminal = False
+                if self._durable_initialized and self._durable_repository is not None:
+                    from core.runtime.execution_aggregate import StepExecutionStatus
+                    image = await self._durable_repository.load(self.run_context.run_id)
+                    row = next(s for s in image.steps
+                        if s.step_id == step_id and s.plan_version == self.plan.version)
+                    durable_terminal = row.status not in {"PENDING", "RUNNING"}
+                    if row.status == "RUNNING":
+                        async def atomic_mutation(event):
+                            await self._durable_repository.complete_step(
+                                self._durable_approval_lease, step_id=step_id,
+                                plan_version=row.plan_version, attempt=row.current_attempt,
+                                result={"content": "", "complete": False},
+                                status=StepExecutionStatus.CANCELLED, safe_error="RUN_TERMINATING",
+                                journal_append=lambda session: self._durable_journal.append_in_transaction(session, event),
+                            )
                 with self.activity_tracker.track(
                     "state_event_transitions_in_flight"
                 ):
@@ -2190,8 +2207,10 @@ class RunCoordinator:
                             error_message="运行终结前取消仍在执行的步骤",
                         ),
                     )
-                    if self.event_emitter is not None:
+                    if self.event_emitter is not None and not durable_terminal:
                         step_emitter = self.event_emitter.for_step(step_id)
+                        if step_emitter.is_closed and atomic_mutation is not None:
+                            raise RuntimeError("durable Step cleanup emitter closed")
                         if not step_emitter.is_closed:
                             try:
                                 step = self.agent_state.steps[step_id]
@@ -2219,8 +2238,11 @@ class RunCoordinator:
                                     component="run_coordinator",
                                     close=True,
                                     ignore_run_cancellation=True,
+                                    atomic_mutation=atomic_mutation,
                                 )
                             except (EventChannelClosedError, RuntimeError):
+                                if atomic_mutation is not None:
+                                    raise
                                 pass
             except Exception:
                 cleanup_error_codes.append("ACTIVE_STEP_CLEANUP_FAILED")

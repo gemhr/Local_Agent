@@ -159,7 +159,7 @@ class ModelSelectionPolicy:
             missing = self._missing(profile, request.capability_requirements, final_required)
             if missing: raise ModelSelectionError("forced_profile_constraints_unmet", requested_profile=profile_id, missing_capabilities=tuple(missing), required_context_window=final_required, available_context_window=profile.context_window)
             self._require_metadata_if_needed(request, profile)
-            if request.budget_snapshot is not None and not BudgetPolicy.feasible(request.budget_snapshot, self._estimated_usage(profile, request.context_requirements.minimum_context_window)):
+            if request.budget_snapshot is not None and not BudgetPolicy.feasible(request.budget_snapshot, self._estimated_usage(profile, request.context_requirements.estimated_input_tokens)):
                 raise ModelSelectionError("forced_remote_budget_unavailable" if profile_id == ModelProfileId.REMOTE_ADVANCED else "forced_profile_budget_unavailable", requested_profile=profile_id)
             reason = ModelSelectionReason.USER_FORCED_LOCAL if profile_id == ModelProfileId.LOCAL_FAST else ModelSelectionReason.USER_FORCED_REMOTE
             return self._decision(profile_id, reason, request.context_requirements.was_truncated)
@@ -168,7 +168,7 @@ class ModelSelectionPolicy:
             for profile in eligible: self._require_metadata_if_needed(request, profile)
         if request.budget_snapshot is not None:
             for profile in eligible: self._require_metadata_if_needed(request, profile)
-            feasible = [p for p in eligible if BudgetPolicy.feasible(request.budget_snapshot, self._estimated_usage(p, request.context_requirements.minimum_context_window))]
+            feasible = [p for p in eligible if BudgetPolicy.feasible(request.budget_snapshot, self._estimated_usage(p, request.context_requirements.estimated_input_tokens))]
             preferred_remote = profiles.get(ModelProfileId.REMOTE_ADVANCED) in eligible and self._requires_remote(request.capability_requirements, profiles.get(ModelProfileId.LOCAL_FAST), raw_required)
             if not feasible:
                 raise ModelSelectionError("budget_unavailable")

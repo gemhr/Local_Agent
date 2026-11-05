@@ -350,7 +350,7 @@ class RemoteLLMEngine:
         return self.provider_kind == "deepseek"
 
     def supports_provider_structured_output(self) -> bool:
-        """当前 Engine 未发送 response_format/json_schema，不能声明 provider guarantee。"""
+        """JSON Object 接线不代表完整 JSON Schema 保证。"""
         return False
 
     def _body(
@@ -363,6 +363,7 @@ class RemoteLLMEngine:
         stream: bool,
         tools: list[dict[str, object]] | None = None,
         tool_choice: str = "auto",
+        response_format: dict[str, str] | None = None,
     ) -> dict[str, object]:
         body: dict[str, object] = {
             "model": self.model_name,
@@ -382,6 +383,10 @@ class RemoteLLMEngine:
         if tools is not None:
             body["tools"] = tools
             body["tool_choice"] = tool_choice
+        if response_format is not None:
+            if response_format != {"type": "json_object"}:
+                raise ValueError("unsupported response_format")
+            body["response_format"] = dict(response_format)
         return body
 
     @staticmethod
@@ -478,6 +483,7 @@ class RemoteLLMEngine:
         timeout_seconds: float | None = None,
         tools: list[dict[str, object]] | None = None,
         tool_choice: str = "auto",
+        response_format: dict[str, str] | None = None,
     ) -> AsyncIterator[ProviderDelta]:
         """Consume native SSE and yield provider-neutral typed deltas."""
         self._raise_cancel_or_deadline(run_context, cancellation_token)
@@ -517,6 +523,7 @@ class RemoteLLMEngine:
             stream=True,
             tools=tools,
             tool_choice=tool_choice,
+            response_format=response_format,
         )
         stream_context = None
         response_entered = False
@@ -821,6 +828,7 @@ class RemoteLLMEngine:
         *,
         tools: list[dict[str, object]],
         tool_choice: str = "auto",
+        response_format: dict[str, str] | None = None,
         enable_thinking: bool = False,
         run_context: object | None = None,
         cancellation_token: object | None = None,
@@ -845,6 +853,7 @@ class RemoteLLMEngine:
                     max_tokens=max_tokens,
                     tools=tools,
                     tool_choice=tool_choice,
+                    response_format=response_format,
                     enable_thinking=enable_thinking,
                     run_context=run_context,
                     cancellation_token=cancellation_token,
@@ -859,6 +868,7 @@ class RemoteLLMEngine:
         *,
         tools: list[dict[str, object]],
         tool_choice: str = "auto",
+        response_format: dict[str, str] | None = None,
         enable_thinking: bool = False,
         run_context: object | None = None,
         cancellation_token: object | None = None,
@@ -877,6 +887,7 @@ class RemoteLLMEngine:
             cancellation_token=cancellation_token,
             tools=tools,
             tool_choice=tool_choice,
+            response_format=response_format,
         ):
             if isinstance(delta, TextDelta):
                 chunks.append(delta.text)

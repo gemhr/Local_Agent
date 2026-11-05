@@ -58,7 +58,13 @@ def loop_options(frame):
     if frame.context_seed["protocol_mode"] != "native":
         return {}
     if getattr(frame, "adaptive_decision", None) is not None:
-        return {"tools": [], "tool_choice": "none"}
+        options = {"tools": [], "tool_choice": "none"}
+        agent = frame.pinned_config["agent"]
+        from .adaptive_stop import AGENT_ID
+        if (agent["agent_id"] == AGENT_ID
+                and agent["business_options"].get("final_response_format") == {"type": "json_object"}):
+            options["response_format"] = {"type": "json_object"}
+        return options
     tools = [t["schema"] for t in frame.pinned_config["tools"]]
     targets = frame.pinned_config.get("delegation_targets", {}) if frame.frame_role == "ROOT" else {}
     if targets:

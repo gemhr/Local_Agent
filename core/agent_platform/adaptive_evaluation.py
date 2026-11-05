@@ -147,9 +147,10 @@ class AdaptiveEvaluationService:
         correlation["run_id"] = str(request.attempt_id)
         correlation["evaluation_project_id"] = correlation.pop("project_id")
         run_id = correlation["run_id"]
+        manifest = dict(protocol_version=PROTOCOL, slice=request.input.slice, strategy=policy, business_input=business,
+            timeout_milliseconds=request.timeout_milliseconds)
         winner, _ = await self.receipts.admit(correlation=correlation, principal=principal,
-            manifest=dict(protocol_version=PROTOCOL, slice=request.input.slice, strategy=policy, business_input=business,
-                timeout_milliseconds=request.timeout_milliseconds), profile=dict(version=PROTOCOL))
+            manifest=manifest, profile=dict(version=PROTOCOL))
         if not winner:
             return await self.capture(principal, run_id)
         if request.input.slice == "STATUS":

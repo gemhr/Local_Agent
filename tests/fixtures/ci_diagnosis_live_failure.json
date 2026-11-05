@@ -1,0 +1,122 @@
+{
+  "source": {
+    "report": "170_solB_wp4_d1_live_experiment.md",
+    "snapshot_digest": "78e2d27c2048a5f21cd6d673a09b4129e962183c22e3784e6d5451cd7d8a0545",
+    "a_sha256": "1ed28050c60be32c5fb868511f4ced71969a567892c96fc8df8e5613e8f7bd99",
+    "b_sha256": "04f85414eade7e13fd8bc1779c26c6fb9fbee2a8c0c8f81baaab20e56b9a595e"
+  },
+  "selection": {
+    "profile": {
+      "is_remote": true,
+      "profile_id": "remote_advanced",
+      "breaker_key": "remote_openai_compatible",
+      "cost_profile": {
+        "is_remote": true,
+        "profile_id": "remote_advanced",
+        "estimated_latency_ms": 3000,
+        "fixed_call_cost_units": 10,
+        "input_cost_units_per_1k_tokens": 2,
+        "output_cost_units_per_1k_tokens": 4
+      },
+      "latency_tier": 2,
+      "quality_tier": 2,
+      "provider_kind": "deepseek",
+      "context_window": 1000000,
+      "model_identity": "deepseek-flash",
+      "supports_tools": true,
+      "max_output_tokens": 4096,
+      "request_counting_mode": "HEURISTIC",
+      "request_framing_bound": 0,
+      "supports_code_reasoning": true,
+      "supports_long_reasoning": true,
+      "request_counting_version": "",
+      "output_accounting_contract": "",
+      "supports_structured_output": true,
+      "supports_native_tool_calling": true,
+      "request_message_framing_bound": 0,
+      "supports_provider_structured_output": false
+    },
+    "budget_totals": {
+      "max_retries": 0,
+      "max_cost_units": 65536,
+      "max_tool_calls": 8,
+      "max_model_calls": 8,
+      "max_total_tokens": 32768,
+      "max_elapsed_seconds": 180
+    },
+    "budget_consumed": {
+      "retries": 0,
+      "cost_units": 50,
+      "tool_calls": 6,
+      "model_calls": 3,
+      "rrf_fusions": 0,
+      "step_starts": 0,
+      "bm25_queries": 0,
+      "input_tokens": 7754,
+      "total_tokens": 8069,
+      "context_chars": 0,
+      "output_tokens": 315,
+      "document_reads": 0,
+      "vector_queries": 0,
+      "embedding_calls": 0,
+      "keyword_queries": 0,
+      "retrieval_calls": 0,
+      "remote_model_calls": 3
+    },
+    "estimated_input_tokens": 16694,
+    "output_reserve": 4096
+  },
+  "final_frame": {
+    "frame_id": "73a7eabe-64b9-5df9-bfe9-2509b7780890",
+    "run_id": "324c56ee-01a2-4f53-b2a8-9acad56e0e42",
+    "step_id": "answer",
+    "schema_version": 2,
+    "frame_role": "ROOT",
+    "execution_agent_id": "ci_incident_investigator",
+    "resume_generation": 0,
+    "current_iteration": 4,
+    "committed_observation_cursor": 3,
+    "loop_policy": {
+      "cost_units": 65536,
+      "max_retries": 0,
+      "failure_mode": "FAIL_FAST",
+      "total_tokens": 32768,
+      "max_batch_size": 2,
+      "max_iterations": 8,
+      "max_tool_calls": 8,
+      "max_child_depth": 1,
+      "max_delegations": 2,
+      "max_model_calls": 8,
+      "max_active_children": 1,
+      "max_elapsed_seconds": 180,
+      "max_batch_concurrency": 1
+    },
+    "adaptive_decision": {
+      "reason": "COVERAGE_SUFFICIENT",
+      "version": "final-only.v1",
+      "decision_id": "b0c21b92376eb602bf4e6309b897bf27887e2938f0f870f9a2fa684550c2c39c",
+      "insufficient": false,
+      "policy_digest": "06be0a1c5be623ccc7f81ce72756b1c114ef87010591c397cc6e1a175a50875f",
+      "allowed_actions": "FINAL_ONLY",
+      "evidence_digest": "796e1d5c82bb262373a8209dfe836f6fac90dd58c3725c1f092f8e76fb757eed",
+      "observation_cursor": 3,
+      "effective_iteration": 4
+    }
+  },
+  "final_output": "\n\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"ci_read_execution_evidence\">\n<｜｜DSML｜｜ parameter name=\"evidence_id\" string=\"true\">f2ff156f-70ab-57b4-a2b6-cf6d8ce85ed1</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n<｜｜DSML｜｜ invoke name=\"ci_read_execution_evidence\">\n<｜｜DSML｜｜ parameter name=\"evidence_id\" string=\"true\">67f82521-3c24-5a00-a922-347a266bdbb7</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>",
+  "incident_id": "d035c8e9-1189-41cb-b438-a39e7569f3d4",
+  "supporting_evidence": [
+    {
+      "evidence_id": "e5e38029-44a7-54b3-9245-aedf5aeb5cfe",
+      "digest": "3c71b27d7d1d41fefe397a42aa25fb6bc99a99392ffef6df6a44f31ba625b459"
+    },
+    {
+      "evidence_id": "45d9201a-b0a8-59d5-9c0d-4659e8a39a14",
+      "digest": "0d7a25924e54eae1b6036a1bf24677494f79036b40016e07e197865c709ad1f3"
+    },
+    {
+      "evidence_id": "bf63ad51-5e1c-5bc0-828d-9679cb7593e7",
+      "digest": "17dd9ff1bce9e81db5d1718466cd85b63efb7881e9497592f8c570d51f47c7b8"
+    }
+  ]
+}

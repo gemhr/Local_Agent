@@ -10,7 +10,7 @@ from .contracts import LoopDecisionV2, LoopStopped, LoopPolicyV2
 from .context import pinned_loop_config
 from .compaction import prepare_context
 from .batch import prepare_batch, advance_batch
-from .adaptive_stop import consider_stop, enforce_final_only
+from .adaptive_stop import AGENT_ID as CI_DIAGNOSIS_AGENT_ID, consider_stop, enforce_final_only
 
 
 class AgentLoopDriverV2:
@@ -68,9 +68,13 @@ class AgentLoopDriverV2:
                     synthetic_id=f"call_{frame.frame_id}_{current.iteration_no}", handoff_targets=frame.pinned_config.get("delegation_targets", {}))
                 enforce_final_only(frame, decision, current.iteration_no)
                 recipes, assistant = prepare_batch(frame, current, decision, context) if decision.kind == "TOOL_BATCH" else ([], None)
-                if decision.kind in {"FINAL", "REFUSAL"} and definition.output_schema is not None:
+                output_schema = definition.output_schema
+                # CI 报告只约束 FINAL；不改变原 REFUSAL 或公开交付 Schema。
+                if decision.kind == "FINAL" and definition.agent_id == CI_DIAGNOSIS_AGENT_ID:
+                    output_schema = definition.business_options.get("final_report_schema", output_schema)
+                if decision.kind in {"FINAL", "REFUSAL"} and output_schema is not None:
                     try:
-                        if not schema_matches(definition.output_schema, json.loads(decision.content)):
+                        if not schema_matches(output_schema, json.loads(decision.content)):
                             raise ValueError("schema")
                     except (TypeError, ValueError):
                         raise LoopStopped("LOOP_DECISION_INVALID") from None

@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any, Mapping, Protocol
 
 from core.runtime.budget import BudgetExceededError
+from core.runtime.model_selection import ModelSelectionError
 from core.runtime.context import RunContext
 from core.runtime.context import RunDeadlineExceededError
 from core.runtime.cancellation import RunCancelledError
@@ -224,6 +225,7 @@ class ParallelExecutor:
         global_semaphore = asyncio.Semaphore(max_concurrency)
         outcomes: dict[str, StepExecutionOutcome] = {}
         completions: dict[str, StepCompletionResult] = {}
+        durable_attempts: dict[str, int] = {}
         was_token_cancelled = False
         fail_fast_triggered = asyncio.Event()
 
@@ -286,6 +288,8 @@ class ParallelExecutor:
             try:  # 覆盖等待全局/资源许可、Driver、to_thread 等待及终态提交前的取消。
                 with activate_span(step_span):
                     durable_attempt = await self._emit_step_started(claim, plan=plan)
+                    if durable_attempt is not None:
+                        durable_attempts[claim.step_id] = durable_attempt
                     run_context.raise_if_inactive()
                     spec = specs.get(claim.step_id, StepConcurrencySpec())
                     async with global_semaphore, resource_semaphores[spec.resource_key]:
@@ -317,9 +321,9 @@ class ParallelExecutor:
                                 fail_fast_triggered.set()
                                 raise _FailFastSignal() from None
                             return
-                        except Exception:
+                        except Exception as exc:
                             code = (
-                                self._driver_failure_code(plan, claim)
+                                self._driver_failure_code(plan, claim, exc)
                                 if effective_completion_owner is not None
                                 else "STEP_EXECUTION_FAILED"
                             )
@@ -437,9 +441,9 @@ class ParallelExecutor:
                 )
                 if failure_mode == ParallelFailureMode.FAIL_FAST:
                     raise _FailFastSignal() from None
-            except Exception:
+            except Exception as exc:
                 code = (
-                    self._driver_failure_code(plan, claim)
+                    self._driver_failure_code(plan, claim, exc)
                     if effective_completion_owner is not None
                     else "STEP_EXECUTION_FAILED"
                 )
@@ -483,15 +487,15 @@ class ParallelExecutor:
         except (LoopStopped, LoopSuspended, MemoryContextError):
             raise
         except asyncio.CancelledError:
-            await self._cancel_unfinished(claims, outcomes, state)
+            await self._cancel_unfinished(claims, outcomes, state, durable_attempts)
             raise
         except (BudgetExceededError, RunDeadlineExceededError):
-            await self._cancel_unfinished(claims, outcomes, state)
+            await self._cancel_unfinished(claims, outcomes, state, durable_attempts)
             raise
         except Exception as exc:
-            await self._cancel_unfinished(claims, outcomes, state)
+            await self._cancel_unfinished(claims, outcomes, state, durable_attempts)
             raise ParallelExecutionInfrastructureError("EXECUTION_INFRASTRUCTURE_ERROR", "并行执行基础设施异常") from exc
-        await self._cancel_unfinished(claims, outcomes, state)
+        await self._cancel_unfinished(claims, outcomes, state, durable_attempts)
         ordered = tuple(outcomes[claim.step_id] for claim in claims)
         ordered_completions = tuple(
             completions[claim.step_id]
@@ -665,6 +669,8 @@ class ParallelExecutor:
                 atomic_mutation=atomic_mutation,
             )
         except (EventChannelClosedError, RuntimeError):
+            if atomic_mutation is not None:
+                raise
             return
 
     def _preflight(self, driver: StepExecutionDriver, mode: StepExecutionMode, specs: Mapping[str, StepConcurrencySpec], claims: tuple[StepClaim, ...]) -> None:
@@ -857,7 +863,11 @@ class ParallelExecutor:
         return outcome
 
     @staticmethod
-    def _driver_failure_code(plan: Plan | None, claim: StepClaim) -> str:
+    def _driver_failure_code(plan: Plan | None, claim: StepClaim, error: Exception | None = None) -> str:
+        if isinstance(error, ModelSelectionError) and error.reason_code in {
+            "budget_unavailable", "forced_remote_budget_unavailable", "forced_profile_budget_unavailable",
+        }:
+            return "MODEL_SELECTION_BUDGET_UNAVAILABLE"
         if plan is not None:
             for step in plan.steps:
                 if step.step_id == claim.step_id:
@@ -878,7 +888,7 @@ class ParallelExecutor:
                     claim, state, StepStatus.CANCELLED, error_code
                 )
 
-    async def _cancel_unfinished(self, claims: tuple[StepClaim, ...], outcomes: dict[str, StepExecutionOutcome], state: AgentState) -> None:
+    async def _cancel_unfinished(self, claims: tuple[StepClaim, ...], outcomes: dict[str, StepExecutionOutcome], state: AgentState, durable_attempts: Mapping[str, int] | None = None) -> None:
         for claim in claims:
             current = state.steps.get(claim.step_id)
             if current is not None and current.status not in {
@@ -889,7 +899,8 @@ class ParallelExecutor:
             if claim.step_id not in outcomes:
                 outcomes[claim.step_id] = self._terminal(state, claim, StepStatus.CANCELLED, error_code="STEP_CANCELLED", error_message="步骤执行已取消")
                 await self._emit_step_completed(
-                    claim, state, StepStatus.CANCELLED, "STEP_CANCELLED"
+                    claim, state, StepStatus.CANCELLED, "STEP_CANCELLED",
+                    durable_attempt=(durable_attempts or {}).get(claim.step_id),
                 )
 
     @staticmethod
