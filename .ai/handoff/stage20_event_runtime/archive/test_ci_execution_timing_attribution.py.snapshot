@@ -1,0 +1,263 @@
+"""四次顺序 CI 调查：仅归因物理连接生命周期与 Step 提交包络。"""
+import asyncio
+from datetime import UTC, datetime
+import json
+import os
+import time
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+import pytest
+from sqlalchemy import event, text
+from sqlalchemy.engine import make_url
+
+from core.agent_platform.application import AgentApplicationService
+from core.agent_platform.ci_diagnosis import CIInvestigationService, definition
+from core.agent_platform.ci_diagnosis_tools import TOOL_NAMES
+from core.auth import ObjectAuthorizationService
+from core.chat_service import ChatService
+from core.persistence.database import Database, DatabaseConfig
+from server import RunExecutionSupervisor
+from tests._pg_fixtures import _truncate_all
+from tests.fixtures.adaptive_execution_server import ObservedInvestigator
+from tests.test_ci_adaptive_stop import actions, build
+
+
+@pytest.fixture
+def prepared_timing_url(pg_url):
+    """仅顺序清理已有测试库；不调用会重建 schema 的 pg_schema。"""
+    url = make_url(pg_url)
+    assert url.host in {"localhost", "127.0.0.1", "::1"} and url.database.endswith("_test")
+    assert not os.getenv("PYTEST_XDIST_WORKER"), "共享测试库禁止 xdist 并行清理"
+
+    async def verify():
+        database = Database(DatabaseConfig(url=pg_url, use_null_pool=True))
+        try:
+            async with database.session() as session:
+                others = await session.scalar(text("SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname=current_database() AND pid<>pg_backend_pid() "
+                    "AND backend_type='client backend'"))
+                assert others == 0, "BLOCKED: 测试库存在其他客户端，不允许清理"
+                current = set((await session.scalars(text("SELECT version_num FROM alembic_version"))).all())
+                assert current == set(ScriptDirectory.from_config(Config("alembic.ini")).get_heads()), \
+                    "BLOCKED: 仅接受已准备好的当前 schema，不自动迁移"
+        finally:
+            await database.dispose()
+
+    asyncio.run(verify())
+    _truncate_all(Database(DatabaseConfig(url=pg_url, use_null_pool=True)))
+    return DatabaseConfig(url=pg_url, use_null_pool=True)
+
+
+def interval_stats(rows, lower, upper):
+    """只统计与 envelope 相交的区间，分别保留累计及并集。"""
+    intervals = sorted((max(lower, r["start_ms"]), min(upper, r["end_ms"])) for r in rows
+        if r["end_ms"] is not None and r["end_ms"] > lower and r["start_ms"] < upper)
+    merged = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(end, merged[-1][1])
+        else:
+            merged.append([start, end])
+    return dict(count=len(intervals), cumulative_ms=sum(b-a for a, b in intervals),
+        union_ms=sum(b-a for a, b in merged))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sample,use_null_pool", [(1, True), (2, False), (3, True), (4, False)],
+    ids=["1-null", "2-pool", "3-null", "4-pool"])
+async def test_ci_execution_timing_attribution(prepared_timing_url, tmp_path, monkeypatch, sample, use_null_pool):
+    database = Database(DatabaseConfig(url=prepared_timing_url.url, use_null_pool=use_null_pool))
+    trace = dict(sample=sample, pool=type(database.engine.pool).__name__,
+        config=dict(use_null_pool=use_null_pool, pool_size=5, max_overflow=5, pool_timeout_seconds=5),
+        captured_at=datetime.now(UTC).isoformat(), connect=[], close=[], holds=[],
+        steps=[], models=[], tools=[], batches=[], correctness_passed=False)
+    supervisor = RunExecutionSupervisor(max_active_runs=1)
+    try:
+        q = await build(database, tmp_path, loop_limits={"total_tokens": 32768})
+        application = AgentApplicationService(ChatService(q.factory._router,
+            coordinated_runtime_factory=q.factory), q.factory._agent_registry)
+        service = CIInvestigationService(q.incidents, application, q.repo, supervisor,
+            ObjectAuthorizationService(database), real_model=True)
+        # build 必需的合成数据准备已结束；清空其连接，两个模式均从空池开始。
+        # 仅重置 engine pool，不调用会把 Database 标记关闭的 dispose()。
+        await database.engine.dispose()
+        if not use_null_pool:
+            assert database.engine.pool.checkedin() == database.engine.pool.checkedout() == 0
+        provider = ObservedInvestigator()
+        physical_ids, checked_out = {}, {}
+        origin = time.perf_counter()
+        clock = lambda: (time.perf_counter() - origin) * 1000
+        dialect = database.engine.sync_engine.dialect
+
+        def wrap_interval(original, rows):
+            def call(*args, **kwargs):
+                row = dict(start_ms=clock(), end_ms=None, success=False)
+                rows.append(row)
+                try:
+                    result = original(*args, **kwargs)
+                    row["success"] = True
+                    return result
+                finally:
+                    row["end_ms"] = clock()
+            return call
+
+        original_connect, original_close = dialect.connect, dialect.do_close
+
+        def connect(*args, **kwargs):
+            row = dict(start_ms=clock(), end_ms=None, success=False)
+            trace["connect"].append(row)
+            row["connection_id"] = "c" + str(len(trace["connect"]))
+            try:
+                connection = original_connect(*args, **kwargs)
+                physical_ids[id(connection)] = row["connection_id"]
+                row["success"] = True
+                return connection
+            finally:
+                row["end_ms"] = clock()
+
+        def close(connection):
+            row = dict(connection_id=physical_ids[id(connection)], start_ms=clock(), end_ms=None, success=False)
+            trace["close"].append(row)
+            try:
+                result = original_close(connection)
+                row["success"] = True
+                return result
+            finally:
+                row["end_ms"] = clock()
+
+        def checkout(connection, record, proxy):
+            row = dict(connection_id=physical_ids[id(connection)], start_ms=clock(), end_ms=None)
+            trace["holds"].append(row)
+            checked_out[id(record)] = row
+
+        def checkin(connection, record):
+            checked_out.pop(id(record))["end_ms"] = clock()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(dialect, "connect", connect)
+            patch.setattr(dialect, "do_close", close)
+            event.listen(database.engine.sync_engine, "checkout", checkout)
+            event.listen(database.engine.sync_engine, "checkin", checkin)
+            original_scope = type(q.factory).create_run_scope
+
+            async def create_scope(factory, *args, **kwargs):
+                scope = await original_scope(factory, *args, **kwargs)
+                if factory is not q.factory:
+                    return scope
+                executor = scope.coordinator.executor
+                original_invoke = executor._invoke
+                step = dict(step_id=scope.plan.steps[0].step_id)
+                trace["steps"].append(step)
+
+                async def invoke(driver, *args, **kwargs):
+                    step["invoke_enter_ms"] = clock()
+                    original_execute = driver.execute
+                    def execute(*args, **kwargs):
+                        step["driver_start_ms"] = clock()
+                        try:
+                            return original_execute(*args, **kwargs)
+                        finally:
+                            step["driver_end_ms"] = clock()
+                    snapshot = q.factory.services.coordinated_step_executor.snapshot()
+                    step["executor_before"] = dict(active=snapshot.active_count, pending=snapshot.pending_count)
+                    with monkeypatch.context() as driver_patch:
+                        driver_patch.setattr(driver, "execute", execute)
+                        try:
+                            return await original_invoke(driver, *args, **kwargs)
+                        finally:
+                            step["invoke_return_ms"] = clock()
+
+                patch.setattr(executor, "_invoke", invoke)
+                return scope
+
+            patch.setattr(type(q.factory), "create_run_scope", create_scope)
+            patch.setattr(q.model, "invoke_request", wrap_interval(provider.invoke_request, trace["models"]))
+            for name in TOOL_NAMES:
+                adapter = q.factory._router.tool_registry.require(name).adapter
+                original = adapter.invoke_once
+
+                def tool(invocation, context, original=original):
+                    row = dict(action_id=invocation.invocation_id, evidence_id=invocation.arguments.get("evidence_id"),
+                        tool=invocation.tool_name, start_ms=clock(), end_ms=None)
+                    trace["tools"].append(row)
+                    try:
+                        return original(invocation, context)
+                    finally:
+                        row["end_ms"] = clock()
+
+                assert adapter.spec.max_concurrency == 1
+                patch.setattr(adapter, "invoke_once", tool)
+            original_commit = q.repo.commit_loop_batch
+
+            async def commit(*args, **kwargs):
+                result = await original_commit(*args, **kwargs)
+                trace["batches"].append(dict(iteration=args[2], committed_ms=clock()))
+                return result
+
+            patch.setattr(q.repo, "commit_loop_batch", commit)
+            try:
+                trace["t0_ms"] = clock()
+                trace["identities"] = links = await service.start(q.principal, q.incident.incident_id,
+                    "timing-" + tmp_path.name)
+                task = supervisor._tasks[links["run_id"]]
+                await asyncio.wait_for(asyncio.shield(task), timeout=180)
+                trace["t1_ms"] = clock()
+                # 下列只读回查仍保留原始连接记录，但按 t1 裁剪后绝不计入执行统计。
+                result = await service.get(q.principal, q.incident.incident_id, links["investigation_id"])
+                image = await q.repo.load(links["run_id"])
+                q.row = await q.incidents.investigation(q.principal, q.incident.incident_id, links["investigation_id"])
+                saved_actions = await actions(q)
+                assert image.root.status == image.steps[0].status == "SUCCEEDED"
+                assert image.loop_frames[0].final_delivery_receipt["status"] == "DELIVERED"
+                assert result["investigation_status"] == "COMPLETED" and result["diagnosis_status"] == "SUPPORTED"
+                assert result["safe_error_code"] is None
+                assert q.row.projection_status == "READY" and result["report"] == json.loads(image.steps[0].typed_result_payload["content"])
+                assert all(m.request_assessment["reliable"] and m.request_assessment["admissible"] for m in image.models)
+                assert image.root.budget_totals["max_total_tokens"] == definition().business_options["loop_policy"]["total_tokens"] == 32768
+                assert image.root.budget_consumed["total_tokens"] <= 32768
+                assert image.loop_frames[0].loop_policy["max_batch_size"] == 2
+                assert image.loop_frames[0].loop_policy["max_batch_concurrency"] == 1
+                assert len(image.models) == len(image.tool_invocations) == len(saved_actions) == 4
+                assert all(t.state == "COMMITTED" for t in image.tool_invocations)
+                pair = [a for a in saved_actions if a.iteration_no == 2]
+                assert [a.ordinal for a in pair] == [0, 1]
+                assert len({a.recipe["arguments"]["evidence_id"] for a in pair}) == 2
+                assert {a.action_id for a in pair} == {r["action_id"] for r in trace["tools"][1:3]}
+                assert [r["evidence_id"] for r in trace["tools"][1:3]] == [a.recipe["arguments"]["evidence_id"] for a in pair]
+                assert trace["tools"][1]["end_ms"] <= trace["tools"][2]["start_ms"]
+                assert trace["batches"][1]["committed_ms"] >= trace["tools"][2]["end_ms"]
+                assert [i.observation_cursor for i in image.loop_iterations if i.state == "OBSERVED"] == [1, 2, 3]
+                assert image.loop_iterations[-1].state == "CLOSED"
+                assert len(trace["steps"]) == 1 and len(trace["models"]) == len(trace["tools"]) == 4
+                step = trace["steps"][0]
+                assert trace["t0_ms"] <= step["invoke_enter_ms"] <= step["driver_start_ms"] <= step["driver_end_ms"] <= step["invoke_return_ms"] <= trace["t1_ms"]
+                trace.update(correctness_passed=True, business_result=result,
+                    root_status=image.root.status, step_status=image.steps[0].status,
+                    receipt=image.loop_frames[0].final_delivery_receipt, budget=image.root.budget_consumed,
+                    assessments=[dict(request_digest=m.request_digest, reliable=m.request_assessment["reliable"],
+                        admissible=m.request_assessment["admissible"]) for m in image.models],
+                    actions=[dict(action_id=a.action_id, iteration=a.iteration_no, ordinal=a.ordinal,
+                        invocation_id=a.invocation_id, source_digest=a.source_digest) for a in saved_actions])
+            finally:
+                if supervisor._tasks:
+                    await asyncio.gather(*supervisor._tasks.values(), return_exceptions=True)
+                trace["dispose_start_ms"] = clock()
+                await database.dispose()
+                trace["dispose_end_ms"] = clock()
+                event.remove(database.engine.sync_engine, "checkout", checkout)
+                event.remove(database.engine.sync_engine, "checkin", checkin)
+        assert not checked_out and all(r["success"] for r in trace["connect"] + trace["close"])
+        assert len(trace["connect"]) == len(trace["close"])
+        lower, upper = trace["t0_ms"], trace["t1_ms"]
+        trace["execution_stats"] = {key: interval_stats(trace[key], lower, upper) for key in ("connect", "close", "holds")}
+        trace["execution_stats"]["lifecycle"] = interval_stats(trace["connect"] + trace["close"], lower, upper)
+        trace["envelope_ms"] = upper-lower
+        step["submit_envelope_ms"] = step["driver_start_ms"]-step["invoke_enter_ms"]
+        step["driver_duration_ms"] = step["driver_end_ms"]-step["driver_start_ms"]
+        step["return_overhead_ms"] = step["invoke_return_ms"]-step["driver_end_ms"]
+        target = tmp_path / "ci_execution_timing.json"
+        target.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+        print("TIMING_ARTIFACT=" + str(target))
+    finally:
+        await database.dispose()

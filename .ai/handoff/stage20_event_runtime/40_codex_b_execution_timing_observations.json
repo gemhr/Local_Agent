@@ -1,0 +1,6327 @@
+{
+  "samples_executed": 4,
+  "complete_measurement_samples": 3,
+  "incomplete_sample": {
+    "sample": 1,
+    "pool": "NullPool",
+    "status": "MEASUREMENT_INCOMPLETE",
+    "business_assertions": "PASSED_BEFORE_TIMING_ASSERTION",
+    "error": "KeyError: driver_start_ms",
+    "raw_intervals": null,
+    "source": "pytest-2323 / 1 failed, 2 warnings in 16.81s; service.start was executed once"
+  },
+  "setup_failure": {
+    "source": "pytest-2322",
+    "error": "AttributeError: create_run_scope is read-only",
+    "investigations_executed": 0
+  },
+  "sources": [
+    "C:\\Users\\GemHr\\AppData\\Local\\Temp\\pytest-of-GemHr\\pytest-2324\\test_ci_execution_timing_attri0\\ci_execution_timing.json",
+    "C:\\Users\\GemHr\\AppData\\Local\\Temp\\pytest-of-GemHr\\pytest-2324\\test_ci_execution_timing_attri1\\ci_execution_timing.json",
+    "C:\\Users\\GemHr\\AppData\\Local\\Temp\\pytest-of-GemHr\\pytest-2324\\test_ci_execution_timing_attri2\\ci_execution_timing.json"
+  ],
+  "samples": [
+    {
+      "sample": 2,
+      "pool": "AsyncAdaptedQueuePool",
+      "config": {
+        "use_null_pool": false,
+        "pool_size": 5,
+        "max_overflow": 5,
+        "pool_timeout_seconds": 5
+      },
+      "captured_at": "2026-11-05T15:58:41.031027+00:00",
+      "connect": [
+        {
+          "start_ms": 0.21360000027925707,
+          "end_ms": 43.36979999970936,
+          "success": true,
+          "connection_id": "c1"
+        },
+        {
+          "start_ms": 1132.103100000677,
+          "end_ms": 1176.6786000007414,
+          "success": true,
+          "connection_id": "c2"
+        }
+      ],
+      "close": [
+        {
+          "connection_id": "c2",
+          "start_ms": 1332.8173000008974,
+          "end_ms": 1334.2953999999736,
+          "success": true
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1334.3956000007893,
+          "end_ms": 1335.6825999999273,
+          "success": true
+        }
+      ],
+      "holds": [
+        {
+          "connection_id": "c1",
+          "start_ms": 43.43160000098578,
+          "end_ms": 46.902800000680145
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 47.594400000889436,
+          "end_ms": 52.75350000010803
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 53.326499999457155,
+          "end_ms": 56.060200000501936
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 56.52120000013383,
+          "end_ms": 60.44590000055905
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 61.17629999971541,
+          "end_ms": 67.90510000064387
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 68.29060000018217,
+          "end_ms": 71.38900000063586
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 72.68800000019837,
+          "end_ms": 79.51649999995425
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 79.84940000096685,
+          "end_ms": 81.6465000007156
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 82.03429999957734,
+          "end_ms": 95.48580000046059
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 95.94509999988077,
+          "end_ms": 101.70280000056664
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 102.12599999977101,
+          "end_ms": 116.86229999941133
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 122.54930000017339,
+          "end_ms": 125.17950000074052
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 125.90529999943101,
+          "end_ms": 128.27029999971273
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 129.42210000073828,
+          "end_ms": 131.5627999993012
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 132.04939999923226,
+          "end_ms": 134.39350000044215
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 134.9128000001656,
+          "end_ms": 138.41859999956796
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 138.88290000068082,
+          "end_ms": 145.57369999965886
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 150.77870000095572,
+          "end_ms": 172.333599999547
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 173.2441000003746,
+          "end_ms": 178.46710000048915
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 181.81189999995695,
+          "end_ms": 188.27520000013465
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 189.20950000028824,
+          "end_ms": 191.334299999653
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 191.9448000007833,
+          "end_ms": 198.09540000096604
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 198.69690000086848,
+          "end_ms": 200.61320000058913
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 201.07020000068587,
+          "end_ms": 223.2378000007884
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 224.21729999950912,
+          "end_ms": 227.36000000077183
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 227.8710000009596,
+          "end_ms": 245.79169999924488
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 246.45710000004328,
+          "end_ms": 248.47480000062205
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 248.930300000211,
+          "end_ms": 254.01489999967453
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 254.53659999948286,
+          "end_ms": 256.3475999995717
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 257.1628999994573,
+          "end_ms": 261.38970000101835
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 261.87299999946845,
+          "end_ms": 266.26170000054117
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 266.99179999923217,
+          "end_ms": 272.65970000007655
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 273.17799999946146,
+          "end_ms": 277.7418999994552
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 278.24429999964195,
+          "end_ms": 283.8076000007277
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 284.43829999923764,
+          "end_ms": 289.1665999995894
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 289.8301999994146,
+          "end_ms": 295.6524000001082
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 296.3615000007849,
+          "end_ms": 318.99800000064715
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 319.96410000101605,
+          "end_ms": 326.4462999995885
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 327.2763000004488,
+          "end_ms": 330.6253000009747
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 331.5175999996427,
+          "end_ms": 337.5562000001082
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 338.36990000054357,
+          "end_ms": 350.6565000006958
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 351.8442000004143,
+          "end_ms": 354.69820000071195
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 355.8266000000003,
+          "end_ms": 372.33670000023267
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 372.9696000009426,
+          "end_ms": 374.96250000003783
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 375.52879999930155,
+          "end_ms": 378.7517000000662
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 379.2888000007224,
+          "end_ms": 385.04529999954684
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 386.23159999951895,
+          "end_ms": 387.66690000011295
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 388.43980000092415,
+          "end_ms": 403.3527999999933
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 403.85220000098343,
+          "end_ms": 404.3075999998109
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 405.36319999955595,
+          "end_ms": 408.88769999946817
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 409.62989999934507,
+          "end_ms": 417.99879999962286
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 418.45459999967716,
+          "end_ms": 440.50480000078096
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 441.1913000003551,
+          "end_ms": 449.56269999966025
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 450.87360000070476,
+          "end_ms": 458.56110000022454
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 459.9524000004749,
+          "end_ms": 467.2848000009253
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 468.0451999993238,
+          "end_ms": 470.85100000003877
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 472.0558000008168,
+          "end_ms": 477.4751000004471
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 478.1481999998505,
+          "end_ms": 484.5385999997234
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 485.11080000025686,
+          "end_ms": 487.29070000081265
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 488.0336999995052,
+          "end_ms": 499.8562000000675
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 501.0208000003331,
+          "end_ms": 503.85690000075556
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 504.94830000025104,
+          "end_ms": 514.2759000009391
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 515.2085999998235,
+          "end_ms": 530.7938999994803
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 531.6050000001269,
+          "end_ms": 534.274199999345
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 535.1589000001695,
+          "end_ms": 540.2730000005249
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 541.558900000382,
+          "end_ms": 544.2380999993475
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 544.8682999995071,
+          "end_ms": 559.5026000009966
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 560.8155999998417,
+          "end_ms": 563.5751000008895
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 564.3541000008554,
+          "end_ms": 571.7648000008921
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 572.8101999993669,
+          "end_ms": 575.7725999992545
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 576.4983999997639,
+          "end_ms": 581.9991000007576
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 582.6694999996107,
+          "end_ms": 587.3234000009688
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 588.3639000003313,
+          "end_ms": 595.21020000102
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 595.8281000002899,
+          "end_ms": 601.3058999997156
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 601.9539999997505,
+          "end_ms": 608.1890999994357
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 609.3378000005032,
+          "end_ms": 614.8914999994304
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 615.86460000035,
+          "end_ms": 620.8657999995921
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 621.7163000001165,
+          "end_ms": 635.9088000008342
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 636.5614000005735,
+          "end_ms": 642.1659000006912
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 642.9463999993459,
+          "end_ms": 645.1792000007117
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 645.8091999993485,
+          "end_ms": 651.3704999997572
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 652.0099000008486,
+          "end_ms": 659.4402999999147
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 660.3639000004478,
+          "end_ms": 662.409700000353
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 663.5122000006959,
+          "end_ms": 675.6055999994715
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 676.2529000006907,
+          "end_ms": 678.1881999995676
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 678.762600000482,
+          "end_ms": 681.3423999992665
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 681.7812999997841,
+          "end_ms": 685.6107000003249
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 686.4287999997032,
+          "end_ms": 687.3056999993423
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 687.7098999993905,
+          "end_ms": 695.6938000002992
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 696.1766999993415,
+          "end_ms": 696.6474000000744
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 697.6262000007409,
+          "end_ms": 699.9109999997017
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 700.4778000009537,
+          "end_ms": 705.8827000000747
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 706.3130999995337,
+          "end_ms": 720.4609000000346
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 720.8554000008007,
+          "end_ms": 726.4076999999816
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 727.0214000000124,
+          "end_ms": 728.7309999992431
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 729.4720000008965,
+          "end_ms": 733.9130000000296
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 734.4898000010289,
+          "end_ms": 736.5762999997969
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 737.4564000001556,
+          "end_ms": 742.0462999998563
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 742.5070999997843,
+          "end_ms": 746.6604000001098
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 747.8138999995281,
+          "end_ms": 748.315900000307
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 748.743199999808,
+          "end_ms": 756.1213000008138
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 756.537200000821,
+          "end_ms": 756.973100000323
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 757.7521000002889,
+          "end_ms": 760.2874000003794
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 760.767499999929,
+          "end_ms": 766.0568000010244
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 766.434000001027,
+          "end_ms": 778.7373999999545
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 779.2112999995879,
+          "end_ms": 784.7335999995266
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 785.3035999996791,
+          "end_ms": 787.3154999997496
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 788.0466999995406,
+          "end_ms": 792.2364000005473
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 792.8162999996857,
+          "end_ms": 795.0970000001689
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 795.9057000007306,
+          "end_ms": 800.7682999996177
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 801.2440000002243,
+          "end_ms": 805.2403000001505
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 805.8141000001342,
+          "end_ms": 808.034100000441
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 808.576900000844,
+          "end_ms": 814.3445000005158
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 815.0394000003871,
+          "end_ms": 817.0079000010446
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 817.4854999997478,
+          "end_ms": 822.529900000518
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 823.2776000004378,
+          "end_ms": 832.214699999895
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 832.7112999995734,
+          "end_ms": 834.4450999993569
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 835.1483000005828,
+          "end_ms": 839.2144000008557
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 840.7069999993837,
+          "end_ms": 842.8007000002253
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 843.3624999997846,
+          "end_ms": 854.1939000006096
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 854.8996000008628,
+          "end_ms": 857.0472999999765
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 857.5479999999516,
+          "end_ms": 862.7615999994305
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 863.4925000005751,
+          "end_ms": 865.4569999998785
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 865.9239999997226,
+          "end_ms": 870.3093000003719
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 871.0152000003291,
+          "end_ms": 879.0649000002304
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 880.255500000203,
+          "end_ms": 888.1834000003437
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 888.704000000871,
+          "end_ms": 893.730300000243
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 894.3641999994725,
+          "end_ms": 899.9261999997543
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 900.6375999997545,
+          "end_ms": 905.0810000007914
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 905.7069000009506,
+          "end_ms": 911.0906000005343
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 911.6823000003933,
+          "end_ms": 924.060900000768
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 924.6191000002,
+          "end_ms": 930.1340000001801
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 931.3239000002795,
+          "end_ms": 933.3998000001884
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 933.9691999994102,
+          "end_ms": 939.3118000007235
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 939.8724000002403,
+          "end_ms": 947.1169999997073
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 947.8519999993296,
+          "end_ms": 950.026099999377
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 950.9080999996513,
+          "end_ms": 960.8115000010002
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 961.3487999995414,
+          "end_ms": 963.253199999599
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 963.7340000008408,
+          "end_ms": 966.7191000007733
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 967.1388000006118,
+          "end_ms": 971.45620000083
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 972.2125000007509,
+          "end_ms": 972.7457000008144
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 973.0975000002218,
+          "end_ms": 980.7799999998679
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 981.2729000004765,
+          "end_ms": 981.8195999996533
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 982.7282999995077,
+          "end_ms": 984.5922000004066
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 985.1581000002625,
+          "end_ms": 991.5727000006882
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 992.1245999994426,
+          "end_ms": 1006.4151999995374
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1006.847700000435,
+          "end_ms": 1012.3194000007061
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1012.8590000003896,
+          "end_ms": 1014.4610999996075
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1015.2539999999135,
+          "end_ms": 1019.0545000004931
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1019.758800001,
+          "end_ms": 1022.0349000010174
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1022.7474000002985,
+          "end_ms": 1027.5175999995554
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1027.972800000498,
+          "end_ms": 1032.45170000082
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1033.0033999998705,
+          "end_ms": 1034.7603999998682
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1035.2017000004707,
+          "end_ms": 1040.6005999993795
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1041.2075999993249,
+          "end_ms": 1043.454799999381
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1043.989199999487,
+          "end_ms": 1049.2795999998634
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1049.820100000943,
+          "end_ms": 1059.751500000857
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1060.3623000006337,
+          "end_ms": 1062.2277000002214
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1062.9442999997991,
+          "end_ms": 1068.2245000007242
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1069.9093999992328,
+          "end_ms": 1072.6183999995555
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1073.2938000001013,
+          "end_ms": 1084.348399999726
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1085.0310000005265,
+          "end_ms": 1087.417299999288
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1087.9875000009633,
+          "end_ms": 1093.6736000003293
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1094.370799999524,
+          "end_ms": 1096.336099999462
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1096.7342000003555,
+          "end_ms": 1101.6519000004337
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1102.1698999993532,
+          "end_ms": 1106.8350999994436
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1107.7635000001465,
+          "end_ms": 1113.4717000004457
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1114.140800000314,
+          "end_ms": 1118.9305000007153
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1119.4458000009035,
+          "end_ms": 1125.2117000003636
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1126.2041999998473,
+          "end_ms": 1130.8492999996815
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1131.5042999995057,
+          "end_ms": 1138.7706000004982
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1139.5147999992332,
+          "end_ms": 1152.322500000082
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1152.8581000002305,
+          "end_ms": 1175.8408000005147
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1176.7199000005348,
+          "end_ms": 1179.4413000006898
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1177.159799999572,
+          "end_ms": 1179.56520000007
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1180.220800000825,
+          "end_ms": 1204.1984999996203
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1204.966900000727,
+          "end_ms": 1212.0802000008553
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1212.7691999994568,
+          "end_ms": 1222.6212000005034
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1223.81200000018,
+          "end_ms": 1234.9596999993082
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1235.5179999995016,
+          "end_ms": 1243.416299999808
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1244.1175999992993,
+          "end_ms": 1249.127999999473
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1250.0037000008888,
+          "end_ms": 1252.1400000005087
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1252.738799999861,
+          "end_ms": 1267.6873000000342
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1268.5275999992882,
+          "end_ms": 1271.595599999273
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1271.9591999994009,
+          "end_ms": 1284.4588999996631
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1285.0832999993145,
+          "end_ms": 1291.5362999992794
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1292.273999999452,
+          "end_ms": 1293.566300000748
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1294.0748000000895,
+          "end_ms": 1302.001600000949
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1303.227099999276,
+          "end_ms": 1304.1008000000147
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1304.477499999848,
+          "end_ms": 1315.8359999997629
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1316.2124999998923,
+          "end_ms": 1320.6133999992744
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1321.2946000003285,
+          "end_ms": 1323.1768000005104
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1323.6066000008577,
+          "end_ms": 1324.486600000455
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1324.7874999997293,
+          "end_ms": 1325.2771999996185
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1325.7431000001816,
+          "end_ms": 1330.029700000523
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 1330.3558000006888,
+          "end_ms": 1331.460600000355
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1331.7662000008568,
+          "end_ms": 1332.663200000752
+        }
+      ],
+      "steps": [
+        {
+          "step_id": "answer",
+          "invoke_enter_ms": 178.69699999937438,
+          "executor_before": {
+            "active": 0,
+            "pending": 0
+          },
+          "driver_start_ms": 179.11070000081963,
+          "driver_end_ms": 1249.3711999995867,
+          "invoke_return_ms": 1249.4729000009102,
+          "submit_envelope_ms": 0.41370000144524965,
+          "driver_duration_ms": 1070.260499998767,
+          "return_overhead_ms": 0.10170000132347923
+        }
+      ],
+      "models": [
+        {
+          "start_ms": 337.66470000045956,
+          "end_ms": 337.7001000008022,
+          "success": true
+        },
+        {
+          "start_ms": 651.461699999345,
+          "end_ms": 651.5204000006634,
+          "success": true
+        },
+        {
+          "start_ms": 939.3894000004366,
+          "end_ms": 939.4580000007409,
+          "success": true
+        },
+        {
+          "start_ms": 1204.3040999997174,
+          "end_ms": 1204.4048000007024,
+          "success": true
+        }
+      ],
+      "tools": [
+        {
+          "action_id": "9bb7b2cdb65a5832a15482930b8c70ec",
+          "evidence_id": null,
+          "tool": "ci_get_execution_context",
+          "start_ms": 450.17940000070666,
+          "end_ms": 458.9529000004404
+        },
+        {
+          "action_id": "55f7027b199b57cbb55f4c8e74d56536",
+          "evidence_id": "7e5a88cd-9da2-56fb-bdef-99b7dce81c1a",
+          "tool": "ci_read_execution_evidence",
+          "start_ms": 726.5480999994907,
+          "end_ms": 728.8733999994292
+        },
+        {
+          "action_id": "6b8daccf6d5d5ff3af87aeff0e4ae32e",
+          "evidence_id": "d3725118-1ac7-5156-82c0-b6fb6f669c77",
+          "tool": "ci_read_execution_evidence",
+          "start_ms": 784.853999999541,
+          "end_ms": 787.4630999995134
+        },
+        {
+          "action_id": "4bffdceccd8950a3a8d072f3dd66ab43",
+          "evidence_id": "541289cd-7e45-517e-b8b4-4e40ea6c1d2e",
+          "tool": "ci_read_execution_evidence",
+          "start_ms": 1012.4419999992824,
+          "end_ms": 1014.5962000005966
+        }
+      ],
+      "batches": [
+        {
+          "iteration": 1,
+          "committed_ms": 499.96509999982663
+        },
+        {
+          "iteration": 2,
+          "committed_ms": 814.4264000002295
+        },
+        {
+          "iteration": 3,
+          "committed_ms": 1040.6782000009116
+        }
+      ],
+      "correctness_passed": true,
+      "t0_ms": 0.05140000030223746,
+      "identities": {
+        "investigation_id": "99133771-808a-4ea4-82ff-5afb759e18d5",
+        "run_id": "bf510147-c3a9-4484-8698-91169aa080f9",
+        "session_id": "0b63a431-9938-44ce-a6f8-ed18830e3718",
+        "report_version": 2,
+        "events_url": "/api/v1/runs/bf510147-c3a9-4484-8698-91169aa080f9/events",
+        "report_url": "/api/ci/incidents/a174009c-ceeb-443b-b906-9a7e46861742/investigations/99133771-808a-4ea4-82ff-5afb759e18d5"
+      },
+      "t1_ms": 1323.3065999993414,
+      "business_result": {
+        "investigation_id": "99133771-808a-4ea4-82ff-5afb759e18d5",
+        "run_id": "bf510147-c3a9-4484-8698-91169aa080f9",
+        "report_version": 2,
+        "investigation_status": "COMPLETED",
+        "runtime_status": null,
+        "diagnosis_status": "SUPPORTED",
+        "report": {
+          "kind": "REPORT",
+          "incident_id": "a174009c-ceeb-443b-b906-9a7e46861742",
+          "failure_stage": "PARSER",
+          "uncertainties": [],
+          "schema_version": "ci-diagnosis.v1",
+          "diagnosis_status": "SUPPORTED",
+          "recommended_checks": [
+            "核对解析与解码能力记录"
+          ],
+          "supporting_evidence": [
+            {
+              "digest": "99225905bb985bbe3ddc202d9354b9895c07fb8de07375552cfa80a64684c5a7",
+              "evidence_id": "7e5a88cd-9da2-56fb-bdef-99b7dce81c1a"
+            },
+            {
+              "digest": "51caf8f39c889d5ae4f5ac9bdbb18c1347ec7515d758656142f3df78919576d3",
+              "evidence_id": "d3725118-1ac7-5156-82c0-b6fb6f669c77"
+            },
+            {
+              "digest": "a7f5fa78b7e04c49612514aeb0d1c14b4a7de8ffc0f6d26116742d0c40a3222d",
+              "evidence_id": "541289cd-7e45-517e-b8b4-4e40ea6c1d2e"
+            }
+          ],
+          "root_cause_hypothesis": "已观察解析错误与环境能力，需核对字段版本兼容性",
+          "recommended_owner_role": "TOOL_MAINTAINER"
+        },
+        "safe_error_code": null
+      },
+      "root_status": "SUCCEEDED",
+      "step_status": "SUCCEEDED",
+      "receipt": {
+        "cursor": 19,
+        "status": "DELIVERED",
+        "event_id": "a34ebcf061fc4467ac66a84de5350385",
+        "sequence": 19,
+        "decision_id": "9cf53c52b4e85a46b8ab775bc78c2ea4",
+        "result_digest": "e7d78111b39ca810646b3d1912ca20a0b55835a85353f954ac6dee0887462bdd",
+        "content_digest": "e7d78111b39ca810646b3d1912ca20a0b55835a85353f954ac6dee0887462bdd"
+      },
+      "budget": {
+        "retries": 0,
+        "cost_units": 4,
+        "tool_calls": 4,
+        "model_calls": 4,
+        "rrf_fusions": 0,
+        "step_starts": 0,
+        "bm25_queries": 0,
+        "input_tokens": 26209,
+        "total_tokens": 28257,
+        "context_chars": 0,
+        "output_tokens": 2048,
+        "document_reads": 0,
+        "vector_queries": 0,
+        "embedding_calls": 0,
+        "keyword_queries": 0,
+        "retrieval_calls": 0,
+        "remote_model_calls": 0
+      },
+      "assessments": [
+        {
+          "request_digest": "4395851959b356711e5e1cbcecd5250d4c0bdae043c82ec54d8ec590b485f03e",
+          "reliable": true,
+          "admissible": true
+        },
+        {
+          "request_digest": "43038151bf22aece329da38bcc6a08eedbd714bcbc42705d6eda661b261d96ec",
+          "reliable": true,
+          "admissible": true
+        },
+        {
+          "request_digest": "6a68f23ef566a22229a58659327e7b8ca80bedc358cb53221b4b93b8dce6b0bc",
+          "reliable": true,
+          "admissible": true
+        },
+        {
+          "request_digest": "46ce2adb02a74af3943388e1fc4d33b5fa4d54d7fdd6872ac90dafbf9c828254",
+          "reliable": true,
+          "admissible": true
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "9bb7b2cdb65a5832a15482930b8c70ec",
+          "iteration": 1,
+          "ordinal": 0,
+          "invocation_id": "9bb7b2cdb65a5832a15482930b8c70ec",
+          "source_digest": "fbce791d86d139c504d823bd60613ce3d0c77527098636eadea1565e1283a716"
+        },
+        {
+          "action_id": "55f7027b199b57cbb55f4c8e74d56536",
+          "iteration": 2,
+          "ordinal": 0,
+          "invocation_id": "55f7027b199b57cbb55f4c8e74d56536",
+          "source_digest": "1dd0af0f3ba715e5e03026d09c54c9c9c4bf9290601b2f0acab6d0c39bb5935a"
+        },
+        {
+          "action_id": "6b8daccf6d5d5ff3af87aeff0e4ae32e",
+          "iteration": 2,
+          "ordinal": 1,
+          "invocation_id": "6b8daccf6d5d5ff3af87aeff0e4ae32e",
+          "source_digest": "3daba06ce741b6642d7581e493d4e9fce4554fbd1b7bfcc507f6f3d6377fbdf8"
+        },
+        {
+          "action_id": "4bffdceccd8950a3a8d072f3dd66ab43",
+          "iteration": 3,
+          "ordinal": 0,
+          "invocation_id": "4bffdceccd8950a3a8d072f3dd66ab43",
+          "source_digest": "006c5957c5f5b5d573740ff6af5ca78fea105ef2c2bfe6f6016e2d1c5ae0c0f3"
+        }
+      ],
+      "dispose_start_ms": 1332.8001000008953,
+      "dispose_end_ms": 1336.1774000004516,
+      "execution_stats": {
+        "connect": {
+          "count": 2,
+          "cumulative_ms": 87.7316999994946,
+          "union_ms": 87.7316999994946
+        },
+        "close": {
+          "count": 0,
+          "cumulative_ms": 0,
+          "union_ms": 0
+        },
+        "holds": {
+          "count": 192,
+          "cumulative_ms": 1135.9742000095139,
+          "union_ms": 1133.692700008396
+        },
+        "lifecycle": {
+          "count": 2,
+          "cumulative_ms": 87.7316999994946,
+          "union_ms": 87.7316999994946
+        }
+      },
+      "envelope_ms": 1323.2551999990392
+    },
+    {
+      "sample": 3,
+      "pool": "NullPool",
+      "config": {
+        "use_null_pool": true,
+        "pool_size": 5,
+        "max_overflow": 5,
+        "pool_timeout_seconds": 5
+      },
+      "captured_at": "2026-11-05T15:58:43.107176+00:00",
+      "connect": [
+        {
+          "start_ms": 0.23390000023937318,
+          "end_ms": 42.477799999687704,
+          "success": true,
+          "connection_id": "c1"
+        },
+        {
+          "start_ms": 47.40060000040103,
+          "end_ms": 91.25010000025213,
+          "success": true,
+          "connection_id": "c2"
+        },
+        {
+          "start_ms": 99.68859999935376,
+          "end_ms": 140.6103000008443,
+          "success": true,
+          "connection_id": "c3"
+        },
+        {
+          "start_ms": 144.76470000045083,
+          "end_ms": 185.34730000101263,
+          "success": true,
+          "connection_id": "c4"
+        },
+        {
+          "start_ms": 193.60090000009222,
+          "end_ms": 234.79070000030333,
+          "success": true,
+          "connection_id": "c5"
+        },
+        {
+          "start_ms": 243.1209000005765,
+          "end_ms": 284.1191000006802,
+          "success": true,
+          "connection_id": "c6"
+        },
+        {
+          "start_ms": 289.2549999996845,
+          "end_ms": 331.655399999363,
+          "success": true,
+          "connection_id": "c7"
+        },
+        {
+          "start_ms": 342.713800000638,
+          "end_ms": 385.0908000003983,
+          "success": true,
+          "connection_id": "c8"
+        },
+        {
+          "start_ms": 391.8095999997604,
+          "end_ms": 434.0577000002668,
+          "success": true,
+          "connection_id": "c9"
+        },
+        {
+          "start_ms": 451.2286999997741,
+          "end_ms": 492.48050000096555,
+          "success": true,
+          "connection_id": "c10"
+        },
+        {
+          "start_ms": 504.00529999933497,
+          "end_ms": 544.9050999995961,
+          "success": true,
+          "connection_id": "c11"
+        },
+        {
+          "start_ms": 568.8876999993226,
+          "end_ms": 610.8684000009816,
+          "success": true,
+          "connection_id": "c12"
+        },
+        {
+          "start_ms": 615.3073000004952,
+          "end_ms": 657.2947000004206,
+          "success": true,
+          "connection_id": "c13"
+        },
+        {
+          "start_ms": 664.7195000005013,
+          "end_ms": 705.8689000004961,
+          "success": true,
+          "connection_id": "c14"
+        },
+        {
+          "start_ms": 711.3862999995035,
+          "end_ms": 753.3285000008618,
+          "success": true,
+          "connection_id": "c15"
+        },
+        {
+          "start_ms": 757.7915000001667,
+          "end_ms": 799.7446999997919,
+          "success": true,
+          "connection_id": "c16"
+        },
+        {
+          "start_ms": 805.8381000009831,
+          "end_ms": 847.8228999993007,
+          "success": true,
+          "connection_id": "c17"
+        },
+        {
+          "start_ms": 861.8098999995709,
+          "end_ms": 1018.5273999995843,
+          "success": true,
+          "connection_id": "c18"
+        },
+        {
+          "start_ms": 1056.7387000010058,
+          "end_ms": 1099.1281000005984,
+          "success": true,
+          "connection_id": "c19"
+        },
+        {
+          "start_ms": 1113.0749000003561,
+          "end_ms": 1154.9983999993856,
+          "success": true,
+          "connection_id": "c20"
+        },
+        {
+          "start_ms": 1167.5912999999127,
+          "end_ms": 1316.1651000009442,
+          "success": true,
+          "connection_id": "c21"
+        },
+        {
+          "start_ms": 1326.6624999996566,
+          "end_ms": 1368.5855999992782,
+          "success": true,
+          "connection_id": "c22"
+        },
+        {
+          "start_ms": 1392.881199999465,
+          "end_ms": 1434.682299999622,
+          "success": true,
+          "connection_id": "c23"
+        },
+        {
+          "start_ms": 1445.288900000378,
+          "end_ms": 1486.4493000004586,
+          "success": true,
+          "connection_id": "c24"
+        },
+        {
+          "start_ms": 1513.9608000008593,
+          "end_ms": 1556.8192999999155,
+          "success": true,
+          "connection_id": "c25"
+        },
+        {
+          "start_ms": 1567.978499999299,
+          "end_ms": 1610.3187000007892,
+          "success": true,
+          "connection_id": "c26"
+        },
+        {
+          "start_ms": 1652.7734000010241,
+          "end_ms": 1694.0682999993442,
+          "success": true,
+          "connection_id": "c27"
+        },
+        {
+          "start_ms": 1704.7574000007444,
+          "end_ms": 1748.5114999999496,
+          "success": true,
+          "connection_id": "c28"
+        },
+        {
+          "start_ms": 1759.3114000010246,
+          "end_ms": 1818.1793999992806,
+          "success": true,
+          "connection_id": "c29"
+        },
+        {
+          "start_ms": 1775.1060999999027,
+          "end_ms": 1819.5171000006667,
+          "success": true,
+          "connection_id": "c30"
+        },
+        {
+          "start_ms": 1829.063600000154,
+          "end_ms": 1870.553500000824,
+          "success": true,
+          "connection_id": "c31"
+        },
+        {
+          "start_ms": 1894.1861999992398,
+          "end_ms": 1936.8849000002228,
+          "success": true,
+          "connection_id": "c32"
+        },
+        {
+          "start_ms": 1959.3404000006558,
+          "end_ms": 2001.0939000003418,
+          "success": true,
+          "connection_id": "c33"
+        },
+        {
+          "start_ms": 2025.6011000001308,
+          "end_ms": 2068.998200000351,
+          "success": true,
+          "connection_id": "c34"
+        },
+        {
+          "start_ms": 2091.5050999992673,
+          "end_ms": 2133.5995999997976,
+          "success": true,
+          "connection_id": "c35"
+        },
+        {
+          "start_ms": 2157.8293000002304,
+          "end_ms": 2199.053399999684,
+          "success": true,
+          "connection_id": "c36"
+        },
+        {
+          "start_ms": 2222.7569999995467,
+          "end_ms": 2264.7080999995524,
+          "success": true,
+          "connection_id": "c37"
+        },
+        {
+          "start_ms": 2288.0636999998387,
+          "end_ms": 2330.9783000004245,
+          "success": true,
+          "connection_id": "c38"
+        },
+        {
+          "start_ms": 2378.271499999755,
+          "end_ms": 2420.8675999998377,
+          "success": true,
+          "connection_id": "c39"
+        },
+        {
+          "start_ms": 2446.275300000707,
+          "end_ms": 2487.9729000003863,
+          "success": true,
+          "connection_id": "c40"
+        },
+        {
+          "start_ms": 2496.2047999997594,
+          "end_ms": 2538.1422999998904,
+          "success": true,
+          "connection_id": "c41"
+        },
+        {
+          "start_ms": 2562.595900000815,
+          "end_ms": 2604.143300000942,
+          "success": true,
+          "connection_id": "c42"
+        },
+        {
+          "start_ms": 2623.3823000002303,
+          "end_ms": 2666.213399999833,
+          "success": true,
+          "connection_id": "c43"
+        },
+        {
+          "start_ms": 2674.801400000433,
+          "end_ms": 2716.253799999322,
+          "success": true,
+          "connection_id": "c44"
+        },
+        {
+          "start_ms": 2757.7091999992263,
+          "end_ms": 2800.7168999993155,
+          "success": true,
+          "connection_id": "c45"
+        },
+        {
+          "start_ms": 2806.375100000878,
+          "end_ms": 2867.2358999992866,
+          "success": true,
+          "connection_id": "c46"
+        },
+        {
+          "start_ms": 2812.518099999579,
+          "end_ms": 2868.646200000512,
+          "success": true,
+          "connection_id": "c47"
+        },
+        {
+          "start_ms": 2880.6731999993644,
+          "end_ms": 2922.1309999993537,
+          "success": true,
+          "connection_id": "c48"
+        },
+        {
+          "start_ms": 2945.11059999968,
+          "end_ms": 2986.390500000198,
+          "success": true,
+          "connection_id": "c49"
+        },
+        {
+          "start_ms": 2990.6716000004963,
+          "end_ms": 3031.682999999248,
+          "success": true,
+          "connection_id": "c50"
+        },
+        {
+          "start_ms": 3058.129999999437,
+          "end_ms": 3099.3187999993097,
+          "success": true,
+          "connection_id": "c51"
+        },
+        {
+          "start_ms": 3103.8274000002275,
+          "end_ms": 3144.64179999959,
+          "success": true,
+          "connection_id": "c52"
+        },
+        {
+          "start_ms": 3152.4315000006027,
+          "end_ms": 3193.3480000006966,
+          "success": true,
+          "connection_id": "c53"
+        },
+        {
+          "start_ms": 3217.755699999543,
+          "end_ms": 3259.66630000039,
+          "success": true,
+          "connection_id": "c54"
+        },
+        {
+          "start_ms": 3301.7268999992666,
+          "end_ms": 3343.628099999478,
+          "success": true,
+          "connection_id": "c55"
+        },
+        {
+          "start_ms": 3367.779399999563,
+          "end_ms": 3408.5162000010314,
+          "success": true,
+          "connection_id": "c56"
+        },
+        {
+          "start_ms": 3421.0829000003287,
+          "end_ms": 3463.4163999999146,
+          "success": true,
+          "connection_id": "c57"
+        },
+        {
+          "start_ms": 3480.2343000010296,
+          "end_ms": 3522.306999999273,
+          "success": true,
+          "connection_id": "c58"
+        },
+        {
+          "start_ms": 3530.3045000000566,
+          "end_ms": 3572.6527999995596,
+          "success": true,
+          "connection_id": "c59"
+        },
+        {
+          "start_ms": 3595.821299999443,
+          "end_ms": 3637.3695000002044,
+          "success": true,
+          "connection_id": "c60"
+        },
+        {
+          "start_ms": 3657.414900000731,
+          "end_ms": 3699.6729000002233,
+          "success": true,
+          "connection_id": "c61"
+        },
+        {
+          "start_ms": 3710.418099999515,
+          "end_ms": 3752.395299999989,
+          "success": true,
+          "connection_id": "c62"
+        },
+        {
+          "start_ms": 3774.702000000616,
+          "end_ms": 3816.131100000348,
+          "success": true,
+          "connection_id": "c63"
+        },
+        {
+          "start_ms": 3827.0642000006774,
+          "end_ms": 3869.4245999995474,
+          "success": true,
+          "connection_id": "c64"
+        },
+        {
+          "start_ms": 3867.7301999996416,
+          "end_ms": 3910.127299999658,
+          "success": true,
+          "connection_id": "c65"
+        },
+        {
+          "start_ms": 3910.931599999458,
+          "end_ms": 3952.6595000006637,
+          "success": true,
+          "connection_id": "c66"
+        },
+        {
+          "start_ms": 3990.5491000008624,
+          "end_ms": 4032.72300000026,
+          "success": true,
+          "connection_id": "c67"
+        },
+        {
+          "start_ms": 4043.8374999994267,
+          "end_ms": 4084.46720000029,
+          "success": true,
+          "connection_id": "c68"
+        },
+        {
+          "start_ms": 4109.7762000008515,
+          "end_ms": 4152.059199999712,
+          "success": true,
+          "connection_id": "c69"
+        },
+        {
+          "start_ms": 4162.663799999791,
+          "end_ms": 4203.491500000382,
+          "success": true,
+          "connection_id": "c70"
+        },
+        {
+          "start_ms": 4242.779599999267,
+          "end_ms": 4284.199800000351,
+          "success": true,
+          "connection_id": "c71"
+        },
+        {
+          "start_ms": 4295.385499999611,
+          "end_ms": 4337.441699999545,
+          "success": true,
+          "connection_id": "c72"
+        },
+        {
+          "start_ms": 4361.692599999515,
+          "end_ms": 4403.511500000604,
+          "success": true,
+          "connection_id": "c73"
+        },
+        {
+          "start_ms": 4414.160199999969,
+          "end_ms": 4456.495899999936,
+          "success": true,
+          "connection_id": "c74"
+        },
+        {
+          "start_ms": 4480.148200000258,
+          "end_ms": 4521.786100000099,
+          "success": true,
+          "connection_id": "c75"
+        },
+        {
+          "start_ms": 4546.443499999441,
+          "end_ms": 4692.577899999378,
+          "success": true,
+          "connection_id": "c76"
+        },
+        {
+          "start_ms": 4716.740199999549,
+          "end_ms": 4759.246600000552,
+          "success": true,
+          "connection_id": "c77"
+        },
+        {
+          "start_ms": 4782.970500000374,
+          "end_ms": 4824.524600000586,
+          "success": true,
+          "connection_id": "c78"
+        },
+        {
+          "start_ms": 4847.867099999348,
+          "end_ms": 4889.697000000524,
+          "success": true,
+          "connection_id": "c79"
+        },
+        {
+          "start_ms": 4914.251100000911,
+          "end_ms": 4976.817200000369,
+          "success": true,
+          "connection_id": "c80"
+        },
+        {
+          "start_ms": 4915.589500000351,
+          "end_ms": 4978.27099999995,
+          "success": true,
+          "connection_id": "c81"
+        },
+        {
+          "start_ms": 4982.242699999915,
+          "end_ms": 5024.017699999604,
+          "success": true,
+          "connection_id": "c82"
+        },
+        {
+          "start_ms": 5003.651900000477,
+          "end_ms": 5045.381300000372,
+          "success": true,
+          "connection_id": "c83"
+        },
+        {
+          "start_ms": 5085.555999999997,
+          "end_ms": 5129.004800000985,
+          "success": true,
+          "connection_id": "c84"
+        },
+        {
+          "start_ms": 5152.260299999398,
+          "end_ms": 5194.861399999354,
+          "success": true,
+          "connection_id": "c85"
+        },
+        {
+          "start_ms": 5203.222500000265,
+          "end_ms": 5244.977300000755,
+          "success": true,
+          "connection_id": "c86"
+        },
+        {
+          "start_ms": 5269.533500000762,
+          "end_ms": 5311.841400000048,
+          "success": true,
+          "connection_id": "c87"
+        },
+        {
+          "start_ms": 5331.008200000724,
+          "end_ms": 5373.4067999994295,
+          "success": true,
+          "connection_id": "c88"
+        },
+        {
+          "start_ms": 5381.904800000484,
+          "end_ms": 5425.100000000384,
+          "success": true,
+          "connection_id": "c89"
+        },
+        {
+          "start_ms": 5467.998300000545,
+          "end_ms": 5509.524600000077,
+          "success": true,
+          "connection_id": "c90"
+        },
+        {
+          "start_ms": 5520.858899999439,
+          "end_ms": 5676.301499999681,
+          "success": true,
+          "connection_id": "c91"
+        },
+        {
+          "start_ms": 5689.239699999234,
+          "end_ms": 5731.729999999516,
+          "success": true,
+          "connection_id": "c92"
+        },
+        {
+          "start_ms": 5756.3415999993595,
+          "end_ms": 5797.235100000762,
+          "success": true,
+          "connection_id": "c93"
+        },
+        {
+          "start_ms": 5801.470099999278,
+          "end_ms": 5843.046399999366,
+          "success": true,
+          "connection_id": "c94"
+        },
+        {
+          "start_ms": 5868.703899999673,
+          "end_ms": 5911.14430000016,
+          "success": true,
+          "connection_id": "c95"
+        },
+        {
+          "start_ms": 5915.613000001031,
+          "end_ms": 5957.431599999836,
+          "success": true,
+          "connection_id": "c96"
+        },
+        {
+          "start_ms": 5965.954799999963,
+          "end_ms": 6007.942399999592,
+          "success": true,
+          "connection_id": "c97"
+        },
+        {
+          "start_ms": 6031.33170000001,
+          "end_ms": 6073.420200000328,
+          "success": true,
+          "connection_id": "c98"
+        },
+        {
+          "start_ms": 6052.983699999459,
+          "end_ms": 6095.030599999518,
+          "success": true,
+          "connection_id": "c99"
+        },
+        {
+          "start_ms": 6132.47550000051,
+          "end_ms": 6174.2295999993075,
+          "success": true,
+          "connection_id": "c100"
+        },
+        {
+          "start_ms": 6197.880499999883,
+          "end_ms": 6240.152300000773,
+          "success": true,
+          "connection_id": "c101"
+        },
+        {
+          "start_ms": 6251.203100000566,
+          "end_ms": 6292.282599999453,
+          "success": true,
+          "connection_id": "c102"
+        },
+        {
+          "start_ms": 6309.154799999305,
+          "end_ms": 6350.592500000857,
+          "success": true,
+          "connection_id": "c103"
+        },
+        {
+          "start_ms": 6359.065399999963,
+          "end_ms": 6401.23979999953,
+          "success": true,
+          "connection_id": "c104"
+        },
+        {
+          "start_ms": 6425.335199999608,
+          "end_ms": 6466.292600000088,
+          "success": true,
+          "connection_id": "c105"
+        },
+        {
+          "start_ms": 6485.252700000274,
+          "end_ms": 6528.056799999831,
+          "success": true,
+          "connection_id": "c106"
+        },
+        {
+          "start_ms": 6532.037200000559,
+          "end_ms": 6573.725399999603,
+          "success": true,
+          "connection_id": "c107"
+        },
+        {
+          "start_ms": 6597.656199999619,
+          "end_ms": 6639.71280000078,
+          "success": true,
+          "connection_id": "c108"
+        },
+        {
+          "start_ms": 6644.337600000654,
+          "end_ms": 6686.604300000909,
+          "success": true,
+          "connection_id": "c109"
+        },
+        {
+          "start_ms": 6695.300299999872,
+          "end_ms": 6736.5900999993755,
+          "success": true,
+          "connection_id": "c110"
+        },
+        {
+          "start_ms": 6760.901699999522,
+          "end_ms": 6802.267000000938,
+          "success": true,
+          "connection_id": "c111"
+        },
+        {
+          "start_ms": 6843.631800000367,
+          "end_ms": 6884.824500000832,
+          "success": true,
+          "connection_id": "c112"
+        },
+        {
+          "start_ms": 6908.715600000505,
+          "end_ms": 6950.099600000613,
+          "success": true,
+          "connection_id": "c113"
+        },
+        {
+          "start_ms": 6960.999599999923,
+          "end_ms": 7003.71670000095,
+          "success": true,
+          "connection_id": "c114"
+        },
+        {
+          "start_ms": 7020.2401999995345,
+          "end_ms": 7063.170299999911,
+          "success": true,
+          "connection_id": "c115"
+        },
+        {
+          "start_ms": 7075.145500000872,
+          "end_ms": 7117.215899999792,
+          "success": true,
+          "connection_id": "c116"
+        },
+        {
+          "start_ms": 7097.832699999344,
+          "end_ms": 7139.398299999812,
+          "success": true,
+          "connection_id": "c117"
+        },
+        {
+          "start_ms": 7157.214900000326,
+          "end_ms": 7198.129300000801,
+          "success": true,
+          "connection_id": "c118"
+        },
+        {
+          "start_ms": 7216.167399999904,
+          "end_ms": 7257.595000000947,
+          "success": true,
+          "connection_id": "c119"
+        },
+        {
+          "start_ms": 7268.662000000404,
+          "end_ms": 7309.942899999442,
+          "success": true,
+          "connection_id": "c120"
+        },
+        {
+          "start_ms": 7332.950600000913,
+          "end_ms": 7374.171299999944,
+          "success": true,
+          "connection_id": "c121"
+        },
+        {
+          "start_ms": 7384.729600000355,
+          "end_ms": 7426.647199999934,
+          "success": true,
+          "connection_id": "c122"
+        },
+        {
+          "start_ms": 7450.71470000039,
+          "end_ms": 7492.256300000008,
+          "success": true,
+          "connection_id": "c123"
+        },
+        {
+          "start_ms": 7529.691300000195,
+          "end_ms": 7572.561900000437,
+          "success": true,
+          "connection_id": "c124"
+        },
+        {
+          "start_ms": 7583.102200000212,
+          "end_ms": 7625.8121999999275,
+          "success": true,
+          "connection_id": "c125"
+        },
+        {
+          "start_ms": 7650.892699999531,
+          "end_ms": 7692.38199999927,
+          "success": true,
+          "connection_id": "c126"
+        },
+        {
+          "start_ms": 7703.433500000756,
+          "end_ms": 7745.234100000744,
+          "success": true,
+          "connection_id": "c127"
+        },
+        {
+          "start_ms": 7789.9340999993,
+          "end_ms": 7831.602199999907,
+          "success": true,
+          "connection_id": "c128"
+        },
+        {
+          "start_ms": 7842.066499999419,
+          "end_ms": 7884.741899999426,
+          "success": true,
+          "connection_id": "c129"
+        },
+        {
+          "start_ms": 7909.814599999663,
+          "end_ms": 7952.309899999818,
+          "success": true,
+          "connection_id": "c130"
+        },
+        {
+          "start_ms": 7962.950700000874,
+          "end_ms": 8003.712300000188,
+          "success": true,
+          "connection_id": "c131"
+        },
+        {
+          "start_ms": 8028.729400000884,
+          "end_ms": 8070.463699999891,
+          "success": true,
+          "connection_id": "c132"
+        },
+        {
+          "start_ms": 8095.358700000361,
+          "end_ms": 8137.071600000127,
+          "success": true,
+          "connection_id": "c133"
+        },
+        {
+          "start_ms": 8135.5598000009195,
+          "end_ms": 8178.196599999865,
+          "success": true,
+          "connection_id": "c134"
+        },
+        {
+          "start_ms": 8178.613000000041,
+          "end_ms": 8219.458900000973,
+          "success": true,
+          "connection_id": "c135"
+        },
+        {
+          "start_ms": 8242.64249999942,
+          "end_ms": 8284.49670000009,
+          "success": true,
+          "connection_id": "c136"
+        },
+        {
+          "start_ms": 8308.175300000585,
+          "end_ms": 8349.590800000442,
+          "success": true,
+          "connection_id": "c137"
+        },
+        {
+          "start_ms": 8373.49069999982,
+          "end_ms": 8414.7109000005,
+          "success": true,
+          "connection_id": "c138"
+        },
+        {
+          "start_ms": 8438.988399999289,
+          "end_ms": 8480.108499999915,
+          "success": true,
+          "connection_id": "c139"
+        },
+        {
+          "start_ms": 8520.972399999664,
+          "end_ms": 8562.960799999928,
+          "success": true,
+          "connection_id": "c140"
+        },
+        {
+          "start_ms": 8587.464300000647,
+          "end_ms": 8629.28060000013,
+          "success": true,
+          "connection_id": "c141"
+        },
+        {
+          "start_ms": 8637.275900000532,
+          "end_ms": 8679.44929999976,
+          "success": true,
+          "connection_id": "c142"
+        },
+        {
+          "start_ms": 8702.845400001024,
+          "end_ms": 8744.535100000576,
+          "success": true,
+          "connection_id": "c143"
+        },
+        {
+          "start_ms": 8763.200499999584,
+          "end_ms": 8805.539799999679,
+          "success": true,
+          "connection_id": "c144"
+        },
+        {
+          "start_ms": 8814.573999999993,
+          "end_ms": 8857.823399999688,
+          "success": true,
+          "connection_id": "c145"
+        },
+        {
+          "start_ms": 8896.366200000557,
+          "end_ms": 8938.2999999998,
+          "success": true,
+          "connection_id": "c146"
+        },
+        {
+          "start_ms": 8948.745699999563,
+          "end_ms": 8991.647900000316,
+          "success": true,
+          "connection_id": "c147"
+        },
+        {
+          "start_ms": 9004.133000000365,
+          "end_ms": 9045.925099999295,
+          "success": true,
+          "connection_id": "c148"
+        },
+        {
+          "start_ms": 9071.693500000038,
+          "end_ms": 9113.381600000139,
+          "success": true,
+          "connection_id": "c149"
+        },
+        {
+          "start_ms": 9117.446199999904,
+          "end_ms": 9159.771099999489,
+          "success": true,
+          "connection_id": "c150"
+        },
+        {
+          "start_ms": 9181.470999999874,
+          "end_ms": 9243.482399999266,
+          "success": true,
+          "connection_id": "c151"
+        },
+        {
+          "start_ms": 9186.630700000023,
+          "end_ms": 9245.286100000158,
+          "success": true,
+          "connection_id": "c152"
+        },
+        {
+          "start_ms": 9247.774800000116,
+          "end_ms": 9308.344799999759,
+          "success": true,
+          "connection_id": "c153"
+        },
+        {
+          "start_ms": 9251.308200000494,
+          "end_ms": 9309.726699999374,
+          "success": true,
+          "connection_id": "c154"
+        },
+        {
+          "start_ms": 9317.971300000863,
+          "end_ms": 9360.437100000127,
+          "success": true,
+          "connection_id": "c155"
+        },
+        {
+          "start_ms": 9384.511800000837,
+          "end_ms": 9426.48349999945,
+          "success": true,
+          "connection_id": "c156"
+        },
+        {
+          "start_ms": 9466.8829000002,
+          "end_ms": 9508.363599999939,
+          "success": true,
+          "connection_id": "c157"
+        },
+        {
+          "start_ms": 9532.109899999341,
+          "end_ms": 9573.701600000277,
+          "success": true,
+          "connection_id": "c158"
+        },
+        {
+          "start_ms": 9584.88539999962,
+          "end_ms": 9626.335500001005,
+          "success": true,
+          "connection_id": "c159"
+        },
+        {
+          "start_ms": 9644.158799999786,
+          "end_ms": 9686.28549999994,
+          "success": true,
+          "connection_id": "c160"
+        },
+        {
+          "start_ms": 9695.107600000483,
+          "end_ms": 9736.407800000961,
+          "success": true,
+          "connection_id": "c161"
+        },
+        {
+          "start_ms": 9760.73759999963,
+          "end_ms": 9802.419100000407,
+          "success": true,
+          "connection_id": "c162"
+        },
+        {
+          "start_ms": 9821.522399999594,
+          "end_ms": 9863.500400000703,
+          "success": true,
+          "connection_id": "c163"
+        },
+        {
+          "start_ms": 9874.2886,
+          "end_ms": 9916.07649999969,
+          "success": true,
+          "connection_id": "c164"
+        },
+        {
+          "start_ms": 9938.376699999935,
+          "end_ms": 9980.720400000791,
+          "success": true,
+          "connection_id": "c165"
+        },
+        {
+          "start_ms": 9991.863999999623,
+          "end_ms": 10033.433500000683,
+          "success": true,
+          "connection_id": "c166"
+        },
+        {
+          "start_ms": 10057.789099999354,
+          "end_ms": 10099.24510000019,
+          "success": true,
+          "connection_id": "c167"
+        },
+        {
+          "start_ms": 10144.836100000248,
+          "end_ms": 10187.39110000024,
+          "success": true,
+          "connection_id": "c168"
+        },
+        {
+          "start_ms": 10198.06249999965,
+          "end_ms": 10239.634300000034,
+          "success": true,
+          "connection_id": "c169"
+        },
+        {
+          "start_ms": 10264.30149999942,
+          "end_ms": 10306.912100000773,
+          "success": true,
+          "connection_id": "c170"
+        },
+        {
+          "start_ms": 10307.344799999555,
+          "end_ms": 10365.416399999958,
+          "success": true,
+          "connection_id": "c171"
+        },
+        {
+          "start_ms": 10318.889000000127,
+          "end_ms": 10366.859400000976,
+          "success": true,
+          "connection_id": "c172"
+        },
+        {
+          "start_ms": 10406.165500000498,
+          "end_ms": 10447.976200000994,
+          "success": true,
+          "connection_id": "c173"
+        },
+        {
+          "start_ms": 10459.274500000902,
+          "end_ms": 10500.02080000013,
+          "success": true,
+          "connection_id": "c174"
+        },
+        {
+          "start_ms": 10524.9629000009,
+          "end_ms": 10568.158699999913,
+          "success": true,
+          "connection_id": "c175"
+        },
+        {
+          "start_ms": 10578.711100000874,
+          "end_ms": 10620.37489999966,
+          "success": true,
+          "connection_id": "c176"
+        },
+        {
+          "start_ms": 10646.42289999938,
+          "end_ms": 10688.689599999634,
+          "success": true,
+          "connection_id": "c177"
+        },
+        {
+          "start_ms": 10712.720100000297,
+          "end_ms": 10755.456000000777,
+          "success": true,
+          "connection_id": "c178"
+        },
+        {
+          "start_ms": 10779.12649999962,
+          "end_ms": 10820.445800000016,
+          "success": true,
+          "connection_id": "c179"
+        },
+        {
+          "start_ms": 10844.081600000209,
+          "end_ms": 10887.285200000406,
+          "success": true,
+          "connection_id": "c180"
+        },
+        {
+          "start_ms": 10911.937299999408,
+          "end_ms": 10953.610200000185,
+          "success": true,
+          "connection_id": "c181"
+        },
+        {
+          "start_ms": 10978.287300000375,
+          "end_ms": 11019.69260000078,
+          "success": true,
+          "connection_id": "c182"
+        },
+        {
+          "start_ms": 11043.468399999256,
+          "end_ms": 11085.21429999928,
+          "success": true,
+          "connection_id": "c183"
+        },
+        {
+          "start_ms": 11131.016200000886,
+          "end_ms": 11172.795899999983,
+          "success": true,
+          "connection_id": "c184"
+        },
+        {
+          "start_ms": 11197.055399999954,
+          "end_ms": 11238.712200000009,
+          "success": true,
+          "connection_id": "c185"
+        },
+        {
+          "start_ms": 11247.227199999543,
+          "end_ms": 11289.024699999572,
+          "success": true,
+          "connection_id": "c186"
+        },
+        {
+          "start_ms": 11312.523599999622,
+          "end_ms": 11353.993700000501,
+          "success": true,
+          "connection_id": "c187"
+        },
+        {
+          "start_ms": 11352.61360000004,
+          "end_ms": 11394.225100000767,
+          "success": true,
+          "connection_id": "c188"
+        },
+        {
+          "start_ms": 11373.307300000306,
+          "end_ms": 11414.226900000358,
+          "success": true,
+          "connection_id": "c189"
+        },
+        {
+          "start_ms": 11423.319499999707,
+          "end_ms": 11464.299900000697,
+          "success": true,
+          "connection_id": "c190"
+        },
+        {
+          "start_ms": 11503.220099999453,
+          "end_ms": 11545.451600000888,
+          "success": true,
+          "connection_id": "c191"
+        },
+        {
+          "start_ms": 11556.799100000717,
+          "end_ms": 11598.432200000389,
+          "success": true,
+          "connection_id": "c192"
+        },
+        {
+          "start_ms": 11614.48670000027,
+          "end_ms": 11656.301499999245,
+          "success": true,
+          "connection_id": "c193"
+        },
+        {
+          "start_ms": 11667.118200000914,
+          "end_ms": 11709.471100000883,
+          "success": true,
+          "connection_id": "c194"
+        },
+        {
+          "start_ms": 11752.377099999649,
+          "end_ms": 11793.836799999553,
+          "success": true,
+          "connection_id": "c195"
+        },
+        {
+          "start_ms": 11802.45830000058,
+          "end_ms": 11844.423399999869,
+          "success": true,
+          "connection_id": "c196"
+        },
+        {
+          "start_ms": 11875.496599999678,
+          "end_ms": 11917.43150000002,
+          "success": true,
+          "connection_id": "c197"
+        },
+        {
+          "start_ms": 11930.214300000443,
+          "end_ms": 11972.208600000158,
+          "success": true,
+          "connection_id": "c198"
+        },
+        {
+          "start_ms": 11977.183200000582,
+          "end_ms": 12019.124099999317,
+          "success": true,
+          "connection_id": "c199"
+        },
+        {
+          "start_ms": 12035.201500000767,
+          "end_ms": 12077.138099999502,
+          "success": true,
+          "connection_id": "c200"
+        },
+        {
+          "start_ms": 12081.513999999515,
+          "end_ms": 12124.216199999864,
+          "success": true,
+          "connection_id": "c201"
+        },
+        {
+          "start_ms": 12138.63450000099,
+          "end_ms": 12180.740400001014,
+          "success": true,
+          "connection_id": "c202"
+        },
+        {
+          "start_ms": 12204.962600000727,
+          "end_ms": 12247.420600000623,
+          "success": true,
+          "connection_id": "c203"
+        },
+        {
+          "start_ms": 12254.257900000084,
+          "end_ms": 12296.033399999942,
+          "success": true,
+          "connection_id": "c204"
+        },
+        {
+          "start_ms": 12303.343400000813,
+          "end_ms": 12345.012400000996,
+          "success": true,
+          "connection_id": "c205"
+        },
+        {
+          "start_ms": 12350.052499999947,
+          "end_ms": 12392.57920000091,
+          "success": true,
+          "connection_id": "c206"
+        },
+        {
+          "start_ms": 12416.40120000011,
+          "end_ms": 12459.227299999839,
+          "success": true,
+          "connection_id": "c207"
+        },
+        {
+          "start_ms": 12466.329299999416,
+          "end_ms": 12509.233400000085,
+          "success": true,
+          "connection_id": "c208"
+        }
+      ],
+      "close": [
+        {
+          "connection_id": "c1",
+          "start_ms": 45.92939999929513,
+          "end_ms": 47.15840000062599,
+          "success": true
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 98.14379999988887,
+          "end_ms": 99.39280000071449,
+          "success": true
+        },
+        {
+          "connection_id": "c3",
+          "start_ms": 143.16689999941445,
+          "end_ms": 144.4962999994459,
+          "success": true
+        },
+        {
+          "connection_id": "c4",
+          "start_ms": 191.80120000055467,
+          "end_ms": 193.06839999990189,
+          "success": true
+        },
+        {
+          "connection_id": "c5",
+          "start_ms": 241.6957999994338,
+          "end_ms": 242.91509999966365,
+          "success": true
+        },
+        {
+          "connection_id": "c6",
+          "start_ms": 287.5220000005356,
+          "end_ms": 288.98339999977907,
+          "success": true
+        },
+        {
+          "connection_id": "c7",
+          "start_ms": 341.1591000003682,
+          "end_ms": 342.5272999993467,
+          "success": true
+        },
+        {
+          "connection_id": "c8",
+          "start_ms": 390.37219999954687,
+          "end_ms": 391.5868000003684,
+          "success": true
+        },
+        {
+          "connection_id": "c9",
+          "start_ms": 449.56830000046466,
+          "end_ms": 450.9328000003734,
+          "success": true
+        },
+        {
+          "connection_id": "c10",
+          "start_ms": 502.40239999948244,
+          "end_ms": 503.706699999384,
+          "success": true
+        },
+        {
+          "connection_id": "c11",
+          "start_ms": 567.3611000001983,
+          "end_ms": 568.6461000004783,
+          "success": true
+        },
+        {
+          "connection_id": "c12",
+          "start_ms": 613.4910000000673,
+          "end_ms": 614.8742999994283,
+          "success": true
+        },
+        {
+          "connection_id": "c13",
+          "start_ms": 662.2585999994044,
+          "end_ms": 663.4835000004387,
+          "success": true
+        },
+        {
+          "connection_id": "c14",
+          "start_ms": 709.8846999997477,
+          "end_ms": 711.1437000003207,
+          "success": true
+        },
+        {
+          "connection_id": "c15",
+          "start_ms": 756.1050000003888,
+          "end_ms": 757.4311999997008,
+          "success": true
+        },
+        {
+          "connection_id": "c16",
+          "start_ms": 804.2365000001155,
+          "end_ms": 805.5162000000564,
+          "success": true
+        },
+        {
+          "connection_id": "c17",
+          "start_ms": 858.4757000007812,
+          "end_ms": 859.8256999994192,
+          "success": true
+        },
+        {
+          "connection_id": "c18",
+          "start_ms": 1054.152200000317,
+          "end_ms": 1055.5652000002738,
+          "success": true
+        },
+        {
+          "connection_id": "c19",
+          "start_ms": 1110.8942000009847,
+          "end_ms": 1112.2811999994155,
+          "success": true
+        },
+        {
+          "connection_id": "c20",
+          "start_ms": 1165.4713000007177,
+          "end_ms": 1166.762099999687,
+          "success": true
+        },
+        {
+          "connection_id": "c21",
+          "start_ms": 1325.0145000001794,
+          "end_ms": 1326.250699999946,
+          "success": true
+        },
+        {
+          "connection_id": "c22",
+          "start_ms": 1391.1081000005652,
+          "end_ms": 1392.493100000138,
+          "success": true
+        },
+        {
+          "connection_id": "c23",
+          "start_ms": 1443.3060999999725,
+          "end_ms": 1444.6124999994936,
+          "success": true
+        },
+        {
+          "connection_id": "c24",
+          "start_ms": 1511.6593000002467,
+          "end_ms": 1513.02349999969,
+          "success": true
+        },
+        {
+          "connection_id": "c25",
+          "start_ms": 1566.2718000003224,
+          "end_ms": 1567.5637999993342,
+          "success": true
+        },
+        {
+          "connection_id": "c26",
+          "start_ms": 1650.8556999997381,
+          "end_ms": 1652.2475000001577,
+          "success": true
+        },
+        {
+          "connection_id": "c27",
+          "start_ms": 1703.1232999997883,
+          "end_ms": 1704.3575000006967,
+          "success": true
+        },
+        {
+          "connection_id": "c28",
+          "start_ms": 1772.9751000006218,
+          "end_ms": 1774.5539999996254,
+          "success": true
+        },
+        {
+          "connection_id": "c29",
+          "start_ms": 1820.6563999992795,
+          "end_ms": 1821.8823999995948,
+          "success": true
+        },
+        {
+          "connection_id": "c30",
+          "start_ms": 1827.439400000003,
+          "end_ms": 1828.6760999999387,
+          "success": true
+        },
+        {
+          "connection_id": "c31",
+          "start_ms": 1892.3878999994486,
+          "end_ms": 1893.7387000005401,
+          "success": true
+        },
+        {
+          "connection_id": "c32",
+          "start_ms": 1957.2984000005818,
+          "end_ms": 1958.648699999685,
+          "success": true
+        },
+        {
+          "connection_id": "c33",
+          "start_ms": 2023.7515000007988,
+          "end_ms": 2025.1755000008416,
+          "success": true
+        },
+        {
+          "connection_id": "c34",
+          "start_ms": 2089.631900000313,
+          "end_ms": 2090.9881000006862,
+          "success": true
+        },
+        {
+          "connection_id": "c35",
+          "start_ms": 2155.611399999543,
+          "end_ms": 2157.2615999994014,
+          "success": true
+        },
+        {
+          "connection_id": "c36",
+          "start_ms": 2220.897600000171,
+          "end_ms": 2222.259000000122,
+          "success": true
+        },
+        {
+          "connection_id": "c37",
+          "start_ms": 2286.2237999997888,
+          "end_ms": 2287.5585000001593,
+          "success": true
+        },
+        {
+          "connection_id": "c38",
+          "start_ms": 2376.524100000097,
+          "end_ms": 2377.780500000881,
+          "success": true
+        },
+        {
+          "connection_id": "c39",
+          "start_ms": 2444.324100000813,
+          "end_ms": 2445.6597000007605,
+          "success": true
+        },
+        {
+          "connection_id": "c40",
+          "start_ms": 2494.2040000005363,
+          "end_ms": 2495.5537999994704,
+          "success": true
+        },
+        {
+          "connection_id": "c41",
+          "start_ms": 2560.7930999995006,
+          "end_ms": 2562.079499999527,
+          "success": true
+        },
+        {
+          "connection_id": "c42",
+          "start_ms": 2621.4920000002166,
+          "end_ms": 2622.7725999997347,
+          "success": true
+        },
+        {
+          "connection_id": "c43",
+          "start_ms": 2672.59870000089,
+          "end_ms": 2673.93439999978,
+          "success": true
+        },
+        {
+          "connection_id": "c44",
+          "start_ms": 2755.6134999995265,
+          "end_ms": 2757.0598000002065,
+          "success": true
+        },
+        {
+          "connection_id": "c45",
+          "start_ms": 2810.7665999996243,
+          "end_ms": 2812.078200000542,
+          "success": true
+        },
+        {
+          "connection_id": "c46",
+          "start_ms": 2869.8719999993045,
+          "end_ms": 2871.119600000384,
+          "success": true
+        },
+        {
+          "connection_id": "c47",
+          "start_ms": 2878.8502999996126,
+          "end_ms": 2880.291900000884,
+          "success": true
+        },
+        {
+          "connection_id": "c48",
+          "start_ms": 2943.023899999389,
+          "end_ms": 2944.451900000786,
+          "success": true
+        },
+        {
+          "connection_id": "c49",
+          "start_ms": 2988.9898000001267,
+          "end_ms": 2990.3950999996596,
+          "success": true
+        },
+        {
+          "connection_id": "c50",
+          "start_ms": 3056.197699999757,
+          "end_ms": 3057.806900000287,
+          "success": true
+        },
+        {
+          "connection_id": "c51",
+          "start_ms": 3101.9182,
+          "end_ms": 3103.1765999996423,
+          "success": true
+        },
+        {
+          "connection_id": "c52",
+          "start_ms": 3150.7223999997223,
+          "end_ms": 3152.057799999966,
+          "success": true
+        },
+        {
+          "connection_id": "c53",
+          "start_ms": 3215.834399999949,
+          "end_ms": 3217.494500000612,
+          "success": true
+        },
+        {
+          "connection_id": "c54",
+          "start_ms": 3299.989299999652,
+          "end_ms": 3301.4000999992277,
+          "success": true
+        },
+        {
+          "connection_id": "c55",
+          "start_ms": 3365.5983000007836,
+          "end_ms": 3367.1405000004597,
+          "success": true
+        },
+        {
+          "connection_id": "c56",
+          "start_ms": 3419.1150999995443,
+          "end_ms": 3420.479399999749,
+          "success": true
+        },
+        {
+          "connection_id": "c57",
+          "start_ms": 3478.3896999997523,
+          "end_ms": 3479.7906999992847,
+          "success": true
+        },
+        {
+          "connection_id": "c58",
+          "start_ms": 3528.386199999659,
+          "end_ms": 3529.626100000314,
+          "success": true
+        },
+        {
+          "connection_id": "c59",
+          "start_ms": 3594.068200000038,
+          "end_ms": 3595.3836999997293,
+          "success": true
+        },
+        {
+          "connection_id": "c60",
+          "start_ms": 3655.5236999993213,
+          "end_ms": 3656.926100000419,
+          "success": true
+        },
+        {
+          "connection_id": "c61",
+          "start_ms": 3708.7544000005437,
+          "end_ms": 3710.0477000003593,
+          "success": true
+        },
+        {
+          "connection_id": "c62",
+          "start_ms": 3772.8738999994675,
+          "end_ms": 3774.1745000002993,
+          "success": true
+        },
+        {
+          "connection_id": "c63",
+          "start_ms": 3825.3815000007307,
+          "end_ms": 3826.663699999699,
+          "success": true
+        },
+        {
+          "connection_id": "c64",
+          "start_ms": 3908.6124999994354,
+          "end_ms": 3910.488199999236,
+          "success": true
+        },
+        {
+          "connection_id": "c65",
+          "start_ms": 3913.737200000469,
+          "end_ms": 3914.902799999254,
+          "success": true
+        },
+        {
+          "connection_id": "c66",
+          "start_ms": 3988.601600000038,
+          "end_ms": 3990.002900000036,
+          "success": true
+        },
+        {
+          "connection_id": "c67",
+          "start_ms": 4041.921600000933,
+          "end_ms": 4043.2402000005823,
+          "success": true
+        },
+        {
+          "connection_id": "c68",
+          "start_ms": 4106.922099999792,
+          "end_ms": 4108.653799999956,
+          "success": true
+        },
+        {
+          "connection_id": "c69",
+          "start_ms": 4160.9399000008125,
+          "end_ms": 4162.206700000752,
+          "success": true
+        },
+        {
+          "connection_id": "c70",
+          "start_ms": 4240.483199999289,
+          "end_ms": 4242.206599999918,
+          "success": true
+        },
+        {
+          "connection_id": "c71",
+          "start_ms": 4293.715100000554,
+          "end_ms": 4294.977300000028,
+          "success": true
+        },
+        {
+          "connection_id": "c72",
+          "start_ms": 4359.688399999868,
+          "end_ms": 4361.063099999228,
+          "success": true
+        },
+        {
+          "connection_id": "c73",
+          "start_ms": 4412.398000000394,
+          "end_ms": 4413.7673000004725,
+          "success": true
+        },
+        {
+          "connection_id": "c74",
+          "start_ms": 4478.330699999788,
+          "end_ms": 4479.663100000835,
+          "success": true
+        },
+        {
+          "connection_id": "c75",
+          "start_ms": 4544.0693000000465,
+          "end_ms": 4545.64290000053,
+          "success": true
+        },
+        {
+          "connection_id": "c76",
+          "start_ms": 4714.938900000561,
+          "end_ms": 4716.350700000476,
+          "success": true
+        },
+        {
+          "connection_id": "c77",
+          "start_ms": 4781.187399999908,
+          "end_ms": 4782.504400000107,
+          "success": true
+        },
+        {
+          "connection_id": "c78",
+          "start_ms": 4845.902700000806,
+          "end_ms": 4847.2240999999485,
+          "success": true
+        },
+        {
+          "connection_id": "c79",
+          "start_ms": 4912.396300000182,
+          "end_ms": 4913.762599999245,
+          "success": true
+        },
+        {
+          "connection_id": "c81",
+          "start_ms": 4980.338800000027,
+          "end_ms": 4981.769699999859,
+          "success": true
+        },
+        {
+          "connection_id": "c80",
+          "start_ms": 5001.775299999281,
+          "end_ms": 5003.126900001007,
+          "success": true
+        },
+        {
+          "connection_id": "c82",
+          "start_ms": 5043.792200000098,
+          "end_ms": 5045.1412000002165,
+          "success": true
+        },
+        {
+          "connection_id": "c83",
+          "start_ms": 5083.604999999807,
+          "end_ms": 5084.998800000903,
+          "success": true
+        },
+        {
+          "connection_id": "c84",
+          "start_ms": 5150.357700000313,
+          "end_ms": 5151.731600000858,
+          "success": true
+        },
+        {
+          "connection_id": "c85",
+          "start_ms": 5201.229800000874,
+          "end_ms": 5202.652600000874,
+          "success": true
+        },
+        {
+          "connection_id": "c86",
+          "start_ms": 5267.647500000749,
+          "end_ms": 5269.010199999684,
+          "success": true
+        },
+        {
+          "connection_id": "c87",
+          "start_ms": 5329.130199999781,
+          "end_ms": 5330.403199999637,
+          "success": true
+        },
+        {
+          "connection_id": "c88",
+          "start_ms": 5379.5556999994005,
+          "end_ms": 5380.852700000105,
+          "success": true
+        },
+        {
+          "connection_id": "c89",
+          "start_ms": 5466.137200000958,
+          "end_ms": 5467.526700000235,
+          "success": true
+        },
+        {
+          "connection_id": "c90",
+          "start_ms": 5518.7660999999935,
+          "end_ms": 5520.446300000913,
+          "success": true
+        },
+        {
+          "connection_id": "c91",
+          "start_ms": 5687.373500000831,
+          "end_ms": 5688.841799999864,
+          "success": true
+        },
+        {
+          "connection_id": "c92",
+          "start_ms": 5754.221400000461,
+          "end_ms": 5755.669000000125,
+          "success": true
+        },
+        {
+          "connection_id": "c93",
+          "start_ms": 5799.813600000562,
+          "end_ms": 5801.208799999586,
+          "success": true
+        },
+        {
+          "connection_id": "c94",
+          "start_ms": 5866.878400000132,
+          "end_ms": 5868.356799999674,
+          "success": true
+        },
+        {
+          "connection_id": "c95",
+          "start_ms": 5913.428899999417,
+          "end_ms": 5914.766899999449,
+          "success": true
+        },
+        {
+          "connection_id": "c96",
+          "start_ms": 5963.955799999894,
+          "end_ms": 5965.530100000251,
+          "success": true
+        },
+        {
+          "connection_id": "c97",
+          "start_ms": 6029.771699999401,
+          "end_ms": 6031.081499999345,
+          "success": true
+        },
+        {
+          "connection_id": "c99",
+          "start_ms": 6097.5226999998995,
+          "end_ms": 6099.197199999253,
+          "success": true
+        },
+        {
+          "connection_id": "c98",
+          "start_ms": 6130.785999999716,
+          "end_ms": 6132.167300000219,
+          "success": true
+        },
+        {
+          "connection_id": "c100",
+          "start_ms": 6196.1074999999255,
+          "end_ms": 6197.451399999409,
+          "success": true
+        },
+        {
+          "connection_id": "c101",
+          "start_ms": 6249.307199999748,
+          "end_ms": 6250.601600000664,
+          "success": true
+        },
+        {
+          "connection_id": "c102",
+          "start_ms": 6307.392099999561,
+          "end_ms": 6308.706100000563,
+          "success": true
+        },
+        {
+          "connection_id": "c103",
+          "start_ms": 6357.235299999957,
+          "end_ms": 6358.512000000701,
+          "success": true
+        },
+        {
+          "connection_id": "c104",
+          "start_ms": 6423.389499999757,
+          "end_ms": 6424.880399999893,
+          "success": true
+        },
+        {
+          "connection_id": "c105",
+          "start_ms": 6482.874900000752,
+          "end_ms": 6484.35470000004,
+          "success": true
+        },
+        {
+          "connection_id": "c106",
+          "start_ms": 6530.32180000082,
+          "end_ms": 6531.794099999388,
+          "success": true
+        },
+        {
+          "connection_id": "c107",
+          "start_ms": 6596.107600000323,
+          "end_ms": 6597.352400000091,
+          "success": true
+        },
+        {
+          "connection_id": "c108",
+          "start_ms": 6641.947300000538,
+          "end_ms": 6643.619099999341,
+          "success": true
+        },
+        {
+          "connection_id": "c109",
+          "start_ms": 6693.618999999671,
+          "end_ms": 6694.884099999399,
+          "success": true
+        },
+        {
+          "connection_id": "c110",
+          "start_ms": 6758.880699999281,
+          "end_ms": 6760.6195999997,
+          "success": true
+        },
+        {
+          "connection_id": "c111",
+          "start_ms": 6841.886800000793,
+          "end_ms": 6843.339700000797,
+          "success": true
+        },
+        {
+          "connection_id": "c112",
+          "start_ms": 6906.998899999962,
+          "end_ms": 6908.27790000003,
+          "success": true
+        },
+        {
+          "connection_id": "c113",
+          "start_ms": 6958.811700000297,
+          "end_ms": 6960.38530000078,
+          "success": true
+        },
+        {
+          "connection_id": "c114",
+          "start_ms": 7018.212999999378,
+          "end_ms": 7019.641400000182,
+          "success": true
+        },
+        {
+          "connection_id": "c115",
+          "start_ms": 7073.210799999288,
+          "end_ms": 7074.440700000196,
+          "success": true
+        },
+        {
+          "connection_id": "c117",
+          "start_ms": 7141.488499999468,
+          "end_ms": 7143.073400000503,
+          "success": true
+        },
+        {
+          "connection_id": "c116",
+          "start_ms": 7155.320100000608,
+          "end_ms": 7156.760699999722,
+          "success": true
+        },
+        {
+          "connection_id": "c118",
+          "start_ms": 7214.106100000208,
+          "end_ms": 7215.567700000975,
+          "success": true
+        },
+        {
+          "connection_id": "c119",
+          "start_ms": 7266.969500000414,
+          "end_ms": 7268.269000000146,
+          "success": true
+        },
+        {
+          "connection_id": "c120",
+          "start_ms": 7331.050299999333,
+          "end_ms": 7332.371300000887,
+          "success": true
+        },
+        {
+          "connection_id": "c121",
+          "start_ms": 7382.852799999455,
+          "end_ms": 7384.315200000856,
+          "success": true
+        },
+        {
+          "connection_id": "c122",
+          "start_ms": 7448.668600000019,
+          "end_ms": 7450.251700000081,
+          "success": true
+        },
+        {
+          "connection_id": "c123",
+          "start_ms": 7527.878299999429,
+          "end_ms": 7529.175300000134,
+          "success": true
+        },
+        {
+          "connection_id": "c124",
+          "start_ms": 7581.176100000448,
+          "end_ms": 7582.47560000018,
+          "success": true
+        },
+        {
+          "connection_id": "c125",
+          "start_ms": 7647.961200000282,
+          "end_ms": 7649.541400000089,
+          "success": true
+        },
+        {
+          "connection_id": "c126",
+          "start_ms": 7701.385800000935,
+          "end_ms": 7702.902600000016,
+          "success": true
+        },
+        {
+          "connection_id": "c127",
+          "start_ms": 7787.867099999858,
+          "end_ms": 7789.205900000525,
+          "success": true
+        },
+        {
+          "connection_id": "c128",
+          "start_ms": 7840.385900000911,
+          "end_ms": 7841.648499999792,
+          "success": true
+        },
+        {
+          "connection_id": "c129",
+          "start_ms": 7907.896500000788,
+          "end_ms": 7909.197900000436,
+          "success": true
+        },
+        {
+          "connection_id": "c130",
+          "start_ms": 7961.276899999575,
+          "end_ms": 7962.563700000828,
+          "success": true
+        },
+        {
+          "connection_id": "c131",
+          "start_ms": 8026.465400000234,
+          "end_ms": 8028.228299999682,
+          "success": true
+        },
+        {
+          "connection_id": "c132",
+          "start_ms": 8092.95320000092,
+          "end_ms": 8094.427600000927,
+          "success": true
+        },
+        {
+          "connection_id": "c133",
+          "start_ms": 8176.491899999746,
+          "end_ms": 8177.847099999781,
+          "success": true
+        },
+        {
+          "connection_id": "c134",
+          "start_ms": 8181.866999999329,
+          "end_ms": 8183.267200000046,
+          "success": true
+        },
+        {
+          "connection_id": "c135",
+          "start_ms": 8240.669900000285,
+          "end_ms": 8242.157099999531,
+          "success": true
+        },
+        {
+          "connection_id": "c136",
+          "start_ms": 8306.144000000131,
+          "end_ms": 8307.483500000671,
+          "success": true
+        },
+        {
+          "connection_id": "c137",
+          "start_ms": 8371.347199999946,
+          "end_ms": 8372.9727000009,
+          "success": true
+        },
+        {
+          "connection_id": "c138",
+          "start_ms": 8437.005100000533,
+          "end_ms": 8438.382099999217,
+          "success": true
+        },
+        {
+          "connection_id": "c139",
+          "start_ms": 8518.97149999968,
+          "end_ms": 8520.356999999422,
+          "success": true
+        },
+        {
+          "connection_id": "c140",
+          "start_ms": 8585.300099999586,
+          "end_ms": 8586.847300000954,
+          "success": true
+        },
+        {
+          "connection_id": "c141",
+          "start_ms": 8635.475000000952,
+          "end_ms": 8636.748599999919,
+          "success": true
+        },
+        {
+          "connection_id": "c142",
+          "start_ms": 8701.102499999251,
+          "end_ms": 8702.340100000583,
+          "success": true
+        },
+        {
+          "connection_id": "c143",
+          "start_ms": 8760.851799999728,
+          "end_ms": 8762.564599999678,
+          "success": true
+        },
+        {
+          "connection_id": "c144",
+          "start_ms": 8812.384799999563,
+          "end_ms": 8813.670900000943,
+          "success": true
+        },
+        {
+          "connection_id": "c145",
+          "start_ms": 8894.600199999331,
+          "end_ms": 8895.901899999444,
+          "success": true
+        },
+        {
+          "connection_id": "c146",
+          "start_ms": 8946.912800000064,
+          "end_ms": 8948.30809999985,
+          "success": true
+        },
+        {
+          "connection_id": "c147",
+          "start_ms": 9002.31100000019,
+          "end_ms": 9003.721200000655,
+          "success": true
+        },
+        {
+          "connection_id": "c148",
+          "start_ms": 9069.575900000928,
+          "end_ms": 9070.969000000332,
+          "success": true
+        },
+        {
+          "connection_id": "c149",
+          "start_ms": 9115.740999999616,
+          "end_ms": 9117.162200000166,
+          "success": true
+        },
+        {
+          "connection_id": "c150",
+          "start_ms": 9184.902599999987,
+          "end_ms": 9186.208400000396,
+          "success": true
+        },
+        {
+          "connection_id": "c151",
+          "start_ms": 9246.012300000075,
+          "end_ms": 9247.278599999845,
+          "success": true
+        },
+        {
+          "connection_id": "c152",
+          "start_ms": 9249.193100000412,
+          "end_ms": 9250.429300000178,
+          "success": true
+        },
+        {
+          "connection_id": "c153",
+          "start_ms": 9311.822600000596,
+          "end_ms": 9313.123100000666,
+          "success": true
+        },
+        {
+          "connection_id": "c154",
+          "start_ms": 9316.296599999987,
+          "end_ms": 9317.588600000818,
+          "success": true
+        },
+        {
+          "connection_id": "c155",
+          "start_ms": 9382.633999999598,
+          "end_ms": 9384.237800000847,
+          "success": true
+        },
+        {
+          "connection_id": "c156",
+          "start_ms": 9465.3042000009,
+          "end_ms": 9466.592099999616,
+          "success": true
+        },
+        {
+          "connection_id": "c157",
+          "start_ms": 9530.363199999556,
+          "end_ms": 9531.669600000896,
+          "success": true
+        },
+        {
+          "connection_id": "c158",
+          "start_ms": 9582.74370000072,
+          "end_ms": 9584.313800000018,
+          "success": true
+        },
+        {
+          "connection_id": "c159",
+          "start_ms": 9642.481000000771,
+          "end_ms": 9643.705899999986,
+          "success": true
+        },
+        {
+          "connection_id": "c160",
+          "start_ms": 9693.196800000806,
+          "end_ms": 9694.470599999477,
+          "success": true
+        },
+        {
+          "connection_id": "c161",
+          "start_ms": 9758.843600000546,
+          "end_ms": 9760.263500000292,
+          "success": true
+        },
+        {
+          "connection_id": "c162",
+          "start_ms": 9819.58289999966,
+          "end_ms": 9820.97640000029,
+          "success": true
+        },
+        {
+          "connection_id": "c163",
+          "start_ms": 9872.207000000344,
+          "end_ms": 9873.85969999923,
+          "success": true
+        },
+        {
+          "connection_id": "c164",
+          "start_ms": 9936.427399999957,
+          "end_ms": 9937.815299999784,
+          "success": true
+        },
+        {
+          "connection_id": "c165",
+          "start_ms": 9990.141000000222,
+          "end_ms": 9991.433099999995,
+          "success": true
+        },
+        {
+          "connection_id": "c166",
+          "start_ms": 10055.665199999567,
+          "end_ms": 10057.330499999807,
+          "success": true
+        },
+        {
+          "connection_id": "c167",
+          "start_ms": 10142.729200000758,
+          "end_ms": 10144.112300000415,
+          "success": true
+        },
+        {
+          "connection_id": "c168",
+          "start_ms": 10196.144900000945,
+          "end_ms": 10197.403199999826,
+          "success": true
+        },
+        {
+          "connection_id": "c169",
+          "start_ms": 10261.376099999325,
+          "end_ms": 10262.833299999329,
+          "success": true
+        },
+        {
+          "connection_id": "c170",
+          "start_ms": 10317.038499999398,
+          "end_ms": 10318.391200000406,
+          "success": true
+        },
+        {
+          "connection_id": "c171",
+          "start_ms": 10368.128199999774,
+          "end_ms": 10369.402500000433,
+          "success": true
+        },
+        {
+          "connection_id": "c172",
+          "start_ms": 10404.255600000397,
+          "end_ms": 10405.513899999278,
+          "success": true
+        },
+        {
+          "connection_id": "c173",
+          "start_ms": 10457.454600000347,
+          "end_ms": 10458.844400000089,
+          "success": true
+        },
+        {
+          "connection_id": "c174",
+          "start_ms": 10522.474400000647,
+          "end_ms": 10524.245799999335,
+          "success": true
+        },
+        {
+          "connection_id": "c175",
+          "start_ms": 10576.801200000773,
+          "end_ms": 10578.249199999846,
+          "success": true
+        },
+        {
+          "connection_id": "c176",
+          "start_ms": 10644.299699999465,
+          "end_ms": 10645.910299999741,
+          "success": true
+        },
+        {
+          "connection_id": "c177",
+          "start_ms": 10710.333400000309,
+          "end_ms": 10711.686099999497,
+          "success": true
+        },
+        {
+          "connection_id": "c178",
+          "start_ms": 10777.42009999929,
+          "end_ms": 10778.700500000923,
+          "success": true
+        },
+        {
+          "connection_id": "c179",
+          "start_ms": 10841.934800000672,
+          "end_ms": 10843.574399999852,
+          "success": true
+        },
+        {
+          "connection_id": "c180",
+          "start_ms": 10909.842000000936,
+          "end_ms": 10911.220300000423,
+          "success": true
+        },
+        {
+          "connection_id": "c181",
+          "start_ms": 10976.481499999863,
+          "end_ms": 10977.792899999258,
+          "success": true
+        },
+        {
+          "connection_id": "c182",
+          "start_ms": 11041.576199999326,
+          "end_ms": 11042.893600000752,
+          "success": true
+        },
+        {
+          "connection_id": "c183",
+          "start_ms": 11128.7726999999,
+          "end_ms": 11130.395000000135,
+          "success": true
+        },
+        {
+          "connection_id": "c184",
+          "start_ms": 11195.054699999673,
+          "end_ms": 11196.500500000184,
+          "success": true
+        },
+        {
+          "connection_id": "c185",
+          "start_ms": 11245.220700000573,
+          "end_ms": 11246.709700000793,
+          "success": true
+        },
+        {
+          "connection_id": "c186",
+          "start_ms": 11310.664700000416,
+          "end_ms": 11311.951400000908,
+          "success": true
+        },
+        {
+          "connection_id": "c187",
+          "start_ms": 11371.470199999749,
+          "end_ms": 11372.7044999996,
+          "success": true
+        },
+        {
+          "connection_id": "c188",
+          "start_ms": 11412.967399999616,
+          "end_ms": 11414.589199999682,
+          "success": true
+        },
+        {
+          "connection_id": "c189",
+          "start_ms": 11421.18979999941,
+          "end_ms": 11422.478099999353,
+          "success": true
+        },
+        {
+          "connection_id": "c190",
+          "start_ms": 11501.041499999701,
+          "end_ms": 11502.714100000958,
+          "success": true
+        },
+        {
+          "connection_id": "c191",
+          "start_ms": 11555.080199999793,
+          "end_ms": 11556.393700000626,
+          "success": true
+        },
+        {
+          "connection_id": "c192",
+          "start_ms": 11612.266199999794,
+          "end_ms": 11613.747100000182,
+          "success": true
+        },
+        {
+          "connection_id": "c193",
+          "start_ms": 11665.390399999524,
+          "end_ms": 11666.804099999354,
+          "success": true
+        },
+        {
+          "connection_id": "c194",
+          "start_ms": 11750.149699999383,
+          "end_ms": 11751.449200000934,
+          "success": true
+        },
+        {
+          "connection_id": "c195",
+          "start_ms": 11800.892600000225,
+          "end_ms": 11802.165400000376,
+          "success": true
+        },
+        {
+          "connection_id": "c196",
+          "start_ms": 11873.223500000677,
+          "end_ms": 11874.900799999523,
+          "success": true
+        },
+        {
+          "connection_id": "c197",
+          "start_ms": 11928.328699999838,
+          "end_ms": 11929.608099999314,
+          "success": true
+        },
+        {
+          "connection_id": "c198",
+          "start_ms": 11975.587599999926,
+          "end_ms": 11976.805300000706,
+          "success": true
+        },
+        {
+          "connection_id": "c199",
+          "start_ms": 12033.024399999704,
+          "end_ms": 12034.230100000059,
+          "success": true
+        },
+        {
+          "connection_id": "c200",
+          "start_ms": 12079.92639999975,
+          "end_ms": 12081.23069999965,
+          "success": true
+        },
+        {
+          "connection_id": "c201",
+          "start_ms": 12137.032399999953,
+          "end_ms": 12138.42509999995,
+          "success": true
+        },
+        {
+          "connection_id": "c202",
+          "start_ms": 12203.046200000244,
+          "end_ms": 12204.381800000192,
+          "success": true
+        },
+        {
+          "connection_id": "c203",
+          "start_ms": 12252.28369999968,
+          "end_ms": 12253.872799999954,
+          "success": true
+        },
+        {
+          "connection_id": "c204",
+          "start_ms": 12301.582800000688,
+          "end_ms": 12303.139100000408,
+          "success": true
+        },
+        {
+          "connection_id": "c205",
+          "start_ms": 12348.500199999762,
+          "end_ms": 12349.7883,
+          "success": true
+        },
+        {
+          "connection_id": "c206",
+          "start_ms": 12414.6810000002,
+          "end_ms": 12416.127099999358,
+          "success": true
+        },
+        {
+          "connection_id": "c207",
+          "start_ms": 12464.80960000008,
+          "end_ms": 12466.085899999598,
+          "success": true
+        },
+        {
+          "connection_id": "c208",
+          "start_ms": 12512.664199999563,
+          "end_ms": 12514.026599999852,
+          "success": true
+        }
+      ],
+      "holds": [
+        {
+          "connection_id": "c1",
+          "start_ms": 42.53600000083679,
+          "end_ms": 45.922700001028716
+        },
+        {
+          "connection_id": "c2",
+          "start_ms": 91.29679999932705,
+          "end_ms": 98.13890000077663
+        },
+        {
+          "connection_id": "c3",
+          "start_ms": 140.6552999997075,
+          "end_ms": 143.1611999996676
+        },
+        {
+          "connection_id": "c4",
+          "start_ms": 185.40020000000368,
+          "end_ms": 191.79500000063854
+        },
+        {
+          "connection_id": "c5",
+          "start_ms": 234.8450999998022,
+          "end_ms": 241.69050000091374
+        },
+        {
+          "connection_id": "c6",
+          "start_ms": 284.1714000005595,
+          "end_ms": 287.5158000006195
+        },
+        {
+          "connection_id": "c7",
+          "start_ms": 331.7093000005116,
+          "end_ms": 341.15399999973306
+        },
+        {
+          "connection_id": "c8",
+          "start_ms": 385.1374999994732,
+          "end_ms": 390.3671999996732
+        },
+        {
+          "connection_id": "c9",
+          "start_ms": 434.1110999994271,
+          "end_ms": 449.56289999936416
+        },
+        {
+          "connection_id": "c10",
+          "start_ms": 492.5284000000829,
+          "end_ms": 502.396800000497
+        },
+        {
+          "connection_id": "c11",
+          "start_ms": 544.9578000007023,
+          "end_ms": 567.3549000002822
+        },
+        {
+          "connection_id": "c12",
+          "start_ms": 610.9230000001844,
+          "end_ms": 613.4853999992629
+        },
+        {
+          "connection_id": "c13",
+          "start_ms": 657.3427999992418,
+          "end_ms": 662.2521000008419
+        },
+        {
+          "connection_id": "c14",
+          "start_ms": 705.9181999993598,
+          "end_ms": 709.878600000593
+        },
+        {
+          "connection_id": "c15",
+          "start_ms": 753.3801999998104,
+          "end_ms": 756.0991999998805
+        },
+        {
+          "connection_id": "c16",
+          "start_ms": 799.7983000004751,
+          "end_ms": 804.2304999999033
+        },
+        {
+          "connection_id": "c17",
+          "start_ms": 847.8749000005337,
+          "end_ms": 858.4699999992154
+        },
+        {
+          "connection_id": "c18",
+          "start_ms": 1018.5796000005212,
+          "end_ms": 1054.1460999993433
+        },
+        {
+          "connection_id": "c19",
+          "start_ms": 1099.1737000003923,
+          "end_ms": 1110.8889000006457
+        },
+        {
+          "connection_id": "c20",
+          "start_ms": 1155.0489000001107,
+          "end_ms": 1165.4658999996172
+        },
+        {
+          "connection_id": "c21",
+          "start_ms": 1316.2124999998923,
+          "end_ms": 1325.008699999671
+        },
+        {
+          "connection_id": "c22",
+          "start_ms": 1368.6324000009336,
+          "end_ms": 1391.1017999998876
+        },
+        {
+          "connection_id": "c23",
+          "start_ms": 1434.7376999994594,
+          "end_ms": 1443.3000999997603
+        },
+        {
+          "connection_id": "c24",
+          "start_ms": 1486.4959999995335,
+          "end_ms": 1511.6536000004999
+        },
+        {
+          "connection_id": "c25",
+          "start_ms": 1556.8664000002173,
+          "end_ms": 1566.2666999996873
+        },
+        {
+          "connection_id": "c26",
+          "start_ms": 1610.3691999996954,
+          "end_ms": 1650.8496000005835
+        },
+        {
+          "connection_id": "c27",
+          "start_ms": 1694.1203999995196,
+          "end_ms": 1703.1182999999146
+        },
+        {
+          "connection_id": "c28",
+          "start_ms": 1748.5587000010128,
+          "end_ms": 1772.968999999648
+        },
+        {
+          "connection_id": "c29",
+          "start_ms": 1818.226200000936,
+          "end_ms": 1820.6516999998712
+        },
+        {
+          "connection_id": "c30",
+          "start_ms": 1819.5556999999098,
+          "end_ms": 1827.4345999998332
+        },
+        {
+          "connection_id": "c31",
+          "start_ms": 1870.6003999996028,
+          "end_ms": 1892.382500000167
+        },
+        {
+          "connection_id": "c32",
+          "start_ms": 1936.9337999996787,
+          "end_ms": 1957.2920000009617
+        },
+        {
+          "connection_id": "c33",
+          "start_ms": 2001.1429000005592,
+          "end_ms": 2023.7453999998252
+        },
+        {
+          "connection_id": "c34",
+          "start_ms": 2069.049800000357,
+          "end_ms": 2089.626099999805
+        },
+        {
+          "connection_id": "c35",
+          "start_ms": 2133.64730000103,
+          "end_ms": 2155.6053000003885
+        },
+        {
+          "connection_id": "c36",
+          "start_ms": 2199.1068000006635,
+          "end_ms": 2220.8919000004244
+        },
+        {
+          "connection_id": "c37",
+          "start_ms": 2264.762900000278,
+          "end_ms": 2286.2182000008033
+        },
+        {
+          "connection_id": "c38",
+          "start_ms": 2331.026899999415,
+          "end_ms": 2376.5177999994194
+        },
+        {
+          "connection_id": "c39",
+          "start_ms": 2420.916200000647,
+          "end_ms": 2444.318199999543
+        },
+        {
+          "connection_id": "c40",
+          "start_ms": 2488.0178999992495,
+          "end_ms": 2494.198899999901
+        },
+        {
+          "connection_id": "c41",
+          "start_ms": 2538.1895000009536,
+          "end_ms": 2560.7870999992883
+        },
+        {
+          "connection_id": "c42",
+          "start_ms": 2604.189800000313,
+          "end_ms": 2621.48630000047
+        },
+        {
+          "connection_id": "c43",
+          "start_ms": 2666.2622000003466,
+          "end_ms": 2672.593200000847
+        },
+        {
+          "connection_id": "c44",
+          "start_ms": 2716.304300000047,
+          "end_ms": 2755.6067000004987
+        },
+        {
+          "connection_id": "c45",
+          "start_ms": 2800.764400000844,
+          "end_ms": 2810.7600000003004
+        },
+        {
+          "connection_id": "c46",
+          "start_ms": 2867.2937999999704,
+          "end_ms": 2869.866999999431
+        },
+        {
+          "connection_id": "c47",
+          "start_ms": 2868.6871000008978,
+          "end_ms": 2878.8459000006696
+        },
+        {
+          "connection_id": "c48",
+          "start_ms": 2922.181300000375,
+          "end_ms": 2943.0183000004035
+        },
+        {
+          "connection_id": "c49",
+          "start_ms": 2986.4383000003727,
+          "end_ms": 2988.983900000676
+        },
+        {
+          "connection_id": "c50",
+          "start_ms": 3031.733499999973,
+          "end_ms": 3056.192699999883
+        },
+        {
+          "connection_id": "c51",
+          "start_ms": 3099.4203999998717,
+          "end_ms": 3101.913300000888
+        },
+        {
+          "connection_id": "c52",
+          "start_ms": 3144.6943000009924,
+          "end_ms": 3150.7173999998486
+        },
+        {
+          "connection_id": "c53",
+          "start_ms": 3193.3948999994755,
+          "end_ms": 3215.8276999998634
+        },
+        {
+          "connection_id": "c54",
+          "start_ms": 3259.710399999676,
+          "end_ms": 3299.9837000006664
+        },
+        {
+          "connection_id": "c55",
+          "start_ms": 3343.6756000010064,
+          "end_ms": 3365.591800000402
+        },
+        {
+          "connection_id": "c56",
+          "start_ms": 3408.5634000002756,
+          "end_ms": 3419.110000000728
+        },
+        {
+          "connection_id": "c57",
+          "start_ms": 3463.466100000005,
+          "end_ms": 3478.3829000007245
+        },
+        {
+          "connection_id": "c58",
+          "start_ms": 3522.360999999364,
+          "end_ms": 3528.3815000002505
+        },
+        {
+          "connection_id": "c59",
+          "start_ms": 3572.698100000707,
+          "end_ms": 3594.0616999996564
+        },
+        {
+          "connection_id": "c60",
+          "start_ms": 3637.4195000007603,
+          "end_ms": 3655.5169000002934
+        },
+        {
+          "connection_id": "c61",
+          "start_ms": 3699.7241000008216,
+          "end_ms": 3708.748999999443
+        },
+        {
+          "connection_id": "c62",
+          "start_ms": 3752.4429999994027,
+          "end_ms": 3772.8669999996782
+        },
+        {
+          "connection_id": "c63",
+          "start_ms": 3816.1801999995077,
+          "end_ms": 3825.3762000003917
+        },
+        {
+          "connection_id": "c64",
+          "start_ms": 3869.4746000001032,
+          "end_ms": 3908.6057000004075
+        },
+        {
+          "connection_id": "c65",
+          "start_ms": 3910.1800999997067,
+          "end_ms": 3913.7320999998337
+        },
+        {
+          "connection_id": "c66",
+          "start_ms": 3952.7144999992743,
+          "end_ms": 3988.5957000005874
+        },
+        {
+          "connection_id": "c67",
+          "start_ms": 4032.771899999716,
+          "end_ms": 4041.915499999959
+        },
+        {
+          "connection_id": "c68",
+          "start_ms": 4084.519800000635,
+          "end_ms": 4106.916700000511
+        },
+        {
+          "connection_id": "c69",
+          "start_ms": 4152.1064000007755,
+          "end_ms": 4160.933799999839
+        },
+        {
+          "connection_id": "c70",
+          "start_ms": 4203.538499999922,
+          "end_ms": 4240.477999999712
+        },
+        {
+          "connection_id": "c71",
+          "start_ms": 4284.25419999985,
+          "end_ms": 4293.709800000215
+        },
+        {
+          "connection_id": "c72",
+          "start_ms": 4337.486700000227,
+          "end_ms": 4359.682700000121
+        },
+        {
+          "connection_id": "c73",
+          "start_ms": 4403.558699999849,
+          "end_ms": 4412.392500000351
+        },
+        {
+          "connection_id": "c74",
+          "start_ms": 4456.547699999646,
+          "end_ms": 4478.325399999449
+        },
+        {
+          "connection_id": "c75",
+          "start_ms": 4521.8346000001475,
+          "end_ms": 4544.062999999369
+        },
+        {
+          "connection_id": "c76",
+          "start_ms": 4692.630999999892,
+          "end_ms": 4714.931700000307
+        },
+        {
+          "connection_id": "c77",
+          "start_ms": 4759.297700000388,
+          "end_ms": 4781.181399999696
+        },
+        {
+          "connection_id": "c78",
+          "start_ms": 4824.572199999238,
+          "end_ms": 4845.896700000594
+        },
+        {
+          "connection_id": "c79",
+          "start_ms": 4889.750500000446,
+          "end_ms": 4912.390699999378
+        },
+        {
+          "connection_id": "c80",
+          "start_ms": 4976.86640000029,
+          "end_ms": 5001.769200000126
+        },
+        {
+          "connection_id": "c81",
+          "start_ms": 4978.303699999742,
+          "end_ms": 4980.333600000449
+        },
+        {
+          "connection_id": "c82",
+          "start_ms": 5024.0659000010055,
+          "end_ms": 5043.785699999717
+        },
+        {
+          "connection_id": "c83",
+          "start_ms": 5045.423100000335,
+          "end_ms": 5083.599699999468
+        },
+        {
+          "connection_id": "c84",
+          "start_ms": 5129.052000000229,
+          "end_ms": 5150.3520000005665
+        },
+        {
+          "connection_id": "c85",
+          "start_ms": 5194.9132999998255,
+          "end_ms": 5201.224300000831
+        },
+        {
+          "connection_id": "c86",
+          "start_ms": 5245.024699999703,
+          "end_ms": 5267.641200000071
+        },
+        {
+          "connection_id": "c87",
+          "start_ms": 5311.893800000689,
+          "end_ms": 5329.125000000204
+        },
+        {
+          "connection_id": "c88",
+          "start_ms": 5373.460599999817,
+          "end_ms": 5379.550199999358
+        },
+        {
+          "connection_id": "c89",
+          "start_ms": 5425.15099999946,
+          "end_ms": 5466.129599999476
+        },
+        {
+          "connection_id": "c90",
+          "start_ms": 5509.578299999703,
+          "end_ms": 5518.760000000839
+        },
+        {
+          "connection_id": "c91",
+          "start_ms": 5676.354400000491,
+          "end_ms": 5687.3670000004495
+        },
+        {
+          "connection_id": "c92",
+          "start_ms": 5731.785399999353,
+          "end_ms": 5754.215599999952
+        },
+        {
+          "connection_id": "c93",
+          "start_ms": 5797.2828000001755,
+          "end_ms": 5799.807900000815
+        },
+        {
+          "connection_id": "c94",
+          "start_ms": 5843.09949999988,
+          "end_ms": 5866.87239999992
+        },
+        {
+          "connection_id": "c95",
+          "start_ms": 5911.198899999363,
+          "end_ms": 5913.424000000305
+        },
+        {
+          "connection_id": "c96",
+          "start_ms": 5957.478500000434,
+          "end_ms": 5963.950100000147
+        },
+        {
+          "connection_id": "c97",
+          "start_ms": 6007.989199999429,
+          "end_ms": 6029.765400000542
+        },
+        {
+          "connection_id": "c98",
+          "start_ms": 6073.467599999276,
+          "end_ms": 6130.779200000688
+        },
+        {
+          "connection_id": "c99",
+          "start_ms": 6095.0713000002,
+          "end_ms": 6097.517000000153
+        },
+        {
+          "connection_id": "c100",
+          "start_ms": 6174.283599999399,
+          "end_ms": 6196.101600000475
+        },
+        {
+          "connection_id": "c101",
+          "start_ms": 6240.205100000821,
+          "end_ms": 6249.30139999924
+        },
+        {
+          "connection_id": "c102",
+          "start_ms": 6292.333600000347,
+          "end_ms": 6307.38620000011
+        },
+        {
+          "connection_id": "c103",
+          "start_ms": 6350.640000000567,
+          "end_ms": 6357.229900000675
+        },
+        {
+          "connection_id": "c104",
+          "start_ms": 6401.291700000002,
+          "end_ms": 6423.383699999249
+        },
+        {
+          "connection_id": "c105",
+          "start_ms": 6466.339799999332,
+          "end_ms": 6482.869200001005
+        },
+        {
+          "connection_id": "c106",
+          "start_ms": 6528.110299999753,
+          "end_ms": 6530.3165999994235
+        },
+        {
+          "connection_id": "c107",
+          "start_ms": 6573.77169999927,
+          "end_ms": 6596.101600000111
+        },
+        {
+          "connection_id": "c108",
+          "start_ms": 6639.760300000489,
+          "end_ms": 6641.940999999861
+        },
+        {
+          "connection_id": "c109",
+          "start_ms": 6686.651899999561,
+          "end_ms": 6693.6122000006435
+        },
+        {
+          "connection_id": "c110",
+          "start_ms": 6736.642399999255,
+          "end_ms": 6758.874200000719
+        },
+        {
+          "connection_id": "c111",
+          "start_ms": 6802.3143999998865,
+          "end_ms": 6841.881000000285
+        },
+        {
+          "connection_id": "c112",
+          "start_ms": 6884.881800000585,
+          "end_ms": 6906.99289999975
+        },
+        {
+          "connection_id": "c113",
+          "start_ms": 6950.151700000788,
+          "end_ms": 6958.806399999958
+        },
+        {
+          "connection_id": "c114",
+          "start_ms": 7003.770799999984,
+          "end_ms": 7018.206900000223
+        },
+        {
+          "connection_id": "c115",
+          "start_ms": 7063.216799999282,
+          "end_ms": 7073.205000000598
+        },
+        {
+          "connection_id": "c116",
+          "start_ms": 7117.263800000728,
+          "end_ms": 7155.313999999635
+        },
+        {
+          "connection_id": "c117",
+          "start_ms": 7139.441100000113,
+          "end_ms": 7141.483600000356
+        },
+        {
+          "connection_id": "c118",
+          "start_ms": 7198.180299999876,
+          "end_ms": 7214.099799999531
+        },
+        {
+          "connection_id": "c119",
+          "start_ms": 7257.64110000091,
+          "end_ms": 7266.963699999906
+        },
+        {
+          "connection_id": "c120",
+          "start_ms": 7309.9949000006745,
+          "end_ms": 7331.044599999586
+        },
+        {
+          "connection_id": "c121",
+          "start_ms": 7374.2180000008375,
+          "end_ms": 7382.8472000004695
+        },
+        {
+          "connection_id": "c122",
+          "start_ms": 7426.702799999475,
+          "end_ms": 7448.662700000568
+        },
+        {
+          "connection_id": "c123",
+          "start_ms": 7492.305800000395,
+          "end_ms": 7527.872599999682
+        },
+        {
+          "connection_id": "c124",
+          "start_ms": 7572.609200000443,
+          "end_ms": 7581.170600000405
+        },
+        {
+          "connection_id": "c125",
+          "start_ms": 7625.865100000738,
+          "end_ms": 7647.955099999308
+        },
+        {
+          "connection_id": "c126",
+          "start_ms": 7692.429400000037,
+          "end_ms": 7701.379800000723
+        },
+        {
+          "connection_id": "c127",
+          "start_ms": 7745.279299999311,
+          "end_ms": 7787.861000000703
+        },
+        {
+          "connection_id": "c128",
+          "start_ms": 7831.65740000004,
+          "end_ms": 7840.380600000572
+        },
+        {
+          "connection_id": "c129",
+          "start_ms": 7884.894799999529,
+          "end_ms": 7907.890300000872
+        },
+        {
+          "connection_id": "c130",
+          "start_ms": 7952.362699999867,
+          "end_ms": 7961.271000000124
+        },
+        {
+          "connection_id": "c131",
+          "start_ms": 8003.757799999221,
+          "end_ms": 8026.459700000487
+        },
+        {
+          "connection_id": "c132",
+          "start_ms": 8070.5158000000665,
+          "end_ms": 8092.947900000581
+        },
+        {
+          "connection_id": "c133",
+          "start_ms": 8137.120800000048,
+          "end_ms": 8176.485300000422
+        },
+        {
+          "connection_id": "c134",
+          "start_ms": 8178.252199999406,
+          "end_ms": 8181.861900000513
+        },
+        {
+          "connection_id": "c135",
+          "start_ms": 8219.505799999752,
+          "end_ms": 8240.664400000242
+        },
+        {
+          "connection_id": "c136",
+          "start_ms": 8284.548699999505,
+          "end_ms": 8306.13810000068
+        },
+        {
+          "connection_id": "c137",
+          "start_ms": 8349.643900000956,
+          "end_ms": 8371.34160000096
+        },
+        {
+          "connection_id": "c138",
+          "start_ms": 8414.764200000718,
+          "end_ms": 8436.99899999956
+        },
+        {
+          "connection_id": "c139",
+          "start_ms": 8480.160799999794,
+          "end_ms": 8518.965999999637
+        },
+        {
+          "connection_id": "c140",
+          "start_ms": 8563.010800000484,
+          "end_ms": 8585.293600001023
+        },
+        {
+          "connection_id": "c141",
+          "start_ms": 8629.327000000558,
+          "end_ms": 8635.469500000909
+        },
+        {
+          "connection_id": "c142",
+          "start_ms": 8679.496500000823,
+          "end_ms": 8701.096299999335
+        },
+        {
+          "connection_id": "c143",
+          "start_ms": 8744.587600000159,
+          "end_ms": 8760.84609999998
+        },
+        {
+          "connection_id": "c144",
+          "start_ms": 8805.586599999515,
+          "end_ms": 8812.379200000578
+        },
+        {
+          "connection_id": "c145",
+          "start_ms": 8857.870300000286,
+          "end_ms": 8894.593600000007
+        },
+        {
+          "connection_id": "c146",
+          "start_ms": 8938.348800000313,
+          "end_ms": 8946.907400000782
+        },
+        {
+          "connection_id": "c147",
+          "start_ms": 8991.69240000083,
+          "end_ms": 9002.305500000148
+        },
+        {
+          "connection_id": "c148",
+          "start_ms": 9045.982100000401,
+          "end_ms": 9069.570800000292
+        },
+        {
+          "connection_id": "c149",
+          "start_ms": 9113.430100000187,
+          "end_ms": 9115.735600000335
+        },
+        {
+          "connection_id": "c150",
+          "start_ms": 9159.817600000679,
+          "end_ms": 9184.896500000832
+        },
+        {
+          "connection_id": "c151",
+          "start_ms": 9243.529800000033,
+          "end_ms": 9246.006900000793
+        },
+        {
+          "connection_id": "c152",
+          "start_ms": 9245.324299999993,
+          "end_ms": 9249.188899999353
+        },
+        {
+          "connection_id": "c153",
+          "start_ms": 9308.392299999468,
+          "end_ms": 9311.816999999792
+        },
+        {
+          "connection_id": "c154",
+          "start_ms": 9309.77189999976,
+          "end_ms": 9316.292299999986
+        },
+        {
+          "connection_id": "c155",
+          "start_ms": 9360.483500000555,
+          "end_ms": 9382.627900000443
+        },
+        {
+          "connection_id": "c156",
+          "start_ms": 9426.535700000386,
+          "end_ms": 9465.298600000096
+        },
+        {
+          "connection_id": "c157",
+          "start_ms": 9508.410200000071,
+          "end_ms": 9530.35649999947
+        },
+        {
+          "connection_id": "c158",
+          "start_ms": 9573.757800000749,
+          "end_ms": 9582.738000000973
+        },
+        {
+          "connection_id": "c159",
+          "start_ms": 9626.386699999784,
+          "end_ms": 9642.475300001024
+        },
+        {
+          "connection_id": "c160",
+          "start_ms": 9686.336099999608,
+          "end_ms": 9693.191800000932
+        },
+        {
+          "connection_id": "c161",
+          "start_ms": 9736.459199999445,
+          "end_ms": 9758.837800000038
+        },
+        {
+          "connection_id": "c162",
+          "start_ms": 9802.466700000878,
+          "end_ms": 9819.57710000097
+        },
+        {
+          "connection_id": "c163",
+          "start_ms": 9863.547700000709,
+          "end_ms": 9872.196899999835
+        },
+        {
+          "connection_id": "c164",
+          "start_ms": 9916.13099999995,
+          "end_ms": 9936.421500000506
+        },
+        {
+          "connection_id": "c165",
+          "start_ms": 9980.772400000205,
+          "end_ms": 9990.135500000179
+        },
+        {
+          "connection_id": "c166",
+          "start_ms": 10033.480199999758,
+          "end_ms": 10055.658299999777
+        },
+        {
+          "connection_id": "c167",
+          "start_ms": 10099.29910000028,
+          "end_ms": 10142.706500000713
+        },
+        {
+          "connection_id": "c168",
+          "start_ms": 10187.438299999485,
+          "end_ms": 10196.137900000394
+        },
+        {
+          "connection_id": "c169",
+          "start_ms": 10239.687100000083,
+          "end_ms": 10261.370599999282
+        },
+        {
+          "connection_id": "c170",
+          "start_ms": 10306.959800000186,
+          "end_ms": 10317.032599999948
+        },
+        {
+          "connection_id": "c171",
+          "start_ms": 10365.465999999287,
+          "end_ms": 10368.1231999999
+        },
+        {
+          "connection_id": "c172",
+          "start_ms": 10366.895700000896,
+          "end_ms": 10404.249600000185
+        },
+        {
+          "connection_id": "c173",
+          "start_ms": 10448.021800000788,
+          "end_ms": 10457.448600000134
+        },
+        {
+          "connection_id": "c174",
+          "start_ms": 10500.095900000815,
+          "end_ms": 10522.466599999461
+        },
+        {
+          "connection_id": "c175",
+          "start_ms": 10568.207899999834,
+          "end_ms": 10576.796499999546
+        },
+        {
+          "connection_id": "c176",
+          "start_ms": 10620.419599999877,
+          "end_ms": 10644.294499999887
+        },
+        {
+          "connection_id": "c177",
+          "start_ms": 10688.743000000613,
+          "end_ms": 10710.327799999504
+        },
+        {
+          "connection_id": "c178",
+          "start_ms": 10755.501999999979,
+          "end_ms": 10777.41419999984
+        },
+        {
+          "connection_id": "c179",
+          "start_ms": 10820.49729999926,
+          "end_ms": 10841.929500000333
+        },
+        {
+          "connection_id": "c180",
+          "start_ms": 10887.33289999982,
+          "end_ms": 10909.835500000554
+        },
+        {
+          "connection_id": "c181",
+          "start_ms": 10953.664599999684,
+          "end_ms": 10976.475499999651
+        },
+        {
+          "connection_id": "c182",
+          "start_ms": 11019.74010000049,
+          "end_ms": 11041.569700000764
+        },
+        {
+          "connection_id": "c183",
+          "start_ms": 11085.262500000681,
+          "end_ms": 11128.767000000153
+        },
+        {
+          "connection_id": "c184",
+          "start_ms": 11172.849599999608,
+          "end_ms": 11195.048600000518
+        },
+        {
+          "connection_id": "c185",
+          "start_ms": 11238.759399999253,
+          "end_ms": 11245.215099999768
+        },
+        {
+          "connection_id": "c186",
+          "start_ms": 11289.07640000034,
+          "end_ms": 11310.658200000034
+        },
+        {
+          "connection_id": "c187",
+          "start_ms": 11354.03899999983,
+          "end_ms": 11371.46439999924
+        },
+        {
+          "connection_id": "c188",
+          "start_ms": 11394.27330000035,
+          "end_ms": 11412.96069999953
+        },
+        {
+          "connection_id": "c189",
+          "start_ms": 11414.274900000237,
+          "end_ms": 11421.183099999325
+        },
+        {
+          "connection_id": "c190",
+          "start_ms": 11464.346200000364,
+          "end_ms": 11501.034599999912
+        },
+        {
+          "connection_id": "c191",
+          "start_ms": 11545.50460000064,
+          "end_ms": 11555.074600000808
+        },
+        {
+          "connection_id": "c192",
+          "start_ms": 11598.485799999253,
+          "end_ms": 11612.261399999625
+        },
+        {
+          "connection_id": "c193",
+          "start_ms": 11656.35199999997,
+          "end_ms": 11665.384600000834
+        },
+        {
+          "connection_id": "c194",
+          "start_ms": 11709.525100000974,
+          "end_ms": 11750.143299999763
+        },
+        {
+          "connection_id": "c195",
+          "start_ms": 11793.890799999645,
+          "end_ms": 11800.887100000182
+        },
+        {
+          "connection_id": "c196",
+          "start_ms": 11844.471200000044,
+          "end_ms": 11873.217899999872
+        },
+        {
+          "connection_id": "c197",
+          "start_ms": 11917.487500000789,
+          "end_ms": 11928.322699999626
+        },
+        {
+          "connection_id": "c198",
+          "start_ms": 11972.26210000008,
+          "end_ms": 11975.581700000475
+        },
+        {
+          "connection_id": "c199",
+          "start_ms": 12019.17069999945,
+          "end_ms": 12033.018100000845
+        },
+        {
+          "connection_id": "c200",
+          "start_ms": 12077.184400000988,
+          "end_ms": 12079.920700000002
+        },
+        {
+          "connection_id": "c201",
+          "start_ms": 12124.265500000547,
+          "end_ms": 12137.026500000502
+        },
+        {
+          "connection_id": "c202",
+          "start_ms": 12180.794800000513,
+          "end_ms": 12203.040399999736
+        },
+        {
+          "connection_id": "c203",
+          "start_ms": 12247.469100000671,
+          "end_ms": 12252.277400000821
+        },
+        {
+          "connection_id": "c204",
+          "start_ms": 12296.078299999863,
+          "end_ms": 12301.577199999883
+        },
+        {
+          "connection_id": "c205",
+          "start_ms": 12345.06490000058,
+          "end_ms": 12348.493600000438
+        },
+        {
+          "connection_id": "c206",
+          "start_ms": 12392.631599999731,
+          "end_ms": 12414.674999999988
+        },
+        {
+          "connection_id": "c207",
+          "start_ms": 12459.274200000436,
+          "end_ms": 12464.804200000799
+        },
+        {
+          "connection_id": "c208",
+          "start_ms": 12509.286099999372,
+          "end_ms": 12512.658999999985
+        }
+      ],
+      "steps": [
+        {
+          "step_id": "answer",
+          "invoke_enter_ms": 1112.5986999995803,
+          "executor_before": {
+            "active": 0,
+            "pending": 0
+          },
+          "driver_start_ms": 1112.78510000011,
+          "driver_end_ms": 11614.038699999583,
+          "invoke_return_ms": 11614.15660000057,
+          "submit_envelope_ms": 0.1864000005298294,
+          "driver_duration_ms": 10501.253599999472,
+          "return_overhead_ms": 0.11790000098699238
+        }
+      ],
+      "models": [
+        {
+          "start_ms": 2562.2246000002633,
+          "end_ms": 2562.254300000859,
+          "success": true
+        },
+        {
+          "start_ms": 5269.153200000801,
+          "end_ms": 5269.209800000681,
+          "success": true
+        },
+        {
+          "start_ms": 8702.477799999542,
+          "end_ms": 8702.548900000693,
+          "success": true
+        },
+        {
+          "start_ms": 11312.10529999953,
+          "end_ms": 11312.202900000557,
+          "success": true
+        }
+      ],
+      "tools": [
+        {
+          "action_id": "e0c2c2ae688d522982635d454bb01140",
+          "evidence_id": null,
+          "tool": "ci_get_execution_context",
+          "start_ms": 3367.4800000007963,
+          "end_ms": 3420.6627999992634
+        },
+        {
+          "action_id": "0d0b32d5d40756eda8f4b2caf87af0c4",
+          "evidence_id": "575d37d8-b9c2-5517-92b8-06a26b40810a",
+          "tool": "ci_read_execution_evidence",
+          "start_ms": 6197.639199999685,
+          "end_ms": 6250.771900000473
+        },
+        {
+          "action_id": "513daf8a64d257b496392a5718c0fafa",
+          "evidence_id": "10ac3df7-4aa5-5782-9ee5-063c377d9568",
+          "tool": "ci_read_execution_evidence",
+          "start_ms": 6908.466400000179,
+          "end_ms": 6960.558400000082
+        },
+        {
+          "action_id": "29f6a254752b5c3f8a5495f2684e93e6",
+          "evidence_id": "9f771d52-cd63-5643-904a-235a312ccbd8",
+          "tool": "ci_read_execution_evidence",
+          "start_ms": 9531.859200000326,
+          "end_ms": 9584.472700000333
+        }
+      ],
+      "batches": [
+        {
+          "iteration": 1,
+          "committed_ms": 3774.3260999995982
+        },
+        {
+          "iteration": 2,
+          "committed_ms": 7332.527700000355
+        },
+        {
+          "iteration": 3,
+          "committed_ms": 9937.963899999886
+        }
+      ],
+      "correctness_passed": true,
+      "t0_ms": 0.055900000006658956,
+      "identities": {
+        "investigation_id": "1066939d-8bcf-4ebc-9de3-121d515f2241",
+        "run_id": "ab17db83-11fe-469b-b983-7dee7e15cb41",
+        "session_id": "1e855589-6bfa-4c23-934b-d3682781541c",
+        "report_version": 2,
+        "events_url": "/api/v1/runs/ab17db83-11fe-469b-b983-7dee7e15cb41/events",
+        "report_url": "/api/ci/incidents/9f0d14ea-754d-4295-872d-b5d1e015ab13/investigations/1066939d-8bcf-4ebc-9de3-121d515f2241"
+      },
+      "t1_ms": 12254.083899999387,
+      "business_result": {
+        "investigation_id": "1066939d-8bcf-4ebc-9de3-121d515f2241",
+        "run_id": "ab17db83-11fe-469b-b983-7dee7e15cb41",
+        "report_version": 2,
+        "investigation_status": "COMPLETED",
+        "runtime_status": null,
+        "diagnosis_status": "SUPPORTED",
+        "report": {
+          "kind": "REPORT",
+          "incident_id": "9f0d14ea-754d-4295-872d-b5d1e015ab13",
+          "failure_stage": "PARSER",
+          "uncertainties": [],
+          "schema_version": "ci-diagnosis.v1",
+          "diagnosis_status": "SUPPORTED",
+          "recommended_checks": [
+            "核对解析与解码能力记录"
+          ],
+          "supporting_evidence": [
+            {
+              "digest": "9843058bb0d75f8c91d8994d0ee853ad8e172f74b48d3390728324da4b3c1d16",
+              "evidence_id": "575d37d8-b9c2-5517-92b8-06a26b40810a"
+            },
+            {
+              "digest": "98ff467609cc29cd1de536e5e47e54428028242ad69b71801d9ac1de020ea9be",
+              "evidence_id": "10ac3df7-4aa5-5782-9ee5-063c377d9568"
+            },
+            {
+              "digest": "7f811d04df45b3bc02b76f3c02c888e271e0461f651dd4105330b8e992028c67",
+              "evidence_id": "9f771d52-cd63-5643-904a-235a312ccbd8"
+            }
+          ],
+          "root_cause_hypothesis": "已观察解析错误与环境能力，需核对字段版本兼容性",
+          "recommended_owner_role": "TOOL_MAINTAINER"
+        },
+        "safe_error_code": null
+      },
+      "root_status": "SUCCEEDED",
+      "step_status": "SUCCEEDED",
+      "receipt": {
+        "cursor": 19,
+        "status": "DELIVERED",
+        "event_id": "dc8c815fdabc42f4be2224e400e6022a",
+        "sequence": 19,
+        "decision_id": "dc84216303705f408251ead7fb784957",
+        "result_digest": "03857a2247031cc3ddcb285481fab657882d9ec40dc70854341a25921180bc0b",
+        "content_digest": "03857a2247031cc3ddcb285481fab657882d9ec40dc70854341a25921180bc0b"
+      },
+      "budget": {
+        "retries": 0,
+        "cost_units": 4,
+        "tool_calls": 4,
+        "model_calls": 4,
+        "rrf_fusions": 0,
+        "step_starts": 0,
+        "bm25_queries": 0,
+        "input_tokens": 26209,
+        "total_tokens": 28257,
+        "context_chars": 0,
+        "output_tokens": 2048,
+        "document_reads": 0,
+        "vector_queries": 0,
+        "embedding_calls": 0,
+        "keyword_queries": 0,
+        "retrieval_calls": 0,
+        "remote_model_calls": 0
+      },
+      "assessments": [
+        {
+          "request_digest": "365ff9e20a6fd3b7065e67f4fddd211375847fdba3a3922e4fd646707bbb1067",
+          "reliable": true,
+          "admissible": true
+        },
+        {
+          "request_digest": "a3728359c1182f313331a2f9b9116086ed43b10b6a460c8abc32d07c4076ac45",
+          "reliable": true,
+          "admissible": true
+        },
+        {
+          "request_digest": "8ea8fa9b28d91c4f452b45b29871e54741938a4993598f1ebaee78564d72d44c",
+          "reliable": true,
+          "admissible": true
+        },
+        {
+          "request_digest": "73e08643177aed507f16925ca03b1983833d740d93fbfb655e638be0c3ab384e",
+          "reliable": true,
+          "admissible": true
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "e0c2c2ae688d522982635d454bb01140",
+          "iteration": 1,
+          "ordinal": 0,
+          "invocation_id": "e0c2c2ae688d522982635d454bb01140",
+          "source_digest": "1091089ae03a1139b3ada0af15d90b301a2a5119399c2d89af6697af16baf93b"
+        },
+        {
+          "action_id": "0d0b32d5d40756eda8f4b2caf87af0c4",
+          "iteration": 2,
+          "ordinal": 0,
+          "invocation_id": "0d0b32d5d40756eda8f4b2caf87af0c4",
+          "source_digest": "f2aa6ba8e1bf9eb942ab82fdfb56b12fe6584ac165cfdb1ce3d1bc3119f0957a"
+        },
+        {
+          "action_id": "513daf8a64d257b496392a5718c0fafa",
+          "iteration": 2,
+          "ordinal": 1,
+          "invocation_id": "513daf8a64d257b496392a5718c0fafa",
+          "source_digest": "14983e63e70fe8482216ca59124ced806cf663546adde7dc3aa354c3eca3a1ff"
+        },
+        {
+          "action_id": "29f6a254752b5c3f8a5495f2684e93e6",
+          "iteration": 3,
+          "ordinal": 0,
+          "invocation_id": "29f6a254752b5c3f8a5495f2684e93e6",
+          "source_digest": "9b7b9642062b8bce4155bc126b6dd645e9eb73c8558f461ea6820fab77b2bbb2"
+        }
+      ],
+      "dispose_start_ms": 12514.208399999916,
+      "dispose_end_ms": 12514.31650000086,
+      "execution_stats": {
+        "connect": {
+          "count": 203,
+          "cumulative_ms": 9131.57200000569,
+          "union_ms": 8726.44790000777
+        },
+        "close": {
+          "count": 203,
+          "cumulative_ms": 282.2130000058678,
+          "union_ms": 282.2130000058678
+        },
+        "holds": {
+          "count": 203,
+          "cumulative_ms": 3423.323100008929,
+          "union_ms": 3410.5739000096946
+        },
+        "lifecycle": {
+          "count": 406,
+          "cumulative_ms": 9413.785000011558,
+          "union_ms": 8991.245500010336
+        }
+      },
+      "envelope_ms": 12254.02799999938
+    },
+    {
+      "sample": 4,
+      "pool": "AsyncAdaptedQueuePool",
+      "config": {
+        "use_null_pool": false,
+        "pool_size": 5,
+        "max_overflow": 5,
+        "pool_timeout_seconds": 5
+      },
+      "captured_at": "2026-11-05T15:58:56.448594+00:00",
+      "connect": [
+        {
+          "start_ms": 0.19330000031914096,
+          "end_ms": 42.55310000007739,
+          "success": true,
+          "connection_id": "c1"
+        }
+      ],
+      "close": [
+        {
+          "connection_id": "c1",
+          "start_ms": 1113.0097999994177,
+          "end_ms": 1114.784999999756,
+          "success": true
+        }
+      ],
+      "holds": [
+        {
+          "connection_id": "c1",
+          "start_ms": 42.617999999492895,
+          "end_ms": 45.68239999935031
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 46.133699999700184,
+          "end_ms": 51.14529999991646
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 51.577099999121856,
+          "end_ms": 53.92729999948642
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 54.294400000799214,
+          "end_ms": 57.551100000637234
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 58.218500000293716,
+          "end_ms": 64.07559999934165
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 64.57339999906253,
+          "end_ms": 67.17709999975341
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 67.51190000068163,
+          "end_ms": 73.00519999989774
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 73.31610000073852,
+          "end_ms": 75.15699999930803
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 75.4942999992636,
+          "end_ms": 87.37099999962084
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 87.8207999994629,
+          "end_ms": 92.3211999997875
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 92.86969999993744,
+          "end_ms": 104.85630000039237
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 105.20440000072995,
+          "end_ms": 106.71290000027511
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 107.30309999962628,
+          "end_ms": 109.4983000002685
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 110.55149999992864,
+          "end_ms": 112.6365000000078
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 112.96779999975115,
+          "end_ms": 115.38850000033563
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 115.85120000017923,
+          "end_ms": 118.65620000025956
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 119.26119999952789,
+          "end_ms": 126.33400000049733
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 128.90089999928023,
+          "end_ms": 147.46390000073006
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 148.40580000054615,
+          "end_ms": 153.31870000045456
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 154.1691999991599,
+          "end_ms": 159.27929999998014
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 160.18040000017209,
+          "end_ms": 162.3345000007248
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 162.76319999997213,
+          "end_ms": 168.39570000047388
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 168.9688999995269,
+          "end_ms": 171.41090000041004
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 171.89680000046792,
+          "end_ms": 190.95129999914207
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 192.3944999998639,
+          "end_ms": 194.99569999970845
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 195.50290000006498,
+          "end_ms": 213.10380000068108
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 213.8223999991169,
+          "end_ms": 215.75529999972787
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 216.22949999982666,
+          "end_ms": 222.6542000007612
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 223.243000000366,
+          "end_ms": 225.28190000048198
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 225.80120000020543,
+          "end_ms": 230.74110000015935
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 231.31309999916994,
+          "end_ms": 235.9734000001481
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 236.8494999991526,
+          "end_ms": 243.07950000002165
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 243.92749999969965,
+          "end_ms": 248.81400000049325
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 249.4657000006555,
+          "end_ms": 255.3079000008438
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 255.99449999936041,
+          "end_ms": 260.797700000694
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 261.4525999997568,
+          "end_ms": 266.19039999968663
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 266.7338999999629,
+          "end_ms": 283.9433999997709
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 284.60740000082296,
+          "end_ms": 290.4113000004145
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 291.0388000000239,
+          "end_ms": 293.62899999978254
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 294.3529000003764,
+          "end_ms": 300.18159999963245
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 300.77840000012657,
+          "end_ms": 310.24969999998575
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 311.00209999931394,
+          "end_ms": 313.22630000067875
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 314.1508000007889,
+          "end_ms": 330.4993000001559
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 331.1739000000671,
+          "end_ms": 333.3483000005799
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 333.86109999992186,
+          "end_ms": 337.2436999998172
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 337.8255999996327,
+          "end_ms": 342.1558999998524
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 342.96399999948335,
+          "end_ms": 343.8415000000532
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 344.1705000004731,
+          "end_ms": 356.93539999920176
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 357.3500000002241,
+          "end_ms": 357.78059999938705
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 359.1061000006448,
+          "end_ms": 361.58330000034766
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 362.0962999993935,
+          "end_ms": 367.40610000015295
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 367.7289000006567,
+          "end_ms": 381.3795999994909
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 381.8637000003946,
+          "end_ms": 387.2033999996347
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 387.93880000048375,
+          "end_ms": 392.6217000007455
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 393.33869999973103,
+          "end_ms": 399.00479999960226
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 399.5885000003909,
+          "end_ms": 401.5068999997311
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 402.1460999992996,
+          "end_ms": 406.253299999662
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 406.7102999997587,
+          "end_ms": 412.58840000045893
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 413.18200000023353,
+          "end_ms": 415.0790000003326
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 415.50549999919895,
+          "end_ms": 422.23940000076254
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 422.8043000002799,
+          "end_ms": 424.58690000057686
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 425.0957999993261,
+          "end_ms": 430.0731999992422
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 430.82329999924696,
+          "end_ms": 442.2078000006877
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 442.7207000007911,
+          "end_ms": 444.52090000049793
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 445.13499999993655,
+          "end_ms": 449.1756000006717
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 450.3430999993725,
+          "end_ms": 452.1122000005562
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 453.0940000004193,
+          "end_ms": 463.81409999958123
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 464.59839999988617,
+          "end_ms": 466.3846999992529
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 466.8968000005407,
+          "end_ms": 472.6262999993196
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 473.2984000002034,
+          "end_ms": 475.3325000001496
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 475.7917000006273,
+          "end_ms": 480.1093000005494
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 480.98140000001877,
+          "end_ms": 484.9668000006204
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 485.7804000002943,
+          "end_ms": 490.9583999997267
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 491.47939999966184,
+          "end_ms": 495.6913000005443
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 496.3597000005393,
+          "end_ms": 502.915999999459
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 503.774799999519,
+          "end_ms": 507.59300000026997
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 508.39020000057644,
+          "end_ms": 512.8151000008074
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 513.3984000003693,
+          "end_ms": 525.1299999999901
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 525.8591000001616,
+          "end_ms": 530.9022999990702
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 531.5207000003284,
+          "end_ms": 533.310499999061
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 533.904399999301,
+          "end_ms": 538.6376999995264
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 539.2054000003554,
+          "end_ms": 545.4270999998698
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 546.1472000006324,
+          "end_ms": 547.9644999995799
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 548.9412000006268,
+          "end_ms": 559.5154999991792
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 560.074999999415,
+          "end_ms": 561.8895999996312
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 562.3711999996885,
+          "end_ms": 564.8213999993459
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 565.2609000007942,
+          "end_ms": 569.0231999997195
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 569.693900000857,
+          "end_ms": 570.5486999995628
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 570.8703000000241,
+          "end_ms": 577.747499999532
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 578.2373000001826,
+          "end_ms": 578.6645000007411
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 579.3794000001071,
+          "end_ms": 581.4501999993809
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 581.9367000003695,
+          "end_ms": 587.1243999990838
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 587.9437000003236,
+          "end_ms": 601.2482000005548
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 601.5840000000026,
+          "end_ms": 606.4597999993566
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 607.0166000008612,
+          "end_ms": 608.6419999992358
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 609.2898000006244,
+          "end_ms": 613.2004999999481
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 614.0077000000019,
+          "end_ms": 615.7841999993252
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 616.436899999826,
+          "end_ms": 620.7615000002988
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 621.2173000003531,
+          "end_ms": 625.1771999995981
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 625.9436000000278,
+          "end_ms": 626.3443000007101
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 626.6787000004115,
+          "end_ms": 633.7760000005801
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 634.1400999990583,
+          "end_ms": 634.5292000005429
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 635.2814000001672,
+          "end_ms": 637.9417000007379
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 638.4025000006659,
+          "end_ms": 643.230499999845
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 643.5185999998794,
+          "end_ms": 655.9120999991137
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 656.2443999991956,
+          "end_ms": 661.1093999999866
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 661.8634999995265,
+          "end_ms": 663.4733999999298
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 664.5183000000543,
+          "end_ms": 668.1422000001476
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 668.6434000002919,
+          "end_ms": 670.8493000005546
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 671.521300000677,
+          "end_ms": 675.4780999999639
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 675.9089000006497,
+          "end_ms": 679.8846000001504
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 680.534400000397,
+          "end_ms": 682.7205000008689
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 683.2085999994888,
+          "end_ms": 688.7246000005689
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 689.3481999995856,
+          "end_ms": 691.0932999999204
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 691.7510999992373,
+          "end_ms": 697.1744000002218
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 697.9515999992145,
+          "end_ms": 706.2901000008424
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 706.8072999991273,
+          "end_ms": 708.7370000008377
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 709.6077999995032,
+          "end_ms": 714.2273000008572
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 715.616499999669,
+          "end_ms": 717.4646000003122
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 718.0124999995314,
+          "end_ms": 729.0068000002066
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 729.681900000287,
+          "end_ms": 731.738000000405
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 732.3608000006061,
+          "end_ms": 737.8274999991845
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 738.5587000007945,
+          "end_ms": 740.4117999994924
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 740.9614000007423,
+          "end_ms": 745.5107000005228
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 746.0508000003756,
+          "end_ms": 750.3976000007242
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 751.2724999996863,
+          "end_ms": 756.8766000003961
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 757.2909999998956,
+          "end_ms": 761.4744000002247
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 762.2486000000208,
+          "end_ms": 767.7753000007215
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 768.512999999075,
+          "end_ms": 772.6552999993146
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 773.1249000007665,
+          "end_ms": 777.1642000006977
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 777.6890999994066,
+          "end_ms": 789.9904000005336
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 790.5955000005633,
+          "end_ms": 795.8405999997922
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 796.3854999998148,
+          "end_ms": 798.398900000393
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 799.0671999996266,
+          "end_ms": 804.8352999994677
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 805.3942000005918,
+          "end_ms": 812.0546999998624
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 812.8699000008055,
+          "end_ms": 814.9186999999074
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 815.7876999994187,
+          "end_ms": 825.7288000004337
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 826.2866000004578,
+          "end_ms": 828.3074999999371
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 829.0704999999434,
+          "end_ms": 831.8280000003142
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 832.5602999993862,
+          "end_ms": 836.8329999993875
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 837.5753000000259,
+          "end_ms": 837.9679999998189
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 838.2910000000265,
+          "end_ms": 845.7911999994394
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 846.1669999996957,
+          "end_ms": 846.5307999995275
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 847.4657000006118,
+          "end_ms": 849.7716999991098
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 850.2888999992138,
+          "end_ms": 855.8484000004682
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 856.2781000000541,
+          "end_ms": 870.1141000001371
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 870.5064000005223,
+          "end_ms": 875.5657999990945
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 876.0884999992413,
+          "end_ms": 877.5924999990821
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 878.2324999992852,
+          "end_ms": 882.6002999994671
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 883.1176999992749,
+          "end_ms": 884.86439999906
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 885.4683999998088,
+          "end_ms": 889.9483000004693
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 890.3556000004755,
+          "end_ms": 894.813000000795
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 895.4152000005706,
+          "end_ms": 897.4070000003849
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 897.8647000003548,
+          "end_ms": 902.104299999337
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 903.1099999992875,
+          "end_ms": 904.8918000007689
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 905.3289000003133,
+          "end_ms": 910.5259000007209
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 911.0548000007839,
+          "end_ms": 920.6383000000642
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 921.1768999994092,
+          "end_ms": 922.9439999999158
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 923.6657999990712,
+          "end_ms": 928.0328999993799
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 929.7048000007635,
+          "end_ms": 931.6717000001518
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 932.3542000001908,
+          "end_ms": 943.1394000002911
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 943.8011000002007,
+          "end_ms": 945.9311999999045
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 946.4604999993753,
+          "end_ms": 951.467999999295
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 952.236900000571,
+          "end_ms": 954.3517999991309
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 954.78969999931,
+          "end_ms": 959.4257000007929
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 959.9923999994644,
+          "end_ms": 964.4076999993558
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 965.3605999992578,
+          "end_ms": 970.5078000006324
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 970.9383000008529,
+          "end_ms": 974.9971000001096
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 975.6240999995498,
+          "end_ms": 980.926800000816
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 981.6657999999734,
+          "end_ms": 986.0487999994803
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 986.6063999998005,
+          "end_ms": 990.9244999998919
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 991.5507000005164,
+          "end_ms": 1004.5006000000285
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1005.1084000006085,
+          "end_ms": 1009.9914000002173
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1010.5375999992248,
+          "end_ms": 1012.8251999994973
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1013.5085999991134,
+          "end_ms": 1018.6840999995184
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1019.3942999994761,
+          "end_ms": 1025.5646000005072
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1026.269300000422,
+          "end_ms": 1027.9869999994844
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1029.042300000583,
+          "end_ms": 1039.5160000007309
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1039.9985999993078,
+          "end_ms": 1041.9373999993695
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1042.5175000000309,
+          "end_ms": 1046.8409000004613
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1047.5232000007964,
+          "end_ms": 1049.7556999998778
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1050.110099999074,
+          "end_ms": 1063.226800000848
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1064.1219000008277,
+          "end_ms": 1066.7307999992772
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1067.0608000000357,
+          "end_ms": 1078.2512000005227
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1079.0290999993886,
+          "end_ms": 1083.195400000477
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1083.8108000007196,
+          "end_ms": 1084.9049999997078
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1085.4500999994343,
+          "end_ms": 1091.0296000001836
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1092.0454999995854,
+          "end_ms": 1093.0088000004616
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1093.352199999572,
+          "end_ms": 1096.1740000002465
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1096.4540999993915,
+          "end_ms": 1101.058300000659
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1101.6693000001396,
+          "end_ms": 1103.8191000006918
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1104.2765999991389,
+          "end_ms": 1105.0873000003776
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1105.3833000005397,
+          "end_ms": 1105.7641999996122
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1106.0312999998132,
+          "end_ms": 1109.994700000243
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1110.3672000008373,
+          "end_ms": 1111.3103000006959
+        },
+        {
+          "connection_id": "c1",
+          "start_ms": 1111.587100000179,
+          "end_ms": 1112.8571999997803
+        }
+      ],
+      "steps": [
+        {
+          "step_id": "answer",
+          "invoke_enter_ms": 153.5475000000588,
+          "executor_before": {
+            "active": 0,
+            "pending": 0
+          },
+          "driver_start_ms": 153.72460000071442,
+          "driver_end_ms": 1047.0301000004838,
+          "invoke_return_ms": 1047.108799999478,
+          "submit_envelope_ms": 0.1771000006556278,
+          "driver_duration_ms": 893.3054999997694,
+          "return_overhead_ms": 0.07869999899412505
+        }
+      ],
+      "models": [
+        {
+          "start_ms": 300.2694999995583,
+          "end_ms": 300.29470000044967,
+          "success": true
+        },
+        {
+          "start_ms": 538.7076000006346,
+          "end_ms": 538.7573999996675,
+          "success": true
+        },
+        {
+          "start_ms": 804.9073000001954,
+          "end_ms": 804.9733999996533,
+          "success": true
+        },
+        {
+          "start_ms": 1018.7635000002047,
+          "end_ms": 1018.849300000511,
+          "success": true
+        }
+      ],
+      "tools": [
+        {
+          "action_id": "da6c3d8723a05044ba3bda50156520f3",
+          "evidence_id": null,
+          "tool": "ci_get_execution_context",
+          "start_ms": 387.46920000085083,
+          "end_ms": 392.78700000068056
+        },
+        {
+          "action_id": "533b99e17ee156228df05a480093fc00",
+          "evidence_id": "bc50a96a-0622-5194-ad31-35d8f9e77e02",
+          "tool": "ci_read_execution_evidence",
+          "start_ms": 606.5744999996241,
+          "end_ms": 608.7845999991259
+        },
+        {
+          "action_id": "2a87cf8333625954998a37d021142308",
+          "evidence_id": "95e71dcb-c034-5808-b2e5-3c8a75232505",
+          "tool": "ci_read_execution_evidence",
+          "start_ms": 661.2440999997489,
+          "end_ms": 663.609400000496
+        },
+        {
+          "action_id": "c42393fddc8d53488e6982f5e7ef6620",
+          "evidence_id": "a1581da0-7030-5756-8776-66affe8a1ec9",
+          "tool": "ci_read_execution_evidence",
+          "start_ms": 875.6917999999132,
+          "end_ms": 877.7186999996047
+        }
+      ],
+      "batches": [
+        {
+          "iteration": 1,
+          "committed_ms": 422.30580000068585
+        },
+        {
+          "iteration": 2,
+          "committed_ms": 688.790300000619
+        },
+        {
+          "iteration": 3,
+          "committed_ms": 902.1652999999787
+        }
+      ],
+      "correctness_passed": true,
+      "t0_ms": 0.04640000042854808,
+      "identities": {
+        "investigation_id": "7aa8e383-8ab2-403f-a236-add30971a149",
+        "run_id": "d07a3bb7-6f78-404c-a7a0-81ee44318cdf",
+        "session_id": "e543fc04-c6be-4172-ac7c-027a2bf0ee42",
+        "report_version": 2,
+        "events_url": "/api/v1/runs/d07a3bb7-6f78-404c-a7a0-81ee44318cdf/events",
+        "report_url": "/api/ci/incidents/6392c71a-b565-4f95-a883-b5c7edc5aecf/investigations/7aa8e383-8ab2-403f-a236-add30971a149"
+      },
+      "t1_ms": 1103.9677000007941,
+      "business_result": {
+        "investigation_id": "7aa8e383-8ab2-403f-a236-add30971a149",
+        "run_id": "d07a3bb7-6f78-404c-a7a0-81ee44318cdf",
+        "report_version": 2,
+        "investigation_status": "COMPLETED",
+        "runtime_status": null,
+        "diagnosis_status": "SUPPORTED",
+        "report": {
+          "kind": "REPORT",
+          "incident_id": "6392c71a-b565-4f95-a883-b5c7edc5aecf",
+          "failure_stage": "PARSER",
+          "uncertainties": [],
+          "schema_version": "ci-diagnosis.v1",
+          "diagnosis_status": "SUPPORTED",
+          "recommended_checks": [
+            "核对解析与解码能力记录"
+          ],
+          "supporting_evidence": [
+            {
+              "digest": "e9bcd204dfc27f3ffb9ea425ccb54ff52a7d73113c1c80ac1d70c9b364a5f4bc",
+              "evidence_id": "bc50a96a-0622-5194-ad31-35d8f9e77e02"
+            },
+            {
+              "digest": "03f172259ea97ebfed0da5b03f14abd43b45ffb73c2635d2d5858f8408bc8a2f",
+              "evidence_id": "95e71dcb-c034-5808-b2e5-3c8a75232505"
+            },
+            {
+              "digest": "198f57472749bdcdaad133b4756286d198833adccf32c3ad438eb7639c9443d6",
+              "evidence_id": "a1581da0-7030-5756-8776-66affe8a1ec9"
+            }
+          ],
+          "root_cause_hypothesis": "已观察解析错误与环境能力，需核对字段版本兼容性",
+          "recommended_owner_role": "TOOL_MAINTAINER"
+        },
+        "safe_error_code": null
+      },
+      "root_status": "SUCCEEDED",
+      "step_status": "SUCCEEDED",
+      "receipt": {
+        "cursor": 19,
+        "status": "DELIVERED",
+        "event_id": "a665119172454354928baa3ac1c283c8",
+        "sequence": 19,
+        "decision_id": "418cca853c0f5d7b87a55b4458654ea7",
+        "result_digest": "fb565f5d469ea364c42abb919afe10d73d54e68964f3ffe148584973f2ed7c6e",
+        "content_digest": "fb565f5d469ea364c42abb919afe10d73d54e68964f3ffe148584973f2ed7c6e"
+      },
+      "budget": {
+        "retries": 0,
+        "cost_units": 4,
+        "tool_calls": 4,
+        "model_calls": 4,
+        "rrf_fusions": 0,
+        "step_starts": 0,
+        "bm25_queries": 0,
+        "input_tokens": 26209,
+        "total_tokens": 28257,
+        "context_chars": 0,
+        "output_tokens": 2048,
+        "document_reads": 0,
+        "vector_queries": 0,
+        "embedding_calls": 0,
+        "keyword_queries": 0,
+        "retrieval_calls": 0,
+        "remote_model_calls": 0
+      },
+      "assessments": [
+        {
+          "request_digest": "d1004e06e8e5034211a619ee5ee2aac07afe1013fc2f61171960bc19798fb0c3",
+          "reliable": true,
+          "admissible": true
+        },
+        {
+          "request_digest": "254b6589918fda1827a2d8209e63ae9fb2cd6b37e342fbe7314f27172d56329e",
+          "reliable": true,
+          "admissible": true
+        },
+        {
+          "request_digest": "c3122c10f60a3c208be06d679372877b3068e937599edd8f09fe65f21861907d",
+          "reliable": true,
+          "admissible": true
+        },
+        {
+          "request_digest": "3ccd3d7434229d90447b50c669e2bdf34d2b7895a83e38cac5a0b80b3fc634b6",
+          "reliable": true,
+          "admissible": true
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "da6c3d8723a05044ba3bda50156520f3",
+          "iteration": 1,
+          "ordinal": 0,
+          "invocation_id": "da6c3d8723a05044ba3bda50156520f3",
+          "source_digest": "eed0b3f3fa0b2fbc0cfa52bbba7e112fb0bf5afef5b8e077dc879c885d946b88"
+        },
+        {
+          "action_id": "533b99e17ee156228df05a480093fc00",
+          "iteration": 2,
+          "ordinal": 0,
+          "invocation_id": "533b99e17ee156228df05a480093fc00",
+          "source_digest": "4ee4e90ff04538bf5edf03e81d99b3ce6619ad020c3f3b33eeecc55e58c1875a"
+        },
+        {
+          "action_id": "2a87cf8333625954998a37d021142308",
+          "iteration": 2,
+          "ordinal": 1,
+          "invocation_id": "2a87cf8333625954998a37d021142308",
+          "source_digest": "6a9ace9a8b0207d7c8ed4f8b0e110a43d2c3aa8a360d642b9d1a0162bb0449fa"
+        },
+        {
+          "action_id": "c42393fddc8d53488e6982f5e7ef6620",
+          "iteration": 3,
+          "ordinal": 0,
+          "invocation_id": "c42393fddc8d53488e6982f5e7ef6620",
+          "source_digest": "48550bc2f4cffe996028d026185fe591e2c415970de977df621b4c9ed2a3cc9d"
+        }
+      ],
+      "dispose_start_ms": 1112.9932000003464,
+      "dispose_end_ms": 1115.3376999991451,
+      "execution_stats": {
+        "connect": {
+          "count": 1,
+          "cumulative_ms": 42.35979999975825,
+          "union_ms": 42.35979999975825
+        },
+        "close": {
+          "count": 0,
+          "cumulative_ms": 0,
+          "union_ms": 0
+        },
+        "holds": {
+          "count": 191,
+          "cumulative_ms": 939.8625000103493,
+          "union_ms": 939.8625000103493
+        },
+        "lifecycle": {
+          "count": 1,
+          "cumulative_ms": 42.35979999975825,
+          "union_ms": 42.35979999975825
+        }
+      },
+      "envelope_ms": 1103.9213000003656
+    }
+  ],
+  "prior_file_sha256": {
+    "10_codex_a_execution_architecture_audit.md": "f8d58f7be997b648fe63e8113f5e866e8691e90b5ce520a94e1cfe549311ce26",
+    "30_codex_a_wp1_baseline_gate_and_scope_decision.md": "07176dcc4ccf635a2064462c6fac74e83c4405bf070a8b0872a7408161e74bb5",
+    "20_codex_b_ci_investigation_baseline_observations.json": "f0229e5b1c69579f86ba5be36b0cacf6eaa9f597f1d33eee7b046877a16b1dd9",
+    "20_codex_b_ci_investigation_baseline.md": "30b9b09d0a85b452193225b164fde69f44aa39b017f99030e9367cc46b0ae4f2"
+  }
+}
