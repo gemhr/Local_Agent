@@ -119,9 +119,9 @@ class FeatureImpactService:
                 error = "REPORT_SCHEMA_OR_EVIDENCE_INVALID"
             version = (await session.execute(select(func.max(ReportRow.report_version)).where(ReportRow.task_id == task_id))).scalar() or 0
             report_id = str(uuid4())
-            envelope = dict(schema_version="feature-impact-report.v1", report_id=report_id, report_version=version + 1,
+            envelope = dict(schema_version="feature-impact-report.v2" if task.snapshot.get("analysis_contract") == "interface-impact.v1" else "feature-impact-report.v1", report_id=report_id, report_version=version + 1,
                 task_id=task_id, task_version=task.snapshot["task_version"], input_digest=task.snapshot["input_digest"],
-                corpus_digest=task.snapshot["corpus_digest"], candidate_kind=kind, candidate_version="1.1.0" if agent_result else RULE_VERSION if rule else "human.v1",
+                corpus_digest=task.snapshot["corpus_digest"], candidate_kind=kind, candidate_version="1.1.0" if agent_result else source.get("rule_version", RULE_VERSION) if rule else "human.v2" if task.snapshot.get("analysis_contract") == "interface-impact.v1" else "human.v1",
                 run_id=agent_result[0].run_id if agent_result else None, sealed_at=now(), report_digest=digest(parsed if parsed else raw),
                 discovery_origins={f["finding_id"]: ("DEVELOPER_KNOWN" if f["historical_feature_id"] in task.snapshot["known_impacts"] else "UNPROMPTED_CANDIDATE") for f in (parsed or {}).get("findings", [])})
             row = ReportRow(report_id=report_id, task_id=task_id, request_id=request_id, intent_digest=intent, report_version=version + 1,
@@ -144,6 +144,12 @@ class FeatureImpactService:
             result["coverage_plan"] = plan.payload if plan else None
             result["executions"] = [dict(execution_id=e.execution_id, test_id=e.result["test_id"]) for e in
                 (await session.execute(select(ExecutionRow).where(ExecutionRow.plan_id == plan.plan_id))).scalars().all()] if plan else []
+            if plan:
+                from core.ci_simulation.models import ScenarioInstanceRow
+                from core.ci_simulation.coverage_execution import public_asset, references
+                instances = (await session.scalars(select(ScenarioInstanceRow).where(ScenarioInstanceRow.tenant_id == principal.tenant_id, ScenarioInstanceRow.owner_user_id == principal.user_id, ScenarioInstanceRow.current_state["workflow_source"]["plan_id"].astext == plan.plan_id))).all()
+                result["case_assets"] = [public_asset(i, await references(session, i.instance_id)) for i in instances]
+                result["executions"] += [e for a in result["case_assets"] for e in a["executions"]]
             return result
 
     async def review(self, principal, report_id, body):
@@ -204,6 +210,8 @@ class FeatureImpactService:
             test = next((t for t in plan.payload["tests"] if t["test_id"] == body["test_id"]), None)
             if test is None:
                 raise BusinessError("TEST_NOT_APPROVED")
+            if test.get("test_kind") == "DAAS_CASE":
+                raise BusinessError("DAAS_CASE_REQUIRES_CI_ASSET_TRIGGER")
             result, trace = execute(test["policy"], test["operations"])
             result.update(execution_id=str(uuid4()), plan_id=plan_id, plan_version=1, plan_digest=body["plan_digest"], test_id=body["test_id"], completed_at=now())
             result["result_digest"] = digest(result)
@@ -220,6 +228,14 @@ class FeatureImpactService:
             plan = await session.get(PlanRow, row.plan_id)
             await self.owned_report(session, principal, plan.report_id)
             return row.result
+
+    async def prepare_assets(self, principal, plan_id, body):
+        from core.ci_simulation.coverage_execution import prepare
+        return await prepare(self, principal, plan_id, body)
+
+    async def case_assets(self, principal, plan_id):
+        from core.ci_simulation.coverage_execution import assets
+        return await assets(self, principal, plan_id)
 
     async def bound_evidence(self, context, arguments):
         from core.feature_impact.models import InvestigationRow

@@ -69,7 +69,9 @@ async def create_verification(service, principal, incident_id, body):
             # 仅此人工验证路径不创建 FAIL Incident；执行和证据仍逐条追加。
             execution, _ = await execute_instance(session, principal, instance.instance_id,
                 str(uuid5(NAMESPACE_URL, verification_id + ":" + case_id)),
-                case_id=case_id, expected_state_revision=instance.state_revision)
+                case_id=case_id, expected_state_revision=instance.state_revision,
+                asset_digest=instance.current_state.get("case_asset", {}).get("asset_digest"),
+                _verification=dict(incident_id=incident_id, verification_id=verification_id) if "workflow_source" in instance.current_state else None)
             items.append(dict(case_id=case_id, execution_id=execution.execution_id))
             completed = execution.completed_at
         row = IncidentVerificationRow(verification_id=verification_id, incident_id=incident_id,

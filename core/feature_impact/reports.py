@@ -51,7 +51,11 @@ class Report(Strict):
 
 
 def validate(raw, task, *, kind, reads, task_inputs=()):
-    report = Report.model_validate(raw)
+    joint = task.get("analysis_contract") == "interface-impact.v1"
+    if joint:
+        from core.feature_impact.interface_impact import Report as InterfaceReport
+        from core.ci_simulation.daas_assets import validate_test
+    report = (InterfaceReport if joint else Report).model_validate(raw)
     ids, tests = set(), set()
     for finding in report.findings:
         if finding.finding_id in ids:
@@ -73,7 +77,10 @@ def validate(raw, task, *, kind, reads, task_inputs=()):
                 raise ValueError("DUPLICATE_TEST_ID")
             tests.add(test.test_id)
             from core.feature_impact.resource_simulation import validate_operations
-            validate_operations(test.operations)
+            if joint:
+                validate_test(task, test.model_dump())
+            else:
+                validate_operations(test.operations)
     return report.model_dump()
 
 
@@ -153,6 +160,10 @@ def _existing_coverage(cases, mechanism):
 
 def rule_report(task):
     """只读公开依赖，未知信息不补成确定事实。"""
+    if task.get("analysis_contract") == "interface-impact.v1":
+        from core.feature_impact.interface_impact import rule_report as interface_rule
+        value, source = interface_rule(task)
+        return validate(value, task, kind="RULE", reads=source["read_sources"]), source
     catalog = search(task, "")
     docs = [read(task, d["source_ref"]) for d in catalog]
     reads = [d["source_ref"] for d in docs]

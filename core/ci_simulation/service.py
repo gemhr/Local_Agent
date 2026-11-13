@@ -25,13 +25,17 @@ async def create_instance(session, principal, key, request_id):
     return row, inserted is not None
 
 
-async def execute_instance(session, principal, instance_id, request_id, *, case_id=None, expected_state_revision=None):
+async def execute_instance(session, principal, instance_id, request_id, *, case_id=None, expected_state_revision=None, asset_digest=None, _verification=None):
+    from core.ci_simulation import coverage_execution as coverage
+    peek = await session.scalar(select(ScenarioInstanceRow).where(ScenarioInstanceRow.instance_id == instance_id, ScenarioInstanceRow.owner_user_id == principal.user_id, ScenarioInstanceRow.tenant_id == principal.tenant_id))
+    binding = await coverage.lock_task(session, principal, peek) if peek is not None and "workflow_source" in peek.current_state else None
     row = (await session.execute(select(ScenarioInstanceRow).where(ScenarioInstanceRow.instance_id == instance_id,
         ScenarioInstanceRow.owner_user_id == principal.user_id, ScenarioInstanceRow.tenant_id == principal.tenant_id).with_for_update())).scalar_one_or_none()
     if row is None:
         raise CIError("CI_NOT_FOUND", 404)
     old = (await session.execute(select(CIExecutionRow).where(CIExecutionRow.instance_id == instance_id,
         CIExecutionRow.request_id == request_id))).scalar_one_or_none()
+    trigger = await coverage.authorize(session, principal, row, binding, old, request_id, case_id, expected_state_revision, asset_digest, _verification) if binding else None
     if old:
         if ((case_id is not None and old.case_id != case_id)
                 or (expected_state_revision is not None and old.state_revision != expected_state_revision)):
@@ -42,6 +46,10 @@ async def execute_instance(session, principal, instance_id, request_id, *, case_
     if case_id is not None and case_id not in {c["case_id"] for c in case_catalog(row.current_state)}:
         raise CIError("CI_CASE_UNKNOWN", 422)
     result = execute(row.current_state, str(uuid4()), case_id)
+    if binding:
+        coverage.seal_execution(result, trigger, instance_id)
+        if binding[0].exposed_at is None:
+            binding[0].exposed_at = datetime.now(timezone.utc)
     state = result["execution_snapshot"]
     execution = CIExecutionRow(execution_id=result["summary"]["execution_id"], instance_id=instance_id,
         request_id=request_id, environment_id=state["environment"]["environment_id"],

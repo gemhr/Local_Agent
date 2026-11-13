@@ -2298,7 +2298,7 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                 require_scope(request.state.principal, EVALUATION_EXECUTE_SCOPE)
             elif request.url.path == "/api/ci/quality/evaluate" and request.method == "POST":
                 require_scope(request.state.principal, "localagent:ci-business:evaluate")
-            elif request.url.path == "/api/ci/quality/baseband/evaluate" and request.method == "POST":
+            elif request.url.path in {"/api/ci/quality/baseband/evaluate", "/api/ci/quality/coverage-execution/evaluate"} and request.method == "POST":
                 require_scope(request.state.principal, "localagent:baseband:evaluate")
             elif request.url.path == "/api/feature-impact/quality/evaluate" and request.method == "POST":
                 require_scope(request.state.principal, "localagent:feature-impact:evaluate")

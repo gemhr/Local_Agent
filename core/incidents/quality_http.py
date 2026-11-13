@@ -38,3 +38,17 @@ async def evaluate(body: QualityEvaluate, request: Request):
         raise HTTPException(exc.status_code, detail=exc.code) from None
     except CIError as exc:
         raise HTTPException(exc.status, detail=exc.code) from None
+
+
+from core.incidents.coverage_quality import Evaluate as CoverageEvaluate, evaluate as evaluate_coverage
+
+
+@router.post("/coverage-execution/evaluate")
+async def coverage_evaluate(body: CoverageEvaluate, request: Request):
+    try:
+        state = request.app.state
+        return await evaluate_coverage(state.incident_service, state.baseband_quality_configuration, request.state.principal, body)
+    except AuthError as exc:
+        raise HTTPException(exc.status_code, detail=exc.code) from None
+    except CIError as exc:
+        raise HTTPException(exc.status, detail=exc.code) from None

@@ -39,7 +39,7 @@ async def create_scenario(body: CreateScenario, request: Request, response: Resp
 @router.post("/scenarios/{instance_id}/executions")
 async def execute(instance_id: str, body: ExecutionIntent, request: Request, response: Response):
     execution, incident, created = await call(request.app.state.incident_service.execute(human(request), instance_id, str(body.request_id),
-        case_id=body.case_id, expected_state_revision=body.expected_state_revision))
+        case_id=body.case_id, expected_state_revision=body.expected_state_revision, asset_digest=body.asset_digest))
     response.status_code = 201 if created else 200
     return dict(execution_id=execution.execution_id, outcome=execution.outcome,
         incident_id=incident.incident_id if incident else None, completed_at=execution.completed_at, state_revision=execution.state_revision)

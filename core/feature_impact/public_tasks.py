@@ -1,9 +1,10 @@
-"""只装载已批准的四份公开快照；调用者不能提供路径或资料正文。"""
+"""只装载已批准的公开快照；调用者不能提供路径或资料正文。"""
 import json
 from pathlib import Path
 from core.feature_impact.knowledge import digest, read
 
 APPROVED_INPUTS = {
+    'sampling-interface': '57faace5956f727f25918aff04d2fa3e1a980b5b5da7dc9bdffc143fe6da3819',
     'T2': 'be188c4cf395286ad272a0556485b513279e387c6098499133646fb7e185140a',
     'T3': '60c39e7217e6d32a8dc725f052a9e6b327517eae1bed0a124a05fb59e7e2651a',
     'T5': 'e6ac66135bba5be333a9ad0febea8b0382c762897ffaed6654aa3f6a77c59dc7',

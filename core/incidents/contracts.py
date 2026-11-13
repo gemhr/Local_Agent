@@ -231,6 +231,7 @@ class CreateScenario(Intent):
 
 
 class ExecutionIntent(Intent):
+    asset_digest: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
     case_id: str | None = None
     expected_state_revision: int | None = Field(default=None, strict=True, ge=1)
 

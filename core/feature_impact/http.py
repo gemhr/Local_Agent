@@ -14,7 +14,7 @@ class Intent(Strict):
 
 
 class PublicTaskIntent(Intent):
-    public_task: Literal['T2', 'T3', 'T5', 'T6']
+    public_task: Literal['T2', 'T3', 'T5', 'T6', 'sampling-interface']
 
 
 class Submission(Intent):
@@ -36,6 +36,20 @@ class Review(Intent):
 class Execution(Intent):
     plan_digest: str
     test_id: str
+
+
+class PrepareAsset(Execution):
+    executor_ref: str = Field(min_length=1, max_length=100)
+
+
+@router.post("/coverage-plans/{plan_id}/case-assets")
+async def prepare_asset(plan_id: str, body: PrepareAsset, request: Request):
+    return await call(request, "prepare_assets", plan_id, body.model_dump(mode="json"))
+
+
+@router.get("/coverage-plans/{plan_id}/case-assets")
+async def case_assets(plan_id: str, request: Request):
+    return await call(request, "case_assets", plan_id)
 
 
 class QualityInput(Strict):

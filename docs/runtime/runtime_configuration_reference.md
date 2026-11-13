@@ -464,3 +464,15 @@ HUMAN 场景包含 `baseband_input_mismatch`、`baseband_compatible`、`baseband
 当前 Agent `baseband_test_investigator/1.1.0` 输出 `baseband-diagnosis.v2`，每项区分 finding_status 与 failure_relation；部分异常可确认而整体不可决。只保留原两项只读工具。SERVICE 同一路由新增严格 `baseband-quality-request.v2` / output.v2 分支；observed_reads 从 FINAL 前真实 COMMITTED/OBSERVED 读取计算，不由模型自报。旧 request/output.v1、report.v1 与已封存 1.0.0 来源保持独立。
 
 HUMAN `SELECT_BASEBAND_REFERENCE` 明确指定 `reference_id=integer-reference`、`version=1/2`，服务端验证实际软件/条件适用性，沿 preview/digest/revision/confirm 修改未来状态，再执行 SINGLE/GROUP；原 FAIL/证据不变。迁移 `0044_oracle_reference_action` 仅扩展 action CHECK，存在此动作记录时不能直接降级旧 CHECK。
+
+### 覆盖计划与本地 DAAS 合成资产
+
+`sampling-interface` 是允许列表中的独立公开任务，分析合同 `interface-impact.v1`。仅 OPERATOR/ADMIN HUMAN 可按原公开任务入口创建；资料仍按 planning_cutoff、manifest/corpus/input digest 冻结。新 RULE `interface-coverage.v1` 读取新旧 Tag 值域、消息依赖和历史测试值，生成 `feature-impact-report.v2` 的 `DAAS_CASE` 分支；旧 Buffer/v1 报告、规则与执行分派保留。Feature Agent 模型开关不变，本链规划 RULE/HUMAN、诊断 RULE、模型 NOT_EXECUTED、增量价值 NOT_VALIDATED。
+
+`POST /api/feature-impact/coverage-plans/{plan_id}/case-assets` 只接受 request_id/plan_digest/test_id/executor_ref。当前目标仅 `local-integer-executor@1`；服务端从原批准行和冻结资料构造 `ScenarioInstance`，分别保存公开 asset_digest 与内部 recipe_digest，记录 LOCAL_SIMULATED 分发。GET 同一路径用于恢复资产与 CI 引用。准备不调用 Oracle，不产生 CIExecution/Incident，不设置 exposed_at，不代表向真实执行机传输了文件。
+
+HUMAN 通过原 `/api/ci/scenarios/{instance_id}/executions`，按服务端返回 execution_intent 明确选择资产并带 asset_digest。关联实例统一 Task→Scenario→Incident 锁顺序，校验 owner/tenant、Plan/批准 Test、资产、目标和修订；旧实例不强加新字段。trigger 由服务端认证身份构造，首次 CI/Incident 成功落库与 Task.exposed_at 在同一事务，失败全回滚；同 request 同意图重试返回原执行，不同意图冲突。新来源首次写入 snapshot，CI_SUMMARY 仅加公开 allowlist，保留六类证据及 baseband input_digest 原义。Feature 不插入另一份 Buffer 执行结果。
+
+普通触发不得绕过原资产或借修订执行改后状态；原 IncidentVerification 人工复测仍追加 CIExecution，并记录原来源、verification_ref、action_id（若有 APPLIED 修改）、state_revision 与实际配置摘要。事务提交后由原验证批次引用这些执行，不新增审批体系。
+
+`POST /api/ci/quality/coverage-execution/evaluate` 是只读 SERVICE 重验，复用 `localagent:baseband:evaluate` 与原精确 project/service/tenant/owner/incident grant。新 request/output.v1 绑定 Task/Report/Plan/Test/Asset/Distribution/Trigger/Execution/Incident，以及独立 baseband 子输入；不接受客户端 Plan/批准身份/资产正文或 GT。现有 Token 四文件和恢复补丁不变，本链开关保持关闭。

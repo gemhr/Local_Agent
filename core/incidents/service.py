@@ -30,6 +30,7 @@ class IncidentService:
             return await simulation.create_instance(session, principal, key, request_id)
 
     async def execute(self, principal, instance_id, request_id, **options):
+        require_human(principal)
         async with self.database.transaction() as session:
             execution, created = await simulation.execute_instance(session, principal, instance_id, request_id, **options)
             incident = (await session.execute(select(IncidentRow).where(IncidentRow.execution_id == execution.execution_id))).scalar_one_or_none()
@@ -55,6 +56,10 @@ class IncidentService:
         require_human(principal)
         incident = await self.owned_incident(session, principal, incident_id)
         origin = await session.get(CIExecutionRow, incident.execution_id)
+        if lock and "workflow_source" in origin.execution_snapshot:
+            from core.ci_simulation.coverage_execution import lock_task
+            linked = await session.get(ScenarioInstanceRow, origin.instance_id)
+            await lock_task(session, principal, linked)
         query = select(ScenarioInstanceRow).where(ScenarioInstanceRow.instance_id == origin.instance_id,
             ScenarioInstanceRow.owner_user_id == principal.user_id, ScenarioInstanceRow.tenant_id == principal.tenant_id)
         instance = (await session.execute(query.with_for_update() if lock else query)).scalar_one_or_none()
@@ -88,12 +93,16 @@ class IncidentService:
                 .order_by(IncidentActionRow.created_at.desc(), IncidentActionRow.action_id))).scalars().all()
             verifications = (await session.execute(select(IncidentVerificationRow).where(IncidentVerificationRow.incident_id == incident_id)
                 .order_by(IncidentVerificationRow.completed_at.desc(), IncidentVerificationRow.verification_id))).scalars().all()
+            from core.incidents.joint_diagnosis import rule_report
             return dict(incident_id=row.incident_id, title=row.title, status=row.status, created_at=row.created_at,
                 instance_id=instance.instance_id, state_revision=instance.state_revision,
                 closed_at=row.closed_at, closed_by_user_id=row.closed_by_user_id, closure=row.closure_payload,
                 actions=[action_payload(a, instance.state_revision) for a in actions],
                 verifications=[await verification_payload(session, v, execution) for v in verifications],
                 closure_eligibility=await closure_eligibility(session, row, execution, instance),
+                workflow_source=execution.summary.get("workflow_source"),
+                rule_diagnosis=(rule_report(row.incident_id, execution) if "workflow_source" in execution.execution_snapshot else None),
+                diagnosis_source="RULE" if "workflow_source" in execution.execution_snapshot else None, model_execution="NOT_EXECUTED" if "workflow_source" in execution.execution_snapshot else None,
                 execution=execution.summary, evidence=evidence_catalog(execution),
                 investigations=[dict(investigation_id=i.investigation_id, run_id=i.run_id, report_version=i.report_version,
                     projection_status=i.projection_status) for i in investigations])
