@@ -434,3 +434,21 @@ Loop v2 从已提交 Observation 派生首次成功 load_skill 的 `(name, SKILL
 同一冻结正文的后续重复组不额外永久保留，仍受最近组等原规则约束；references 继续按原规则压缩。
 source_manifest 中 skill_loads 投影仅含 name/sha256/first，不存正文，不成为 loaded 状态 Authority。
 恢复复用原 COMMITTED Tool Result 和冻结 Skill 身份，不重读已提交正文；未加载文件仍须校验原摘要。Child 在自身 Frame 独立派生。
+
+## 基带输入调查与只读评价
+
+`LOCAL_AGENT_BASEBAND_QUALITY_CONFIGURATION_PATH` 默认为空，未配置时不授予任何基带评价来源。非空值指向 UTF-8 JSON：`{"grants":[{"project_id":"...","service_user_id":"...","tenant_id":"...","owner_user_id":"...","incident_ids":["..."]}]}`。配置由部署者管理，启动时冻结；更改后重启。文件只含身份授权，不保存 token、GT 或模型报告。
+
+`POST /api/ci/quality/baseband/evaluate` 要求 SERVICE 和 `localagent:baseband:evaluate`，同时匹配配置中的 service、tenant、owner、project 和确切 incident。请求的 selector 仅选择已封存调查；不能授权新来源。输入使用 `baseband-input.v1`，请求摘要为排序、紧凑 UTF-8 canonical JSON 的 SHA-256。RULE 明示规则来源；AGENT 必须重验 SUCCEEDED Run、Session、DELIVERED FINAL、封存摘要和实际 COMMITTED/OBSERVED 引用。入口不启动模型、不修改执行，不接收 GT 或报告正文。
+
+HUMAN 场景包含 `baseband_input_mismatch`、`baseband_compatible`、`baseband_missing_receipt`。服务端按执行 snapshot 的 schema 选择 `baseband_test_investigator/1.0.0`，只授权两项现有 CI 只读工具，不开启 parser adaptive stop。正常对照也创建可调查的 Incident 容器，但其原始 execution.outcome 保持 PASS。人工 `ALIGN_BASEBAND_INPUT` 只接受 `{"rule_version":"1"}`，沿 preview/confirm 与 SINGLE/GROUP 追加执行。应用旧库前执行正常 `uv run python -m alembic upgrade head`，0043 仅扩展现有动作 CHECK，不新增表；存在新动作记录时不能直接降级旧 CHECK。
+
+此配置不授予 Token 计量例外。当前默认 HEURISTIC Profile 可能在模型调用前被 `CONTEXT_BUDGET_UNCERTAIN` 拒绝，必须与实际模型失败、证据不足诊断分别展示。
+
+### Stage21 本地基带 Token 临时例外
+
+仅在 `LOCAL_AGENT_ENVIRONMENT_PROFILE=TEST` 且 `LOCAL_AGENT_STAGE21_BASEBAND_TOKEN_EXCEPTION=1` 时，对 `baseband_test_investigator` 的 HUMAN/Loop v2 调查启用。限定 remote_advanced / deepseek / deepseek-flash，单次输出 reserve 仍为 4096，实际上下文窗口仍由原 Profile 和 Provider 限制。
+
+例外复用现有 BoundAdmission、Root/Frame pins、ContextSnapshot 和模型请求摘要校验，新准入采用 stage21-baseband-local-admission.v2 实验记录。初次准入与 Root 写入从原 Investigation→Incident→Execution、可信 Memory/Run/Conversation 归属验证 HUMAN、Session、tenant、owner、baseband schema、冻结 input digest 和原调查请求；同时绑定实际 Profile 摘要。公开摘要不充当授权凭证。Root、Model、ContextSnapshot 新写入均要求 TEST 和开关仍启用；历史 v1/v2 仅允许独立只读校验。计数可靠性始终 UNAVAILABLE，原 HEURISTIC assessment 仍 reliable=False/admissible=False，不创建或伪造 SERVICE quality_receipt。
+
+仅在上述完整准入通过后，此实验 Run 的 max_input_tokens/max_output_tokens/max_total_tokens 及 Token 派生的累计 cost_units 上限才为 None，且模型选择限定为获准 Profile；仍保留模型调用次数、工具次数、重试、180 秒总时间上限及请求自身 Deadline、Cancel、权限和副作用控制。该开关不会扩大 Profile 的实际上下文窗口，不改变旧 parser 默认准入。结束 Stage21 时按任务 Handoff 的 stage21_token_exception.patch 精确反向恢复，不用整文件覆盖。

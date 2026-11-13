@@ -4,6 +4,7 @@ from core.ci_simulation.execution import case_catalog, PRODUCT_RELEASES
 from core.ci_simulation.service import CIError
 
 ACTION_OPTIONS = [
+    dict(action_kind="ALIGN_BASEBAND_INPUT", title="对齐 KDT 采样率及增益到 DDT", parameters={"rule_version": "1"}),
     dict(action_kind="UPGRADE_PARSER_DECODER", title="升级 parser/decoder", parameters={"target_version": "2.0"}),
     dict(action_kind="SET_FEATURE_FLAG", title="设置 compressed_transport", parameters={"compressed_transport": False}),
     dict(action_kind="REFRESH_CASE_INPUT", title="刷新主用例 TLV 输入", parameters={"target_revision": 2}),
@@ -27,7 +28,16 @@ def preview(state, action_kind, target_case_id, parameters):
         before = node.get(path[-1])
         if before != after:
             changes.append(dict(path=path, before=before, after=after))
-    if action_kind == "UPGRADE_PARSER_DECODER":
+    if action_kind == "ALIGN_BASEBAND_INPUT":
+        from core.ci_simulation.baseband import validate
+        if state.get("schema_version") != "baseband-input.v1":
+            raise CIError("CI_ACTION_TARGET_INVALID", 422)
+        inputs = validate(state["baseband"])
+        for key in ("sample_rate", "gain"):
+            change(["baseband", "kdt", key], inputs["ddt"][key])
+    elif state.get("schema_version") == "baseband-input.v1":
+        raise CIError("CI_ACTION_TARGET_INVALID", 422)
+    elif action_kind == "UPGRADE_PARSER_DECODER":
         for key, value in dict(parser_version="parser-2.0", decoder_table_version="decoder-2.0",
                 parser_supported_field_revision=2, decoder_supported_field_revision=2).items():
             change(["environment", key], value)

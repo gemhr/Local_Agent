@@ -66,5 +66,6 @@ def register_tools(registry, service, bridge):
 
 
 def register_policies(catalog):
+    from core.ci_simulation.baseband import AGENT_ID as BASEBAND_AGENT
     for name in TOOL_NAMES:
-        catalog.register(ToolPolicy(tool_name=name, allowed_agent_ids=frozenset({AGENT_ID})))
+        catalog.register(ToolPolicy(tool_name=name, allowed_agent_ids=frozenset({AGENT_ID, BASEBAND_AGENT})))

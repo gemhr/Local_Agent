@@ -15,7 +15,7 @@ class CIError(ValueError):
 
 async def create_instance(session, principal, key, request_id):
     values = dict(instance_id=str(uuid4()), tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
-        request_id=request_id, scenario_key=key, template_version="2", state_revision=1,
+        request_id=request_id, scenario_key=key, template_version="1" if key.startswith("baseband_") else "2", state_revision=1,
         current_state=initial_state(key), created_at=datetime.now(timezone.utc))
     inserted = (await session.execute(insert(ScenarioInstanceRow).values(**values).on_conflict_do_nothing().returning(ScenarioInstanceRow.instance_id))).scalar_one_or_none()
     row = (await session.execute(select(ScenarioInstanceRow).where(ScenarioInstanceRow.tenant_id == principal.tenant_id,

@@ -101,9 +101,13 @@ class DurableExecutionRepository:
             loop = root.resume_input.get("agent_loop") or {}
             admission = loop.get("e2e_test_admission")
             if admission is not None or loop.get("pinned_config", {}).get("request_counting_exception") is not None:
-                from core.runtime.request_counting_admission import validate_record
-                if quality_receipt is None or not validate_record(admission, root=root, receipt=quality_receipt):
+                from core.runtime.request_counting_admission import validate_record, is_local_baseband_record
+                local = is_local_baseband_record(admission)
+                if (quality_receipt is None and not local) or not validate_record(admission, root=root, receipt=quality_receipt, for_write=True):
                     raise ValueError("E2E_ADMISSION_ROOT_MISMATCH")
+                if local:
+                    from core.runtime.request_counting_admission import validate_local_root
+                    await validate_local_root(session, admission, root)
             if quality_receipt is not None:
                 adaptive = quality_receipt.execution_manifest.get("protocol_version") == "adaptive-execution-evaluate.v1"
                 if adaptive:
@@ -412,6 +416,12 @@ class DurableExecutionRepository:
         async with self.database.transaction() as session:
             if self.run_control is not None:
                 await self.run_control.assert_current_in_transaction(session, lease)
+            local_root = await session.get(RuntimeRunExecutionRow, lease.run_id)
+            from core.runtime.request_counting_admission import is_local_baseband_record, validate_record
+            local_record = (local_root.resume_input.get("agent_loop") or {}).get("e2e_test_admission") if local_root else None
+            if is_local_baseband_record(local_record) and (not validate_record(local_record, root=local_root, for_write=True)
+                    or provider_kind != local_record["policy"]["provider_kind"] or profile_identity != local_record["policy"]["model_identity"]):
+                raise ValueError("BASEBAND_LOCAL_MODEL_ADMISSION_INVALID")
             if loop_frame_id is not None:
                 root, frame = await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
                 if frame.frame_role == "CHILD" and purpose == "FORMATION":
@@ -441,10 +451,10 @@ class DurableExecutionRepository:
                     from core.runtime.agent_loop.context import ContextSnapshotV1
                     counting_eligible = bool(request_assessment and request_assessment.get("admissible") is True)
                     if request_assessment and not counting_eligible:
-                        from core.runtime.request_counting_admission import persisted_eligible
+                        from core.runtime.request_counting_admission import persisted_eligible, is_local_baseband_record
                         from core.persistence.models import RuntimeAgentEvaluationReceiptRow
                         receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id)
-                        counting_eligible = receipt is not None and persisted_eligible(request_assessment, root, frame, receipt, purpose=purpose)
+                        counting_eligible = (receipt is not None or is_local_baseband_record((root.resume_input.get("agent_loop") or {}).get("e2e_test_admission"))) and persisted_eligible(request_assessment, root, frame, receipt, purpose=purpose)
                     if not counting_eligible or request_assessment.get("request_digest") != request_digest:
                         raise RuntimeError("CONTEXT_BUDGET_UNCERTAIN")
                     if purpose == "DECISION":
@@ -827,6 +837,10 @@ class DurableExecutionRepository:
         from core.runtime.agent_loop.context import ContextSnapshotV1, context_sources, snapshot_candidate
         async with self.database.transaction() as session:
             root, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+            from core.runtime.request_counting_admission import is_local_baseband_record, validate_record
+            local_record = (root.resume_input.get("agent_loop") or {}).get("e2e_test_admission")
+            if is_local_baseband_record(local_record) and not validate_record(local_record, root=root, frame=frame, for_write=True):
+                raise ValueError("BASEBAND_LOCAL_CONTEXT_ADMISSION_INVALID")
             rows = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id).order_by(RuntimeLoopIterationRow.iteration_no).with_for_update())).scalars().all())
             await self._memory_admission(session, lease)
             current = rows[-1] if rows and rows[-1].state == "OPEN" else None
@@ -853,10 +867,10 @@ class DurableExecutionRepository:
             expected = snapshot_candidate(frame, groups, candidate["options"], candidate["output_reserve"], summary=candidate["summary"], kind=candidate["kind"])
             budget_valid = validation.get("budget") is True
             if not budget_valid:
-                from core.runtime.request_counting_admission import persisted_validation
+                from core.runtime.request_counting_admission import persisted_validation, is_local_baseband_record
                 from core.persistence.models import RuntimeAgentEvaluationReceiptRow
                 receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id)
-                budget_valid = receipt is not None and persisted_validation(validation, root, frame, receipt)
+                budget_valid = (receipt is not None or is_local_baseband_record((root.resume_input.get("agent_loop") or {}).get("e2e_test_admission"))) and persisted_validation(validation, root, frame, receipt)
             if (expected.digest != artifact.digest or validation.get("reason") != "VALID" or not budget_valid
                     or not all(validation.get(k) is True for k in ("source", "mandatory", "roles", "pairs"))):
                 raise RuntimeError("CONTEXT_REJECTED_STALE")

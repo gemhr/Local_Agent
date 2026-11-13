@@ -9,6 +9,21 @@ router = APIRouter(prefix="/api/ci/quality")
 SCOPE = "localagent:ci-business:evaluate"
 
 
+from core.incidents.baseband_quality import Evaluate as BasebandEvaluate, evaluate as evaluate_baseband
+
+
+@router.post("/baseband/evaluate")
+async def baseband_evaluate(body: BasebandEvaluate, request: Request):
+    try:
+        state = request.app.state
+        return await evaluate_baseband(state.incident_service, state.ci_investigation_service.repository,
+            state.baseband_quality_configuration, request.state.principal, body)
+    except AuthError as exc:
+        raise HTTPException(exc.status_code, detail=exc.code) from None
+    except CIError as exc:
+        raise HTTPException(exc.status, detail=exc.code) from None
+
+
 @router.post("/exports")
 async def export(body: QualityExport, request: Request):
     return await call(quality.export_facts(request.app.state.incident_service, human(request), body))

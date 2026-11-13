@@ -1663,6 +1663,8 @@ async def lifespan(app: FastAPI):
     )
     app.state.client_event_feed = runtime_services.client_event_feed
     from core.agent_platform.ci_diagnosis import CIInvestigationService
+    from core.incidents.baseband_quality import load_configuration as load_baseband_quality
+    app.state.baseband_quality_configuration = load_baseband_quality(settings.baseband_quality_configuration_path)
     from core.agent_platform.ci_status import CIStatusService
     app.state.ci_status_service = CIStatusService(incident_service, agent_application_service, app.state.authorization_service)
     app.state.ci_investigation_service = CIInvestigationService(
@@ -2296,6 +2298,8 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                 require_scope(request.state.principal, EVALUATION_EXECUTE_SCOPE)
             elif request.url.path == "/api/ci/quality/evaluate" and request.method == "POST":
                 require_scope(request.state.principal, "localagent:ci-business:evaluate")
+            elif request.url.path == "/api/ci/quality/baseband/evaluate" and request.method == "POST":
+                require_scope(request.state.principal, "localagent:baseband:evaluate")
             elif request.url.path == "/api/feature-impact/quality/evaluate" and request.method == "POST":
                 require_scope(request.state.principal, "localagent:feature-impact:evaluate")
             elif _is_stage8_result_callback_path(request.url.path):

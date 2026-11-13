@@ -69,8 +69,8 @@ class AgentLoopDriverV2:
                 enforce_final_only(frame, decision, current.iteration_no)
                 recipes, assistant = prepare_batch(frame, current, decision, context) if decision.kind == "TOOL_BATCH" else ([], None)
                 output_schema = definition.output_schema
-                # CI 报告只约束 FINAL；不改变原 REFUSAL 或公开交付 Schema。
-                if decision.kind == "FINAL" and definition.agent_id == CI_DIAGNOSIS_AGENT_ID:
+                # 两类 CI 报告只约束 FINAL；不改变原 REFUSAL 或公开交付 Schema。
+                if decision.kind == "FINAL" and definition.agent_id in {CI_DIAGNOSIS_AGENT_ID, "baseband_test_investigator"}:
                     output_schema = definition.business_options.get("final_report_schema", output_schema)
                 if decision.kind in {"FINAL", "REFUSAL"} and output_schema is not None:
                     try:

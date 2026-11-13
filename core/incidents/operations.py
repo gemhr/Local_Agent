@@ -31,7 +31,8 @@ async def current_state(service, principal, incident_id):
                     continue
                 options.append(option)
         return dict(instance_id=instance.instance_id, observed_at=datetime.now(timezone.utc), state_revision=instance.state_revision,
-            environment=state["environment"], cases=case_catalog(state), report_field_revision=state["report"]["field_revision"],
+            environment=state["environment"], cases=case_catalog(state), report_field_revision=state.get("report", {}).get("field_revision"),
+            baseband=state.get("baseband"),
             required_case_ids=[c["case_id"] for c in case_catalog(state)], allowed_actions=options)
 
 

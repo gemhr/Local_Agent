@@ -16,6 +16,7 @@ def state_differences(before, after):
     paths = [["environment", key] for key in ("software_version", "parser_version", "decoder_table_version",
         "parser_supported_field_revision", "decoder_supported_field_revision", "buffer_behavior")]
     paths += [["environment", "feature_flags", "compressed_transport"], ["test_case", "input_revision"], ["report", "field_revision"]]
+    paths += [["baseband", "kdt", key] for key in ("sample_rate", "gain")]
     def read(state, path):
         for key in path:
             state = state.get(key, {}) if isinstance(state, dict) else None

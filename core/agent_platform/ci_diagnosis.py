@@ -70,16 +70,23 @@ def validate_report(raw, row, incident, execution, image, actions):
     frame, step = frames[0], steps[0]
     final = next((i for i in image.loop_iterations if i.frame_id == frame.frame_id and i.decision_id == frame.result_decision_id), None)
     receipt = frame.final_delivery_receipt or {}
-    if (frame.execution_agent_id != AGENT_ID or frame.step_id != step.step_id or final is None
+    if (frame.execution_agent_id != row.agent_id or frame.step_id != step.step_id or final is None
             or final.decision_kind != "FINAL" or receipt.get("decision_id") != final.decision_id
             or receipt.get("status") != "DELIVERED" or receipt.get("result_digest") != text_digest(raw)
             or sha256_digest(step.typed_result_payload) != step.result_digest
-            or step.typed_result_payload.get("producer_agent_id") != AGENT_ID):
+            or step.typed_result_payload.get("producer_agent_id") != row.agent_id):
         raise CIError("CI_REPORT_RESULT_INVALID")
     from core.agent_platform.ci_evidence import observed_sources, minimum_coverage
     seen = observed_sources(image, actions, frame, incident.incident_id, execution.execution_id,
         before_iteration=final.iteration_no)
     value = strict_object(raw)
+    from core.ci_simulation.baseband import AGENT_ID as BASEBAND_AGENT, SCHEMA
+    expected_agent = BASEBAND_AGENT if execution.execution_snapshot.get("schema_version") == SCHEMA else AGENT_ID
+    if row.agent_id != expected_agent or row.agent_version != AGENT_VERSION:
+        raise CIError("CI_REPORT_IDENTITY_INVALID")
+    if expected_agent == BASEBAND_AGENT:
+        from core.incidents.baseband_diagnosis import validate_sources
+        return validate_sources(value, row, incident, execution, seen)
     if isinstance(value, dict) and value.get("kind") == "REFUSAL":
         raise CIError("CI_REPORT_REFUSED")
     report = DiagnosisReport.model_validate(value)
@@ -112,10 +119,10 @@ class CIInvestigationService:
             row, created = await self.incidents.admit(principal, incident_id, request_id)
             if not created:
                 return self.links(row)
-            access = MemoryAccessContext.from_principal(principal, AGENT_ID, row.session_id)
+            access = MemoryAccessContext.from_principal(principal, row.agent_id, row.session_id)
             await self.authorization.bind_new(principal, "CONVERSATION", access.conversation_id)
             await self.authorization.bind_new(principal, "RUN", row.run_id)
-            request = ExecutionRequest(agent_id=AGENT_ID, input="请调查该 CI 执行失败，使用授权工具取证。incident_id=" + incident_id
+            request = ExecutionRequest(agent_id=row.agent_id, input="请调查该 CI 执行，使用授权工具取证。incident_id=" + incident_id
                 + " execution_id=" + incident.execution_id, run_id=row.run_id, session_id=row.session_id, timeout_seconds=180)
             async def consume():
                 try:
@@ -168,5 +175,5 @@ class CIInvestigationService:
         if row.projection_status == "PENDING" and (datetime.now(timezone.utc) - row.created_at).total_seconds() > 180:
             status = "UNCONFIRMED"
         return dict(investigation_id=row.investigation_id, run_id=row.run_id, report_version=row.report_version,
-            investigation_status=status, runtime_status=runtime, diagnosis_status=(row.report_payload or {}).get("diagnosis_status", "FAILED" if row.projection_status == "FAILED" else None),
+            investigation_status=status, runtime_status=runtime, diagnosis_status=(row.report_payload or {}).get("diagnosis_status", (row.report_payload or {}).get("decidability", "FAILED" if row.projection_status == "FAILED" else None)),
             report=row.report_payload, safe_error_code="CI_RUN_START_UNCONFIRMED" if status == "UNCONFIRMED" else row.safe_error_code)

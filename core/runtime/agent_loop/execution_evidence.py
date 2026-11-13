@@ -32,7 +32,7 @@ def build_execution_evidence(image, actions, delegations, binding=None):
                 or model.loop_iteration_no!=iteration.iteration_no or model.purpose!="DECISION"
                 or model.context_snapshot_id!=iteration.context_snapshot_id or digest(model.result_binding)!=model.result_digest
                 or not model.request_assessment or (model.request_assessment.get("admissible") is not True
-                    and not persisted_eligible(model.request_assessment,image.root,frame_by_id.get(iteration.frame_id)))
+                    and not persisted_eligible(model.request_assessment,image.root,frame_by_id.get(iteration.frame_id),for_write=False))
                 or model.request_assessment.get("request_digest")!=model.request_digest):
             gaps.add("MODEL_BINDING_MISSING")
         if not iteration.context_snapshot_id: gaps.add("CONTEXT_BINDING_MISSING")
@@ -76,7 +76,7 @@ def build_execution_evidence(image, actions, delegations, binding=None):
         if (digest(snapshot.payload)!=snapshot.snapshot_digest or snapshot.validation.get("version")!="context-validator.v2"
                 or not all(snapshot.validation.get(k) is True for k in ("source","mandatory","roles","pairs"))
                 or (snapshot.validation.get("budget") is not True
-                    and not persisted_validation(snapshot.validation,image.root,frame_by_id.get(snapshot.frame_id)))):
+                    and not persisted_validation(snapshot.validation,image.root,frame_by_id.get(snapshot.frame_id),for_write=False))):
             gaps.add("SNAPSHOT_VALIDATION_MISSING")
         snapshots.append({"ref":digest(snapshot.snapshot_id),"frame_ref":digest(snapshot.frame_id),"version":snapshot.version,
             "digest":snapshot.snapshot_digest,"source_digest":snapshot.payload.get("source_digest"),

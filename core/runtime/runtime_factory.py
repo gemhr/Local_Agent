@@ -1201,9 +1201,15 @@ class CoordinatedRuntimeFactory:
                 run_context.memory_guard = MemoryContextGuard(memory_repository, durable_lease)
             elif persist or memory_access_context is not None:
                 raise MemoryContextError("MEMORY_CONTEXT_UNVERIFIABLE")
-            from core.runtime.request_counting_admission import bind_context
+            from core.runtime.request_counting_admission import bind_context, prepare_local_admission, context_record
+            local_admission = await prepare_local_admission(repository.database, run_context, memory_access_context,
+                query, self._router.model_profiles, definition, self._router.max_tokens, root=rehydrated_root) if repository else None
             run_context.request_counting_admission = bind_context(self._request_counting_exception,
-                quality_receipt, run_context, memory_access_context, rehydrated_root=rehydrated_root)
+                quality_receipt, run_context, memory_access_context, rehydrated_root=rehydrated_root, local_admission=local_admission)
+            if local_admission is not None and context_record(run_context) is not None:
+                from dataclasses import replace
+                budget = replace(budget, max_input_tokens=None, max_output_tokens=None, max_total_tokens=None, max_cost_units=None)
+                run_context.loop_allowed_model_profiles = [local_admission.record["policy"]["profile_id"]]
             run_context.attach_project_memory_access(project_identity, project_grants)
             prepare_tool_snapshot = getattr(
                 self._router, "prepare_tool_resolution_snapshot", None

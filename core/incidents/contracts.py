@@ -227,7 +227,7 @@ class GroupDecision(Intent):
 
 
 class CreateScenario(Intent):
-    scenario_key: Literal["report_pipeline_failure", "limited_diagnostics", "environment_configuration_failure", "stale_case_input", "buffer_behavior_change"]
+    scenario_key: Literal["report_pipeline_failure", "limited_diagnostics", "environment_configuration_failure", "stale_case_input", "buffer_behavior_change", "baseband_input_mismatch", "baseband_compatible", "baseband_missing_receipt"]
 
 
 class ExecutionIntent(Intent):
@@ -251,14 +251,18 @@ class DeliveryParameters(StrictDTO):
     target_version: Literal["product-2.1.1"]
 
 
+class BasebandParameters(StrictDTO):
+    rule_version: Literal["1"]
+
+
 class ActionIntent(Intent):
-    action_kind: Literal["UPGRADE_PARSER_DECODER", "SET_FEATURE_FLAG", "REFRESH_CASE_INPUT", "DELIVER_PRODUCT_FIX"]
+    action_kind: Literal["UPGRADE_PARSER_DECODER", "SET_FEATURE_FLAG", "REFRESH_CASE_INPUT", "DELIVER_PRODUCT_FIX", "ALIGN_BASEBAND_INPUT"]
     target_case_id: str | None = None
     parameters: dict
 
     @model_validator(mode="after")
     def validate_parameters(self):
-        types = dict(UPGRADE_PARSER_DECODER=UpgradeParameters, SET_FEATURE_FLAG=FlagParameters,
+        types = dict(ALIGN_BASEBAND_INPUT=BasebandParameters, UPGRADE_PARSER_DECODER=UpgradeParameters, SET_FEATURE_FLAG=FlagParameters,
             REFRESH_CASE_INPUT=InputParameters, DELIVER_PRODUCT_FIX=DeliveryParameters)
         self.parameters = types[self.action_kind].model_validate(self.parameters).model_dump()
         return self
