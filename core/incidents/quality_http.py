@@ -9,11 +9,11 @@ router = APIRouter(prefix="/api/ci/quality")
 SCOPE = "localagent:ci-business:evaluate"
 
 
-from core.incidents.baseband_quality import Evaluate as BasebandEvaluate, evaluate as evaluate_baseband
+from core.incidents.baseband_quality import Evaluate as BasebandEvaluate, EvaluateV2 as JointEvaluate, evaluate as evaluate_baseband
 
 
 @router.post("/baseband/evaluate")
-async def baseband_evaluate(body: BasebandEvaluate, request: Request):
+async def baseband_evaluate(body: BasebandEvaluate | JointEvaluate, request: Request):
     try:
         state = request.app.state
         return await evaluate_baseband(state.incident_service, state.ci_investigation_service.repository,

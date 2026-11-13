@@ -42,6 +42,8 @@ def main():
     from core.persistence.models import UserRow, RoleRow, UserRoleRow
     from core.incidents.service import IncidentService
     from core.ci_simulation.baseband import TEMPLATES
+    if os.getenv("BASEBAND_INPUT_VERSION") == "v2":
+        from core.ci_simulation.oracle_chain import TEMPLATES
     import jwt
     import uvicorn
     private = Ed25519PrivateKey.generate()
@@ -59,13 +61,13 @@ def main():
         db = Database(DatabaseConfig.from_settings(settings))
         try:
             replay = []
-            if os.environ.get("BASEBAND_REPLAY_EVIDENCE"):
+            if os.environ.get("BASEBAND_REPLAY_EVIDENCE") or os.environ.get("BASEBAND_SOURCE_REPLAY"):
                 from core.incidents.models import IncidentRow
                 from core.ci_simulation.models import CIExecutionRow
-                saved = json.loads(Path(os.environ["BASEBAND_REPLAY_EVIDENCE"]).read_text(encoding="utf-8"))
+                saved = json.loads(Path(os.environ.get("BASEBAND_SOURCE_REPLAY") or os.environ["BASEBAND_REPLAY_EVIDENCE"]).read_text(encoding="utf-8"))
+                selected = ([s | next((dict(investigation_id=r["links"]["investigation_id"], run_id=r["links"]["run_id"]) for r in saved["sources"] if r["case_key"]==s["case_key"]), dict(investigation_id="", run_id="")) for s in saved["origins"]] if "origins" in saved else [r["origin"] | dict(investigation_id=r["links"]["investigation_id"], run_id=r["links"]["run_id"]) for r in saved["sources"]]) if os.environ.get("BASEBAND_SOURCE_REPLAY") else [r["kernel_value"]["Artifact"]["Body"]["source"] for r in saved["candidate_results"]]
                 async with db.session() as session:
-                    for result in saved["candidate_results"]:
-                        source = result["kernel_value"]["Artifact"]["Body"]["source"]
+                    for source in selected:
                         incident = await session.get(IncidentRow, source["incident_id"])
                         execution = await session.get(CIExecutionRow, source["execution_id"])
                         if incident is None or execution is None or incident.execution_id != execution.execution_id or incident.tenant_id != tenant:
@@ -73,7 +75,7 @@ def main():
                         if replay and uid != incident.owner_user_id:
                             raise RuntimeError("BASEBAND_REPLAY_OWNER_INVALID")
                         uid = incident.owner_user_id
-                        replay.append(dict(incident_id=incident.incident_id, execution_id=execution.execution_id,
+                        replay.append(dict(case_key=source.get("case_key", ""), incident_id=incident.incident_id, execution_id=execution.execution_id,
                             instance_id=execution.instance_id, execution_request_id=execution.request_id,
                             input=execution.execution_snapshot["baseband"], investigation_id=source["investigation_id"], run_id=source["run_id"]))
             async with db.transaction() as session:

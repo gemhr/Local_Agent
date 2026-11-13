@@ -33,10 +33,10 @@ class IncidentService:
         async with self.database.transaction() as session:
             execution, created = await simulation.execute_instance(session, principal, instance_id, request_id, **options)
             incident = (await session.execute(select(IncidentRow).where(IncidentRow.execution_id == execution.execution_id))).scalar_one_or_none()
-            if created and (execution.outcome == "FAIL" or execution.execution_snapshot.get("schema_version") == "baseband-input.v1"):
+            if created and (execution.outcome == "FAIL" or execution.execution_snapshot.get("schema_version") in {"baseband-input.v1", "baseband-input.v2"}):
                 incident = IncidentRow(incident_id=str(uuid4()), execution_id=execution.execution_id,
                     tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
-                    title=("CI 执行调查 · " if execution.execution_snapshot.get("schema_version") == "baseband-input.v1" else "CI 执行失败 · ") + execution.case_id,
+                    title=("CI 执行调查 · " if execution.execution_snapshot.get("schema_version") in {"baseband-input.v1", "baseband-input.v2"} else "CI 执行失败 · ") + execution.case_id,
                     status="OPEN", session_id=str(uuid4()), created_at=execution.completed_at)
                 session.add(incident)
                 await session.flush()
@@ -140,10 +140,10 @@ class IncidentService:
             version = (await session.execute(select(func.max(InvestigationRow.report_version)).where(InvestigationRow.incident_id == incident_id))).scalar() or 0
             execution = await session.get(CIExecutionRow, incident.execution_id)
             from core.ci_simulation.baseband import AGENT_ID as BASEBAND_AGENT, SCHEMA
-            agent_id = BASEBAND_AGENT if execution.execution_snapshot.get("schema_version") == SCHEMA else AGENT_ID
+            agent_id = BASEBAND_AGENT if execution.execution_snapshot.get("schema_version") in {SCHEMA, "baseband-input.v2"} else AGENT_ID
             row = InvestigationRow(investigation_id=str(uuid4()), incident_id=incident_id, request_id=request_id,
                 report_version=version + 1, run_id=run_id or str(uuid4()), session_id=session_id or incident.session_id, agent_id=agent_id,
-                agent_version=AGENT_VERSION, created_at=datetime.now(timezone.utc), projection_status="PENDING")
+                agent_version="1.1.0" if agent_id == BASEBAND_AGENT else AGENT_VERSION, created_at=datetime.now(timezone.utc), projection_status="PENDING")
             session.add(row)
             await session.flush()
             return row, True

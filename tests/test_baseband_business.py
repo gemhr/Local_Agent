@@ -67,7 +67,10 @@ def test_baseband_observed_final_binding():
         result = execute(initial_state(key), "execution")
         execution = NS(execution_id="execution", **result)
         report = rule_report("incident", execution)
-        assert schema_matches(agent.business_options["final_report_schema"], report)
+        from core.incidents.baseband_diagnosis import BasebandReport
+        assert BasebandReport.model_validate(report)
+        assert agent.agent_version == "1.1.0"
+        assert not schema_matches(agent.business_options["final_report_schema"], report)
         assert not schema_matches(agent.business_options["final_report_schema"], {"schema_version": "baseband-diagnosis.v1"})
         raw, row, incident, image, actions = fixture_image(execution, report)
         assert validate_report(raw, row, incident, execution, image, actions) == report

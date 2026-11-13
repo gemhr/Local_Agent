@@ -56,6 +56,16 @@ class Evaluate(StrictDTO):
         return validate(value)
 
 
+class EvaluateV2(Evaluate):
+    protocol: Literal["baseband-quality-request.v2"]
+
+    @field_validator("input")
+    @classmethod
+    def frozen_input(cls, value):
+        from core.ci_simulation.oracle_chain import validate
+        return validate(value)
+
+
 async def evaluate(service, repository, config, principal, body):
     require_scope(principal, SCOPE)
     if principal.principal_kind != "SERVICE":
@@ -64,7 +74,9 @@ async def evaluate(service, repository, config, principal, body):
         and g.tenant_id == principal.tenant_id and body.selector.incident_id in g.incident_ids), None)
     if grant is None:
         raise CIError("BASEBAND_SOURCE_DENIED", 403)
-    if validate(body.input) != body.input or sha256_digest(body.input) != body.frozen_input_digest:
+    joint = isinstance(body, EvaluateV2)
+    from core.ci_simulation.oracle_chain import validate as validate_joint
+    if (validate_joint if joint else validate)(body.input) != body.input or sha256_digest(body.input) != body.frozen_input_digest:
         raise CIError("BASEBAND_INPUT_INVALID", 422)
     selector = body.selector
     async with service.database.session() as session:
@@ -82,12 +94,13 @@ async def evaluate(service, repository, config, principal, body):
         if selector.candidate_kind == "RULE":
             if selector.run_id is not None or selector.investigation_id is not None:
                 raise CIError("BASEBAND_RULE_SELECTOR_INVALID", 422)
-            report = rule_report(incident.incident_id, execution)
-            source["rule_version"] = "baseband-rule.v1"
+            from core.incidents.joint_diagnosis import rule_report as joint_rule
+            report = (joint_rule if joint else rule_report)(incident.incident_id, execution)
+            source["rule_version"] = "baseband-rule.v2" if joint else "baseband-rule.v1"
         else:
             row = await session.get(InvestigationRow, selector.investigation_id)
             if (row is None or row.incident_id != incident.incident_id or row.run_id != selector.run_id
-                    or row.agent_id != AGENT_ID or row.agent_version != "1.0.0" or row.projection_status != "READY"):
+                    or row.agent_id != AGENT_ID or row.agent_version != ("1.1.0" if joint else "1.0.0") or row.projection_status != "READY"):
                 raise CIError("BASEBAND_AGENT_BINDING_INVALID", 422)
             from core.runtime.memory_scope import MemoryAccessContext
             access = MemoryAccessContext(incident.tenant_id, str(incident.owner_user_id), AGENT_ID, row.session_id)
@@ -109,7 +122,18 @@ async def evaluate(service, repository, config, principal, body):
                 model_calls=sum(m.state == "COMPLETED" for m in image.models),
                 committed_tools=sum(t.state == "COMMITTED" for t in image.tool_invocations),
                 observed_batches=sum(i.state == "OBSERVED" for i in image.loop_iterations))
-        return dict(protocol="baseband-quality-output.v1", **{k: getattr(body, k) for k in
+        if joint:
+            source["observed_reads"] = []
+            if selector.candidate_kind == "AGENT":
+                from core.agent_platform.ci_evidence import observed_sources
+                frame = next(f for f in image.loop_frames if f.frame_role == "ROOT")
+                final = next(i for i in image.loop_iterations if i.decision_id == frame.result_decision_id)
+                seen = observed_sources(image, actions, frame, incident.incident_id, execution.execution_id,
+                    before_iteration=final.iteration_no, observed_reads=source["observed_reads"])
+                originals = {e["evidence_id"]: e for e in execution.evidence_manifest}
+                if len(source["observed_reads"]) > 8 or any(v != dict(incident_id=incident.incident_id, **originals[k]) for k,v in seen.items()):
+                    raise CIError("CI_REPORT_SOURCE_INVALID")
+        return dict(protocol="baseband-quality-output.v2" if joint else "baseband-quality-output.v1", **{k: getattr(body, k) for k in
             ("project_id", "run_id", "attempt_id", "request_id", "case_id", "frozen_input_digest")},
             input=body.input, source=source, report=report, report_digest=sha256_digest(report),
             evidence=execution.evidence_manifest)

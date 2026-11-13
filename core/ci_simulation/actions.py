@@ -4,6 +4,7 @@ from core.ci_simulation.execution import case_catalog, PRODUCT_RELEASES
 from core.ci_simulation.service import CIError
 
 ACTION_OPTIONS = [
+    *[dict(action_kind="SELECT_BASEBAND_REFERENCE", title="选择适用参考 " + v + " 并追加复测", parameters=dict(reference_id="integer-reference", version=v)) for v in ("1", "2")],
     dict(action_kind="ALIGN_BASEBAND_INPUT", title="对齐 KDT 采样率及增益到 DDT", parameters={"rule_version": "1"}),
     dict(action_kind="UPGRADE_PARSER_DECODER", title="升级 parser/decoder", parameters={"target_version": "2.0"}),
     dict(action_kind="SET_FEATURE_FLAG", title="设置 compressed_transport", parameters={"compressed_transport": False}),
@@ -17,7 +18,7 @@ def preview(state, action_kind, target_case_id, parameters):
     primary = cases[0]
     if target_case_id is not None and target_case_id != primary["case_id"]:
         raise CIError("CI_ACTION_TARGET_INVALID", 422)
-    option = next((o for o in ACTION_OPTIONS if o["action_kind"] == action_kind), None)
+    option = next((o for o in ACTION_OPTIONS if o["action_kind"] == action_kind and o["parameters"] == parameters), None)
     if option is None or parameters != option["parameters"]:
         raise CIError("CI_ACTION_PARAMETERS_INVALID", 422)
     changes = []
@@ -28,14 +29,22 @@ def preview(state, action_kind, target_case_id, parameters):
         before = node.get(path[-1])
         if before != after:
             changes.append(dict(path=path, before=before, after=after))
-    if action_kind == "ALIGN_BASEBAND_INPUT":
+    if action_kind == "SELECT_BASEBAND_REFERENCE":
+        from core.ci_simulation.oracle_chain import validate, REFERENCES, applicable
+        if state.get("schema_version") != "baseband-input.v2":
+            raise CIError("CI_ACTION_TARGET_INVALID", 422)
+        inputs = validate(state["baseband"])
+        if not applicable(REFERENCES[parameters["version"]], inputs):
+            raise CIError("CI_REFERENCE_NOT_APPLICABLE", 422)
+        change(["baseband", "reference"], dict(parameters))
+    elif action_kind == "ALIGN_BASEBAND_INPUT":
         from core.ci_simulation.baseband import validate
         if state.get("schema_version") != "baseband-input.v1":
             raise CIError("CI_ACTION_TARGET_INVALID", 422)
         inputs = validate(state["baseband"])
         for key in ("sample_rate", "gain"):
             change(["baseband", "kdt", key], inputs["ddt"][key])
-    elif state.get("schema_version") == "baseband-input.v1":
+    elif state.get("schema_version") in {"baseband-input.v1", "baseband-input.v2"}:
         raise CIError("CI_ACTION_TARGET_INVALID", 422)
     elif action_kind == "UPGRADE_PARSER_DECODER":
         for key, value in dict(parser_version="parser-2.0", decoder_table_version="decoder-2.0",

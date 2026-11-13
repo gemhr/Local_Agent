@@ -447,8 +447,20 @@ HUMAN 场景包含 `baseband_input_mismatch`、`baseband_compatible`、`baseband
 
 ### Stage21 本地基带 Token 临时例外
 
+版本映射仅允许 `baseband_test_investigator/1.0.0` → `baseband-input.v1` 与 `1.1.0` → `baseband-input.v2`，仍核验原 HUMAN 调查及冻结 input/query/profile。旧封存 1.0.0 按原报告/协议重验，不能用当前定义伪装历史来源。
+
 仅在 `LOCAL_AGENT_ENVIRONMENT_PROFILE=TEST` 且 `LOCAL_AGENT_STAGE21_BASEBAND_TOKEN_EXCEPTION=1` 时，对 `baseband_test_investigator` 的 HUMAN/Loop v2 调查启用。限定 remote_advanced / deepseek / deepseek-flash，单次输出 reserve 仍为 4096，实际上下文窗口仍由原 Profile 和 Provider 限制。
 
 例外复用现有 BoundAdmission、Root/Frame pins、ContextSnapshot 和模型请求摘要校验，新准入采用 stage21-baseband-local-admission.v2 实验记录。初次准入与 Root 写入从原 Investigation→Incident→Execution、可信 Memory/Run/Conversation 归属验证 HUMAN、Session、tenant、owner、baseband schema、冻结 input digest 和原调查请求；同时绑定实际 Profile 摘要。公开摘要不充当授权凭证。Root、Model、ContextSnapshot 新写入均要求 TEST 和开关仍启用；历史 v1/v2 仅允许独立只读校验。计数可靠性始终 UNAVAILABLE，原 HEURISTIC assessment 仍 reliable=False/admissible=False，不创建或伪造 SERVICE quality_receipt。
 
 仅在上述完整准入通过后，此实验 Run 的 max_input_tokens/max_output_tokens/max_total_tokens 及 Token 派生的累计 cost_units 上限才为 None，且模型选择限定为获准 Profile；仍保留模型调用次数、工具次数、重试、180 秒总时间上限及请求自身 Deadline、Cancel、权限和副作用控制。该开关不会扩大 Profile 的实际上下文窗口，不改变旧 parser 默认准入。结束 Stage21 时按任务 Handoff 的 stage21_token_exception.patch 精确反向恢复，不用整文件覆盖。
+
+### Oracle/DAAS 联合调查
+
+`baseband-input.v2` / `baseband-execution.v2` 在原场景/追加执行路径分派。`oracle_reference_scope`、`oracle_application_delay`、`oracle_output_divergence`、`oracle_partial_capture` 只选择参数初态；原始比较由整数实际输出与选用参考预测计算。参考范围单独判定，不自动重写原 verdict。DAAS 使用整数 `(tick, sequence)`，只有匹配请求且 ACK 接收后的 APPLIED 能更新配置，`tick < sample_tick` 才影响本次采样。
+
+六类公开证据为 CI_SUMMARY、INPUT_MANIFEST、REFERENCE_RECORD、DAAS_TIMELINE、APPLIED_STATE、EXECUTION_RECEIPT。完整 recipe 仅用于重放/受信输入绑定；工具目录与原文、HUMAN 当前状态 DTO 均不暴露 initial state、替代实现 offset、未来 APPLIED 事件或 capture 控制。APPLIED_STATE 缺失不改变实际执行，其他 bundle 不复制该状态。
+
+当前 Agent `baseband_test_investigator/1.1.0` 输出 `baseband-diagnosis.v2`，每项区分 finding_status 与 failure_relation；部分异常可确认而整体不可决。只保留原两项只读工具。SERVICE 同一路由新增严格 `baseband-quality-request.v2` / output.v2 分支；observed_reads 从 FINAL 前真实 COMMITTED/OBSERVED 读取计算，不由模型自报。旧 request/output.v1、report.v1 与已封存 1.0.0 来源保持独立。
+
+HUMAN `SELECT_BASEBAND_REFERENCE` 明确指定 `reference_id=integer-reference`、`version=1/2`，服务端验证实际软件/条件适用性，沿 preview/digest/revision/confirm 修改未来状态，再执行 SINGLE/GROUP；原 FAIL/证据不变。迁移 `0044_oracle_reference_action` 仅扩展 action CHECK，存在此动作记录时不能直接降级旧 CHECK。

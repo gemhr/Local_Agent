@@ -3,9 +3,9 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
 from core.runtime.snapshot_serialization import sha256_digest
-from core.ci_simulation import baseband
+from core.ci_simulation import baseband, oracle_chain
 
-SCENARIOS = baseband.TEMPLATES + [
+SCENARIOS = baseband.TEMPLATES + oracle_chain.TEMPLATES + [
     dict(scenario_key="report_pipeline_failure", title="上报链路失败", description="调查工具兼容与执行证据", template_version="2"),
     dict(scenario_key="environment_configuration_failure", title="环境配置冲突", description="检查共享环境开关", template_version="2"),
     dict(scenario_key="stale_case_input", title="TLV 输入落后", description="检查用例输入与软件要求", template_version="2"),
@@ -20,6 +20,8 @@ PRODUCT_RELEASES = {
 
 
 def initial_state(key):
+    if key in {s["scenario_key"] for s in oracle_chain.TEMPLATES}:
+        return oracle_chain.initial_state(key)
     if key in {s["scenario_key"] for s in baseband.TEMPLATES}:
         return baseband.initial_state(key)
     if key not in {s["scenario_key"] for s in SCENARIOS}:
@@ -69,6 +71,8 @@ def case_catalog(state):
 
 
 def execute(state, execution_id, case_id=None):
+    if state.get("schema_version") == oracle_chain.SCHEMA:
+        return oracle_chain.execute(state, execution_id, case_id)
     if state.get("schema_version") == baseband.SCHEMA:
         return baseband.execute(state, execution_id, case_id)
     snapshot = deepcopy(state)

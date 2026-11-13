@@ -227,7 +227,7 @@ class GroupDecision(Intent):
 
 
 class CreateScenario(Intent):
-    scenario_key: Literal["report_pipeline_failure", "limited_diagnostics", "environment_configuration_failure", "stale_case_input", "buffer_behavior_change", "baseband_input_mismatch", "baseband_compatible", "baseband_missing_receipt"]
+    scenario_key: Literal["report_pipeline_failure", "limited_diagnostics", "environment_configuration_failure", "stale_case_input", "buffer_behavior_change", "baseband_input_mismatch", "baseband_compatible", "baseband_missing_receipt", "oracle_reference_scope", "oracle_application_delay", "oracle_output_divergence", "oracle_partial_capture"]
 
 
 class ExecutionIntent(Intent):
@@ -255,14 +255,19 @@ class BasebandParameters(StrictDTO):
     rule_version: Literal["1"]
 
 
+class ReferenceParameters(StrictDTO):
+    reference_id: Literal["integer-reference"]
+    version: Literal["1", "2"]
+
+
 class ActionIntent(Intent):
-    action_kind: Literal["UPGRADE_PARSER_DECODER", "SET_FEATURE_FLAG", "REFRESH_CASE_INPUT", "DELIVER_PRODUCT_FIX", "ALIGN_BASEBAND_INPUT"]
+    action_kind: Literal["UPGRADE_PARSER_DECODER", "SET_FEATURE_FLAG", "REFRESH_CASE_INPUT", "DELIVER_PRODUCT_FIX", "ALIGN_BASEBAND_INPUT", "SELECT_BASEBAND_REFERENCE"]
     target_case_id: str | None = None
     parameters: dict
 
     @model_validator(mode="after")
     def validate_parameters(self):
-        types = dict(ALIGN_BASEBAND_INPUT=BasebandParameters, UPGRADE_PARSER_DECODER=UpgradeParameters, SET_FEATURE_FLAG=FlagParameters,
+        types = dict(SELECT_BASEBAND_REFERENCE=ReferenceParameters, ALIGN_BASEBAND_INPUT=BasebandParameters, UPGRADE_PARSER_DECODER=UpgradeParameters, SET_FEATURE_FLAG=FlagParameters,
             REFRESH_CASE_INPUT=InputParameters, DELIVER_PRODUCT_FIX=DeliveryParameters)
         self.parameters = types[self.action_kind].model_validate(self.parameters).model_dump()
         return self

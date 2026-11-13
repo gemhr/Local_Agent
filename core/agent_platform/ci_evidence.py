@@ -11,7 +11,7 @@ from core.runtime.tool_contract import canonical_json_digest
 REQUIRED_KINDS = {"PARSER_LOG", "ENVIRONMENT_RECORD", "CASE_REQUIREMENTS"}
 
 
-def observed_sources(image, actions, frame, incident_id, execution_id, *, before_iteration=None):
+def observed_sources(image, actions, frame, incident_id, execution_id, *, before_iteration=None, observed_reads=None):
     observed = {i.iteration_no: i for i in image.loop_iterations if i.frame_id == frame.frame_id
         and i.state == "OBSERVED" and (before_iteration is None or i.iteration_no < before_iteration) and i.observation is not None}
     tools = {t.invocation_id: t for t in image.tool_invocations if t.state == "COMMITTED"}
@@ -34,6 +34,10 @@ def observed_sources(image, actions, frame, incident_id, execution_id, *, before
             continue
         if isinstance(evidence, dict) and evidence.get("incident_id") == incident_id and evidence.get("execution_id") == execution_id:
             seen[evidence["evidence_id"]] = evidence
+            if observed_reads is not None:
+                observed_reads.append(dict(evidence_id=evidence["evidence_id"], digest=evidence["digest"],
+                    availability=evidence["availability"], invocation_id=tool.invocation_id,
+                    action_id=action.action_id, iteration_no=action.iteration_no))
     return seen
 
 

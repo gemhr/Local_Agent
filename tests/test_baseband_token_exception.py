@@ -26,7 +26,7 @@ from core.runtime.request_counting_admission import context_record, context_elig
 async def prepared(database, tmp_path, *, wrong_profile=False):
     actor = await user(database)
     service = IncidentService(database)
-    instance, _ = await service.create_scenario(actor, "baseband_input_mismatch", str(uuid4()))
+    instance, _ = await service.create_scenario(actor, "oracle_reference_scope", str(uuid4()))
     execution, incident, _ = await service.execute(actor, instance.instance_id, str(uuid4()))
     row, _ = await service.admit(actor, incident.incident_id, str(uuid4()))
     agent = definition()
@@ -52,7 +52,7 @@ async def prepared(database, tmp_path, *, wrong_profile=False):
     record = context_record(context)
     config = pinned_loop_config(factory._router, agent.agent_id, context)
     seed = dict(messages=[dict(role="user", content=query)])
-    resume = dict(resolved_agent_id=agent.agent_id, agent_version="1.0.0", session_id=row.session_id, user_query=query,
+    resume = dict(resolved_agent_id=agent.agent_id, agent_version="1.1.0", session_id=row.session_id, user_query=query,
         agent_loop=dict(e2e_test_admission=record, pinned_config=config, context_seed=seed, loop_policy=context.loop_policy.to_dict()))
     root = ExecutionRootInput(row.run_id, resume, factory._router.build_single_agent_plan(agent.agent_id, query),
         context.data.deadline_at, asdict(context.budget_ledger.budget), {}, {}, execution_policy="durable-agent-loop.v2")
@@ -116,6 +116,15 @@ async def test_local_valid_profile_and_persisted_write_controls(clean_database, 
         assert budget.max_total_tokens is None and budget.max_cost_units is None
         assert budget.max_model_calls == budget.max_tool_calls == 8 and budget.max_elapsed_seconds == 180
         assert scope.run_context.remaining_seconds() <= 30
+        from sqlalchemy import select
+        from core.incidents.models import InvestigationRow
+        from core.runtime.request_counting_admission import local_business_binding
+        async with clean_database.transaction() as session:
+            row = await session.scalar(select(InvestigationRow).where(InvestigationRow.run_id == root.run_id))
+            row.agent_version = "1.0.0"
+            with pytest.raises(ValueError, match="BASEBAND_LOCAL_ADMISSION_SOURCE_INVALID"):
+                await local_business_binding(session, root.run_id, scope.run_context.memory_access_context, root.resume_input["user_query"])
+            row.agent_version = "1.1.0"
         await repo.initialize(root, lease=scope.run_context.durable_lease)
         image = await repo.load(root.run_id)
         assert image is not None

@@ -81,9 +81,12 @@ def validate_report(raw, row, incident, execution, image, actions):
         before_iteration=final.iteration_no)
     value = strict_object(raw)
     from core.ci_simulation.baseband import AGENT_ID as BASEBAND_AGENT, SCHEMA
-    expected_agent = BASEBAND_AGENT if execution.execution_snapshot.get("schema_version") == SCHEMA else AGENT_ID
-    if row.agent_id != expected_agent or row.agent_version != AGENT_VERSION:
+    expected_agent = BASEBAND_AGENT if execution.execution_snapshot.get("schema_version") in {SCHEMA, "baseband-input.v2"} else AGENT_ID
+    if row.agent_id != expected_agent or row.agent_version not in ({"1.0.0", "1.1.0"} if expected_agent == BASEBAND_AGENT else {AGENT_VERSION}):
         raise CIError("CI_REPORT_IDENTITY_INVALID")
+    if expected_agent == BASEBAND_AGENT and row.agent_version == "1.1.0":
+        from core.incidents.joint_diagnosis import validate_sources
+        return validate_sources(value, row, incident, execution, seen)
     if expected_agent == BASEBAND_AGENT:
         from core.incidents.baseband_diagnosis import validate_sources
         return validate_sources(value, row, incident, execution, seen)

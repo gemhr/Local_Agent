@@ -80,7 +80,7 @@ class IncidentActionRow(PersistenceBase):
     applied_state_revision: Mapped[int | None] = mapped_column(Integer)
     result_payload: Mapped[dict | None] = mapped_column(JSONB)
     __table_args__ = (UniqueConstraint("incident_id", "request_id"),
-        CheckConstraint("action_kind IN ('UPGRADE_PARSER_DECODER','SET_FEATURE_FLAG','REFRESH_CASE_INPUT','DELIVER_PRODUCT_FIX','ALIGN_BASEBAND_INPUT')"),
+        CheckConstraint("action_kind IN ('UPGRADE_PARSER_DECODER','SET_FEATURE_FLAG','REFRESH_CASE_INPUT','DELIVER_PRODUCT_FIX','ALIGN_BASEBAND_INPUT','SELECT_BASEBAND_REFERENCE')"),
         CheckConstraint("source_kind = 'HUMAN_MANUAL'"), CheckConstraint("base_state_revision > 0"),
         CheckConstraint("(status = 'PREVIEWED' AND confirmed_by_user_id IS NULL AND confirmed_at IS NULL AND applied_state_revision IS NULL AND result_payload IS NULL) OR (status = 'APPLIED' AND confirmed_by_user_id IS NOT NULL AND confirmed_at IS NOT NULL AND applied_state_revision IS NOT NULL AND applied_state_revision > base_state_revision AND result_payload IS NOT NULL)"))
 

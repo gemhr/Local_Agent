@@ -55,10 +55,10 @@ async def local_business_binding(session, run_id, access, query):
     memory = await session.get(RuntimeMemoryBindingRow, run_id)
     expected_query = ("请调查该 CI 执行，使用授权工具取证。incident_id=" + incident.incident_id
         + " execution_id=" + execution.execution_id) if incident and execution else None
-    if (row is None or row.agent_id != LOCAL_BASEBAND_POLICY["agent_id"] or row.agent_version != "1.0.0"
+    if (row is None or row.agent_id != LOCAL_BASEBAND_POLICY["agent_id"] or (row.agent_version, execution.execution_snapshot.get("schema_version") if execution else None) not in {("1.0.0", "baseband-input.v1"), ("1.1.0", "baseband-input.v2")}
             or row.session_id != access.session_id or access.principal_kind != "HUMAN"
             or incident is None or incident.tenant_id != access.tenant_id or str(incident.owner_user_id) != access.user_id
-            or execution is None or execution.execution_snapshot.get("schema_version") != "baseband-input.v1"
+            or execution is None or execution.execution_snapshot.get("schema_version") not in {"baseband-input.v1", "baseband-input.v2"}
             or query != expected_query or memory is None or memory.mode != "SCOPED" or memory.status != "ACTIVE"
             or memory.access != access.to_dict()):
         raise ValueError("BASEBAND_LOCAL_ADMISSION_SOURCE_INVALID")
