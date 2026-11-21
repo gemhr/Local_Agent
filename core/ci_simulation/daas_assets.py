@@ -43,7 +43,9 @@ class Test(Strict):
 
 def catalog(task):
     docs = [read(task,d["source_ref"]) for d in task["documents"]]
-    return deepcopy(next(d["facts"]["catalog"] for d in docs if d["kind"]=="INTERFACE_CATALOG"))
+    value=next((d["facts"]["catalog"] for d in docs if d["kind"]=="INTERFACE_CATALOG"),None)
+    if value is None: raise ValueError("DAAS_CATALOG_NOT_AVAILABLE")
+    return deepcopy(value)
 
 
 def definition(catalog, kind, ref):

@@ -9,7 +9,7 @@ import pytest
 
 from core.agent_router import AgentRouter
 from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
-from core.llm_engine import ScriptedEvaluationLLMEngine
+from core.llm_engine import ScriptedEvaluationLLMEngine, UsageDelta
 from core.memory_manager import MemoryManager
 from core.runtime.budget import BudgetLedger, RunBudget
 from core.runtime.execution_aggregate import ModelAttemptState
@@ -50,6 +50,7 @@ class _ModelRow:
     request_digest: str
     result_binding: dict | None = None
     safe_error: str | None = None
+    usage_evidence: dict | None = None
 
 
 class _DurableRepository:
@@ -89,16 +90,16 @@ class _DurableRepository:
         row.state = kwargs["state"].value
         row.result_binding = kwargs.get("result")
         row.safe_error = kwargs.get("safe_error")
+        row.usage_evidence = kwargs.get("usage")
 
 
-def _invoke(context, repository, adapter, *, retry=False):
+def _invoke(context, repository, adapter, *, retry=False, submit=asyncio.run):
     context.attach_durable_lease(SimpleNamespace(run_id=context.run_id, fencing_token=1))
     context.attach_execution_repository(repository)
     ledger = BudgetLedger(RunBudget(), deadline_remaining=context.remaining_seconds)
     context.attach_budget_ledger(ledger)
     policy = RetryPolicy(max_attempts=2 if retry else 1, base_delay_seconds=0, max_delay_seconds=0)
     router = ModelInvocationRouter(retry_executor=RetryExecutor(policy))
-    submit = lambda coroutine: asyncio.run(coroutine)
     return router.invoke(
         run_context=context,
         budget_ledger=ledger,
@@ -131,16 +132,21 @@ def test_durable_model_started_then_completed_persists_safe_binding() -> None:
     assert "secret prompt" not in row.request_digest
 
 
-def test_provider_started_failure_becomes_unknown_and_one_retry_is_new_attempt() -> None:
+@pytest.mark.parametrize("usage_observed", [False, True])
+def test_provider_started_failure_becomes_unknown_and_one_retry_is_new_attempt(usage_observed) -> None:
     context, _ = create_run_context(entry_agent_id="test")
     repository = _DurableRepository()
 
+    first_usage = UsageDelta(input_tokens=2, output_tokens=1, total_tokens=3, reason=None) if usage_observed else UsageDelta()
+    second_usage = UsageDelta(input_tokens=3, output_tokens=2, total_tokens=5, reason=None)
+    failure = provider_error(ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE)
+    failure.provider_usage = first_usage
     result = _invoke(
         context,
         repository,
         RecordingAdapter([
-            provider_error(ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE),
-            "recovered",
+            failure,
+            ModelAdapterResponse("recovered", actual_usage=second_usage.actual_usage(), provider_usage=second_usage),
         ]),
         retry=True,
     )
@@ -150,6 +156,11 @@ def test_provider_started_failure_becomes_unknown_and_one_retry_is_new_attempt()
         (1, ModelAttemptState.UNKNOWN.value),
         (2, ModelAttemptState.COMPLETED.value),
     ]
+    assert [row.usage_evidence.get("total_tokens") for row in repository.rows] == [3 if usage_observed else None, 5]
+    assert repository.rows[0].usage_evidence["provider_usage"]["quality"] == ("ACTUAL" if usage_observed else "UNAVAILABLE")
+    assert [attempt.provider_usage for attempt in result.attempts] == [first_usage, second_usage]
+    assert context.budget_ledger.snapshot().committed_usage.model_calls == 2
+
 
 
 def test_second_provider_failure_stays_fail_closed_after_retry_budget() -> None:
@@ -258,3 +269,81 @@ def _invoke_with_emitter(
         event_emitter=event_emitter,
         async_submit=lambda coroutine: asyncio.run(coroutine),
     )
+
+
+@pytest.mark.asyncio
+async def test_worker_bridge_keeps_cancelled_attempt_evidence():
+    from core.runtime.model_invocation import GeneratorModelAdapter
+
+    class CancelledEngine:
+        async def agenerate(self, messages, **kwargs):
+            yield UsageDelta(input_tokens=2, output_tokens=3, total_tokens=5, reason=None)
+            raise asyncio.CancelledError("provider read cancelled")
+
+    context, _ = create_run_context(entry_agent_id="test")
+    repository = _DurableRepository()
+    channel = RuntimeEventChannel(8, run_id=context.run_id)
+    emitter = RunEventEmitter(run_id=context.run_id, trace_id=context.trace_id, channel=channel)
+    try:
+        with pytest.raises(asyncio.CancelledError, match="provider read cancelled") as caught:
+            await asyncio.to_thread(_invoke, context, repository, GeneratorModelAdapter(CancelledEngine()),
+                retry=True, submit=emitter.submit_coroutine_from_worker)
+        assert caught.value.provider_usage.total_tokens == 5
+        assert repository.calls == [("start", 1), ("unknown", 1)]
+        assert repository.rows[0].usage_evidence["total_tokens"] == 5
+        snapshot = context.budget_ledger.snapshot()
+        assert snapshot.committed_usage.model_calls == 1
+        assert snapshot.active_reservation_count == 0
+    finally:
+        await channel.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["cancel", "deadline"])
+async def test_durable_terminal_after_usage_keeps_attempt_and_settles_operation(clean_database, tmp_path, terminal):
+    import httpx
+    from core.llm_engine import RemoteLLMEngine
+    from core.runtime.model_invocation import GeneratorModelAdapter
+    from tests.test_agent_loop_runtime import assembly
+
+    reached = asyncio.Event()
+    calls = 0
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}\n\n'
+            reached.set()
+            await asyncio.Future()
+
+    async def handle(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, stream=Stream(), request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        engine = RemoteLLMEngine("https://example.test", "deepseek-flash", provider_kind="deepseek", client=client)
+        factory, repo, _, _ = await assembly(clean_database, tmp_path, [], context_policy={"version": 2},
+            context_model=GeneratorModelAdapter(engine))
+        scope = await factory.create_run_scope("core_router", "public input", execution_policy="durable-agent-loop.v2",
+            timeout_seconds=5 if terminal == "deadline" else 10, persist=False)
+        task = asyncio.create_task(scope.execute())
+        try:
+            await asyncio.wait_for(reached.wait(), timeout=4)
+            if terminal == "cancel":
+                await repo.run_control.request_cancel(scope.run_id, "REQUEST_CANCELLED")
+            result = await asyncio.wait_for(task, timeout=8)
+            assert result.status.value == ("CANCELLED" if terminal == "cancel" else "FAILED")
+            assert result.stop_reason.value == ("USER_CANCELLED" if terminal == "cancel" else "DEADLINE_EXCEEDED")
+            image = await repo.load(scope.run_id)
+            attempt, = image.models
+            assert calls == 1 and attempt.state == "UNKNOWN" and attempt.result_binding is None
+            assert attempt.usage_evidence["total_tokens"] == 5
+            operation, = image.root.budget_operations.values()
+            assert operation["state"] == "SETTLED" and operation["source"] == "ESTIMATED"
+            assert image.root.budget_consumed["model_calls"] == 1
+            assert not any(image.root.budget_reserved.values())
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await scope.close(abort=True)

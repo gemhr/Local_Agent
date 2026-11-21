@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """本地大语言模型推理封装。"""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -9,11 +11,14 @@ import os
 import threading
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from hashlib import sha256
 from typing import Any, AsyncIterator, Dict, Generator, List
 
 import httpx
 
+from core.runtime.cancellation import RunCancelledError
+from core.runtime.context import RunDeadlineExceededError
 from core.runtime.model_invocation import ModelAdapterResponse, NativeToolCall
 
 
@@ -36,6 +41,7 @@ class RemoteLLMError(RuntimeError):
         output_started: bool = False,
         deadline_exceeded: bool = False,
         cancellation_reason: str | None = None,
+        provider_usage: UsageDelta | None = None,
     ) -> None:
         self.status_code = status_code
         self.model_failure_category = model_failure_category
@@ -45,6 +51,7 @@ class RemoteLLMError(RuntimeError):
         self.output_started = output_started
         self.deadline_exceeded = deadline_exceeded
         self.cancellation_reason = cancellation_reason
+        self.provider_usage = provider_usage
         super().__init__(safe_message)
 
 
@@ -74,8 +81,55 @@ class RefusalDelta:
 
 @dataclass(frozen=True, slots=True)
 class UsageDelta:
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cache_hit_tokens: int | None = None
+    cache_miss_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    reason: str | None = "USAGE_MISSING"
+    response_id_digest: str | None = None
+
+    def actual_usage(self):
+        from core.runtime.budget import BudgetUsage
+
+        if self.reason is not None:
+            return None
+        return BudgetUsage(input_tokens=self.input_tokens, output_tokens=self.output_tokens,
+                           total_tokens=self.total_tokens)
+
+    @classmethod
+    def from_payload(cls, usage, response_id):
+        def count(value):
+            return value if type(value) is int and value >= 0 else None
+
+        response_id_digest = (sha256(response_id.encode("ascii")).hexdigest()
+                              if isinstance(response_id, str) and 0 < len(response_id) <= 256
+                              and all("!" <= char <= "~" for char in response_id) else None)
+        if usage is None:
+            return cls(response_id_digest=response_id_digest)
+        if not isinstance(usage, dict) or not usage:
+            return cls(reason="USAGE_EMPTY" if usage == {} else "USAGE_INVALID",
+                       response_id_digest=response_id_digest)
+        keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+        prompt, completion, total = (count(usage.get(key)) for key in keys)
+        reason = None
+        if any(key in usage and count(usage[key]) is None for key in keys):
+            reason = "USAGE_INVALID"
+        elif None in (prompt, completion, total):
+            reason = "USAGE_FIELDS_MISSING"
+        elif total != prompt + completion:
+            reason = "USAGE_TOTAL_MISMATCH"
+
+        prompt_details = usage.get("prompt_tokens_details")
+        completion_details = usage.get("completion_tokens_details")
+        hit = count(usage.get("prompt_cache_hit_tokens"))
+        if hit is None and isinstance(prompt_details, dict):
+            hit = count(prompt_details.get("cached_tokens"))
+        miss = count(usage.get("prompt_cache_miss_tokens"))
+        reasoning = (count(completion_details.get("reasoning_tokens"))
+                     if isinstance(completion_details, dict) else None)
+        return cls(prompt, completion, total, hit, miss, reasoning, reason, response_id_digest)
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +347,8 @@ class RemoteLLMEngine:
     同步方法仅是既有 blocking executor 调用方的收集 facade。
     """
 
+    _HTTP_CLEANUP_GRACE_SECONDS = 0.1
+
     def __init__(
         self,
         api_base_url: str,
@@ -326,6 +382,7 @@ class RemoteLLMEngine:
             self._client_owned = True
         self._session_lock = threading.Lock()
         self._closed = False
+        self._http_cleanup_tasks: set[asyncio.Task] = set()
 
     def _build_headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -413,14 +470,13 @@ class RemoteLLMEngine:
 
     async def _await_controlled(
         self,
-        awaitable,
+        operation_task: asyncio.Task,
         *,
         run_context: object | None,
         cancellation_token: object | None,
         remaining: float | None,
         output_started: bool,
     ):
-        operation_task = asyncio.create_task(awaitable)
         cancel_task = None
         deadline_task = None
         if cancellation_token is not None:
@@ -433,12 +489,8 @@ class RemoteLLMEngine:
                 (operation_task, *controls), return_when=asyncio.FIRST_COMPLETED
             )
             if cancel_task is not None and cancel_task in done:
-                operation_task.cancel()
-                await asyncio.gather(operation_task, return_exceptions=True)
                 cancellation_token.raise_if_cancelled()
             if deadline_task is not None and deadline_task in done:
-                operation_task.cancel()
-                await asyncio.gather(operation_task, return_exceptions=True)
                 if run_context is not None:
                     run_context.raise_if_inactive()
                 raise RemoteLLMError(
@@ -454,22 +506,22 @@ class RemoteLLMEngine:
                     task.cancel()
             await asyncio.gather(*controls, return_exceptions=True)
 
-    async def _next_chunk(
-        self,
-        iterator,
-        *,
-        run_context: object | None,
-        cancellation_token: object | None,
-        remaining: float | None,
-        output_started: bool,
-    ):
-        return await self._await_controlled(
-            iterator.__anext__(),
-            run_context=run_context,
-            cancellation_token=cancellation_token,
-            remaining=remaining,
-            output_started=output_started,
-        )
+    async def _reap_http_request(self, cleanup_task: asyncio.Task) -> None:
+        """Engine 持有同一事件循环上的清理，直到任务完成并取走异常。"""
+        self._http_cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(self._http_cleanup_finished)
+        _, pending = await asyncio.wait({cleanup_task}, timeout=self._HTTP_CLEANUP_GRACE_SECONDS)
+        if pending:
+            logger.warning("Remote HTTP cleanup is still pending", extra={
+                "safe_error_code": "REMOTE_HTTP_CLEANUP_PENDING",
+            })
+
+    def _http_cleanup_finished(self, task: asyncio.Task) -> None:
+        self._http_cleanup_tasks.discard(task)
+        if task.cancelled() or task.exception() is not None:
+            logger.warning("Remote HTTP cleanup did not complete normally", extra={
+                "safe_error_code": "REMOTE_HTTP_CLEANUP_FAILED",
+            })
 
     async def agenerate(
         self,
@@ -486,19 +538,24 @@ class RemoteLLMEngine:
         response_format: dict[str, str] | None = None,
     ) -> AsyncIterator[ProviderDelta]:
         """Consume native SSE and yield provider-neutral typed deltas."""
-        self._raise_cancel_or_deadline(run_context, cancellation_token)
+        try:
+            self._raise_cancel_or_deadline(run_context, cancellation_token)
+        except (RunCancelledError, RunDeadlineExceededError) as exc:
+            exc.provider_started = False
+            exc.provider_responded = False
+            raise
         token = cancellation_token or getattr(run_context, "cancellation_token", None)
         invocation_cap = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         invocation_deadline = time.monotonic() + max(0.0, float(invocation_cap))
         remaining = self._remaining_budget(run_context, invocation_deadline)
         if remaining is not None and remaining <= 0:
-            if run_context is not None:
-                run_context.raise_if_inactive()
             raise RemoteLLMError(
                 "Remote provider deadline exceeded",
                 model_failure_category="DEADLINE_EXCEEDED",
                 safe_error_code="DEADLINE_EXCEEDED",
                 deadline_exceeded=True,
+                provider_started=False,
+                provider_responded=False,
             )
         timeout = httpx.Timeout(
             connect=remaining,
@@ -512,6 +569,9 @@ class RemoteLLMEngine:
         first_delta_at: float | None = None
         finish_reason: str | None = None
         saw_finish = False
+        saw_done = False
+        provider_usage = UsageDelta()
+        conflicting_response_id = False
         decoder = _SSEDecoder()
         body = self._body(
             messages,
@@ -527,31 +587,54 @@ class RemoteLLMEngine:
         )
         stream_context = None
         response_entered = False
-        try:
-            if self._client is None:
-                raise RemoteLLMError(
-                    "Remote async client is unavailable",
-                    safe_error_code="REMOTE_CLIENT_UNAVAILABLE",
-                    provider_started=False,
-                    provider_responded=False,
-                )
-            stream_context = self._client.stream(
-                "POST",
-                self._chat_completions_url(),
-                headers=self._build_headers(),
-                json=body,
-                timeout=timeout,
-            )
-            response = await self._await_controlled(
-                stream_context.__aenter__(),
-                run_context=run_context,
-                cancellation_token=token,
-                remaining=self._remaining_budget(run_context, invocation_deadline),
-                output_started=False,
-            )
+        response = None
+        operation_task = None
+        closing_task = None
+
+        async def enter_response():
+            nonlocal response, response_entered
+            response = await stream_context.__aenter__()
             response_entered = True
+
+        async def close_response():
+            nonlocal response_entered
+            if response_entered:
+                response_entered = False
+                await stream_context.__aexit__(None, None, None)
+
+        async def finish_interrupted_request():
+            # 读任务或迟到的响应头退出前，禁止与它并发关闭 Response。
             try:
+                await asyncio.gather(operation_task, return_exceptions=True)
+            finally:
+                await close_response()
+
+        try:
+            try:
+                if self._client is None:
+                    raise RemoteLLMError(
+                        "Remote async client is unavailable",
+                        safe_error_code="REMOTE_CLIENT_UNAVAILABLE",
+                        provider_started=False,
+                        provider_responded=False,
+                    )
+                stream_context = self._client.stream(
+                    "POST",
+                    self._chat_completions_url(),
+                    headers=self._build_headers(),
+                    json=body,
+                    timeout=timeout,
+                )
+                # 等待响应头时，HTTP 请求可能已经发送。
                 started = True
+                operation_task = asyncio.create_task(enter_response())
+                await self._await_controlled(
+                    operation_task,
+                    run_context=run_context,
+                    cancellation_token=token,
+                    remaining=self._remaining_budget(run_context, invocation_deadline),
+                    output_started=False,
+                )
                 if response.status_code >= 400:
                     raise RemoteLLMError(
                         f"Remote API request failed: status={response.status_code}",
@@ -561,47 +644,53 @@ class RemoteLLMEngine:
                         output_started=output_started,
                     )
                 iterator = response.aiter_bytes().__aiter__()
-                while True:
-                    current_remaining = self._remaining_budget(
-                        run_context, invocation_deadline
-                    )
+                eof = False
+                while not saw_done and not eof:
                     try:
-                        chunk = await self._next_chunk(
-                            iterator,
+                        operation_task = asyncio.create_task(iterator.__anext__())
+                        chunk = await self._await_controlled(
+                            operation_task,
                             run_context=run_context,
                             cancellation_token=token,
-                            remaining=current_remaining,
+                            remaining=self._remaining_budget(run_context, invocation_deadline),
                             output_started=output_started,
                         )
+                        events = decoder.feed(chunk)
                     except StopAsyncIteration:
-                        break
-                    for data in decoder.feed(chunk):
+                        eof = True
+                        events = decoder.finish()
+                    for data in events:
+                        self._raise_cancel_or_deadline(run_context, token)
+                        if data.strip() == "[DONE]":
+                            saw_done = True
+                            if not saw_finish:
+                                yield Finish()
+                            break
                         for delta in self._normalize_sse_data(data):
-                            self._raise_cancel_or_deadline(run_context, token)
                             if isinstance(delta, (TextDelta, ToolCallDelta)):
                                 output_started = True
                                 if first_delta_at is None:
                                     first_delta_at = time.monotonic()
+                            if isinstance(delta, UsageDelta):
+                                previous_id = provider_usage.response_id_digest
+                                incoming_id = delta.response_id_digest
+                                if previous_id and incoming_id and previous_id != incoming_id:
+                                    conflicting_response_id = True
+                                response_id = None if conflicting_response_id else (previous_id or incoming_id)
+                                counts = delta
+                                if delta.reason == "USAGE_MISSING" or (provider_usage.reason is None and delta.reason is not None):
+                                    counts = provider_usage
+                                delta = replace(counts, response_id_digest=response_id)
+                                if delta == provider_usage:
+                                    continue
+                                provider_usage = delta
                             if isinstance(delta, Finish):
                                 if saw_finish:
                                     continue
                                 finish_reason = delta.reason
                                 saw_finish = True
                             yield delta
-                for data in decoder.finish():
-                    for delta in self._normalize_sse_data(data):
-                        self._raise_cancel_or_deadline(run_context, token)
-                        if isinstance(delta, (TextDelta, ToolCallDelta)):
-                            output_started = True
-                            if first_delta_at is None:
-                                first_delta_at = time.monotonic()
-                        if isinstance(delta, Finish):
-                            if saw_finish:
-                                continue
-                            finish_reason = delta.reason
-                            saw_finish = True
-                        yield delta
-                if not saw_finish:
+                if not saw_done and (self._supports_deepseek_thinking() or not saw_finish):
                     raise RemoteLLMError(
                         "Remote provider stream ended before completion",
                         model_failure_category="TRANSIENT_PROVIDER_FAILURE",
@@ -610,13 +699,33 @@ class RemoteLLMEngine:
                         provider_responded=True,
                         output_started=output_started,
                     )
-            finally:
-                await stream_context.__aexit__(None, None, None)
-                response_entered = False
-        except RemoteLLMError as exc:
-            exc.output_started = bool(exc.output_started or output_started)
-            raise
-        except asyncio.CancelledError:
+                closing_task = asyncio.create_task(close_response())
+                await self._await_controlled(
+                    closing_task,
+                    run_context=run_context,
+                    cancellation_token=token,
+                    remaining=self._remaining_budget(run_context, invocation_deadline),
+                    output_started=output_started,
+                )
+            except BaseException as request_error:
+                cleanup_task = closing_task
+                if cleanup_task is None and operation_task is not None:
+                    if not operation_task.done():
+                        operation_task.cancel()
+                    cleanup_task = asyncio.create_task(finish_interrupted_request())
+                if cleanup_task is not None:
+                    try:
+                        await self._reap_http_request(cleanup_task)
+                    except asyncio.CancelledError:
+                        # 只保持已经发生的控制终止。清理期间首次收到的任务取消仍需传播。
+                        if not isinstance(request_error, (asyncio.CancelledError, RunCancelledError, RunDeadlineExceededError)):
+                            raise
+                raise
+        except (RemoteLLMError, RunCancelledError, RunDeadlineExceededError, asyncio.CancelledError) as exc:
+            exc.output_started = bool(getattr(exc, "output_started", False) or output_started)
+            exc.provider_started = started
+            exc.provider_responded = response is not None
+            exc.provider_usage = provider_usage
             raise
         except UnicodeDecodeError:
             raise RemoteLLMError(
@@ -624,30 +733,31 @@ class RemoteLLMEngine:
                 model_failure_category="PROVIDER_PROTOCOL_ERROR",
                 safe_error_code="PROVIDER_PROTOCOL_ERROR",
                 provider_started=started,
-                provider_responded=started,
+                provider_responded=response is not None,
                 output_started=output_started,
+                provider_usage=provider_usage,
             ) from None
         except httpx.TimeoutException as exc:
             raise RemoteLLMError(
                 "Remote provider timeout",
                 model_failure_category="PROVIDER_TIMEOUT",
                 safe_error_code="PROVIDER_TIMEOUT",
-                provider_started=started,
-                provider_responded=started,
+                provider_started=started and not isinstance(exc, (httpx.ConnectTimeout, httpx.PoolTimeout)),
+                provider_responded=response is not None,
                 output_started=output_started,
+                provider_usage=provider_usage,
             ) from None
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
             raise RemoteLLMError(
                 "Remote provider connection failed",
                 model_failure_category="TRANSIENT_PROVIDER_FAILURE",
                 safe_error_code="PROVIDER_CONNECTION_ERROR",
-                provider_started=started,
-                provider_responded=started,
+                provider_started=started and not isinstance(exc, httpx.ConnectError),
+                provider_responded=response is not None,
                 output_started=output_started,
+                provider_usage=provider_usage,
             ) from None
         finally:
-            if response_entered and stream_context is not None:
-                await stream_context.__aexit__(None, None, None)
             logger.info(
                 "Remote provider stream completed",
                 extra={
@@ -678,8 +788,6 @@ class RemoteLLMEngine:
 
     @staticmethod
     def _normalize_sse_data(data: str) -> tuple[ProviderDelta, ...]:
-        if data.strip() == "[DONE]":
-            return (Finish(),)
         try:
             payload = json.loads(data)
         except (TypeError, ValueError):
@@ -768,16 +876,9 @@ class RemoteLLMEngine:
                 reason = choice.get("finish_reason")
                 if reason is not None:
                     deltas.append(Finish(str(reason)))
-        usage = payload.get("usage")
-        if isinstance(usage, dict):
-            prompt = usage.get("prompt_tokens", 0)
-            completion = usage.get("completion_tokens", 0)
-            deltas.append(
-                UsageDelta(
-                    int(prompt) if isinstance(prompt, int) else 0,
-                    int(completion) if isinstance(completion, int) else 0,
-                )
-            )
+        evidence = UsageDelta.from_payload(payload.get("usage"), payload.get("id"))
+        if evidence.reason != "USAGE_MISSING" or evidence.response_id_digest is not None:
+            deltas.append(evidence)
         return tuple(deltas)
 
     def generate(
@@ -790,6 +891,7 @@ class RemoteLLMEngine:
         run_context: object | None = None,
         cancellation_token: object | None = None,
         timeout_seconds: float | None = None,
+        on_usage=None,
     ) -> Generator[str, None, None]:
         with self._session_lock:
             if self._closed:
@@ -799,17 +901,25 @@ class RemoteLLMEngine:
                     provider_started=False,
                     provider_responded=False,
                 )
-            deltas = self._run_async(
-                self.agenerate(
-                    [dict(message) for message in messages],
-                    temperature,
-                    max_tokens,
-                    enable_thinking,
-                    run_context=run_context,
-                    cancellation_token=cancellation_token,
-                    timeout_seconds=timeout_seconds,
+            try:
+                deltas = self._run_async(
+                    self.agenerate(
+                        [dict(message) for message in messages],
+                        temperature,
+                        max_tokens,
+                        enable_thinking,
+                        run_context=run_context,
+                        cancellation_token=cancellation_token,
+                        timeout_seconds=timeout_seconds,
+                    )
                 )
-            )
+            except (RemoteLLMError, RunCancelledError, RunDeadlineExceededError, asyncio.CancelledError) as exc:
+                usage = getattr(exc, "provider_usage", None)
+                if on_usage is not None and usage is not None:
+                    on_usage(usage)
+                raise
+        if on_usage is not None:
+            on_usage(next((delta for delta in reversed(deltas) if isinstance(delta, UsageDelta)), UsageDelta()))
         for delta in deltas:
             if isinstance(delta, TextDelta):
                 yield delta.text
@@ -875,7 +985,7 @@ class RemoteLLMEngine:
     ) -> ModelAdapterResponse:
         chunks: list[str] = []
         call_parts: dict[int, dict[str, str]] = {}
-        actual_usage = None
+        provider_usage = UsageDelta()
         finish_reason = None
         refusal_parts: list[str] = []
         async for delta in self.agenerate(
@@ -899,28 +1009,28 @@ class RemoteLLMEngine:
             elif isinstance(delta, ToolCallDelta):
                 if (getattr(run_context, "execution_policy", None) == "durable-agent-loop.v2"
                         and (type(delta.index) is not int or not 0 <= delta.index < 4)):
-                    raise RemoteLLMError("Invalid batch index", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True)
+                    raise RemoteLLMError("Invalid batch index", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True, provider_usage=provider_usage)
                 item = call_parts.setdefault(delta.index, {"id": "", "name": "", "arguments": ""})
                 if delta.provider_tool_call_id:
                     if item["id"] and item["id"] != delta.provider_tool_call_id:
-                        raise RemoteLLMError("Remote API returned conflicting native tool call id", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True)
+                        raise RemoteLLMError("Remote API returned conflicting native tool call id", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True, provider_usage=provider_usage)
                     item["id"] = delta.provider_tool_call_id
                 if delta.tool_name:
                     if item["name"] and item["name"] != delta.tool_name:
-                        raise RemoteLLMError("Remote API returned conflicting native tool name", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True)
+                        raise RemoteLLMError("Remote API returned conflicting native tool name", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True, provider_usage=provider_usage)
                     item["name"] = delta.tool_name
                 item["arguments"] += delta.arguments_fragment
             elif isinstance(delta, UsageDelta):
-                from core.runtime.budget import BudgetUsage
-                actual_usage = BudgetUsage(input_tokens=delta.input_tokens, output_tokens=delta.output_tokens, total_tokens=delta.input_tokens + delta.output_tokens)
+                provider_usage = delta
+        actual_usage = provider_usage.actual_usage()
         if getattr(run_context, "execution_policy", None) == "durable-agent-loop.v2":
             if sorted(call_parts) != list(range(len(call_parts))):
-                raise RemoteLLMError("Noncontiguous batch indices", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True)
+                raise RemoteLLMError("Noncontiguous batch indices", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True, provider_usage=provider_usage)
             content = "".join(chunks)
             native_calls = tuple(NativeToolCall(item["id"], item["name"], item["arguments"]) for _, item in sorted(call_parts.items()))
             assistant = {"role": "assistant", "content": content or None, "tool_calls": [
                 {"id": c.provider_tool_call_id, "type": "function", "function": {"name": c.tool_name, "arguments": c.arguments_json}} for c in native_calls]}
-            return ModelAdapterResponse(content, actual_usage=actual_usage, native_tool_calls=native_calls,
+            return ModelAdapterResponse(content, actual_usage=actual_usage, provider_usage=provider_usage, native_tool_calls=native_calls,
                 assistant_message=assistant if native_calls else None, finish_reason=finish_reason,
                 refusal="".join(refusal_parts) or None, tool_call_count=len(native_calls))
         loop_mode = getattr(run_context, "execution_policy", None) == "durable-agent-loop.v1"
@@ -932,28 +1042,28 @@ class RemoteLLMEngine:
                 item = next(iter(call_parts.values()))
                 native = NativeToolCall(item["id"], item["name"], item["arguments"])
             return ModelAdapterResponse(
-                content, actual_usage=actual_usage, native_tool_call=native,
+                content, actual_usage=actual_usage, provider_usage=provider_usage, native_tool_call=native,
                 assistant_message={"role": "assistant", "content": content or None, "tool_calls": calls} if calls else None,
                 finish_reason=finish_reason, refusal="".join(refusal_parts) or None, tool_call_count=len(call_parts),
             )
         if not call_parts:
             content = "".join(chunks)
             if not content.strip() and not refusal_parts:
-                raise RemoteLLMError("Remote model returned empty content", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_EMPTY_CONTENT", provider_responded=True)
-            return ModelAdapterResponse(content, actual_usage=actual_usage, finish_reason=finish_reason, refusal="".join(refusal_parts) or None, tool_call_count=0)
+                raise RemoteLLMError("Remote model returned empty content", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_EMPTY_CONTENT", provider_responded=True, provider_usage=provider_usage)
+            return ModelAdapterResponse(content, actual_usage=actual_usage, provider_usage=provider_usage, finish_reason=finish_reason, refusal="".join(refusal_parts) or None, tool_call_count=0)
         if len(call_parts) != 1:
-            raise RemoteLLMError("Remote API returned unsupported tool call count", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_COUNT_INVALID", provider_responded=True, output_started=True)
+            raise RemoteLLMError("Remote API returned unsupported tool call count", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_COUNT_INVALID", provider_responded=True, output_started=True, provider_usage=provider_usage)
         item = next(iter(call_parts.values()))
         try:
             arguments = json.loads(item["arguments"])
         except (TypeError, ValueError):
-            raise RemoteLLMError("Remote API returned incomplete native tool arguments", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True) from None
+            raise RemoteLLMError("Remote API returned incomplete native tool arguments", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True, provider_usage=provider_usage) from None
         if not isinstance(arguments, dict) or not item["id"] or not item["name"]:
-            raise RemoteLLMError("Remote API returned malformed native tool call", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True)
+            raise RemoteLLMError("Remote API returned malformed native tool call", model_failure_category="OUTPUT_VALIDATION_FAILED", safe_error_code="REMOTE_NATIVE_TOOL_CALL_INVALID", provider_responded=True, output_started=True, provider_usage=provider_usage)
         arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
         native = NativeToolCall(item["id"], item["name"], arguments_json)
         assistant_message = {"role": "assistant", "content": "".join(chunks) or None, "tool_calls": [{"id": item["id"], "type": "function", "function": {"name": item["name"], "arguments": arguments_json}}]}
-        return ModelAdapterResponse("".join(chunks), actual_usage=actual_usage, native_tool_call=native, assistant_message=assistant_message, finish_reason=finish_reason, refusal="".join(refusal_parts) or None, tool_call_count=len(call_parts))
+        return ModelAdapterResponse("".join(chunks), actual_usage=actual_usage, provider_usage=provider_usage, native_tool_call=native, assistant_message=assistant_message, finish_reason=finish_reason, refusal="".join(refusal_parts) or None, tool_call_count=len(call_parts))
 
     def close(self) -> object | None:
         """幂等关闭 application-scoped client。

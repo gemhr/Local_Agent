@@ -1,0 +1,202 @@
+{
+  "snapshot": {
+    "analysis_contract": "interface-coverage-analysis.v1",
+    "task_version": 1,
+    "title": "公开合成说明书：管理消息的配置生效条件",
+    "feature_id": "sampling-control",
+    "planning_cutoff": "2026-10-02T00:00:00Z",
+    "known_impacts": [],
+    "development_exposed": true,
+    "experiment_phase": "FORMAL",
+    "condition_aliases": {
+      "功能打开": "FEATURE_ENABLED",
+      "在线调整": "HOT_RECONFIG",
+      "首条管理消息": "FIRST_MANAGEMENT_MESSAGE",
+      "冷启动": "COLD_START",
+      "恢复": "RECOVERY"
+    },
+    "documents": [
+      {
+        "source_ref": "spec:message:body",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "TERMINOLOGY",
+        "content_digest": "22d246e534bb0f4fffe53090bd57a7b530ae1e61bd7d3513ff57ef5e5bdd95d9",
+        "title": "说明书 §3 表3 第4行",
+        "content": "新版管理消息使用当时的有效配置。功能打开即 FEATURE_ENABLED；在线调整即 HOT_RECONFIG；首次管理消息即 FIRST_MANAGEMENT_MESSAGE。配置版本为sampling-control v2。开发交付说明书，测试人员手工维护Tag/消息并统一上库；本文表示已经上库的合成版本。",
+        "facts": {
+          "section": "§3 表3 第4行",
+          "target_version": {
+            "id": "sampling-control",
+            "version": "2"
+          },
+          "aliases": {
+            "功能打开": "FEATURE_ENABLED",
+            "在线调整": "HOT_RECONFIG",
+            "首条管理消息": "FIRST_MANAGEMENT_MESSAGE",
+            "冷启动": "COLD_START",
+            "恢复": "RECOVERY"
+          }
+        }
+      },
+      {
+        "source_ref": "spec:message:footnote-a",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "REQUIREMENT",
+        "content_digest": "564a7bb2e7a038c480c26ce1e60b4ae593ee1f6afdee8c35b0afed15d5f8eb2c",
+        "title": "§3 表3 脚注a",
+        "content": "功能打开且在线调整后，重配后的首条管理消息必须使用新的有效配置。先开启功能，再在线重配，随后观察首条管理消息。",
+        "facts": {
+          "section": "§3 表3 脚注a",
+          "path": "HOT_RECONFIG",
+          "target_version": {
+            "id": "sampling-control",
+            "version": "2"
+          },
+          "conditions": [
+            "功能打开",
+            "在线调整",
+            "首条管理消息"
+          ],
+          "event_order": [
+            "FEATURE_ENABLED",
+            "HOT_RECONFIG",
+            "FIRST_MANAGEMENT_MESSAGE"
+          ],
+          "observation": "FIRST_MESSAGE_AFTER_RECONFIG",
+          "expected": "MESSAGE_USES_EFFECTIVE_CONFIG",
+          "configuration_semantics": {}
+        }
+      },
+      {
+        "source_ref": "spec:message:footnote-b",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "REQUIREMENT",
+        "content_digest": "dcbd796fa89cfaca0cc66705c4b6646513477e760f9fe6dfdc9be50bb54e0ee4",
+        "title": "§3 表3 脚注b",
+        "content": "冷启动时功能打开，启动后的首条管理消息须使用启动配置；先配置、冷启动，然后观察首条消息。",
+        "facts": {
+          "section": "§3 表3 脚注b",
+          "path": "COLD_START",
+          "target_version": {
+            "id": "sampling-control",
+            "version": "2"
+          },
+          "conditions": [
+            "功能打开",
+            "冷启动",
+            "首条管理消息"
+          ],
+          "event_order": [
+            "CONFIGURE",
+            "COLD_START",
+            "FIRST_MANAGEMENT_MESSAGE"
+          ],
+          "observation": "FIRST_MESSAGE_AFTER_COLD_START",
+          "expected": "MESSAGE_USES_EFFECTIVE_CONFIG",
+          "configuration_semantics": {}
+        }
+      },
+      {
+        "source_ref": "case:message:stable",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "5bc9053c469316663ceab53c0c63bfd7dc3fddbda0b7c38446d2d38718d2e5a3",
+        "title": "新版消息gain2回归",
+        "content": "启动前设置gain=2，打开功能，启动后等待稳定，再抽查若干管理消息使用gain=2。",
+        "facts": {
+          "section": "历史用例实际步骤",
+          "path": "HOT_RECONFIG",
+          "target_version": {
+            "id": "sampling-control",
+            "version": "2"
+          },
+          "conditions": [
+            "FEATURE_ENABLED"
+          ],
+          "steps": [
+            "CONFIGURE",
+            "FEATURE_ENABLED",
+            "COLD_START",
+            "WAIT_STABLE",
+            "OBSERVE"
+          ],
+          "observation": "STABLE_MESSAGES",
+          "expected": "MESSAGE_USES_EFFECTIVE_CONFIG"
+        }
+      },
+      {
+        "source_ref": "case:message:cold",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "33d039e4235ba9a77b81885a6e71f9b89655eb9e76997c0966e273a5fadb3539",
+        "title": "冷启动首次管理消息",
+        "content": "设置gain=2并打开功能，执行冷启动，在首条管理消息验证使用有效启动配置。",
+        "facts": {
+          "section": "历史用例实际步骤",
+          "path": "COLD_START",
+          "target_version": {
+            "id": "sampling-control",
+            "version": "2"
+          },
+          "conditions": [
+            "FEATURE_ENABLED",
+            "COLD_START",
+            "FIRST_MANAGEMENT_MESSAGE"
+          ],
+          "steps": [
+            "CONFIGURE",
+            "FEATURE_ENABLED",
+            "COLD_START",
+            "FIRST_MANAGEMENT_MESSAGE"
+          ],
+          "observation": "FIRST_MESSAGE_AFTER_COLD_START",
+          "expected": "MESSAGE_USES_EFFECTIVE_CONFIG"
+        }
+      }
+    ],
+    "manifest": [
+      {
+        "source_ref": "spec:message:body",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "22d246e534bb0f4fffe53090bd57a7b530ae1e61bd7d3513ff57ef5e5bdd95d9"
+      },
+      {
+        "source_ref": "spec:message:footnote-a",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "564a7bb2e7a038c480c26ce1e60b4ae593ee1f6afdee8c35b0afed15d5f8eb2c"
+      },
+      {
+        "source_ref": "spec:message:footnote-b",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "dcbd796fa89cfaca0cc66705c4b6646513477e760f9fe6dfdc9be50bb54e0ee4"
+      },
+      {
+        "source_ref": "case:message:stable",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "5bc9053c469316663ceab53c0c63bfd7dc3fddbda0b7c38446d2d38718d2e5a3"
+      },
+      {
+        "source_ref": "case:message:cold",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "33d039e4235ba9a77b81885a6e71f9b89655eb9e76997c0966e273a5fadb3539"
+      }
+    ],
+    "corpus_digest": "75d8f213ef7bba3d31ce34b4751de562c98a7ee69dbf74f89ea8a70fedbfc847",
+    "input_digest": "85bb61b0bfc1cf3ca8d264236ecf68b19cc5347d4ba62acc11c4a6f74d44de10"
+  }
+}

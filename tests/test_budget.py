@@ -87,3 +87,24 @@ def test_lazy_stream_partial_close_and_actual_usage():
     stream=BudgetedModelStream(Lazy([]),ledger,r,lambda _: usage(5,5));
     with pytest.raises(StopIteration): next(stream)
     assert ledger.snapshot().committed_usage.total_tokens==16
+
+
+def test_interrupted_stream_keeps_original_error_and_settles_overrun_once():
+    import asyncio
+
+    class Interrupted(Lazy):
+        def __next__(self):
+            raise asyncio.CancelledError()
+
+    ledger = BudgetLedger(RunBudget(max_total_tokens=5))
+    reservation = ledger.reserve(BudgetUsage(model_calls=1, total_tokens=4), reservation_type="model")
+    reported = BudgetUsage(model_calls=1, input_tokens=4, output_tokens=2, total_tokens=6)
+    stream = BudgetedModelStream(Interrupted(), ledger, reservation, lambda _: reported)
+    with pytest.raises(asyncio.CancelledError) as caught:
+        next(stream)
+    assert caught.value.budget_error.error_code == "BUDGET_EXHAUSTED"
+    stream.close()
+    with pytest.raises(BudgetReservationError):
+        ledger.commit(reservation, reported)
+    assert ledger.snapshot().committed_usage == reported
+    assert ledger.snapshot().active_reservation_count == 0

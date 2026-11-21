@@ -129,7 +129,7 @@ def observations(image, actions, delegations, binding, receipt):
             "accepted_kind": accepted.decision_kind if accepted else None,
             "accepted_digest": accepted.decision_digest if accepted else None,
             "input_tokens": model.usage_evidence.get("input_tokens"), "output_tokens": model.usage_evidence.get("output_tokens"),
-            "total_tokens": model.usage_evidence.get("total_tokens"), "usage_quality": "ACTUAL" if model.usage_evidence else "UNAVAILABLE"})
+            "total_tokens": model.usage_evidence.get("total_tokens"), "usage_quality": "ACTUAL" if model.usage_evidence.get("total_tokens") is not None else "UNAVAILABLE"})
         models[-1]["profile_digest"] = _ref([model.provider_kind, model.profile_identity])
         models[-1]["compaction_operation_ref"] = _ref(model.compaction_operation_id)
         models[-1]["budget_operation_ref"] = _ref(f"model:{model.step_id}:{model.attempt_number}:{model.model_attempt_number}")

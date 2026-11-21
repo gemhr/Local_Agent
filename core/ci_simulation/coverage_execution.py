@@ -23,10 +23,11 @@ async def approved(session,principal,plan_id,test_id,*,lock=False,trusted_owner=
         if (principal.principal_kind!="SERVICE" or lock or task is None or (task.tenant_id,str(task.owner_user_id))!=trusted_owner):
             raise BusinessError("COVERAGE_SOURCE_DENIED",403)
     test=next((t for t in plan.payload["tests"] if t["test_id"]==test_id),None)
+    if test and test.get("test_kind")=="PLANNING_ONLY": raise BusinessError("PLANNING_ONLY_NOT_EXECUTABLE")
     if (test is None or test.get("test_kind")!="DAAS_CASE"
             or not any(d["finding_id"]==test["finding_id"] and d["decision"]=="ACCEPT" for d in plan.payload["decisions"])):
         raise BusinessError("TEST_NOT_APPROVED")
-    if (task.snapshot.get("analysis_contract")!="interface-impact.v1" or report.rejection
+    if (task.snapshot.get("analysis_contract") not in {"interface-impact.v1","interface-coverage-analysis.v1"} or report.rejection
             or digest({k:v for k,v in task.snapshot.items() if k!="input_digest"})!=task.snapshot["input_digest"]
             or digest(report.payload)!=report.envelope["report_digest"]
             or digest({k:v for k,v in plan.payload.items() if k!="plan_digest"})!=plan.payload["plan_digest"]
@@ -51,7 +52,7 @@ def public_asset(row,executions=()):
         case_asset=state["case_asset"],workflow_source=state["workflow_source"],distribution=state["distribution"],
         execution_status="EXECUTED" if executions else "NOT_EXECUTED",executions=list(executions),
         execution_intent=dict(case_id=state["test_case"]["case_id"],expected_state_revision=row.state_revision),
-        model_execution="NOT_EXECUTED",incremental_agent_value="NOT_VALIDATED")
+        model_execution="EXECUTED" if state["workflow_source"].get("candidate_kind")=="AGENT" else "NOT_EXECUTED",incremental_agent_value="NOT_VALIDATED")
 
 
 async def prepare(service,principal,plan_id,body):

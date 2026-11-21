@@ -610,6 +610,7 @@ class CoordinatedRuntimeFactory:
         "_execution_repository",
         "_agent_registry",
         "_request_counting_exception",
+        "_ordinary_request_counting_policy",
     )
 
     def __init__(
@@ -626,6 +627,7 @@ class CoordinatedRuntimeFactory:
         step_result_max_entries: int = 16,
         execution_repository=None,
         request_counting_exception=None,
+        ordinary_request_counting_policy=None,
     ) -> None:
         if not isinstance(services, ApplicationRuntimeServices):
             raise TypeError("services must be ApplicationRuntimeServices")
@@ -675,6 +677,10 @@ class CoordinatedRuntimeFactory:
         self._step_result_max_entries = step_result_max_entries
         self._execution_repository = execution_repository
         self._agent_registry = agent_registry
+        from core.runtime.request_counting_admission import ORDINARY_ESTIMATE
+        if ordinary_request_counting_policy not in (None, ORDINARY_ESTIMATE):
+            raise ValueError("CONTEXT_ADMISSION_POLICY_INVALID")
+        self._ordinary_request_counting_policy = ordinary_request_counting_policy
         self._request_counting_exception = request_counting_exception
         if request_counting_exception is not None:
             from core.runtime.request_counting_admission import TrustedException, AGENT, LIMITS
@@ -1201,15 +1207,13 @@ class CoordinatedRuntimeFactory:
                 run_context.memory_guard = MemoryContextGuard(memory_repository, durable_lease)
             elif persist or memory_access_context is not None:
                 raise MemoryContextError("MEMORY_CONTEXT_UNVERIFIABLE")
-            from core.runtime.request_counting_admission import bind_context, prepare_local_admission, context_record
-            local_admission = await prepare_local_admission(repository.database, run_context, memory_access_context,
-                query, self._router.model_profiles, definition, self._router.max_tokens, root=rehydrated_root) if repository else None
+            from core.runtime.request_counting_admission import bind_context, ordinary_policy_for_run
+            run_context.ordinary_request_counting_policy = ordinary_policy_for_run(
+                self._ordinary_request_counting_policy, run_context.execution_policy,
+                root=rehydrated_root, receipt=quality_receipt, correlation=run_context.loop_correlation,
+            )
             run_context.request_counting_admission = bind_context(self._request_counting_exception,
-                quality_receipt, run_context, memory_access_context, rehydrated_root=rehydrated_root, local_admission=local_admission)
-            if local_admission is not None and context_record(run_context) is not None:
-                from dataclasses import replace
-                budget = replace(budget, max_input_tokens=None, max_output_tokens=None, max_total_tokens=None, max_cost_units=None)
-                run_context.loop_allowed_model_profiles = [local_admission.record["policy"]["profile_id"]]
+                quality_receipt, run_context, memory_access_context, rehydrated_root=rehydrated_root)
             run_context.attach_project_memory_access(project_identity, project_grants)
             prepare_tool_snapshot = getattr(
                 self._router, "prepare_tool_resolution_snapshot", None

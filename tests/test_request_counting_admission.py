@@ -2,6 +2,7 @@
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 import json
 from types import SimpleNamespace as NS
 from uuid import uuid4
@@ -44,7 +45,7 @@ def remote_profile():
 async def ci_runtime(database,tmp_path,*,tamper=False):
     from core.agent_platform.registry import AgentRegistrationBundle
     from core.agent_platform.contracts import AgentRegistration
-    from core.agent_platform.ci_diagnosis_tools import CIDiagnosisTool, TOOL_NAMES
+    from core.agent_platform.ci_diagnosis_tools import TOOL_NAMES, register_tools as register_ci_tools
     from core.persistence.sync_bridge import SyncPersistenceBridge
     from core.persistence.memory import PostgresMemoryManager, PostgresMemoryManagerBridge
     from core.persistence.repositories.memory_lifecycle import MemoryLifecycleRepository
@@ -52,26 +53,49 @@ async def ci_runtime(database,tmp_path,*,tamper=False):
     from core.agent_platform.quality_configuration import runtime_build_digest
     from core.runtime.runtime_factory import CoordinatedRuntimeFactory
     from core.runtime.model_invocation import ModelAdapterResponse
+    from core.runtime.tool_registry import ToolRegistry
+    from core.runtime.tool_snapshot_store import PostgresToolResolutionSnapshotStore
+    from core.skills.catalog import SkillCatalog
+    from core.skills.tool_adapter import register_tools as register_skill_tools
     from tests.test_agent_loop_runtime import assembly, native
     from tests.test_agent_batch_handoff import Provider
     actor,definition,request,_=await inputs(database)
     service=IncidentService(database)
     bridge=SyncPersistenceBridge(asyncio.get_running_loop())
-    tools=[CIDiagnosisTool(n,service,bridge) for n in TOOL_NAMES]
+    catalog = SkillCatalog.discover([Path(__file__).resolve().parents[1] / "skills"])
+    registry = ToolRegistry()
+    register_ci_tools(registry, service, bridge)
+    register_skill_tools(registry, catalog)
+    registrations = registry.startup_registrations
+    tools = [registration.adapter for registration in registrations]
     await MemoryLifecycleRepository(database).configure_project(tenant_id=actor.tenant_id,
         project_id=str(request.quality.evaluation_project_id),agent_id=AGENT,
         grants={str(actor.user_id):['READ']},ttl_seconds=3600)
     first=native(TOOL_NAMES[0],'context')
     first=replace(first,native_tool_calls=(first.native_tool_call,),native_tool_call=None)
-    model=Provider([first,ModelAdapterResponse('synthetic final',finish_reason='stop',tool_call_count=0)])
+    def final_report(messages):
+        observation = next(message for message in messages if message["role"] == "tool")
+        context = json.loads(json.loads(observation["content"])["content"])
+        report = dict(schema_version="ci-diagnosis.v1", kind="REPORT", incident_id=context["incident_id"],
+            diagnosis_status="INSUFFICIENT_EVIDENCE", failure_stage="UNKNOWN",
+            root_cause_hypothesis="合成测试保留不确定性", supporting_evidence=[],
+            uncertainties=["只读取了执行上下文"], recommended_checks=["核对原始证据"],
+            recommended_owner_role="UNKNOWN")
+        return ModelAdapterResponse(json.dumps(report, ensure_ascii=False), finish_reason="stop", tool_call_count=0)
+
+    model=Provider([first,final_report])
     bundle=AgentRegistrationBundle(registrations=(AgentRegistration(definition),),model_profile_ids=frozenset({'default'}),
-        tool_grants={n:frozenset({AGENT}) for n in TOOL_NAMES})
+        tool_grants={n:frozenset({AGENT}) for n in definition.allowed_tools})
     initial,repo,_,_=await assembly(database,tmp_path,[],tools=tools,context_policy={'version':2},
         context_model=model,business_bundle=bundle,model_profile=remote_profile(),max_tokens=4096,
-        memory_manager=PostgresMemoryManagerBridge(PostgresMemoryManager(database),bridge))
+        memory_manager=PostgresMemoryManagerBridge(PostgresMemoryManager(database),bridge),
+        tool_registrations=registrations)
+    initial._router.skill_catalog = catalog
+    initial._router.tool_snapshot_store = PostgresToolResolutionSnapshotStore(database)
     config=configuration(actor,definition,request)
+    query = request.quality.query
     snapshot=initial._router.tool_discovery.create_tool_snapshot(str(uuid4()),
-        initial._router.tool_discovery.discover_tools('ci',AGENT),selection_query='ci')
+        initial._router._discover_run_tools(query, AGENT, None), selection_query=query)
     pin=pinned_loop_config(initial._router,AGENT,NS(tool_resolution_snapshot=snapshot,
         execution_policy=EXECUTION,memory_effect_policy='SERVICE_PROJECT_READ_ONLY.v1'),request_counting_policy=config['policy'])
     manifest=dict(schema_version='agent-quality-execution-manifest.v1',runtime_build_digest=runtime_build_digest(),
@@ -221,3 +245,129 @@ async def test_forged_persistent_annotation_cannot_initialize_root(clean_databas
     assert result.status.value=='FAILED'
     assert await repo.load(str(request.quality.run_id)) is None
     assert not model.requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["allowed", "recover", "messages_tampered", "options_tampered", "started_tampered", "over_capacity"])
+async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_database, tmp_path, scenario):
+    from core.runtime.agent_loop.execution_evidence import build_execution_evidence
+    from core.runtime.model_invocation import ModelAdapterResponse
+    from core.runtime.request_counting_admission import ORDINARY_ESTIMATE, ORDINARY_POLICY_KEY
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+    from tests.test_agent_batch_handoff import Provider
+    from tests.test_agent_loop_runtime import assembly
+
+    from core.llm_engine import UsageDelta
+
+    provider_usage = UsageDelta(input_tokens=0, output_tokens=0, total_tokens=0, reason=None)
+    model = Provider([ModelAdapterResponse("ordinary final", finish_reason="stop", tool_call_count=0,
+        actual_usage=provider_usage.actual_usage(), provider_usage=provider_usage)])
+    profile = remote_profile()
+    if scenario == "over_capacity":
+        profile = replace(profile, context_window=16000)
+    initial, repo, _, _ = await assembly(clean_database, tmp_path, [], context_model=model,
+        context_policy={"version": 2}, model_profile=profile, max_tokens=4096)
+    factory = CoordinatedRuntimeFactory(initial._router, initial._services, agent_registry=initial._agent_registry,
+        event_channel_capacity=256, execution_repository=repo, ordinary_request_counting_policy=ORDINARY_ESTIMATE)
+    if scenario in {"messages_tampered", "options_tampered"}:
+        router = factory._router.model_invocation_router
+        original = router.invoke
+
+        def tampered(**kwargs):
+            if scenario == "messages_tampered":
+                kwargs["messages"] = [*kwargs["messages"], {"role": "user", "content": "changed"}]
+            else:
+                options = kwargs["run_context"].loop_request_options
+                options["remote_advanced"] = {**options["remote_advanced"], "tool_choice": "none"}
+            return original(**kwargs)
+
+        router.invoke = tampered
+    elif scenario == "started_tampered":
+        original_start = repo.start_model_attempt
+
+        async def tampered_start(lease, **kwargs):
+            kwargs["request_assessment"]["options_bound"] += 1
+            return await original_start(lease, **kwargs)
+
+        repo.start_model_attempt = tampered_start
+    elif scenario == "recover":
+        from datetime import UTC, datetime
+        from core.runtime.agent_loop.contracts import LoopSuspended
+
+        original_accept = repo.accept_loop_batch
+
+        async def suspend_before_accept(*args, **kwargs):
+            raise LoopSuspended(next_recovery_at=datetime.now(UTC))
+
+        repo.accept_loop_batch = suspend_before_accept
+    query = "证据" * 2750 if scenario == "over_capacity" else "public input"
+    scope = await factory.create_run_scope("core_router", query, execution_policy=EXECUTION, persist=False)
+    try:
+        if scenario == "recover":
+            from core.runtime.recovery_coordinator import RecoveryCoordinator
+
+            with pytest.raises(LoopSuspended):
+                await scope.execute()
+            await scope.close(abort=True)
+            repo.accept_loop_batch = original_accept
+            recovered = []
+
+            async def resume(run_id, lease, image):
+                restored = await initial.create_rehydrated_run_scope(image, lease=lease, run_id=run_id)
+                try:
+                    recovered.append(await restored.execute())
+                finally:
+                    await restored.close(abort=True)
+
+            recovery = RecoveryCoordinator(repo, repo.run_control, resume, instance_id="ordinary-recovery")
+            assert await recovery.scan_once() == 1
+            await asyncio.gather(*tuple(recovery._local_tasks))
+            result, = recovered
+        else:
+            result = await scope.execute()
+        image = await repo.load(scope.run_id)
+        assert image.root.resume_input["agent_loop"]["pinned_config"][ORDINARY_POLICY_KEY] == ORDINARY_ESTIMATE
+        if scenario in {"allowed", "recover"}:
+            assert result.status.value == "SUCCEEDED"
+            assert len(model.requests) == 1 and len(image.models) == 1
+            attempt = image.models[0]
+            assert attempt.state == "COMPLETED"
+            assert attempt.request_assessment["reliable"] is False
+            assert attempt.request_assessment["admissible"] is False
+            snapshot = image.context_snapshots[0]
+            assert snapshot.validation["budget"] is False
+            assert snapshot.validation["ordinary_admission"] == [attempt.request_assessment]
+            assert image.root.budget_consumed["model_calls"] == 1
+            assert attempt.usage_evidence["total_tokens"] == 0
+            assert attempt.usage_evidence["provider_usage"]["quality"] == "ACTUAL"
+            gaps = build_execution_evidence(image, (), ())["gaps"]
+            assert "MODEL_BINDING_MISSING" not in gaps and "SNAPSHOT_VALIDATION_MISSING" not in gaps
+        else:
+            assert result.status.value == "FAILED"
+            assert not model.requests and not image.models
+            if scenario == "over_capacity":
+                assert image.loop_frames[0].stop_code in {"CONTEXT_COMPACTION_FAILED", "LOOP_CONTEXT_EXHAUSTED"}
+    finally:
+        await scope.close(abort=True)
+
+
+def test_ordinary_policy_cannot_be_injected_or_inherited_by_historical_runs():
+    from pydantic import ValidationError
+    from core.runtime.request_counting_admission import ORDINARY_ESTIMATE, ORDINARY_POLICY_KEY, ordinary_policy_for_run
+    from server import ChatRequest, RuntimeExecuteRequest
+
+    for request in (ChatRequest, RuntimeExecuteRequest):
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            request.model_validate({"agent_id": "core_router", "query": "test",
+                                    **({"timeout_seconds": 20} if request is RuntimeExecuteRequest else {}),
+                                    ORDINARY_POLICY_KEY: ORDINARY_ESTIMATE})
+    flags = {"request_counting_exception": {"schema_version": "stage21-baseband-local-policy.v1"}}
+    legacy = {"schema_version": "stage21-baseband-local-admission.v2", "policy": flags["request_counting_exception"]}
+    for loop in ({"pinned_config": {}}, {"pinned_config": flags, "e2e_test_admission": legacy}):
+        root = NS(execution_policy=EXECUTION, resume_input={"agent_loop": loop})
+        assert ordinary_policy_for_run(ORDINARY_ESTIMATE, EXECUTION, root=root) is None
+    assert ordinary_policy_for_run(ORDINARY_ESTIMATE, EXECUTION, receipt=object()) is None
+    assert ordinary_policy_for_run(ORDINARY_ESTIMATE, EXECUTION, correlation={"attempt_id": "evaluation"}) is None
+    root = NS(execution_policy=EXECUTION, resume_input={"agent_loop": {
+        "pinned_config": {ORDINARY_POLICY_KEY: ORDINARY_ESTIMATE}}})
+    assert ordinary_policy_for_run(None, EXECUTION, root=root) == ORDINARY_ESTIMATE

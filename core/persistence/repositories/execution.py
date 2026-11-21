@@ -99,15 +99,13 @@ class DurableExecutionRepository:
             from core.persistence.models import RuntimeAgentEvaluationReceiptRow
             quality_receipt = await session.get(RuntimeAgentEvaluationReceiptRow, root.run_id)
             loop = root.resume_input.get("agent_loop") or {}
+            from core.runtime.request_counting_admission import ordinary_policy_for_run
+            ordinary_policy_for_run(None, root.execution_policy, root=root, receipt=quality_receipt)
             admission = loop.get("e2e_test_admission")
             if admission is not None or loop.get("pinned_config", {}).get("request_counting_exception") is not None:
-                from core.runtime.request_counting_admission import validate_record, is_local_baseband_record
-                local = is_local_baseband_record(admission)
-                if (quality_receipt is None and not local) or not validate_record(admission, root=root, receipt=quality_receipt, for_write=True):
+                from core.runtime.request_counting_admission import validate_record
+                if quality_receipt is None or not validate_record(admission, root=root, receipt=quality_receipt):
                     raise ValueError("E2E_ADMISSION_ROOT_MISMATCH")
-                if local:
-                    from core.runtime.request_counting_admission import validate_local_root
-                    await validate_local_root(session, admission, root)
             if quality_receipt is not None:
                 adaptive = quality_receipt.execution_manifest.get("protocol_version") == "adaptive-execution-evaluate.v1"
                 if adaptive:
@@ -416,12 +414,6 @@ class DurableExecutionRepository:
         async with self.database.transaction() as session:
             if self.run_control is not None:
                 await self.run_control.assert_current_in_transaction(session, lease)
-            local_root = await session.get(RuntimeRunExecutionRow, lease.run_id)
-            from core.runtime.request_counting_admission import is_local_baseband_record, validate_record
-            local_record = (local_root.resume_input.get("agent_loop") or {}).get("e2e_test_admission") if local_root else None
-            if is_local_baseband_record(local_record) and (not validate_record(local_record, root=local_root, for_write=True)
-                    or provider_kind != local_record["policy"]["provider_kind"] or profile_identity != local_record["policy"]["model_identity"]):
-                raise ValueError("BASEBAND_LOCAL_MODEL_ADMISSION_INVALID")
             if loop_frame_id is not None:
                 root, frame = await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
                 if frame.frame_role == "CHILD" and purpose == "FORMATION":
@@ -449,16 +441,35 @@ class DurableExecutionRepository:
                     raise RuntimeError("LOOP_MODEL_BINDING_INVALID")
                 if frame.context_policy and purpose != "FORMATION":
                     from core.runtime.agent_loop.context import ContextSnapshotV1
+                    from core.runtime.request_counting_admission import ORDINARY_POLICY_KEY, persisted_eligible
+                    ordinary = request_assessment and ORDINARY_POLICY_KEY in request_assessment
                     counting_eligible = bool(request_assessment and request_assessment.get("admissible") is True)
-                    if request_assessment and not counting_eligible:
-                        from core.runtime.request_counting_admission import persisted_eligible, is_local_baseband_record
+                    if frame.pinned_config.get(ORDINARY_POLICY_KEY) and request_assessment and not ordinary:
+                        pin = next((p for p in frame.pinned_config["profiles"]
+                            if p["profile_id"] == request_assessment.get("profile_id")), None)
+                        if (pin is None or pin["request_counting_mode"] == "HEURISTIC"
+                                or (provider_kind, profile_identity) != (pin["provider_kind"], pin["model_identity"] or pin["profile_id"])):
+                            raise RuntimeError("CONTEXT_BUDGET_UNCERTAIN")
+                    snapshot = None
+                    if ordinary and purpose == "DECISION":
+                        snapshot = await session.get(RuntimeContextSnapshotRow, context_snapshot_id)
+                    if ordinary:
                         from core.persistence.models import RuntimeAgentEvaluationReceiptRow
                         receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id)
-                        counting_eligible = (receipt is not None or is_local_baseband_record((root.resume_input.get("agent_loop") or {}).get("e2e_test_admission"))) and persisted_eligible(request_assessment, root, frame, receipt, purpose=purpose)
+                        request = operation.prepared if purpose == "COMPACTION" else (snapshot.payload if snapshot else None)
+                        counting_eligible = (persisted_eligible(request_assessment, root, frame, receipt,
+                            purpose=purpose, request=request, provider=(provider_kind, profile_identity))
+                            and canonical_payload_digest(evaluation_messages) == request_assessment["messages_digest"]
+                            and (purpose == "COMPACTION" or request_assessment in snapshot.validation.get("ordinary_admission", [])))
+                    elif request_assessment and not counting_eligible:
+                        from core.persistence.models import RuntimeAgentEvaluationReceiptRow
+                        receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id)
+                        counting_eligible = receipt is not None and persisted_eligible(request_assessment, root, frame, receipt, purpose=purpose)
                     if not counting_eligible or request_assessment.get("request_digest") != request_digest:
                         raise RuntimeError("CONTEXT_BUDGET_UNCERTAIN")
                     if purpose == "DECISION":
-                        snapshot = await session.get(RuntimeContextSnapshotRow, context_snapshot_id)
+                        if snapshot is None:
+                            snapshot = await session.get(RuntimeContextSnapshotRow, context_snapshot_id)
                         if (snapshot is None or snapshot.snapshot_id != iteration.context_snapshot_id
                                 or snapshot.snapshot_digest != iteration.context_snapshot_digest
                                 or snapshot.snapshot_digest != ContextSnapshotV1.create(snapshot.payload).digest
@@ -585,7 +596,10 @@ class DurableExecutionRepository:
             if loop_frame_id is None and resume_generation is not None:
                 loop_frame_id = (await session.execute(select(RuntimeModelInvocationRow.loop_frame_id).where(RuntimeModelInvocationRow.run_id == lease.run_id, RuntimeModelInvocationRow.step_id == step_id, RuntimeModelInvocationRow.attempt_number == attempt, RuntimeModelInvocationRow.model_attempt_number == model_attempt))).scalar_one()
             if loop_frame_id is not None:
-                root, frame = await self._lock_loop(session, lease, loop_frame_id, resume_generation=resume_generation)
+                # 控制终止后仅允许结清已 STARTED 的 UNKNOWN，仍核验 lease 与 fence。
+                control_stopped = state is ModelAttemptState.UNKNOWN and safe_error in {"CANCELLED", "DEADLINE_EXCEEDED"}
+                root, frame = await self._lock_loop(session, lease, loop_frame_id,
+                    resume_generation=resume_generation, allow_control_stop=control_stopped)
                 if operation_id is None:
                     raise ValueError("Loop model requires budget operation")
                 try:
@@ -837,10 +851,6 @@ class DurableExecutionRepository:
         from core.runtime.agent_loop.context import ContextSnapshotV1, context_sources, snapshot_candidate
         async with self.database.transaction() as session:
             root, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
-            from core.runtime.request_counting_admission import is_local_baseband_record, validate_record
-            local_record = (root.resume_input.get("agent_loop") or {}).get("e2e_test_admission")
-            if is_local_baseband_record(local_record) and not validate_record(local_record, root=root, frame=frame, for_write=True):
-                raise ValueError("BASEBAND_LOCAL_CONTEXT_ADMISSION_INVALID")
             rows = tuple((await session.execute(select(RuntimeLoopIterationRow).where(RuntimeLoopIterationRow.frame_id == frame_id).order_by(RuntimeLoopIterationRow.iteration_no).with_for_update())).scalars().all())
             await self._memory_admission(session, lease)
             current = rows[-1] if rows and rows[-1].state == "OPEN" else None
@@ -866,11 +876,12 @@ class DurableExecutionRepository:
                 raise RuntimeError("CONTEXT_VALIDATION_FAILED")
             expected = snapshot_candidate(frame, groups, candidate["options"], candidate["output_reserve"], summary=candidate["summary"], kind=candidate["kind"])
             budget_valid = validation.get("budget") is True
-            if not budget_valid:
-                from core.runtime.request_counting_admission import persisted_validation, is_local_baseband_record
+            if not budget_valid or "ordinary_admission" in validation:
+                from core.runtime.request_counting_admission import persisted_validation
                 from core.persistence.models import RuntimeAgentEvaluationReceiptRow
                 receipt = await session.get(RuntimeAgentEvaluationReceiptRow, lease.run_id)
-                budget_valid = (receipt is not None or is_local_baseband_record((root.resume_input.get("agent_loop") or {}).get("e2e_test_admission"))) and persisted_validation(validation, root, frame, receipt)
+                budget_valid = ("ordinary_admission" in validation or receipt is not None) and persisted_validation(
+                    validation, root, frame, receipt, request=candidate)
             if (expected.digest != artifact.digest or validation.get("reason") != "VALID" or not budget_valid
                     or not all(validation.get(k) is True for k in ("source", "mandatory", "roles", "pairs"))):
                 raise RuntimeError("CONTEXT_REJECTED_STALE")

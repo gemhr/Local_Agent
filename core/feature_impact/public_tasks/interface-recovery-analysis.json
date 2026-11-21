@@ -1,0 +1,125 @@
+{
+  "snapshot": {
+    "analysis_contract": "interface-coverage-analysis.v1",
+    "task_version": 1,
+    "title": "公开合成说明书：恢复配置语义待澄清",
+    "feature_id": "sampling-control",
+    "planning_cutoff": "2026-10-02T00:00:00Z",
+    "known_impacts": [],
+    "development_exposed": true,
+    "experiment_phase": "FORMAL",
+    "condition_aliases": {
+      "功能打开": "FEATURE_ENABLED",
+      "在线调整": "HOT_RECONFIG",
+      "首条管理消息": "FIRST_MANAGEMENT_MESSAGE",
+      "冷启动": "COLD_START",
+      "恢复": "RECOVERY"
+    },
+    "documents": [
+      {
+        "source_ref": "spec:message:body",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "TERMINOLOGY",
+        "content_digest": "22d246e534bb0f4fffe53090bd57a7b530ae1e61bd7d3513ff57ef5e5bdd95d9",
+        "title": "说明书 §3 表3 第4行",
+        "content": "新版管理消息使用当时的有效配置。功能打开即 FEATURE_ENABLED；在线调整即 HOT_RECONFIG；首次管理消息即 FIRST_MANAGEMENT_MESSAGE。配置版本为sampling-control v2。开发交付说明书，测试人员手工维护Tag/消息并统一上库；本文表示已经上库的合成版本。",
+        "facts": {
+          "section": "§3 表3 第4行",
+          "target_version": {
+            "id": "sampling-control",
+            "version": "2"
+          },
+          "aliases": {
+            "功能打开": "FEATURE_ENABLED",
+            "在线调整": "HOT_RECONFIG",
+            "首条管理消息": "FIRST_MANAGEMENT_MESSAGE",
+            "冷启动": "COLD_START",
+            "恢复": "RECOVERY"
+          }
+        }
+      },
+      {
+        "source_ref": "spec:recovery:paragraph",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "REQUIREMENT",
+        "content_digest": "722491d2385c8944d79c39f3cb5b5ef38ff64553dd8214437cdd27be9d323438",
+        "title": "§4 恢复流程第2段",
+        "content": "恢复流程可以复用此前配置；未说明恢复时是否保留配置、重新生效时点，或需要观察恢复后的哪条管理消息。",
+        "facts": {
+          "section": "§4 恢复流程第2段",
+          "path": "RECOVERY",
+          "target_version": {
+            "id": "sampling-control",
+            "version": "2"
+          },
+          "conditions": [
+            "恢复"
+          ],
+          "event_order": [
+            "RECOVERY"
+          ],
+          "observation": "MESSAGE_AFTER_RECOVERY",
+          "expected": "MESSAGE_USES_EFFECTIVE_CONFIG",
+          "configuration_semantics": {
+            "CONFIG_RETAINED": null,
+            "EFFECTIVE_AT": null,
+            "OBSERVED_MESSAGE": null
+          }
+        }
+      },
+      {
+        "source_ref": "case:recovery:check",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "34160a5f4e353255a484a1d91dc812e1404ee6b1987912ede36f2f0e9749e26f",
+        "title": "恢复消息检查",
+        "content": "触发恢复，然后检查消息。用例未记录配置保留、生效时点和消息序号。",
+        "facts": {
+          "section": "历史用例实际步骤",
+          "path": "RECOVERY",
+          "target_version": {
+            "id": "sampling-control",
+            "version": "2"
+          },
+          "conditions": [
+            "RECOVERY"
+          ],
+          "steps": [
+            "RECOVERY",
+            "OBSERVE"
+          ],
+          "observation": "UNSPECIFIED_MESSAGE",
+          "expected": "MESSAGE_USES_EFFECTIVE_CONFIG"
+        }
+      }
+    ],
+    "manifest": [
+      {
+        "source_ref": "spec:message:body",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "22d246e534bb0f4fffe53090bd57a7b530ae1e61bd7d3513ff57ef5e5bdd95d9"
+      },
+      {
+        "source_ref": "spec:recovery:paragraph",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "722491d2385c8944d79c39f3cb5b5ef38ff64553dd8214437cdd27be9d323438"
+      },
+      {
+        "source_ref": "case:recovery:check",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "34160a5f4e353255a484a1d91dc812e1404ee6b1987912ede36f2f0e9749e26f"
+      }
+    ],
+    "corpus_digest": "bfa330e740c0ac5c9924663ca7d97e7c98233233d524d8785251214166d42e95",
+    "input_digest": "eaf0a4d10175adb04ca626ee48cfbad784cecd6c4ddda851f240b8b5aab5f2b3"
+  }
+}

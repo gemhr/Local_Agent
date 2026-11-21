@@ -102,7 +102,7 @@ class IncidentService:
                 closure_eligibility=await closure_eligibility(session, row, execution, instance),
                 workflow_source=execution.summary.get("workflow_source"),
                 rule_diagnosis=(rule_report(row.incident_id, execution) if "workflow_source" in execution.execution_snapshot else None),
-                diagnosis_source="RULE" if "workflow_source" in execution.execution_snapshot else None, model_execution="NOT_EXECUTED" if "workflow_source" in execution.execution_snapshot else None,
+                diagnosis_source="RULE" if "workflow_source" in execution.execution_snapshot else None, model_execution="NOT_EXECUTED" if "workflow_source" in execution.execution_snapshot else None, planning_model_execution="EXECUTED" if execution.execution_snapshot.get("workflow_source",{}).get("candidate_kind")=="AGENT" else "NOT_EXECUTED",
                 execution=execution.summary, evidence=evidence_catalog(execution),
                 investigations=[dict(investigation_id=i.investigation_id, run_id=i.run_id, report_version=i.report_version,
                     projection_status=i.projection_status) for i in investigations])

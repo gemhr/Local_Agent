@@ -81,6 +81,14 @@ class BudgetUsage:
     def plus(self, other:"BudgetUsage")->"BudgetUsage": return BudgetUsage(**{n:getattr(self,n)+getattr(other,n) for n in _DIMENSIONS}, _allow_independent_total=self._allow_independent_total or other._allow_independent_total)
     def minus(self, other:"BudgetUsage")->"BudgetUsage": return BudgetUsage(**{n:getattr(self,n)-getattr(other,n) for n in _DIMENSIONS}, _allow_independent_total=self._allow_independent_total or other._allow_independent_total)
 
+def apply_provider_token_counts(reserved: BudgetUsage, reported: BudgetUsage | None) -> BudgetUsage | None:
+    """替换实测 Token 维度，同时保留该次调用的独立计数与内部成本占用。"""
+    if reported is None:
+        return None
+    return replace(reserved, input_tokens=reported.input_tokens, output_tokens=reported.output_tokens,
+                   total_tokens=reported.total_tokens)
+
+
 class UsageSource(str,Enum): ACTUAL="ACTUAL"; ESTIMATED="ESTIMATED"
 @dataclass(frozen=True,slots=True)
 class BudgetReservation:
@@ -199,7 +207,9 @@ class BudgetLedger:
                 limit=getattr(self.budget,_LIMITS[dim]); requested=getattr(usage,dim)
                 if limit is not None and getattr(self._committed,dim)+getattr(snap.reserved_usage,dim)+requested>limit: raise BudgetExceededError(dim,requested,getattr(snap.remaining,dim),snap)
             r=BudgetReservation(uuid4().hex,reservation_type,step_id,usage,datetime.now(UTC)); self._reservations[r.reservation_id]=r; return r
-    def commit(self,reservation:BudgetReservation, actual_usage:BudgetUsage|None=None, *, usage_source:UsageSource=UsageSource.ACTUAL):
+    def commit(self,reservation:BudgetReservation, actual_usage:BudgetUsage|None=None, *,
+               usage_source:UsageSource=UsageSource.ACTUAL, record_actual_overrun:bool=False):
+        """单进程终止路径可原子保留实际超额，随后仍报告预算失败。"""
         with self._lock:
             stored=self._reservations.get(reservation.reservation_id)
             if stored != reservation: raise BudgetReservationError("Reservation 未知、已结算或已释放")
@@ -216,14 +226,18 @@ class BudgetLedger:
                 if over: raise BudgetReservationError("DELEGATION_BUDGET_EXCEEDED")
                 return self._snapshot_locked()
             # 调用发生且未知实际值时调用方传 None，保守结算预留。
-            # 实际值小于预留时原子退款；大于预留时在同一把锁内补差并重新校验，
-            # 不允许已完成调用把任何有限预算推到上限之外。
+            # 默认失败时保留预约，由原调用方完成结算。已结束的独立调用
+            # 可以在同一次持锁更新中保留实际超额，并用最终快照报告预算失败。
             self._reservations.pop(reservation.reservation_id)
             snapshot_without_current=self._snapshot_locked()
             for dim in _DIMENSIONS:
                 limit=getattr(self.budget,_LIMITS[dim])
                 requested=getattr(actual,dim)
                 if limit is not None and getattr(self._committed,dim)+getattr(snapshot_without_current.reserved_usage,dim)+requested>limit:
+                    if record_actual_overrun and actual_usage is not None:
+                        self._committed = self._committed.plus(actual)
+                        raise BudgetExceededError(dim, requested, getattr(snapshot_without_current.remaining, dim),
+                                                  self._snapshot_locked())
                     self._reservations[reservation.reservation_id]=reservation
                     snapshot=self._snapshot_locked()
                     raise BudgetExceededError(dim,requested,getattr(snapshot.remaining,dim),snapshot)
@@ -256,10 +270,20 @@ class BudgetedModelStream:
     def __iter__(self): return self
     def __next__(self):
         if self._closed: raise StopIteration
+        previously_started = self._started
         self._started=True
-        try: return next(self._stream)
-        except BaseException:
-            self.close(); raise
+        try:
+            return next(self._stream)
+        except StopIteration:
+            self.close()
+            raise
+        except BaseException as exc:
+            self._started = previously_started or getattr(exc, "provider_started", True)
+            try:
+                self.close()
+            except BudgetExceededError as budget_error:
+                exc.budget_error = budget_error
+            raise
     def close(self):
         if self._closed: return
         self._closed=True
@@ -269,5 +293,7 @@ class BudgetedModelStream:
         finally:
             if self._started:
                 actual=self._getter(self._stream) if self._getter else None
-                self._ledger.commit(self._reservation, actual, usage_source=UsageSource.ACTUAL if actual else UsageSource.ESTIMATED)
+                self._ledger.commit(self._reservation, actual,
+                    usage_source=UsageSource.ACTUAL if actual is not None else UsageSource.ESTIMATED,
+                    record_actual_overrun=True)
             else: self._ledger.release(self._reservation)

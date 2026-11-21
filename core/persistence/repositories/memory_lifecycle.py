@@ -756,7 +756,7 @@ class MemoryLifecycleRepository:
             operation.state="PREPARED"
             return response.output
 
-    async def finish_admission(self, lease, admission, *, state, result_digest=None):
+    async def finish_admission(self, lease, admission, *, state, result_digest=None, usage=None, model=None):
         """只保存原 Model Owner 的 pre-root 完成事实；不授权新调用。"""
         if state not in {"COMPLETED","UNKNOWN"}:
             raise MemoryContextError("MEMORY_ADMISSION_INVALID")
@@ -773,5 +773,9 @@ class MemoryLifecycleRepository:
             if len(matching)!=1 or matching[0].get("state")!="STARTED":
                 raise MemoryContextError("MEMORY_ADMISSION_INVALID")
             matching[0].update(state=state,result_digest=result_digest)
+            if usage:
+                matching[0]["usage_evidence"] = usage
+            if model:
+                matching[0]["model_evidence"] = model
             binding.admissions=facts
             binding.row_version+=1

@@ -36,7 +36,16 @@ class Evaluate(StrictDTO):
     selector: Selector
 
 
-async def evaluate(service,config,principal,body):
+class InputV2(Input):
+    schema_version: Literal["coverage-execution-input.v2"]
+
+
+class EvaluateV2(Evaluate):
+    protocol: Literal["coverage-execution-request.v2"]
+    input: InputV2
+
+
+async def evaluate(service,config,principal,body,repository=None):
     from core.incidents.models import IncidentRow
     from core.ci_simulation.models import CIExecutionRow
     from core.ci_simulation.coverage_execution import approved
@@ -75,6 +84,18 @@ async def evaluate(service,config,principal,body):
                 or distribution.get("actor_user_id")!=grant.owner_user_id or distribution.get("asset_digest")!=source["asset_digest"]
                 or distribution.get("distribution_digest")!=digest({k:v for k,v in distribution.items() if k!="distribution_digest"})):
             raise CIError("COVERAGE_BINDING_INVALID",422)
+        feature_source=None
+        feature_model_calls=0
+        if body.protocol=="coverage-execution-request.v2":
+            from core.feature_impact.planning_quality import sealed
+            from core.persistence.models import RuntimeModelInvocationRow
+            from sqlalchemy import select,func
+            if report.envelope["candidate_kind"]!="AGENT" or report.envelope["candidate_version"]!="1.2.0" or repository is None:
+                raise CIError("COVERAGE_AGENT_SOURCE_INVALID",422)
+            _,_,feature_source=await sealed(session,repository,principal,task.snapshot,dict(task_id=task.task_id,report_id=report.report_id,run_id=report.envelope["run_id"]),"AGENT","1.2.0")
+            feature_model_calls=await session.scalar(select(func.count()).select_from(RuntimeModelInvocationRow).where(RuntimeModelInvocationRow.run_id==report.envelope["run_id"]))
+        elif report.envelope["candidate_kind"] not in {"RULE","HUMAN"} or task.snapshot.get("analysis_contract")!="interface-impact.v1":
+            raise CIError("COVERAGE_SOURCE_VERSION_INVALID",422)
         diagnosis=rule_report(incident.incident_id,execution)
         joint_source=dict(candidate_kind="RULE",incident_id=incident.incident_id,execution_id=execution.execution_id,
             input_digest=execution.summary["input_digest"],evidence_digest=execution.evidence_digest,agent_id=None,agent_version=None,
@@ -89,5 +110,7 @@ async def evaluate(service,config,principal,body):
             distribution=distribution,trigger=trigger,execution=dict(execution_id=execution.execution_id,instance_id=execution.instance_id,incident_id=incident.incident_id,
                 request_id=execution.request_id,state_revision=execution.state_revision,outcome=execution.outcome,summary=execution.summary),joint=joint,
             model_calls=0,planning_kind=report.envelope["candidate_kind"],diagnosis_kind="RULE")
-        return dict(protocol="coverage-execution-output.v1",**correlations,input=inputs,frozen_input_digest=body.frozen_input_digest,
+        if feature_source is not None:
+            business.update(feature_agent_source=feature_source,model_calls=feature_model_calls)
+        return dict(protocol="coverage-execution-output.v2" if feature_source is not None else "coverage-execution-output.v1",**correlations,input=inputs,frozen_input_digest=body.frozen_input_digest,
             business=business,business_digest=digest(business))

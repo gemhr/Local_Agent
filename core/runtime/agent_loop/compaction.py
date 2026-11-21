@@ -4,7 +4,10 @@ import json
 
 from .context import snapshot_candidate
 from .contracts import LoopStopped
-from core.runtime.request_counting_admission import context_eligible, context_record, reference
+from core.runtime.request_counting_admission import (
+    ORDINARY_POLICY_KEY, annotate_assessment, context_eligible, context_record,
+    persisted_validation, reference,
+)
 
 SUMMARY_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["version", "groups"],
     "properties": {"version": {"const": 1}, "groups": {"type": "array", "minItems": 1, "maxItems": 64,
@@ -82,7 +85,20 @@ def validate_candidate(frame, groups, candidate, assessments, raw_assessments, *
             raise LoopStopped("CONTEXT_VALIDATION_FAILED")
     validation = {"version": f"context-validator.v{getattr(frame, 'schema_version', 1)}", "source": True, "mandatory": True, "roles": True,
         "pairs": True, "budget": any(a.admissible for a in assessments), "semantic_preservation": "NOT_PROVEN", "reason": "VALID"}
-    if not validation["budget"]:
+    profiles_by_id = {p.profile_id.value: p for p in profiles}
+    ordinary = []
+    for assessment in reliable:
+        profile = profiles_by_id.get(assessment.profile_id)
+        if profile is None or assessment.admissible:
+            continue
+        if payload["kind"] == "COMPACTED" and assessment.required_window * 100 > assessment.window * frame.context_policy["target_percent"]:
+            continue
+        proof = annotate_assessment(assessment, context, profile, "DECISION")
+        if ORDINARY_POLICY_KEY in proof:
+            ordinary.append(proof)
+    if ordinary:
+        validation["ordinary_admission"] = ordinary
+    elif not validation["budget"]:
         validation["e2e_test_admission"] = reference(context_record(context))
     return validation
 
@@ -115,6 +131,7 @@ def invoke_context_model(router, agent_id, messages, context, capabilities, rese
     assessments, effective = request_assessments(router, messages, options, reserve, capabilities, definition)
     context.loop_request_assessments = {a.profile_id: a for a in assessments}
     context.loop_request_options = effective
+    context.loop_request_safety_ratio = router.model_selection_policy.context_window_safety_ratio
     restored = router.model_invocation_router.restore_completed_loop_result(run_context=context,
         messages=messages, max_tokens=reserve, generation_options=options, profiles=router.model_profiles,
         step_id=emitter.step_id, async_submit=emitter.parent.submit_coroutine_from_worker)
@@ -186,7 +203,9 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
         snapshot = next((s for s in image.context_snapshots if s.snapshot_id == current.context_snapshot_id), None)
         if (snapshot is None or snapshot.snapshot_digest != current.context_snapshot_digest
                 or snapshot.snapshot_digest != ContextSnapshotV1.create(snapshot.payload).digest
-                or snapshot.payload["source_cursor"] != frame.committed_observation_cursor):
+                or snapshot.payload["source_cursor"] != frame.committed_observation_cursor
+                or ("ordinary_admission" in snapshot.validation
+                    and not persisted_validation(snapshot.validation, image.root, frame, request=snapshot.payload))):
             raise LoopStopped("CONTEXT_SNAPSHOT_UNAVAILABLE")
         context.loop_context_snapshot_id = snapshot.snapshot_id
         context.loop_iteration_no = current.iteration_no
@@ -205,7 +224,7 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
     raw_assessments = assess(raw)
     valid = [a for a in raw_assessments if context_eligible(a, context, router.model_profiles, frame=frame, purpose="DECISION")]
     reliable = [a for a in raw_assessments if a.reliable]
-    if not reliable and not valid:
+    if not reliable and not valid and getattr(context, "ordinary_request_counting_policy", None) is None:
         raise LoopStopped("CONTEXT_BUDGET_UNCERTAIN")
     if final_only and (force_compaction or not valid):
         raise LoopStopped("LOOP_CONTEXT_EXHAUSTED")

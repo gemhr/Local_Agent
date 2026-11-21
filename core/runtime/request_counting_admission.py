@@ -6,143 +6,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 from core.runtime.execution_aggregate import canonical_payload_digest as digest
-import os
-
-# Stage21 临时本地实验：不开启时不改变任何 Agent 的准入。
-LOCAL_BASEBAND_SCHEMA = "stage21-baseband-local-admission.v2"
-LOCAL_BASEBAND_POLICY = dict(agent_id="baseband_test_investigator", execution_policy="durable-agent-loop.v2",
-    profile_id="remote_advanced", provider_kind="deepseek", model_identity="deepseek-flash", max_tokens=4096,
-    experiment="stage21-local", token_counting="UNAVAILABLE", cumulative_token_budget="UNLIMITED")
-
-
-def local_baseband_enabled(agent_id):
-    return (agent_id == LOCAL_BASEBAND_POLICY["agent_id"]
-        and os.getenv("LOCAL_AGENT_ENVIRONMENT_PROFILE") == "TEST"
-        and os.getenv("LOCAL_AGENT_STAGE21_BASEBAND_TOKEN_EXCEPTION") == "1")
-
-
-def is_local_baseband_record(record):
-    return isinstance(record, dict) and record.get("schema_version") in {LOCAL_BASEBAND_SCHEMA, "stage21-baseband-local-admission.v1"}
-
-
-def _local_record(context, access, binding):
-    record = dict(schema_version=LOCAL_BASEBAND_SCHEMA, policy=dict(LOCAL_BASEBAND_POLICY),
-        authorization=dict(run_id=context.run_id, session_id=context.session_id,
-            tenant_id=access.tenant_id, user_id=access.user_id, **binding), session_id=context.session_id,
-        policy_digest=digest(LOCAL_BASEBAND_POLICY), REQUEST_COUNTING_RELIABILITY="UNAVAILABLE")
-    return {**record, "admission_digest": digest(record)}
-
-
-def _local_profile_matches(profile):
-    from core.runtime.snapshot_serialization import to_primitive
-    value = to_primitive(profile) if is_dataclass(profile) else profile
-    p = LOCAL_BASEBAND_POLICY
-    return (value.get("profile_id") == p["profile_id"] and value.get("provider_kind") == p["provider_kind"]
-        and value.get("model_identity") == p["model_identity"] and value.get("request_counting_mode") == "HEURISTIC"
-        and (profile.effective_is_remote if is_dataclass(profile) else value.get("is_remote") is True)
-        and value.get("max_output_tokens", 0) >= p["max_tokens"])
-
-
-async def local_business_binding(session, run_id, access, query):
-    """只读取已有业务/Memory/归属 Authority；摘要不是授权凭证。"""
-    from sqlalchemy import select
-    from core.incidents.models import InvestigationRow, IncidentRow
-    from core.ci_simulation.models import CIExecutionRow
-    from core.persistence.models import ObjectOwnershipRow, RuntimeMemoryBindingRow
-    row = await session.scalar(select(InvestigationRow).where(InvestigationRow.run_id == run_id))
-    incident = await session.get(IncidentRow, row.incident_id) if row else None
-    execution = await session.get(CIExecutionRow, incident.execution_id) if incident else None
-    memory = await session.get(RuntimeMemoryBindingRow, run_id)
-    expected_query = ("请调查该 CI 执行，使用授权工具取证。incident_id=" + incident.incident_id
-        + " execution_id=" + execution.execution_id) if incident and execution else None
-    if (row is None or row.agent_id != LOCAL_BASEBAND_POLICY["agent_id"] or (row.agent_version, execution.execution_snapshot.get("schema_version") if execution else None) not in {("1.0.0", "baseband-input.v1"), ("1.1.0", "baseband-input.v2")}
-            or row.session_id != access.session_id or access.principal_kind != "HUMAN"
-            or incident is None or incident.tenant_id != access.tenant_id or str(incident.owner_user_id) != access.user_id
-            or execution is None or execution.execution_snapshot.get("schema_version") not in {"baseband-input.v1", "baseband-input.v2"}
-            or query != expected_query or memory is None or memory.mode != "SCOPED" or memory.status != "ACTIVE"
-            or memory.access != access.to_dict()):
-        raise ValueError("BASEBAND_LOCAL_ADMISSION_SOURCE_INVALID")
-    for kind, identity in (("RUN", run_id), ("CONVERSATION", access.conversation_id)):
-        owner = await session.get(ObjectOwnershipRow, (kind, identity))
-        if owner is None or owner.tenant_id != access.tenant_id or str(owner.owner_user_id) != access.user_id:
-            raise ValueError("BASEBAND_LOCAL_ADMISSION_OWNER_INVALID")
-    input_digest = digest(execution.execution_snapshot["baseband"])
-    if execution.summary.get("input_digest") != input_digest:
-        raise ValueError("BASEBAND_LOCAL_ADMISSION_INPUT_INVALID")
-    return dict(investigation_id=row.investigation_id, incident_id=incident.incident_id,
-        execution_id=execution.execution_id, input_digest=input_digest, root_query_digest=digest(query))
-
-
-async def prepare_local_admission(database, context, access, query, profiles, definition, max_tokens, root=None):
-    if (access is None or not local_baseband_enabled(access.agent_id) or context.execution_policy != EXECUTION
-            or definition.agent_id != access.agent_id or definition.model_profile_id not in {"default", LOCAL_BASEBAND_POLICY["profile_id"]}
-            or max_tokens != LOCAL_BASEBAND_POLICY["max_tokens"]):
-        return None
-    profile = next((p for p in profiles if _local_profile_matches(p)), None)
-    if profile is None:
-        return None
-    if access.session_id != context.session_id:
-        raise ValueError("BASEBAND_LOCAL_ADMISSION_IDENTITY_INVALID")
-    async with database.session() as session:
-        binding = await local_business_binding(session, context.run_id, access, query)
-    from core.runtime.snapshot_serialization import to_primitive
-    record = _local_record(context, access, {**binding, "profile_digest": digest(to_primitive(profile))})
-    if root is not None and not validate_record(record, root=root, for_write=True):
-        raise ValueError("BASEBAND_LOCAL_ADMISSION_RESTORE_INVALID")
-    return BoundAdmission(_json(record))
-
-
-async def validate_local_root(session, record, root):
-    from core.persistence.models import RuntimeMemoryBindingRow
-    from core.runtime.memory_scope import MemoryAccessContext
-    memory = await session.get(RuntimeMemoryBindingRow, root.run_id)
-    if memory is None or memory.access is None:
-        raise ValueError("BASEBAND_LOCAL_ADMISSION_SOURCE_INVALID")
-    access = MemoryAccessContext.from_dict(memory.access)
-    binding = await local_business_binding(session, root.run_id, access, root.resume_input.get("user_query"))
-    a = record["authorization"]
-    if a != dict(run_id=root.run_id, session_id=access.session_id, tenant_id=access.tenant_id,
-            user_id=access.user_id, **binding, profile_digest=a["profile_digest"]):
-        raise ValueError("BASEBAND_LOCAL_ADMISSION_BINDING_INVALID")
-
-
-def _validate_local(record, root=None, frame=None, receipt=None, *, for_write=False):
-    try:
-        expected = {k:v for k,v in record.items() if k != "admission_digest"}
-        a = record["authorization"]
-        current = record["schema_version"] == LOCAL_BASEBAND_SCHEMA
-        if for_write and (not current or not local_baseband_enabled(record["policy"].get("agent_id"))):
-            return False
-        fields = {"run_id", "session_id", "tenant_id", "user_id"}
-        if current:
-            fields |= {"investigation_id", "incident_id", "execution_id", "input_digest", "root_query_digest", "profile_digest"}
-        if (set(record) != {"schema_version", "policy", "authorization", "session_id", "policy_digest", "REQUEST_COUNTING_RELIABILITY", "admission_digest"}
-                or record["policy"] != LOCAL_BASEBAND_POLICY or record["policy_digest"] != digest(LOCAL_BASEBAND_POLICY)
-                or record["admission_digest"] != digest(expected) or record["REQUEST_COUNTING_RELIABILITY"] != "UNAVAILABLE"
-                or set(a) != fields
-                or not all(isinstance(v,str) and v for v in a.values()) or a["session_id"] != record["session_id"]
-                or receipt is not None):
-            return False
-        if root is not None:
-            r, loop = root.resume_input, root.resume_input.get("agent_loop", {})
-            if (root.run_id != a["run_id"] or root.execution_policy != EXECUTION
-                    or r.get("resolved_agent_id") != LOCAL_BASEBAND_POLICY["agent_id"] or r.get("session_id") != a["session_id"]
-                    or loop.get("e2e_test_admission") != record
-                    or loop.get("pinned_config", {}).get("request_counting_exception") != record["policy"]):
-                return False
-            if current and (digest(r.get("user_query")) != a["root_query_digest"]
-                    or not any(_local_profile_matches(p) and digest(p) == a["profile_digest"] for p in loop.get("pinned_config", {}).get("profiles", []))):
-                return False
-        if frame is not None and (frame.run_id != a["run_id"] or frame.frame_role != "ROOT" or frame.schema_version != 2
-                or frame.execution_agent_id != LOCAL_BASEBAND_POLICY["agent_id"]
-                or frame.pinned_config.get("request_counting_exception") != record["policy"]):
-            return False
-        if current and frame is not None and (not any(_local_profile_matches(p) and digest(p) == a["profile_digest"] for p in frame.pinned_config.get("profiles", []))
-                or (root is not None and frame.context_seed != root.resume_input.get("agent_loop", {}).get("context_seed"))):
-            return False
-        return True
-    except (KeyError, TypeError, AttributeError):
-        return False
 
 STRATEGY = "E2E_TEST_UNVERIFIED_REQUEST_COUNTING"
 AGENT = "ci_incident_investigator"
@@ -347,12 +210,10 @@ def reference(record):
         RELIABLE_TOKEN_ADMISSION="NOT_VERIFIED")
 
 
-def validate_record(record, *, root=None, frame=None, receipt=None, for_write=False):
+def validate_record(record, *, root=None, frame=None, receipt=None):
     """验证原持久 Owner 的绑定；无记录默认拒绝，历史读取不授予新执行权限。"""
     if type(record) is not dict:
         return False
-    if is_local_baseband_record(record):
-        return _validate_local(record, root, frame, receipt, for_write=for_write)
     try:
         trusted = compile_exception({"policy": record["policy"], "authorization": record["authorization"]})
         p, a, b = trusted.policy, trusted.authorization, record["binding"]
@@ -398,14 +259,7 @@ def validate_record(record, *, root=None, frame=None, receipt=None, for_write=Fa
         return False
 
 
-def bind_context(trusted, receipt, context, access, *, rehydrated_root=None, local_admission=None):
-    if local_admission is not None:
-        if trusted is not None or receipt is not None or access.principal_kind != "HUMAN" or context.execution_policy != EXECUTION or access.session_id != context.session_id:
-            raise ValueError("BASEBAND_LOCAL_ADMISSION_IDENTITY_INVALID")
-        record = local_admission.record
-        if not validate_record(record, root=rehydrated_root, for_write=True):
-            raise ValueError("BASEBAND_LOCAL_ADMISSION_RESTORE_INVALID")
-        return local_admission
+def bind_context(trusted, receipt, context, access, *, rehydrated_root=None):
     record = (receipt.evaluation_capture or {}).get("e2e_test_admission") if receipt else None
     historical = ((rehydrated_root.resume_input.get("agent_loop") or {}).get("e2e_test_admission") if rehydrated_root else None)
     if record is None and historical is None:
@@ -427,13 +281,6 @@ def context_record(context):
             or context.execution_policy != EXECUTION):
         return None
     record = bound.record
-    if is_local_baseband_record(record):
-        access = context.memory_access_context
-        a = record["authorization"]
-        return record if (access is not None and access.agent_id == LOCAL_BASEBAND_POLICY["agent_id"]
-            and access.principal_kind == "HUMAN" and context.run_id == a["run_id"] and context.session_id == a["session_id"]
-            and access.user_id == a["user_id"] and access.tenant_id == a["tenant_id"] and access.session_id == a["session_id"]
-            and validate_record(record, for_write=True)) else None
     if (not validate_record(record) or context.run_id != record["authorization"]["run_id"]
             or context.session_id != record["session_id"]
             or context.loop_correlation != {k: record["authorization"][k] for k in ("evaluation_run_id", "attempt_id", "request_id")}):
@@ -441,13 +288,13 @@ def context_record(context):
     return record
 
 
-def eligible(assessment, record=None, *, profile=None, frame=None, purpose="DECISION", for_write=True):
+def eligible(assessment, record=None, *, profile=None, frame=None, purpose="DECISION"):
     a = asdict(assessment) if is_dataclass(assessment) else assessment
     if not a:
         return False
     if a.get("admissible") is True:
         return True
-    if not validate_record(record, frame=frame, for_write=for_write) or purpose not in {"DECISION", "COMPACTION"}:
+    if not validate_record(record, frame=frame) or purpose not in {"DECISION", "COMPACTION"}:
         return False
     p = record["policy"]
     if (a.get("mode") != "HEURISTIC" or a.get("reliable") is not False or a.get("admissible") is not False
@@ -471,28 +318,125 @@ def eligible(assessment, record=None, *, profile=None, frame=None, purpose="DECI
         and a["input_bound"] + a["output_reserve"] <= a["required_window"] <= a["window"] == window)
 
 
+ORDINARY_ESTIMATE = "ordinary-estimated-request-admission.v1"
+ORDINARY_POLICY_KEY = "request_counting_policy"
+
+
+def ordinary_policy_for_run(configured, execution_policy, *, root=None, receipt=None, correlation=None):
+    """新 Run 由服务端选择。恢复仅使用 Root 的原始冻结证据。"""
+    loop = (root.resume_input.get("agent_loop") or {}) if root is not None else {}
+    config = loop.get("pinned_config", {})
+    policy = config.get(ORDINARY_POLICY_KEY) if root is not None else configured
+    if policy is None:
+        return None
+    if (execution_policy != EXECUTION or receipt is not None or correlation
+            or loop.get("correlation") or loop.get("e2e_test_admission") is not None
+            or config.get("request_counting_exception") is not None):
+        if root is not None:
+            raise ValueError("CONTEXT_ADMISSION_POLICY_INVALID")
+        return None
+    if policy != ORDINARY_ESTIMATE:
+        raise ValueError("CONTEXT_ADMISSION_POLICY_INVALID")
+    return policy
+
+
+def ordinary_eligible(assessment, policy, profile, purpose):
+    if (policy != ORDINARY_ESTIMATE or profile is None
+            or purpose not in {"DECISION", "COMPACTION"}):
+        return False
+    return (
+        profile.request_counting_mode == assessment.mode == "HEURISTIC"
+        and profile.request_counting_version == assessment.counting_version
+        and assessment.reliable is False and assessment.admissible is False
+        and assessment.input_bound == assessment.messages_bound + assessment.options_bound + assessment.framing_bound
+        and 0 < assessment.output_reserve <= profile.max_output_tokens
+        and assessment.safety_margin >= (assessment.input_bound + assessment.output_reserve + 9) // 10
+        and assessment.required_window == assessment.input_bound + assessment.output_reserve + assessment.safety_margin
+        and assessment.required_window <= assessment.window == profile.context_window
+    )
+
+
+def annotate_assessment(assessment, context, profile, purpose):
+    proof = asdict(assessment)
+    if ordinary_eligible(assessment, getattr(context, "ordinary_request_counting_policy", None), profile, purpose):
+        proof[ORDINARY_POLICY_KEY] = ORDINARY_ESTIMATE
+    elif not assessment.admissible and context_eligible(assessment, context, (profile,), purpose=purpose):
+        proof["e2e_test_admission"] = reference(context_record(context))
+    return proof
+
+
+def persisted_ordinary_request(assessment, root, frame, request, *, purpose, receipt=None, provider=None):
+    from core.runtime.model_context import assess_request
+    from core.runtime.model_selection import ModelProfile, ModelProfileId
+
+    if (frame is None or request is None or frame.schema_version != 2
+            or assessment.get(ORDINARY_POLICY_KEY) != ORDINARY_ESTIMATE
+            or frame.pinned_config.get(ORDINARY_POLICY_KEY) != ORDINARY_ESTIMATE):
+        return False
+    try:
+        if ordinary_policy_for_run(None, root.execution_policy, root=root, receipt=receipt) != ORDINARY_ESTIMATE:
+            return False
+        profile_id = assessment["profile_id"]
+        pin = next(p for p in frame.pinned_config["profiles"] if p["profile_id"] == profile_id)
+        allowed = frame.pinned_config.get("allowed_model_profiles")
+        definition_profile = frame.pinned_config["agent"]["model_profile_id"]
+        if (allowed is not None and profile_id not in allowed) or definition_profile not in {"default", profile_id}:
+            return False
+        if provider is not None and provider != (pin["provider_kind"], pin["model_identity"] or profile_id):
+            return False
+        profile = ModelProfile(**{**pin, "profile_id": ModelProfileId(profile_id), "cost_profile": None})
+        reserve = request["reserve"] if purpose == "COMPACTION" else request["output_reserve"]
+        options = dict(request["options"])
+        step = next(step for step in root.plan_payload["steps"] if step["step_id"] == frame.step_id)
+        if step["capability_requirements"]["requires_structured_output"] and profile.supports_provider_structured_output:
+            options.setdefault("response_format", {"type": "json_object"})
+        expected = assess_request(request["messages"], options, reserve, profile,
+            safety_ratio=frame.pinned_config["selection_policy"]["context_window_safety_ratio"])
+        return (digest(assessment) == digest({**asdict(expected), ORDINARY_POLICY_KEY: ORDINARY_ESTIMATE})
+            and ordinary_eligible(expected, ORDINARY_ESTIMATE, profile, purpose)
+            and (request.get("kind") != "COMPACTED"
+                or expected.required_window * 100 <= expected.window * frame.context_policy["target_percent"]))
+    except (KeyError, TypeError, ValueError, StopIteration):
+        return False
+
+
 def context_eligible(assessment, context, profiles, *, frame=None, purpose=None):
     profile = next((p for p in profiles if p.profile_id.value == assessment.profile_id), None)
-    return eligible(assessment, context_record(context), profile=profile, frame=frame,
-        purpose=purpose or context.loop_model_purpose)
+    purpose = purpose or context.loop_model_purpose
+    policy = getattr(context, "ordinary_request_counting_policy", None)
+    allowed = getattr(context, "loop_allowed_model_profiles", None)
+    if ((allowed is not None and assessment.profile_id not in allowed)
+            or (frame is not None and (frame.schema_version != 2
+                or frame.pinned_config.get(ORDINARY_POLICY_KEY) != policy))):
+        policy = None
+    return (eligible(assessment, context_record(context), profile=profile, frame=frame, purpose=purpose)
+            or ordinary_eligible(assessment, policy, profile, purpose))
 
 
-def persisted_eligible(assessment, root, frame, receipt=None, *, purpose="DECISION", for_write=True):
+def persisted_eligible(assessment, root, frame, receipt=None, *, purpose="DECISION", request=None, provider=None):
+    if ORDINARY_POLICY_KEY in assessment:
+        return persisted_ordinary_request(assessment, root, frame, request, purpose=purpose,
+            receipt=receipt, provider=provider)
     if frame is None:
         return False
     record = (root.resume_input.get("agent_loop") or {}).get("e2e_test_admission")
-    if not validate_record(record, root=root, frame=frame, receipt=receipt, for_write=for_write):
+    if not validate_record(record, root=root, frame=frame, receipt=receipt):
         return False
     profile = next((p for p in frame.pinned_config.get("profiles", []) if p["profile_id"] == assessment.get("profile_id")), None)
     return (assessment.get("e2e_test_admission") == reference(record)
-        and eligible(assessment, record, profile=profile, frame=frame, purpose=purpose, for_write=for_write))
+        and eligible(assessment, record, profile=profile, frame=frame, purpose=purpose))
 
 
-def persisted_validation(validation, root, frame, receipt=None, *, for_write=True):
+def persisted_validation(validation, root, frame, receipt=None, *, request=None):
+    if "ordinary_admission" in validation:
+        proofs = validation["ordinary_admission"]
+        return (type(proofs) is list and bool(proofs)
+            and all(type(proof) is dict and persisted_ordinary_request(proof, root, frame, request,
+                purpose="DECISION", receipt=receipt) for proof in proofs))
     if frame is None:
         return False
     record = (root.resume_input.get("agent_loop") or {}).get("e2e_test_admission")
-    return (validation.get("budget") is False and validate_record(record, root=root, frame=frame, receipt=receipt, for_write=for_write)
+    return (validation.get("budget") is False and validate_record(record, root=root, frame=frame, receipt=receipt)
         and validation.get("e2e_test_admission") == reference(record))
 
 

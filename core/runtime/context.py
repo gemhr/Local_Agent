@@ -223,6 +223,8 @@ class RunContext:
         self.adaptive_stop_enabled = None
         self.memory_effect_policy = None
         self.request_counting_admission = None
+        self.ordinary_request_counting_policy = None
+        self.loop_request_safety_ratio = 1.1
         self.loop_frame_id = None
         self.loop_context_snapshot_id = None
         self.loop_model_purpose = "DECISION"

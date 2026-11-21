@@ -51,6 +51,9 @@ class Report(Strict):
 
 
 def validate(raw, task, *, kind, reads, task_inputs=()):
+    if task.get("analysis_contract") == "interface-coverage-analysis.v1":
+        from core.feature_impact.coverage_analysis import Report as PlanningReport
+        return validate_planning(raw, task, kind=kind, reads=reads, task_inputs=task_inputs, schema=PlanningReport)
     joint = task.get("analysis_contract") == "interface-impact.v1"
     if joint:
         from core.feature_impact.interface_impact import Report as InterfaceReport
@@ -160,6 +163,10 @@ def _existing_coverage(cases, mechanism):
 
 def rule_report(task):
     """只读公开依赖，未知信息不补成确定事实。"""
+    if task.get("analysis_contract") == "interface-coverage-analysis.v1":
+        from core.feature_impact.coverage_analysis import rule_report as planning_rule
+        value, source = planning_rule(task)
+        return validate(value, task, kind="RULE", reads=source["read_sources"]), source
     if task.get("analysis_contract") == "interface-impact.v1":
         from core.feature_impact.interface_impact import rule_report as interface_rule
         value, source = interface_rule(task)
@@ -216,3 +223,27 @@ def rule_report(task):
             recommended_tests=suggestions, clarification_questions=["交付后持有副本还是共享引用？何时消费？"] if unknown else []))
     report = dict(schema_version="feature-impact-report.v1", findings=findings)
     return validate(report, task, kind="RULE", reads=reads), dict(query="", read_sources=reads, rule_version=RULE_VERSION, input_digest=task["input_digest"])
+
+
+def validate_planning(raw, task, *, kind, reads, task_inputs, schema, validate_assets=True):
+    report = schema.model_validate(raw)
+    ids, tests = set(), set()
+    from core.ci_simulation.daas_assets import validate_test
+    for f in report.findings:
+        if f.finding_id in ids: raise ValueError("DUPLICATE_FINDING_ID")
+        ids.add(f.finding_id)
+        for ref in f.supporting_evidence + f.counter_evidence:
+            doc = read(task, ref.source_ref)
+            if any(getattr(ref,k)!=doc[k] for k in ("version","chunk","content_digest")):
+                raise ValueError("REPORT_EVIDENCE_INVALID")
+            if ((kind=="RULE" or ref.basis=="EVIDENCE_READ") and ref.source_ref not in reads
+                    or kind=="AGENT" and ref.basis=="TASK_INPUT" and ref.source_ref not in task_inputs):
+                raise ValueError("REPORT_READ_PROOF_INVALID")
+        for ref in f.existing_case_refs:
+            if read(task,ref)["kind"]!="CASE": raise ValueError("CASE_REFERENCE_INVALID")
+        for t in f.recommended_tests:
+            if t.test_id in tests: raise ValueError("DUPLICATE_TEST_ID")
+            tests.add(t.test_id)
+            if validate_assets and t.test_kind=="DAAS_CASE": validate_test(task,t.model_dump())
+        # 仅验证合同与来源；有依据但业务错误的建议由独立评分记录为0。
+    return report.model_dump()

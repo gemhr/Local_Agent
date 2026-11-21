@@ -386,6 +386,14 @@ Memory 不新增环境开关：persist=True 需要独立 typed MemoryAccessConte
 受信 business_options.execution_policy=`durable-agent-loop.v2`；LoopPolicyV2 固定 Batch≤4/并发≤2/写≤1、Child 深度1/累计≤2/活动≤1。缺省 total_tokens/cost_units 各65536；可配置更严有限额度。ContextPolicyV2 默认开启，需完整请求可靠计量；旧 v1 的 Context 配置不自动升级。delegation_allowlist 来自受信 AgentDefinition，缺省为空，Child 目标必须显式启用 v2。Migration head 0034_agent_batches_delegations，部署者迁移；本实现不自动迁移业务库。详见 [合同](agent_execution_v2.md)。
 # 隔离 CI E2E 的请求计量豁免
 
+普通 durable v2 Run 默认使用严格可信准入。服务端组装可通过
+`CoordinatedRuntimeFactory(ordinary_request_counting_policy="ordinary-estimated-request-admission.v1")`
+为普通新 Run 显式选择估算准入。当前应用组装使用默认值，HTTP 请求体不接受该配置，评测关联或 Receipt 排除普通策略。
+策略版本记录在 Root 和 Frame 的 `pinned_config.request_counting_policy`。恢复读取原冻结值，历史缺省继续使用严格检查。
+普通 Snapshot 和 Attempt 保存可复核的完整请求评估，`reliable` 与 `admissible` 继续标为 false。
+估算包含消息、有效 Tool options、实际输出预留及安全缓冲，仍受上下文、调用次数、时限、取消及工具权限约束。
+全局启用前需要完成持久账与进程账的实际超额结算一致性验证。
+
 正常 Runtime 的可靠计量 Guard 保持不变。部署管理的 Quality JSON 可在 `ci_synthetic.request_counting_exception` 配置可选的 `{policy, authorization}`；缺省关闭，不能由 HTTP 或 ExecutionRequest 开启。
 
 `policy` 使用 `e2e-request-counting-policy.v1` / `E2E_TEST_UNVERIFIED_REQUEST_COUNTING`，精确绑定 E2E_TEST、Tenant/Project/SERVICE、CI V2/CANDIDATE、完整 FrozenCI、Candidate/Prompt 摘要、remote_advanced/deepseek/deepseek-flash 和原有 8/8/8/0/180 秒 Loop 限额、4096 输出与 120 秒 Provider timeout。`authorization` 精确绑定 Kernel 创建后的 evaluation_run_id/attempt_id/request_id/run_id（run_id=attempt_id）与 execution_manifest_digest。完整字段和严格类型以 `core/runtime/request_counting_admission.py::Policy/Authorization` 为准。
@@ -445,16 +453,6 @@ HUMAN 场景包含 `baseband_input_mismatch`、`baseband_compatible`、`baseband
 
 此配置不授予 Token 计量例外。当前默认 HEURISTIC Profile 可能在模型调用前被 `CONTEXT_BUDGET_UNCERTAIN` 拒绝，必须与实际模型失败、证据不足诊断分别展示。
 
-### Stage21 本地基带 Token 临时例外
-
-版本映射仅允许 `baseband_test_investigator/1.0.0` → `baseband-input.v1` 与 `1.1.0` → `baseband-input.v2`，仍核验原 HUMAN 调查及冻结 input/query/profile。旧封存 1.0.0 按原报告/协议重验，不能用当前定义伪装历史来源。
-
-仅在 `LOCAL_AGENT_ENVIRONMENT_PROFILE=TEST` 且 `LOCAL_AGENT_STAGE21_BASEBAND_TOKEN_EXCEPTION=1` 时，对 `baseband_test_investigator` 的 HUMAN/Loop v2 调查启用。限定 remote_advanced / deepseek / deepseek-flash，单次输出 reserve 仍为 4096，实际上下文窗口仍由原 Profile 和 Provider 限制。
-
-例外复用现有 BoundAdmission、Root/Frame pins、ContextSnapshot 和模型请求摘要校验，新准入采用 stage21-baseband-local-admission.v2 实验记录。初次准入与 Root 写入从原 Investigation→Incident→Execution、可信 Memory/Run/Conversation 归属验证 HUMAN、Session、tenant、owner、baseband schema、冻结 input digest 和原调查请求；同时绑定实际 Profile 摘要。公开摘要不充当授权凭证。Root、Model、ContextSnapshot 新写入均要求 TEST 和开关仍启用；历史 v1/v2 仅允许独立只读校验。计数可靠性始终 UNAVAILABLE，原 HEURISTIC assessment 仍 reliable=False/admissible=False，不创建或伪造 SERVICE quality_receipt。
-
-仅在上述完整准入通过后，此实验 Run 的 max_input_tokens/max_output_tokens/max_total_tokens 及 Token 派生的累计 cost_units 上限才为 None，且模型选择限定为获准 Profile；仍保留模型调用次数、工具次数、重试、180 秒总时间上限及请求自身 Deadline、Cancel、权限和副作用控制。该开关不会扩大 Profile 的实际上下文窗口，不改变旧 parser 默认准入。结束 Stage21 时按任务 Handoff 的 stage21_token_exception.patch 精确反向恢复，不用整文件覆盖。
-
 ### Oracle/DAAS 联合调查
 
 `baseband-input.v2` / `baseband-execution.v2` 在原场景/追加执行路径分派。`oracle_reference_scope`、`oracle_application_delay`、`oracle_output_divergence`、`oracle_partial_capture` 只选择参数初态；原始比较由整数实际输出与选用参考预测计算。参考范围单独判定，不自动重写原 verdict。DAAS 使用整数 `(tick, sequence)`，只有匹配请求且 ACK 接收后的 APPLIED 能更新配置，`tick < sample_tick` 才影响本次采样。
@@ -475,4 +473,28 @@ HUMAN 通过原 `/api/ci/scenarios/{instance_id}/executions`，按服务端返�
 
 普通触发不得绕过原资产或借修订执行改后状态；原 IncidentVerification 人工复测仍追加 CIExecution，并记录原来源、verification_ref、action_id（若有 APPLIED 修改）、state_revision 与实际配置摘要。事务提交后由原验证批次引用这些执行，不新增审批体系。
 
-`POST /api/ci/quality/coverage-execution/evaluate` 是只读 SERVICE 重验，复用 `localagent:baseband:evaluate` 与原精确 project/service/tenant/owner/incident grant。新 request/output.v1 绑定 Task/Report/Plan/Test/Asset/Distribution/Trigger/Execution/Incident，以及独立 baseband 子输入；不接受客户端 Plan/批准身份/资产正文或 GT。现有 Token 四文件和恢复补丁不变，本链开关保持关闭。
+`POST /api/ci/quality/coverage-execution/evaluate` 是只读 SERVICE 重验，复用 `localagent:baseband:evaluate` 与原精确 project/service/tenant/owner/incident grant。新 request/output.v1 绑定 Task/Report/Plan/Test/Asset/Distribution/Trigger/Execution/Incident，以及独立 baseband 子输入；不接受客户端 Plan/批准身份/资产正文或 GT。运行时使用正常计量准入；阶段临时例外已撤销，历史证据及恢复材料保留于交接目录。
+
+
+### 接口条件覆盖公开实验
+
+`interface-coverage-analysis.v1` / `feature-impact-report.v3` 以 ADD/REUSE/CLARIFY 区分新增要求、完整旧用例复用和资料不足。`PLANNING_ONLY` 表示需后续实现的测试条件，资产准备和 Buffer 执行入口均拒绝；只有合法 `DAAS_CASE` 可沿原 HUMAN 审核与手工 CI 触发。
+
+`LOCAL_AGENT_FEATURE_COVERAGE_EXPERIMENT=1` 仅在 TEST 注册同 Agent 的 1.2.0 方法，且只能启动允许列表内被冻结的三类公开任务及其独立开发版本。默认关闭时保留旧 1.1.0 方法和原模型关闭行为。两项原只读工具、独立 Session/SCOPED Memory、已交付 FINAL 和真实 Run 来源按版本重验；历史报告不因开关关闭而被改写。
+
+
+`/api/feature-impact/quality/evaluate-v2` 复用 SERVICE 原 scope，只读原库封存 RULE/AGENT 来源；共同 snapshot 在 Case.Input，候选版本与确切 selector 在 Subject，不携带 GT。`coverage-execution-request/output.v2` 仅认证新 Feature 1.2.0 来源，规划模型与 RULE 诊断分开；v1 继续拒绝 AGENT。不改变 Stage18 C3 或 WP1–WP3 冻结事实。
+
+
+规划只读评价允许对 schema 可解析但资产业务校验失败的 REJECTED 候选导出“可信拒收规划投影”：重新认证原 Run/Memory/FINAL/全部引用，保留 `source_record.rejected_report` 的原拒收状态和封存 raw 摘要，不写回或批准 ReportRow。投影摘要与原封存 raw 摘要分开，原审批/资产 Validator 仍拒绝；Go 对业务错误判0。读取证明无法认证则HTTP明确拒绝；Target只封存独立HTTP拒绝传输回执，Evaluator判null，不伪造报告或Agent业务成功。已终结调查的同 request 重试只重封存原结果，不新增模型Run或调用。
+
+
+### 接口覆盖评价语义 v2
+
+新 `feature-planning-deterministic.v2` / `feature-planning-counts.v2` / `feature-planning-truth.v2` 对齐已有 `1.2.0` 方法、`feature-impact-report.v3` 的公开字段：`condition_codes` 是条件集合的唯一判分字段；`trigger_conditions` 是自由文本触发说明，不再重复要求其等于代码。路径、事件先后、观察点、缺失条件、版本、引用与澄清仍逐项核验。没有修改模型提示词、字段类型或 schema，因此本次不更换模型方法/报告版本。
+
+`coverage_class` 表达验证义务及证据确定性，`recommendation` 表达下一步动作，两者分开。ADD 的已知必测要求仍 MUST_TEST；CLARIFY 必须 INSUFFICIENT_EVIDENCE/UNKNOWN 且不能生成测试。独立新参考核准 REUSE/FULL 可为 MUST_TEST 或 REASONABLE_CHECK：强制要求已被旧用例覆盖时仍应 REUSE，不意味着新增；必须具备真实等价旧用例引用、完整条件/顺序/观察点，不缺条件且无重复新增。其它风险标签不会因 REUSE 自动获准。
+
+`supporting_evidence` 须包含支持该覆盖判断的要求与历史步骤来源，并满足新参考预先规定的支持组合；`counter_evidence` 表达反驳或限制性资料，不能替代必需的支持引用。一个历史用例既支持“部分覆盖”又反驳“完整覆盖”时，可按两种角色分别引用，二者仍须各自证明来源身份、版本、chunk、digest 和真实获取方式。错误/越域引用、缺条件、无依据多余建议和将在线重配伪装成 DAAS_CASE 继续失败。新参考没有按原模型B输出移动证据角色要求。
+
+新评价器对已认证且可评分的 1/PASS 和 0/FAIL 都提供 applicability=APPLICABLE；拒收、缺失必要证据或GT保持 MISSING_EVIDENCE 与 null/INCONCLUSIVE。原拒绝回执 schema/Decision 内核/覆盖要求/模式比较不变。旧 evaluator/normalization/truth.v1 和原批次保留原行为，不自动复评。

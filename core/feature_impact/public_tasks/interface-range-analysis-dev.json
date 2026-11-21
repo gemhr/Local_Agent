@@ -1,0 +1,276 @@
+{
+  "snapshot": {
+    "analysis_contract": "interface-coverage-analysis.v1",
+    "task_version": 1,
+    "title": "公开合成说明书：采样增益值域变更",
+    "feature_id": "sampling-control",
+    "planning_cutoff": "2026-10-02T00:00:00Z",
+    "known_impacts": [],
+    "documents": [
+      {
+        "source_ref": "spec:gain:row17",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "TERMINOLOGY",
+        "content_digest": "0e943ca0a50a8f4f158de061c44ce63130899b12761f339b04bff6a11c80df13",
+        "title": "说明书 §2 表2 第17行",
+        "content": "Tag17 gain：v1允许1，v2允许1和2；消息sample-config v2引用Tag v2。",
+        "facts": {
+          "section": "§2 表2 第17行",
+          "parameter": "gain",
+          "old_values": [
+            1
+          ],
+          "new_values": [
+            1,
+            2
+          ]
+        }
+      },
+      {
+        "source_ref": "interface:catalog",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "INTERFACE_CATALOG",
+        "content_digest": "4fe51fe86bc6ff0330e52fd1c5d6804882f7188e1d941a8ad0dcfdc2ae2323a4",
+        "title": "合成采样接口版本定义",
+        "content": "公开有限合成定义，不是真实 DAAS 协议或入库接口。",
+        "facts": {
+          "catalog": {
+            "features": [
+              {
+                "ref": {
+                  "id": "sampling-control",
+                  "version": "1"
+                },
+                "interface_ref": {
+                  "id": "l2-management",
+                  "version": "1"
+                }
+              },
+              {
+                "ref": {
+                  "id": "sampling-control",
+                  "version": "2"
+                },
+                "interface_ref": {
+                  "id": "l2-management",
+                  "version": "2"
+                }
+              }
+            ],
+            "interfaces": [
+              {
+                "ref": {
+                  "id": "l2-management",
+                  "version": "1"
+                }
+              },
+              {
+                "ref": {
+                  "id": "l2-management",
+                  "version": "2"
+                }
+              }
+            ],
+            "tags": [
+              {
+                "ref": {
+                  "id": "sampling-gain",
+                  "version": "1"
+                },
+                "interface_ref": {
+                  "id": "l2-management",
+                  "version": "1"
+                },
+                "type": "INTEGER",
+                "number": 17,
+                "length": 1,
+                "allowed_values": [
+                  1
+                ]
+              },
+              {
+                "ref": {
+                  "id": "sampling-gain",
+                  "version": "2"
+                },
+                "interface_ref": {
+                  "id": "l2-management",
+                  "version": "2"
+                },
+                "type": "INTEGER",
+                "number": 17,
+                "length": 1,
+                "allowed_values": [
+                  1,
+                  2
+                ]
+              }
+            ],
+            "messages": [
+              {
+                "ref": {
+                  "id": "sample-config",
+                  "version": "1"
+                },
+                "interface_ref": {
+                  "id": "l2-management",
+                  "version": "1"
+                },
+                "tags": [
+                  {
+                    "id": "sampling-gain",
+                    "version": "1"
+                  }
+                ],
+                "required_tags": [
+                  {
+                    "id": "sampling-gain",
+                    "version": "1"
+                  }
+                ]
+              },
+              {
+                "ref": {
+                  "id": "sample-config",
+                  "version": "2"
+                },
+                "interface_ref": {
+                  "id": "l2-management",
+                  "version": "2"
+                },
+                "tags": [
+                  {
+                    "id": "sampling-gain",
+                    "version": "2"
+                  }
+                ],
+                "required_tags": [
+                  {
+                    "id": "sampling-gain",
+                    "version": "2"
+                  }
+                ]
+              }
+            ],
+            "testcases": [
+              {
+                "ref": {
+                  "id": "sampling-case",
+                  "version": "1"
+                },
+                "feature_ref": {
+                  "id": "sampling-control",
+                  "version": "1"
+                },
+                "message_ref": {
+                  "id": "sample-config",
+                  "version": "1"
+                }
+              },
+              {
+                "ref": {
+                  "id": "sampling-case",
+                  "version": "2"
+                },
+                "feature_ref": {
+                  "id": "sampling-control",
+                  "version": "2"
+                },
+                "message_ref": {
+                  "id": "sample-config",
+                  "version": "2"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "source_ref": "interface:change",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "DESIGN",
+        "content_digest": "c98b2a6a38bd2a2033e67c331039b6df6a95ed8c40457e69e400d80feeec1c6c",
+        "title": "采样增益值域扩展",
+        "content": "新 Tag/消息支持 gain=1/2；旧版仅 gain=1。需要补充新增值的配置应用及输出观察。",
+        "facts": {
+          "old_tag": {
+            "id": "sampling-gain",
+            "version": "1"
+          },
+          "new_tag": {
+            "id": "sampling-gain",
+            "version": "2"
+          },
+          "target_feature": {
+            "id": "sampling-control",
+            "version": "2"
+          }
+        }
+      },
+      {
+        "source_ref": "interface:history",
+        "version": "1",
+        "chunk": "whole",
+        "published_at": "2026-10-01T00:00:00Z",
+        "kind": "CASE",
+        "content_digest": "64c1a6e005cc927ea0f37b66ee593aa46f5aa527f2315317f7b2cc5018d8ea8a",
+        "title": "旧采样用例覆盖",
+        "content": "旧消息和用例只验证 gain=1，不构成新增值的覆盖证明。",
+        "facts": {
+          "testcase_ref": {
+            "id": "sampling-case",
+            "version": "1"
+          },
+          "message_ref": {
+            "id": "sample-config",
+            "version": "1"
+          },
+          "tested_gains": [
+            1
+          ]
+        }
+      }
+    ],
+    "manifest": [
+      {
+        "source_ref": "spec:gain:row17",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "0e943ca0a50a8f4f158de061c44ce63130899b12761f339b04bff6a11c80df13"
+      },
+      {
+        "source_ref": "interface:catalog",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "4fe51fe86bc6ff0330e52fd1c5d6804882f7188e1d941a8ad0dcfdc2ae2323a4"
+      },
+      {
+        "source_ref": "interface:change",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "c98b2a6a38bd2a2033e67c331039b6df6a95ed8c40457e69e400d80feeec1c6c"
+      },
+      {
+        "source_ref": "interface:history",
+        "version": "1",
+        "chunk": "whole",
+        "content_digest": "64c1a6e005cc927ea0f37b66ee593aa46f5aa527f2315317f7b2cc5018d8ea8a"
+      }
+    ],
+    "corpus_digest": "fa9291af47f8e51257f0fc1cfbf4e95bcf2ef8108a1a32235b8a530e7803b017",
+    "development_exposed": true,
+    "experiment_phase": "DEVELOPMENT",
+    "condition_aliases": {
+      "在线调整": "HOT_RECONFIG",
+      "首条管理消息": "FIRST_MANAGEMENT_MESSAGE",
+      "功能打开": "FEATURE_ENABLED"
+    },
+    "input_digest": "7c08a58846cba9a8782ed44397d83e4a1690fa7309ff608e8475314895e5ef0a"
+  }
+}

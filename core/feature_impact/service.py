@@ -8,6 +8,7 @@ from core.feature_impact.models import TaskRow, ReportRow, PlanRow, ExecutionRow
 from core.feature_impact.knowledge import development_input, digest, read, search
 from core.feature_impact.reports import rule_report, validate, RULE_VERSION
 from core.feature_impact.resource_simulation import execute
+from core.feature_impact.coverage_analysis import method, report_schema
 from core.agent_platform.ci_diagnosis_tools import strict_object
 
 
@@ -64,7 +65,7 @@ class FeatureImpactService:
 
     @staticmethod
     def task_payload(row):
-        return dict(task_id=row.task_id, **row.snapshot, agent_execution="NOT_EXECUTED", model_budget="KNOWN_DEFERRED_CONSTRAINT",
+        return dict(task_id=row.task_id, **row.snapshot, agent_execution="UNKNOWN" if method(row.snapshot)=="1.2.0" else "NOT_EXECUTED", model_budget="FINITE" if method(row.snapshot)=="1.2.0" else "KNOWN_DEFERRED_CONSTRAINT",
             exposed=row.exposed_at is not None)
 
     async def tasks(self, principal):
@@ -84,6 +85,11 @@ class FeatureImpactService:
             result = self.task_payload(row)
             reports = (await session.execute(select(ReportRow).where(ReportRow.task_id == task_id).order_by(ReportRow.report_version))).scalars().all()
             result["reports"] = [dict(status="REJECTED" if r.rejection else "SEALED", **r.envelope) for r in reports]
+            if method(row.snapshot)=="1.2.0":
+                from core.persistence.models import RuntimeModelInvocationRow
+                from core.feature_impact.models import InvestigationRow
+                count=await session.scalar(select(func.count()).select_from(RuntimeModelInvocationRow).join(InvestigationRow,InvestigationRow.run_id==RuntimeModelInvocationRow.run_id).where(InvestigationRow.task_id==task_id))
+                result.update(model_invocations=count,agent_execution="EXECUTED" if count else "NOT_EXECUTED")
             return result
 
     async def submit(self, principal, task_id, request_id, raw=None, *, rule=False, agent_result=None):
@@ -119,9 +125,9 @@ class FeatureImpactService:
                 error = "REPORT_SCHEMA_OR_EVIDENCE_INVALID"
             version = (await session.execute(select(func.max(ReportRow.report_version)).where(ReportRow.task_id == task_id))).scalar() or 0
             report_id = str(uuid4())
-            envelope = dict(schema_version="feature-impact-report.v2" if task.snapshot.get("analysis_contract") == "interface-impact.v1" else "feature-impact-report.v1", report_id=report_id, report_version=version + 1,
+            envelope = dict(schema_version=report_schema(task.snapshot), report_id=report_id, report_version=version + 1,
                 task_id=task_id, task_version=task.snapshot["task_version"], input_digest=task.snapshot["input_digest"],
-                corpus_digest=task.snapshot["corpus_digest"], candidate_kind=kind, candidate_version="1.1.0" if agent_result else source.get("rule_version", RULE_VERSION) if rule else "human.v2" if task.snapshot.get("analysis_contract") == "interface-impact.v1" else "human.v1",
+                corpus_digest=task.snapshot["corpus_digest"], candidate_kind=kind, candidate_version=method(task.snapshot) if agent_result else source.get("rule_version", RULE_VERSION) if rule else "human.v2" if task.snapshot.get("analysis_contract") == "interface-impact.v1" else "human.v1",
                 run_id=agent_result[0].run_id if agent_result else None, sealed_at=now(), report_digest=digest(parsed if parsed else raw),
                 discovery_origins={f["finding_id"]: ("DEVELOPER_KNOWN" if f["historical_feature_id"] in task.snapshot["known_impacts"] else "UNPROMPTED_CANDIDATE") for f in (parsed or {}).get("findings", [])})
             row = ReportRow(report_id=report_id, task_id=task_id, request_id=request_id, intent_digest=intent, report_version=version + 1,
@@ -210,6 +216,8 @@ class FeatureImpactService:
             test = next((t for t in plan.payload["tests"] if t["test_id"] == body["test_id"]), None)
             if test is None:
                 raise BusinessError("TEST_NOT_APPROVED")
+            if test.get("test_kind") == "PLANNING_ONLY":
+                raise BusinessError("PLANNING_ONLY_NOT_EXECUTABLE")
             if test.get("test_kind") == "DAAS_CASE":
                 raise BusinessError("DAAS_CASE_REQUIRES_CI_ASSET_TRIGGER")
             result, trace = execute(test["policy"], test["operations"])
@@ -254,7 +262,7 @@ class FeatureImpactService:
             if (task is None
                     or access is None or access.tenant_id != task.tenant_id or access.user_id != str(task.owner_user_id)
                     or access.agent_id != AGENT_ID or access.session_id != binding.session_id
-                    or context.data.entry_agent_id != AGENT_ID or context.data.agent_version != "1.1.0"
+                    or context.data.entry_agent_id != AGENT_ID or context.data.agent_version != method(task.snapshot)
                     or context.session_id != binding.session_id or task.exposed_at is not None):
                 raise BusinessError("FEATURE_SCOPE_DENIED", 403)
             try:

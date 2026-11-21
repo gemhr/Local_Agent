@@ -14,7 +14,7 @@ class Intent(Strict):
 
 
 class PublicTaskIntent(Intent):
-    public_task: Literal['T2', 'T3', 'T5', 'T6', 'sampling-interface']
+    public_task: Literal['T2', 'T3', 'T5', 'T6', 'sampling-interface', 'interface-range-analysis', 'interface-range-analysis-dev', 'interface-message-analysis', 'interface-message-analysis-dev', 'interface-recovery-analysis', 'interface-recovery-analysis-dev']
 
 
 class Submission(Intent):
@@ -179,3 +179,20 @@ async def execute(plan_id: str, body: Execution, request: Request):
 @router.get("/executions/{execution_id}")
 async def execution(execution_id: str, request: Request):
     return await call(request, "execution", execution_id)
+
+
+from core.feature_impact.planning_quality import Request as PlanningRequest
+
+
+@router.post("/quality/evaluate-v2")
+async def planning_quality(body: PlanningRequest, request: Request):
+    from core.auth import AuthError
+    from core.feature_impact.planning_quality import evaluate
+    try:
+        return await evaluate(request.app.state.feature_impact_service, request.app.state.loop_execution_repository, request.state.principal, body.model_dump(mode="json"))
+    except AuthError as exc:
+        raise HTTPException(exc.status_code,exc.code) from None
+    except BusinessError as exc:
+        raise HTTPException(exc.status,exc.code) from None
+    except (ValueError,KeyError,TypeError,AttributeError):
+        raise HTTPException(422,"PLANNING_SOURCE_INVALID") from None

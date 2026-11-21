@@ -495,9 +495,35 @@ class AgentRouter:
         temperature: float = 0.7,
         enable_thinking: bool | None = None,
         prompt_identity: PromptIdentity | None = None,
+        agent_id: str | None = None,
+        run_context: RunContext | None = None,
+        event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
+        business_definition=None,
     ) -> str:
-        """收集一次完整的模型输出；真实 Provider 调用前经过最终预算 gate。"""
+        """收集完整文本。协同 Step 中的远端请求由既有 Model Invocation 执行。"""
         effective_max_tokens = max_tokens or self.max_tokens
+        if isinstance(event_emitter, StepEventEmitter):
+            from core.llm_engine import RemoteLLMEngine
+
+            if isinstance(self.llm, RemoteLLMEngine):
+                if run_context is None or agent_id is None:
+                    raise RuntimeError("协同工具规划需要 RunContext 和 Agent 身份")
+                run_context.raise_if_inactive()
+                return self._invoke_model_contract(
+                    agent_id=agent_id,
+                    user_query=messages[-1]["content"],
+                    messages=messages,
+                    context_requirements=None,
+                    run_context=run_context,
+                    capability_requirements=TaskCapabilityRequirements(),
+                    max_tokens=effective_max_tokens,
+                    event_emitter=event_emitter,
+                    generation_options={"temperature": temperature, "enable_thinking": enable_thinking},
+                    fault_controller=fault_controller,
+                    prompt_identity=prompt_identity,
+                    business_definition=business_definition,
+                ).output
         prepared = self._final_provider_messages(
             list(messages),
             max_tokens=effective_max_tokens,
@@ -1634,6 +1660,9 @@ class AgentRouter:
         agent_id: str,
         run_context: RunContext | None = None,
         business_definition=None,
+        *,
+        event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> Optional[tuple[str, str]]:
         """决定当前回答前是否需要调用工具。"""
         registrations = self._tool_registrations_for_run(
@@ -1662,6 +1691,11 @@ class AgentRouter:
             prompt_identity=build_prompt_identity(
                 PROMPT_ID_TOOL_PLAN, "1", planner_messages[0]["content"]
             ),
+            agent_id=agent_id,
+            run_context=run_context,
+            event_emitter=event_emitter,
+            fault_controller=fault_controller,
+            business_definition=business_definition,
         )
         return self._parse_tool_call(planner_response)
 
@@ -1752,6 +1786,9 @@ class AgentRouter:
         registration,
         safe_error_code: str,
         business_definition=None,
+        run_context: RunContext | None = None,
+        event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> str | None:
         """对 planner 参数只提供一次、仅限 validation 前的修复机会。"""
         repair_messages = list(messages)
@@ -1775,6 +1812,11 @@ class AgentRouter:
                 prompt_identity=build_prompt_identity(
                     PROMPT_ID_TOOL_REPAIR, "1", repair_messages[0]["content"]
                 ),
+                agent_id=agent_id,
+                run_context=run_context,
+                event_emitter=event_emitter,
+                fault_controller=fault_controller,
+                business_definition=business_definition,
             )
         )
         if repaired is None or repaired[0] != tool_name:
@@ -1792,6 +1834,9 @@ class AgentRouter:
         registration=None,
         allow_repair: bool = True,
         business_definition=None,
+        run_context: RunContext | None = None,
+        event_emitter: StepEventEmitter | None = None,
+        fault_controller: FaultInjectionController | None = None,
     ) -> ToolInvocation:
         """在进入 invocation governance 前最多修复一次 planner 参数。"""
         current_args = tool_args
@@ -1810,6 +1855,9 @@ class AgentRouter:
                     ),
                     safe_error_code=exc.safe_error_code,
                     business_definition=business_definition,
+                    run_context=run_context,
+                    event_emitter=event_emitter,
+                    fault_controller=fault_controller,
                 )
                 if repaired_args is None:
                     raise
@@ -1962,8 +2010,10 @@ class AgentRouter:
             return messages
         if run_context is not None and run_context.tool_resolution_snapshot is None:
             self._tool_registrations_for_run(agent_id, user_query, run_context)
+        planner_options = ({"event_emitter": event_emitter, "fault_controller": fault_controller}
+                           if isinstance(event_emitter, StepEventEmitter) else {})
         tool_call = tool_call if tool_call is not None else self._plan_tool_call(
-            messages, agent_id, run_context, business_definition
+            messages, agent_id, run_context, business_definition, **planner_options
         )
         if not tool_call:
             return messages
@@ -2019,6 +2069,9 @@ class AgentRouter:
                 messages=messages, agent_id=agent_id,
                 allow_repair=native_assistant_message is None,
                 business_definition=business_definition,
+                run_context=run_context,
+                event_emitter=event_emitter,
+                fault_controller=fault_controller,
             )
         except ToolAdapterInvocationError as exc:
             raise self._tool_validation_failure(tool_name, exc) from None
@@ -2560,15 +2613,31 @@ class AgentRouter:
             self.max_tokens,
             selected_profile,
         )
-        stream = selected_model.generate(messages, max_tokens=self.max_tokens)
+        from core.llm_engine import RemoteLLMEngine
+        from core.runtime.budget import BudgetExceededError, apply_provider_token_counts
+        from core.runtime.context import RunDeadlineExceededError
+
+        observed_usage = []
+        usage_options = ({"on_usage": observed_usage.append, "run_context": run_context}
+                         if isinstance(selected_model, RemoteLLMEngine) else {})
+        stream = selected_model.generate(messages, max_tokens=self.max_tokens, **usage_options)
         if model_reservation is not None:
-            stream = BudgetedModelStream(stream, run_context.budget_ledger, model_reservation)
+            stream = BudgetedModelStream(stream, run_context.budget_ledger, model_reservation,
+                actual_usage_getter=lambda _: apply_provider_token_counts(
+                    model_reservation.reserved_usage, observed_usage[-1].actual_usage()) if observed_usage else None)
         response = ""
         try:
             for chunk in stream:
                 if run_context is not None:
                     run_context.raise_if_inactive()
                 response += chunk
+        except (RunCancelledError, RunDeadlineExceededError) as exc:
+            if isinstance(stream, BudgetedModelStream):
+                try:
+                    stream.close()
+                except BudgetExceededError as budget_error:
+                    exc.budget_error = budget_error
+            raise
         finally:
             close = getattr(stream, "close", None)
             if close is not None:

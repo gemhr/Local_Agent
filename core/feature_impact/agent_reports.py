@@ -1,5 +1,6 @@
 """从 AgentCore 持久化事实导出 AGENT 报告，不接受远端 receipt 或报告正文。"""
 from sqlalchemy import select
+from core.feature_impact.coverage_analysis import method, METHOD
 from core.persistence.models import ObjectOwnershipRow, RuntimeLoopActionRow
 from core.feature_impact.models import TaskRow, ReportRow, InvestigationRow
 from core.feature_impact.knowledge import digest, read
@@ -13,6 +14,11 @@ from core.agent_platform.ci_diagnosis_tools import strict_object
 async def require_binding_owner(session, binding, task):
     from core.feature_impact.tools import AGENT_ID
     access = MemoryAccessContext(task.tenant_id, str(task.owner_user_id), AGENT_ID, binding.session_id)
+    if method(task.snapshot)==METHOD:
+        from core.persistence.models import RuntimeMemoryBindingRow
+        memory=await session.get(RuntimeMemoryBindingRow,binding.run_id)
+        if memory is None or memory.mode!="SCOPED" or not memory.access or any(memory.access.get(k)!=v for k,v in access.to_dict().items()):
+            raise ValueError("AGENT_MEMORY_OWNER_INVALID")
     for kind, identity in (('RUN', binding.run_id), ('CONVERSATION', access.conversation_id)):
         owner = await session.get(ObjectOwnershipRow, (kind, identity))
         if owner is None or owner.tenant_id != task.tenant_id or owner.owner_user_id != task.owner_user_id:
@@ -25,12 +31,28 @@ def validated_agent_report(binding, image, actions, task):
     raw, source = validate_result(binding, image, actions, task.snapshot)
     report = validate(strict_object(raw), task.snapshot, kind='AGENT', reads=source['read_sources'],
                       task_inputs=source['task_input_sources'])
-    source.update(protocol='feature-impact-agent-source.v1', task_id=task.task_id,
+    source = planning_source(binding,task,raw,report,source)
+    return raw, report, source
+
+
+def planning_source(binding,task,raw,report,source):
+    from core.feature_impact.tools import AGENT_ID
+    source.update(protocol='feature-impact-agent-source.v2' if method(task.snapshot)==METHOD else 'feature-impact-agent-source.v1', task_id=task.task_id,
         task_version=task.snapshot['task_version'], input_digest=task.snapshot['input_digest'],
         corpus_digest=task.snapshot['corpus_digest'], session_id=binding.session_id,
-        owner_user_id=str(task.owner_user_id), tenant_id=task.tenant_id, agent_id=AGENT_ID, agent_version='1.1.0',
+        owner_user_id=str(task.owner_user_id), tenant_id=task.tenant_id, agent_id=AGENT_ID, agent_version=method(task.snapshot),
         final_status='DELIVERED', raw_output=raw, raw_output_digest=text_digest(raw), report_digest=digest(report))
-    return raw, report, source
+    return source
+
+
+def authenticated_rejected_planning(binding,image,actions,task):
+    """只读失败分析投影：认证原FINAL/引用，不授予审批或资产准入。"""
+    from core.feature_impact.agent import validate_result
+    from core.feature_impact.coverage_analysis import Report
+    from core.feature_impact.reports import validate_planning
+    raw,source=validate_result(binding,image,actions,task.snapshot)
+    report=validate_planning(strict_object(raw),task.snapshot,kind="AGENT",reads=source["read_sources"],task_inputs=source["task_input_sources"],schema=Report,validate_assets=False)
+    return raw,report,planning_source(binding,task,raw,report,source)
 
 
 async def evaluate_agent_report(service, repository, principal, body):

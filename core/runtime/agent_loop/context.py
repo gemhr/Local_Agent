@@ -196,7 +196,10 @@ def pinned_loop_config(router, agent_id, run_context, *, request_counting_policy
     # 旧 Run 的 profile 序列化不能因新增默认字段而改变冻结身份。
     if getattr(run_context, "memory_effect_policy", None) is not None:
         config["memory_effect_policy"] = run_context.memory_effect_policy
-    from core.runtime.request_counting_admission import context_record
+    from core.runtime.request_counting_admission import ORDINARY_POLICY_KEY, context_record
+    ordinary_policy = getattr(run_context, "ordinary_request_counting_policy", None)
+    if ordinary_policy is not None:
+        config[ORDINARY_POLICY_KEY] = ordinary_policy
     admission = context_record(run_context)
     if admission is not None:
         config["request_counting_exception"] = admission["policy"]

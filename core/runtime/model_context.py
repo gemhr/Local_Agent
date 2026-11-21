@@ -489,7 +489,7 @@ class FinalProviderMessageBudget:
 
 @dataclass(frozen=True)
 class RequestBudgetAssessment:
-    """实际完整请求的容量证明；HEURISTIC 永不授予新 policy 调用权限。"""
+    """实际完整请求的容量证据。admissible 表示满足严格可信准入。"""
     profile_id: str
     mode: str
     counting_version: str
