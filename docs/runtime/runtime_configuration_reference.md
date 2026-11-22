@@ -39,7 +39,9 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_MODEL_THREADS` | LocalLLMEngine | int | profile-derived | integer ≥1 | no | APPLICATION_SCOPE | yes | internal config | 越界显式值 fail closed；engine load failure | `8` |
 | `LOCAL_AGENT_MODEL_CONTEXT` | LocalLLMEngine/profile | int | profile-derived | positive practical window | no | APPLICATION_SCOPE | yes | internal config | selection/inference failure | `4096` |
 | `LOCAL_AGENT_MODEL_GPU_LAYERS` | LocalLLMEngine | int | `0` | integer ≥-1（`-1`=全部层 offload、`0`=CPU、正数=指定 offload 层数） | no | APPLICATION_SCOPE | yes | internal config | 小于 `-1` 的显式值 fail closed；model load failure | `0` |
-| `LOCAL_AGENT_MODEL_MAX_TOKENS` | model profiles | int | profile/backend-derived：remote-only fast=`2048`、balanced=`4096`、deep=`8192`；local/hybrid 保持 `640/1024/1536` | positive integer | no | APPLICATION_SCOPE | yes | internal config | invalid capacity/inference failure | `4096` |
+| `LOCAL_AGENT_MODEL_MAX_TOKENS` | 单次请求默认输出上限 | int | remote-only fast=`2048`、balanced=`4096`、deep=`8192`；未知远端使用缺省窗口时 deep 改用 `4096`；local/hybrid 保持 `640/1024/1536` | positive integer | no | APPLICATION_SCOPE | yes | internal config | incompatible context/output capacity | `4096` |
+| `LOCAL_AGENT_LOCAL_MODEL_MAX_OUTPUT_TOKENS` | 本地模型物理输出上限 | int | 沿用请求默认输出上限 | positive integer | no | APPLICATION_SCOPE | yes | internal config | 请求上限超出时排除候选 | `4096` |
+| `LOCAL_AGENT_REMOTE_MODEL_MAX_OUTPUT_TOKENS` | 远端模型物理输出上限 | int | 沿用请求默认输出上限 | positive integer | no | APPLICATION_SCOPE | yes | internal config | 请求上限超出时排除候选 | `8192` |
 | `LOCAL_AGENT_REMOTE_MODEL_NAME` | RemoteLLMEngine | string | `deepseek-flash` | provider model identifier | remote/hybrid | APPLICATION_SCOPE | yes | sensitive provider config | provider request failure | `deepseek-flash` |
 | `LOCAL_AGENT_REMOTE_PROVIDER_KIND` | RemoteLLMEngine | string | `deepseek` | implemented provider kinds | no | APPLICATION_SCOPE | yes | internal config | incompatible payload behavior；其他 OpenAI-compatible Provider 必须显式覆盖 | `deepseek` |
 | `LOCAL_AGENT_REMOTE_API_BASE_URL` | RemoteLLMEngine | string | empty | valid configured endpoint | remote/hybrid（SERVER role） | APPLICATION_SCOPE | yes | secret/internal endpoint | SERVER role 缺 endpoint fail closed；PRODUCTION 必须 HTTPS | `<configured-outside-docs>` |
@@ -49,7 +51,7 @@ Environment Profile 只管理少量字段的默认值；Model Profile 只管理 
 | `LOCAL_AGENT_REMOTE_TRUST_ENV` | HTTP transport | strict bool | profile-derived：LOCAL=`1`、TEST=`0`、PRODUCTION=`0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；决定 Server → Remote LLM `httpx.AsyncClient` 是否继承系统 proxy | `0` |
 | `LOCAL_AGENT_CLIENT_TRUST_ENV` | HTTP transport | strict bool | `1`（所有 Profile 一致） | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | security critical | 非法显式值 fail closed；决定 Desktop Client → LocalAgent Server Session 是否继承系统 proxy；与 `LOCAL_AGENT_REMOTE_TRUST_ENV` 完全独立 | `1` |
 | `LOCAL_AGENT_REMOTE_ENABLE_THINKING` | HTTP payload | strict bool | `0` | `1`,`0`,`true`,`false` | no | APPLICATION_SCOPE | yes | internal config | 非法显式值 fail closed | `0` |
-| `LOCAL_AGENT_REMOTE_CONTEXT_WINDOW` | model profile | int | `1000000` | positive practical window；应与真实 Provider capacity 一致 | no | APPLICATION_SCOPE | yes | internal config | routing/capacity mismatch | `1000000` |
+| `LOCAL_AGENT_REMOTE_CONTEXT_WINDOW` | model profile | int | 官方 DeepSeek Flash/Pro 为 `1000000`，兼容代理和其他模型为保守的 `8192` | positive practical window；按部署的模型能力配置 | no | APPLICATION_SCOPE | yes | internal config | routing/capacity mismatch | `1000000` |
 | `LOCAL_AGENT_LOCAL_FIXED_CALL_COST_UNITS` | ModelCostProfile | int | `1` | integer ≥0 | no | APPLICATION_SCOPE | yes | public-safe count | 越界显式值 fail closed | `1` |
 | `LOCAL_AGENT_LOCAL_INPUT_COST_UNITS_PER_1K_TOKENS` | ModelCostProfile | int | `1` | integer ≥0 | no | APPLICATION_SCOPE | yes | public-safe count | 越界显式值 fail closed | `1` |
 | `LOCAL_AGENT_LOCAL_OUTPUT_COST_UNITS_PER_1K_TOKENS` | ModelCostProfile | int | `1` | integer ≥0 | no | APPLICATION_SCOPE | yes | public-safe count | 越界显式值 fail closed | `1` |
@@ -407,13 +409,23 @@ Memory 不新增环境开关：persist=True 需要独立 typed MemoryAccessConte
 保护量不计入用量或活动预约。实际超额可以压缩最终余额，汇总仍按原合同失败或交付。
 恢复保留已提交步骤结果。已有模型记录但缺少完整步骤结果的在途步骤保守阻断，以免重复模型请求或交付。
 
-普通 durable v2 Run 默认使用严格可信准入。服务端组装可通过
-`CoordinatedRuntimeFactory(ordinary_request_counting_policy="ordinary-estimated-request-admission.v1")`
-为普通新 Run 显式选择估算准入。当前应用组装使用默认值，HTTP 请求体不接受该配置，评测关联或 Receipt 排除普通策略。
+普通 durable v2 Run 默认使用严格可信准入。服务端可用
+`LOCAL_AGENT_ORDINARY_ESTIMATED_REQUEST_ADMISSION=1` 为普通新 Run 显式选择
+`ordinary-estimated-request-admission.v1`，并按需与 `LOCAL_AGENT_SHARED_RUN_BUDGET=1` 组合。两项缺省为 `0`。
+HTTP 请求体不接受这两项配置，评测关联或 Receipt 排除普通策略。恢复读取原冻结策略。
 策略版本记录在 Root 和 Frame 的 `pinned_config.request_counting_policy`。恢复读取原冻结值，历史缺省继续使用严格检查。
 普通 Snapshot 和 Attempt 保存可复核的完整请求评估，`reliable` 与 `admissible` 继续标为 false。
 估算包含消息、有效 Tool options、实际输出预留及安全缓冲，仍受上下文、调用次数、时限、取消及工具权限约束。
 全局启用前需要完成持久账与进程账的实际超额结算一致性验证。
+
+fixed-plan 按候选评估完整输入和实际请求输出上限。远端估算包括工具 Schema、JSON 模式和协议选项，
+窄窗口候选在 Provider 前排除。旧 durable v2 按冻结 Profile 身份恢复，变更能力前应保留旧装配或排空活动 Run。
+fixed-plan 未完成步骤按当前 Profile 重新准入。DeepSeek 工具轮使用非思考模式，显式组合 thinking 与工具或工具历史会在发请求前拒绝。
+
+未知远端未显式声明窗口时使用 `8192`。remote-only 的隐式 deep 输出使用 balanced 的 `4096`，
+为输入和安全余量留空间。显式窗口与显式请求上限优先，超出安全窗口会在发送前以容量错误拒绝。
+依赖原缺省 1M 的代理在确认实际能力后，可显式设置 `LOCAL_AGENT_REMOTE_CONTEXT_WINDOW=1000000`。
+保留旧 Run 的冻结身份还需要匹配原模型 ID、请求与物理输出能力及其他配置字段。
 
 正常 Runtime 的可靠计量 Guard 保持不变。部署管理的 Quality JSON 可在 `ci_synthetic.request_counting_exception` 配置可选的 `{policy, authorization}`；缺省关闭，不能由 HTTP 或 ExecutionRequest 开启。
 

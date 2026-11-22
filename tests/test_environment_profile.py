@@ -94,6 +94,7 @@ def test_remote_only_defaults_target_deepseek_flash_without_changing_local_budge
         LOCAL_AGENT_MODEL_MAX_TOKENS=None,
         LOCAL_AGENT_REMOTE_MODEL_NAME=None,
         LOCAL_AGENT_REMOTE_PROVIDER_KIND=None,
+        LOCAL_AGENT_REMOTE_API_BASE_URL="https://api.deepseek.com",
         LOCAL_AGENT_REMOTE_CONTEXT_WINDOW=None,
         LOCAL_AGENT_REMOTE_ENABLE_THINKING=None,
     )
@@ -111,6 +112,31 @@ def test_remote_only_defaults_target_deepseek_flash_without_changing_local_budge
         LOCAL_AGENT_MODEL_MAX_TOKENS=None,
     )
     assert local.model_max_tokens == 1024
+
+
+@pytest.mark.parametrize(("endpoint", "kind", "name"), [
+    ("https://proxy.example.test/v1", "deepseek", "deepseek-flash"),
+    ("https://api.deepseek.com", "deepseek", "unknown-model"),
+    ("https://proxy.example.test/v1", "openai_compatible", "company-model"),
+])
+def test_unknown_remote_model_or_proxy_uses_conservative_window(monkeypatch, endpoint, kind, name):
+    settings = _load(monkeypatch, LOCAL_AGENT_REMOTE_API_BASE_URL=endpoint,
+        LOCAL_AGENT_REMOTE_PROVIDER_KIND=kind, LOCAL_AGENT_REMOTE_MODEL_NAME=name,
+        LOCAL_AGENT_REMOTE_CONTEXT_WINDOW=None)
+    assert settings.remote_context_window == 8192
+
+
+@pytest.mark.parametrize("backend", ["local", "hybrid"])
+def test_unknown_remote_does_not_change_local_or_hybrid_deep_default(monkeypatch, backend):
+    settings = _load(monkeypatch, LOCAL_AGENT_LLM_BACKEND=backend,
+        LOCAL_AGENT_MODEL_PROFILE="deep", LOCAL_AGENT_MODEL_CONTEXT=None,
+        LOCAL_AGENT_MODEL_MAX_TOKENS=None, LOCAL_AGENT_LOCAL_MODEL_MAX_OUTPUT_TOKENS=None,
+        LOCAL_AGENT_REMOTE_MODEL_MAX_OUTPUT_TOKENS="6144", LOCAL_AGENT_REMOTE_CONTEXT_WINDOW=None,
+        LOCAL_AGENT_REMOTE_API_BASE_URL="https://example.test/v1", LOCAL_AGENT_REMOTE_PROVIDER_KIND="openai_compatible")
+    assert settings.model_context == 6144
+    assert settings.model_max_tokens == settings.local_model_max_output_tokens == 1536
+    assert settings.remote_model_max_output_tokens == 6144
+    assert settings.remote_context_window == 8192
 
 
 @pytest.mark.parametrize(

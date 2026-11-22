@@ -139,6 +139,135 @@ def test_no_configuration_reload_api() -> None:
     assert not hasattr(Settings, "reload")
 
 
+@pytest.mark.parametrize("backend", ["local", "remote", "hybrid"])
+def test_model_capabilities_are_separate_from_default_request_cap(monkeypatch, backend):
+    settings = _load(monkeypatch, LOCAL_AGENT_LLM_BACKEND=backend,
+        LOCAL_AGENT_MODEL_MAX_TOKENS="256", LOCAL_AGENT_LOCAL_MODEL_MAX_OUTPUT_TOKENS="512",
+        LOCAL_AGENT_REMOTE_MODEL_MAX_OUTPUT_TOKENS="16384",
+        LOCAL_AGENT_REMOTE_PROVIDER_KIND="openai_compatible",
+        LOCAL_AGENT_REMOTE_MODEL_NAME="company-model")
+    assert settings.model_max_tokens == 256
+    assert settings.local_model_max_output_tokens == 512
+    assert settings.remote_model_max_output_tokens == 16384
+    assert settings.remote_model_name == "company-model"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("backend", "enabled"), [
+    ("remote", False), ("remote", True), ("local", False), ("hybrid", True),
+])
+async def test_server_wires_trusted_model_policies(monkeypatch, tmp_path, clean_database, backend, enabled):
+    from core.runtime.request_counting_admission import ORDINARY_ESTIMATE
+
+    monkeypatch.setenv("LOCAL_AGENT_LLM_BACKEND", backend)
+    monkeypatch.setenv("LOCAL_AGENT_MODEL_MAX_TOKENS", "256")
+    monkeypatch.setenv("LOCAL_AGENT_REMOTE_MODEL_MAX_OUTPUT_TOKENS", "8192")
+    monkeypatch.setenv("LOCAL_AGENT_LOCAL_MODEL_MAX_OUTPUT_TOKENS", "1024")
+    monkeypatch.setenv("LOCAL_AGENT_REMOTE_MODEL_NAME", "deepseek-v4-pro")
+    for key in ("LOCAL_AGENT_ORDINARY_ESTIMATED_REQUEST_ADMISSION", "LOCAL_AGENT_SHARED_RUN_BUDGET"):
+        if enabled:
+            monkeypatch.setenv(key, "true")
+        else:
+            monkeypatch.delenv(key, raising=False)
+    settings = _tmp_settings(monkeypatch, tmp_path, profile="TEST")
+    monkeypatch.setattr(server, "settings", settings)
+    monkeypatch.setattr(server, "VectorDBManager", _RaisingVectorDB)
+    monkeypatch.setattr(server, "LocalLLMEngine", lambda **_: ScriptedEvaluationLLMEngine())
+    app = FastAPI()
+    async with server.lifespan(app):
+        factory = app.state.coordinated_runtime_factory
+        profiles = {profile.profile_id.value: profile for profile in factory._router.model_profiles}
+        assert factory._ordinary_request_counting_policy == (ORDINARY_ESTIMATE if enabled else None)
+        assert factory._shared_run_budget is enabled
+        assert factory._router.max_tokens == 256
+        assert set(profiles) == {"local": {"local_fast"}, "remote": {"remote_advanced"},
+                                 "hybrid": {"local_fast", "remote_advanced"}}[backend]
+        if "remote_advanced" in profiles:
+            profile = profiles["remote_advanced"]
+            assert profile.max_output_tokens == 8192 and profile.model_identity == "deepseek-v4-pro"
+        if "local_fast" in profiles:
+            assert profiles["local_fast"].max_output_tokens == 1024
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("preset", "kind", "name", "endpoint", "window", "request_cap",
+                          "physical_cap", "expected_window", "expected_cap", "conflict"), [
+    pytest.param(None, "openai_compatible", "company-model", "https://example.test/v1",
+                 None, None, None, 8192, 4096, False, id="unknown-default"),
+    pytest.param("deep", "openai_compatible", "company-model", "https://example.test/v1",
+                 None, None, None, 8192, 4096, False, id="unknown-deep"),
+    pytest.param("deep", "openai_compatible", "company-model", "https://example.test/v1",
+                 "1000000", None, None, 1000000, 8192, False, id="explicit-window"),
+    pytest.param("deep", "openai_compatible", "company-model", "https://example.test/v1",
+                 "8192", "8192", None, 8192, 8192, True, id="explicit-conflict"),
+    pytest.param("deep", "openai_compatible", "company-model", "https://example.test/v1",
+                 None, "5120", None, 8192, 5120, False, id="explicit-request-cap"),
+    pytest.param("deep", "deepseek", "deepseek-flash", "https://api.deepseek.com",
+                 None, None, "16384", 1000000, 8192, False, id="official-flash"),
+    pytest.param(None, "deepseek", "deepseek-v4-pro", "https://api.deepseek.com/chat/completions",
+                 None, None, "16384", 1000000, 4096, False, id="official-pro"),
+])
+async def test_remote_default_profile_sends_short_fixed_plan_request(
+        monkeypatch, tmp_path, clean_database, preset, kind, name, endpoint, window, request_cap,
+        physical_cap, expected_window, expected_cap, conflict):
+    import asyncio
+
+    from core.runtime import BudgetLedger, RunBudget, create_run_context
+    from core.runtime.model_context import ContextBudgetExceededError
+    from core.runtime.planning import TaskCapabilityRequirements
+    from tests.test_remote_llm_engine import _capture_client
+
+    for key, value in {
+        "LOCAL_AGENT_MODEL_PROFILE": preset,
+        "LOCAL_AGENT_REMOTE_CONTEXT_WINDOW": window,
+        "LOCAL_AGENT_MODEL_MAX_TOKENS": request_cap,
+        "LOCAL_AGENT_REMOTE_MODEL_MAX_OUTPUT_TOKENS": physical_cap,
+    }.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    monkeypatch.setenv("LOCAL_AGENT_LLM_BACKEND", "remote")
+    monkeypatch.setenv("LOCAL_AGENT_REMOTE_PROVIDER_KIND", kind)
+    monkeypatch.setenv("LOCAL_AGENT_REMOTE_MODEL_NAME", name)
+    _tmp_settings(monkeypatch, tmp_path, profile="TEST")
+    monkeypatch.setenv("LOCAL_AGENT_REMOTE_API_BASE_URL", endpoint)
+    settings = Settings.load()
+    capture, client = _capture_client({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+    engine = server.RemoteLLMEngine
+    monkeypatch.setattr(server, "RemoteLLMEngine", lambda **kwargs: engine(**kwargs, client=client))
+    monkeypatch.setattr(server, "settings", settings)
+    monkeypatch.setattr(server, "VectorDBManager", _RaisingVectorDB)
+
+    app = FastAPI()
+    async with server.lifespan(app):
+        router = app.state.coordinated_runtime_factory._router
+        profile, = router.model_profiles
+        context, _ = create_run_context(entry_agent_id="core_router")
+        ledger = BudgetLedger(RunBudget())
+        context.attach_budget_ledger(ledger)
+
+        def invoke():
+            return router._invoke_model_contract(agent_id="core_router", user_query="Hi",
+                messages=[{"role": "user", "content": "Hi"}], context_requirements=None,
+                run_context=context, capability_requirements=TaskCapabilityRequirements(),
+                max_tokens=router.max_tokens, event_emitter=None)
+
+        assert settings.remote_context_window == profile.context_window == expected_window
+        if conflict:
+            with pytest.raises(ContextBudgetExceededError) as error:
+                await asyncio.to_thread(invoke)
+            assert error.value.reason == "reserved_output_tokens_invalid"
+            assert error.value.estimated_tokens == 8192 > error.value.budget
+            assert not capture and ledger.snapshot().committed_usage.model_calls == 0
+        else:
+            assert (await asyncio.to_thread(invoke)).output == "ok"
+            assert capture["json"]["model"] == name
+            assert capture["json"]["max_tokens"] == expected_cap
+            assert ledger.snapshot().committed_usage.model_calls == 1
+        assert settings.model_max_tokens == router.max_tokens == expected_cap
+        assert profile.max_output_tokens == (int(physical_cap) if physical_cap is not None else expected_cap)
+        assert ledger.snapshot().active_reservation_count == 0
 # ---- validation ordering / startup ----
 
 def test_role_validation_precedes_resource_construction_in_lifespan() -> None:

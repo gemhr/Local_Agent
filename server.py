@@ -1074,7 +1074,7 @@ async def lifespan(app: FastAPI):
             ModelProfile(
                 ModelProfileId.LOCAL_FAST,
                 settings.model_context,
-                settings.model_max_tokens,
+                settings.local_model_max_output_tokens,
                 False,
                 True,
                 False,
@@ -1116,7 +1116,7 @@ async def lifespan(app: FastAPI):
             ModelProfile(
                 ModelProfileId.REMOTE_ADVANCED,
                 settings.remote_context_window,
-                settings.model_max_tokens,
+                settings.remote_model_max_output_tokens,
                 True,
                 True,
                 True,
@@ -1495,6 +1495,8 @@ async def lifespan(app: FastAPI):
         durable_run_control,
     )
     app.state.loop_execution_repository = execution_repository
+    from core.runtime.request_counting_admission import ORDINARY_ESTIMATE
+
     coordinated_runtime_factory = await initialization_stack.create(
         "coordinated_runtime_factory",
         lambda: CoordinatedRuntimeFactory(
@@ -1508,6 +1510,10 @@ async def lifespan(app: FastAPI):
             step_result_max_entries=settings.step_result_max_entries,
             execution_repository=execution_repository,
             request_counting_exception=app.state.request_counting_exception,
+            ordinary_request_counting_policy=(
+                ORDINARY_ESTIMATE if settings.ordinary_estimated_request_admission else None
+            ),
+            shared_run_budget=settings.shared_run_budget,
         ),
     )
 

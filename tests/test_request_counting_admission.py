@@ -248,7 +248,7 @@ async def test_forged_persistent_annotation_cannot_initialize_root(clean_databas
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["allowed", "recover", "shared_recover", "messages_tampered", "options_tampered", "started_tampered", "over_capacity"])
+@pytest.mark.parametrize("scenario", ["allowed", "recover", "shared_recover", "profile_drift", "messages_tampered", "options_tampered", "started_tampered", "over_capacity"])
 async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_database, tmp_path, scenario):
     from core.runtime.agent_loop.execution_evidence import build_execution_evidence
     from core.runtime.model_invocation import ModelAdapterResponse
@@ -291,7 +291,7 @@ async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_d
             return await original_start(lease, **kwargs)
 
         repo.start_model_attempt = tampered_start
-    elif scenario in {"recover", "shared_recover"}:
+    elif scenario in {"recover", "shared_recover", "profile_drift"}:
         from datetime import UTC, datetime
         from core.runtime.agent_loop.contracts import LoopSuspended
 
@@ -304,13 +304,15 @@ async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_d
     query = "证据" * 2750 if scenario == "over_capacity" else "public input"
     scope = await factory.create_run_scope("core_router", query, execution_policy=EXECUTION, persist=False)
     try:
-        if scenario in {"recover", "shared_recover"}:
+        if scenario in {"recover", "shared_recover", "profile_drift"}:
             from core.runtime.recovery_coordinator import RecoveryCoordinator
 
             with pytest.raises(LoopSuspended):
                 await scope.execute()
             await scope.close(abort=True)
             repo.accept_loop_batch = original_accept
+            if scenario == "profile_drift":
+                initial._router.model_profiles = (replace(profile, max_output_tokens=profile.max_output_tokens * 2),)
             recovered = []
 
             async def resume(run_id, lease, image):
@@ -346,6 +348,10 @@ async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_d
             assert attempt.usage_evidence["provider_usage"]["quality"] == "ACTUAL"
             gaps = build_execution_evidence(image, (), ())["gaps"]
             assert "MODEL_BINDING_MISSING" not in gaps and "SNAPSHOT_VALIDATION_MISSING" not in gaps
+        elif scenario == "profile_drift":
+            assert result.status.value == "FAILED" and result.error_code == "LOOP_PINNED_CONFIG_UNAVAILABLE"
+            assert len(model.requests) == len(image.models) == 1
+            assert image.loop_frames[0].pinned_config["profiles"][0]["max_output_tokens"] == profile.max_output_tokens
         else:
             assert result.status.value == "FAILED"
             assert not model.requests and not image.models

@@ -2649,6 +2649,51 @@ class AgentRouter:
                 close()
         return response
 
+    def _fixed_plan_requests(self, messages, capabilities, max_tokens, options, definition):
+        from core.runtime.model_context import assess_request
+
+        pinned = getattr(definition, "model_profile_id", "default")
+        profiles = tuple(p for p in self.model_profiles if pinned in {"default", p.profile_id.value})
+        if not profiles or all(max_tokens > p.max_output_tokens for p in profiles):
+            raise ModelSelectionError("no_profile_satisfies_constraints", missing_capabilities=("output_limit",))
+        requests = {}
+        required_windows = []
+        ratio = max(self.model_selection_policy.context_window_safety_ratio,
+                    self.model_routing_policy._selection_policy.context_window_safety_ratio)
+        for profile in profiles:
+            if max_tokens > profile.max_output_tokens:
+                continue
+            effective = dict(options or {})
+            if capabilities.requires_structured_output and profile.supports_provider_structured_output:
+                effective.setdefault("response_format", {"type": "json_object"})
+            adapter = self.model_adapter_resolver.resolve(profile.profile_id)
+            if ("tools" in effective and isinstance(adapter, GeneratorModelAdapter)
+                    and not adapter.supports_native_tool_calling()):
+                continue
+            project = getattr(adapter, "request_options_for_capacity", None)
+            wire_options = project(messages, max_tokens, effective) if callable(project) else effective
+            counter = getattr(adapter, "count_request_tokens", None)
+            if profile.effective_is_remote or callable(counter):
+                assessment = assess_request(messages, wire_options, max_tokens, profile,
+                    safety_ratio=ratio, exact_counter=counter)
+                input_tokens, required = assessment.input_bound, assessment.required_window
+            else:
+                input_tokens = (self._estimate_messages_tokens(messages)
+                    + self.context_builder.estimator.estimate(json.dumps(wire_options, ensure_ascii=False))
+                    + profile.request_framing_bound + profile.request_message_framing_bound * len(messages))
+                required = self.model_selection_policy.required_context_window(input_tokens + max_tokens)
+                required = max(required, self.model_routing_policy._selection_policy.required_context_window(
+                    input_tokens + max_tokens))
+            required_windows.append(required)
+            if required <= profile.context_window:
+                requests[profile.profile_id] = (input_tokens, effective)
+        if not required_windows:
+            raise ModelSelectionError("no_profile_satisfies_constraints", missing_capabilities=("native_tool_calling",))
+        if not requests:
+            raise ContextBudgetExceededError("full_provider_request_exceeds_window",
+                budget=max(p.context_window for p in profiles), estimated_tokens=min(required_windows))
+        return tuple(p for p in profiles if p.profile_id in requests), requests
+
     def _invoke_model_contract(
         self,
         *,
@@ -2733,6 +2778,17 @@ class AgentRouter:
                     final_minimum_context_window,
                 ),
             )
+        fixed_requests = None
+        profiles = self.model_profiles
+        candidate_inputs = None
+        if getattr(run_context, "execution_policy", None) not in {"durable-agent-loop.v1", "durable-agent-loop.v2"}:
+            profiles, fixed_requests = self._fixed_plan_requests(
+                messages, capability_requirements, max_tokens, generation_options, business_definition)
+            candidate_inputs = {profile_id: request[0] for profile_id, request in fixed_requests.items()}
+            smallest_input = min(candidate_inputs.values())
+            final_context_requirements = replace(final_context_requirements,
+                estimated_input_tokens=smallest_input,
+                minimum_context_window=max(final_context_requirements.minimum_context_window, smallest_input + max_tokens))
         decision, selected_profile, requirements = self._select_model_decision(
             agent_id,
             user_query,
@@ -2742,6 +2798,8 @@ class AgentRouter:
             capability_requirements,
             business_definition,
             request_output_tokens=max_tokens,
+            available_profiles=profiles,
+            candidate_input_tokens=candidate_inputs,
             step_id=getattr(event_emitter, "step_id", None),
         )
         final_budget = self.context_builder.prepare_final_provider_messages(
@@ -2763,21 +2821,23 @@ class AgentRouter:
         breaker_snapshots = self.circuit_breaker_registry.snapshots(
             tuple(
                 profile.effective_breaker_key
-                for profile in self.model_profiles
+                for profile in profiles
             )
         )
         routing_decision = self.model_routing_policy.route(
             selection_decision=decision,
             capability_requirements=capability_requirements,
             context_requirements=requirements,
-            profiles=self.model_profiles,
+            profiles=profiles,
             preference=ModelPreference.AUTO,
             budget_snapshot=run_context.budget_ledger.snapshot(step_id=getattr(event_emitter, "step_id", None)),
             breaker_snapshots=breaker_snapshots,
             request_output_tokens=max_tokens,
+            candidate_input_tokens=candidate_inputs,
         )
         invocation_evidence: dict[str, object] = {
-            "estimated_input_tokens": final_budget.estimated_input_tokens,
+            "estimated_input_tokens": (fixed_requests[selected_profile.profile_id][0]
+                                       if fixed_requests is not None else final_budget.estimated_input_tokens),
             "reserved_output_tokens": max_tokens,
             "context_budget_utilization": final_budget.context_budget_utilization,
             "selected_context_items": sum(
@@ -2818,6 +2878,7 @@ class AgentRouter:
             invocation_evidence=invocation_evidence,
             async_submit=(owner_emitter.submit_coroutine_from_worker if owner_emitter is not None else None),
             on_output_delta=final_output_sink,
+            fixed_requests=fixed_requests,
         )
 
     def _run_agent_once(

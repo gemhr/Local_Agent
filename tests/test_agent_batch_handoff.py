@@ -668,6 +668,41 @@ async def test_overrun_takeover_reuses_committed_model_and_delivers(clean_databa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("total_limit", [None, 24000])
+async def test_shared_loop_context_and_cumulative_usage_are_independent(clean_database, tmp_path, total_limit):
+    from core.runtime.budget import BudgetUsage, RunBudget
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+
+    usage = BudgetUsage(input_tokens=24000, total_tokens=24000)
+    provider = Provider([
+        replace(batch("loop_a"), actual_usage=usage),
+        ModelAdapterResponse("completed", actual_usage=usage, finish_reason="stop", tool_call_count=0),
+    ])
+    initial, repo, _, tools = await assembly(clean_database, tmp_path, [], context_model=provider,
+        context_policy={"version": 2}, context_window=32768)
+    factory = CoordinatedRuntimeFactory(initial._router, initial._services, agent_registry=initial._agent_registry,
+        execution_repository=repo, shared_run_budget=True)
+    scope = await factory.create_run_scope("core_router", "read loop_a and answer", execution_policy=LOOP_POLICY_V2,
+        persist=False, budget=RunBudget(max_total_tokens=total_limit))
+    try:
+        result = await scope.execute()
+        image = await repo.load(scope.run_id)
+        assert len(tools[0].calls) == 1 and not image.context_operations
+        assert not any(image.root.budget_reserved.values())
+        assert all(row.request_assessment["required_window"] < 32768 and
+                   row.request_assessment["output_reserve"] == 128 for row in image.models)
+        if total_limit is None:
+            assert result.status.value == "SUCCEEDED", result.error_code
+            assert len(provider.requests) == 2 and image.root.budget_consumed["total_tokens"] == 48000
+            assert "max_total_tokens" not in image.root.budget_totals
+        else:
+            assert result.stop_reason.value == "BUDGET_EXHAUSTED"
+            assert len(provider.requests) == 1 and image.root.budget_consumed["total_tokens"] == 24000
+    finally:
+        await scope.close(abort=True)
+
+
+@pytest.mark.asyncio
 async def test_shared_durable_proven_unsent_releases_model_budget(clean_database, tmp_path):
     from core.llm_engine import UsageDelta
     from core.runtime.agent_loop.contracts import LoopPolicyV2

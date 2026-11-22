@@ -105,6 +105,173 @@ def test_deepseek_native_tool_call_sends_wire_and_normalizes() -> None:
         engine.close()
 
 
+@pytest.mark.parametrize(("schema_size", "request_cap"), [(0, 64), (12000, 64), (0, 2049)])
+def test_fixed_plan_full_wire_window_rejects_large_tool_schema(schema_size, request_cap):
+    from dataclasses import replace
+    from core.runtime.model_context import ContextBudgetExceededError
+    from core.runtime.model_selection import ModelSelectionError
+    from core.runtime.planning import TaskCapabilityRequirements
+    from tests.test_model_invocation_durable import _compiled_agent_registry
+    from tests.test_request_counting_admission import remote_profile
+
+    capture, client = _capture_client({"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+    engine = RemoteLLMEngine("https://example.test/v1/chat/completions", "deepseek-v4-pro",
+        provider_kind="deepseek", client=client)
+    profile = replace(remote_profile(), context_window=4096, max_output_tokens=2048,
+                      supports_native_tool_calling=True, supports_provider_structured_output=True)
+    router = AgentRouter(engine, memory_manager=object(), agent_registry=_compiled_agent_registry(),
+        model_profiles=(profile,), max_tokens=64)
+    context, _ = create_run_context(entry_agent_id="core_router", session_id="fixture")
+    ledger = BudgetLedger(RunBudget())
+    context.attach_budget_ledger(ledger)
+    options = ({"tools": [{"type": "function", "function": {"name": "read_fixture",
+        "description": "x" * schema_size, "parameters": {"type": "object"}}}]} if schema_size else {})
+
+    def invoke():
+        return router._invoke_model_contract(agent_id="core_router", user_query="return JSON",
+            messages=[{"role": "user", "content": "return a JSON object"}], context_requirements=None,
+            run_context=context, capability_requirements=TaskCapabilityRequirements(requires_structured_output=True),
+            max_tokens=request_cap, event_emitter=None, generation_options=options)
+
+    try:
+        if schema_size:
+            with pytest.raises(ContextBudgetExceededError):
+                invoke()
+            assert not capture and ledger.snapshot().committed_usage.model_calls == 0
+        elif request_cap > profile.max_output_tokens:
+            with pytest.raises(ModelSelectionError) as failure:
+                invoke()
+            assert failure.value.missing_capabilities == ("output_limit",)
+            assert not capture and ledger.snapshot().committed_usage.model_calls == 0
+        else:
+            assert invoke().output == "{}"
+            assert capture["url"] == "https://example.test/v1/chat/completions"
+            assert capture["json"]["model"] == "deepseek-v4-pro"
+            assert capture["json"]["response_format"] == {"type": "json_object"}
+            assert capture["json"]["max_tokens"] == 64
+        assert ledger.snapshot().active_reservation_count == 0
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize(("window", "backup_window", "backup_kind"), [
+    (32768, 4096, "deepseek"), (65536, 4096, "deepseek"), (1_000_000, 4096, "deepseek"),
+    (32768, 16384, "deepseek"), (32768, 16384, "openai_compatible"),
+])
+def test_fixed_plan_narrow_fallback_cannot_send_same_complete_request(window, backup_window, backup_kind):
+    from dataclasses import replace
+    from core.runtime.model_invocation import ModelAdapterResolver, ModelInvocationChainError
+    from core.runtime.model_selection import ModelProfileId
+    from core.runtime.planning import TaskCapabilityRequirements
+    from core.runtime.retry import RetryExecutor, RetryPolicy
+    from tests.test_model_invocation_durable import _compiled_agent_registry
+    from tests.test_request_counting_admission import remote_profile
+
+    primary_wire, primary_client = _capture_client(status_code=503)
+    backup_wire, backup_client = _capture_client()
+    primary = RemoteLLMEngine("https://primary.example.test", "deepseek-v4-pro",
+                             provider_kind="deepseek", client=primary_client)
+    backup = RemoteLLMEngine("https://backup.example.test", "deepseek-flash",
+                            provider_kind=backup_kind, client=backup_client)
+    first = replace(remote_profile(), context_window=window, max_output_tokens=16384)
+    backup_id = ModelProfileId.REMOTE_BACKUP
+    second = replace(first, profile_id=backup_id, context_window=backup_window,
+        supports_provider_structured_output=True,
+        cost_profile=replace(first.cost_profile, profile_id=backup_id))
+    router = AgentRouter(primary, memory_manager=object(), agent_registry=_compiled_agent_registry(),
+        model_profiles=(first, second), max_tokens=64,
+        model_adapter_resolver=ModelAdapterResolver({
+            first.profile_id: GeneratorModelAdapter(primary), second.profile_id: GeneratorModelAdapter(backup),
+        }))
+    context, _ = create_run_context(entry_agent_id="core_router")
+    ledger = BudgetLedger(RunBudget(max_retries=0))
+    context.attach_budget_ledger(ledger)
+    router.model_invocation_router.retry_executor = RetryExecutor(RetryPolicy(max_attempts=1))
+
+    def invoke():
+        return router._invoke_model_contract(agent_id="core_router", user_query="read fixture",
+                messages=[{"role": "user", "content": "read fixture"}], context_requirements=None,
+                run_context=context, capability_requirements=TaskCapabilityRequirements(requires_structured_output=True),
+                max_tokens=64, event_emitter=None, generation_options={"tools": [{"type": "function",
+                    "function": {"name": "read_fixture", "description": "x" * 8000,
+                                 "parameters": {"type": "object"}}}]})
+    try:
+        if backup_window == 4096 or backup_kind != "deepseek":
+            with pytest.raises(ModelInvocationChainError):
+                invoke()
+            assert not backup_wire
+        else:
+            assert invoke().output == "ok"
+            assert backup_wire["json"]["response_format"] == {"type": "json_object"}
+        assert primary_wire["json"]["max_tokens"] == 64 and "response_format" not in primary_wire["json"]
+        assert ledger.snapshot().active_reservation_count == 0
+    finally:
+        primary.close()
+        backup.close()
+
+
+@pytest.mark.parametrize("with_tool_history", [False, True])
+def test_deepseek_thinking_rejects_tools_before_transport(with_tool_history):
+    capture, client = _capture_client()
+    engine = RemoteLLMEngine("https://fixture.example.test/v1/chat/completions", "deepseek-v4-pro",
+                             provider_kind="deepseek", enable_thinking=True, client=client)
+    try:
+        from core.llm_engine import RemoteLLMError
+
+        with pytest.raises(RemoteLLMError) as failure:
+            if with_tool_history:
+                list(engine.generate([{"role": "tool", "tool_call_id": "fixture", "content": "result"}]))
+            else:
+                engine.generate_native([{"role": "user", "content": "fixture"}], enable_thinking=True,
+                    tools=[{"type": "function", "function": {"name": "fixture"}}])
+        assert failure.value.safe_error_code == "REMOTE_THINKING_TOOLS_UNSUPPORTED"
+        assert failure.value.provider_started is False and not capture
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("window", [32768, 65536, 1_000_000])
+def test_exact_counter_models_fixed_plan_context_boundary_without_large_payload(window):
+    from dataclasses import replace
+    from core.runtime.model_context import ContextBudgetExceededError
+    from core.runtime.model_invocation import ModelAdapterResolver, ModelAdapterResponse
+    from core.runtime.planning import TaskCapabilityRequirements
+    from tests.test_model_invocation_durable import _compiled_agent_registry
+    from tests.test_request_counting_admission import remote_profile
+
+    class CountedAdapter:
+        calls = 0
+        input_tokens = window * 100 // 111 - 64
+
+        def count_request_tokens(self, _messages, _options, output_cap):
+            assert output_cap == 64
+            return self.input_tokens
+
+        def invoke(self, _messages, *, max_tokens):
+            self.calls += 1
+            return ModelAdapterResponse("ok")
+
+    adapter = CountedAdapter()
+    profile = replace(remote_profile(), context_window=window, request_counting_mode="EXACT",
+        request_counting_version="synthetic-count.v1", output_accounting_contract="bounded-visible-output.v1")
+    router = AgentRouter(object(), memory_manager=object(), agent_registry=_compiled_agent_registry(),
+        model_profiles=(profile,), max_tokens=64, model_adapter_resolver=ModelAdapterResolver({profile.profile_id: adapter}))
+    context, _ = create_run_context(entry_agent_id="core_router")
+    context.attach_budget_ledger(BudgetLedger(RunBudget()))
+
+    def invoke():
+        return router._invoke_model_contract(agent_id="core_router", user_query="fixture",
+            messages=[{"role": "user", "content": "fixture"}], context_requirements=None,
+            run_context=context, capability_requirements=TaskCapabilityRequirements(),
+            max_tokens=64, event_emitter=None)
+
+    assert invoke().output == "ok"
+    adapter.input_tokens = window - 64
+    with pytest.raises(ContextBudgetExceededError):
+        invoke()
+    assert adapter.calls == 1
+
+
 def test_non_native_local_adapter_preserves_plain_generation_without_tools() -> None:
     class LocalEngine:
         def generate(self, _messages, *, max_tokens):

@@ -683,6 +683,10 @@ class Settings:
     model_context: int
     model_gpu_layers: int
     model_max_tokens: int
+    local_model_max_output_tokens: int
+    remote_model_max_output_tokens: int
+    ordinary_estimated_request_admission: bool
+    shared_run_budget: bool
     history_window_size: int
     summary_trigger_messages: int
     summary_keep_recent: int
@@ -883,11 +887,33 @@ class Settings:
             if os.getenv("LOCAL_AGENT_LLM_BACKEND") not in {None, "", "scripted", "SCRIPTED"}:
                 raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, "LOCAL_AGENT_LLM_BACKEND", "evaluation_profile_forbids_provider_backend")
             llm_backend = "scripted"
-        remote_only_max_tokens = {
+        remote_output_presets = {
             "fast": 2048,
             "balanced": 4096,
             "deep": 8192,
-        }[profile_name]
+        }
+        remote_model_name = os.getenv("LOCAL_AGENT_REMOTE_MODEL_NAME", "deepseek-flash")
+        remote_provider_kind = os.getenv("LOCAL_AGENT_REMOTE_PROVIDER_KIND", "deepseek").lower()
+        remote_api_base_url = os.getenv("LOCAL_AGENT_REMOTE_API_BASE_URL", "")
+        try:
+            remote_url = urlsplit(remote_api_base_url)
+            official_deepseek = (remote_url.scheme == "https" and remote_url.hostname == "api.deepseek.com"
+                                 and remote_url.port in {None, 443} and remote_url.username is None)
+        except ValueError:
+            official_deepseek = False
+        use_deepseek_window = (remote_provider_kind == "deepseek"
+            and remote_model_name in {"deepseek-flash", "deepseek-v4-pro"}
+            and (official_deepseek or not remote_api_base_url))
+        default_remote_window = 1_000_000 if use_deepseek_window else 8192
+        remote_output_default = remote_output_presets[profile_name]
+        if not use_deepseek_window and os.getenv("LOCAL_AGENT_REMOTE_CONTEXT_WINDOW") is None:
+            # 未知窗口使用保守缺省时，沿用 balanced 输出预设，为输入和安全余量留空间。
+            remote_output_default = min(remote_output_default, remote_output_presets["balanced"])
+        model_max_tokens = _env_strict_int(
+            "LOCAL_AGENT_MODEL_MAX_TOKENS",
+            remote_output_default if llm_backend == "remote" else preset["model_max_tokens"],
+            minimum=1,
+        )
 
         # Environment Profile 只管理下列字段的默认值；显式 env 仍最高优先。
         remote_verify_tls = _env_strict_bool(
@@ -1274,13 +1300,9 @@ class Settings:
                 "LOCAL_AGENT_MODEL_PATH",
                 os.path.join(project_root, "data", "models", "qwen2.5-7b-instruct-q4_k_m.gguf"),
             ),
-            remote_model_name=os.getenv(
-                "LOCAL_AGENT_REMOTE_MODEL_NAME", "deepseek-flash"
-            ),
-            remote_provider_kind=os.getenv(
-                "LOCAL_AGENT_REMOTE_PROVIDER_KIND", "deepseek"
-            ).lower(),
-            remote_api_base_url=os.getenv("LOCAL_AGENT_REMOTE_API_BASE_URL", ""),
+            remote_model_name=remote_model_name,
+            remote_provider_kind=remote_provider_kind,
+            remote_api_base_url=remote_api_base_url,
             remote_api_key=os.getenv("LOCAL_AGENT_REMOTE_API_KEY", ""),
             remote_timeout_seconds=_env_strict_int(
                 "LOCAL_AGENT_REMOTE_TIMEOUT_SECONDS", 120, minimum=1
@@ -1292,7 +1314,7 @@ class Settings:
                 "LOCAL_AGENT_REMOTE_ENABLE_THINKING", False
             ),
             remote_context_window=_env_strict_int(
-                "LOCAL_AGENT_REMOTE_CONTEXT_WINDOW", 1_000_000, minimum=1
+                "LOCAL_AGENT_REMOTE_CONTEXT_WINDOW", default_remote_window, minimum=1
             ),
             local_fixed_call_cost_units=_env_strict_int(
                 "LOCAL_AGENT_LOCAL_FIXED_CALL_COST_UNITS", 1, minimum=0
@@ -1339,15 +1361,14 @@ class Settings:
             model_gpu_layers=_env_strict_int(
                 "LOCAL_AGENT_MODEL_GPU_LAYERS", 0, minimum=-1
             ),
-            model_max_tokens=_env_strict_int(
-                "LOCAL_AGENT_MODEL_MAX_TOKENS",
-                (
-                    remote_only_max_tokens
-                    if llm_backend == "remote"
-                    else preset["model_max_tokens"]
-                ),
-                minimum=1,
-            ),
+            model_max_tokens=model_max_tokens,
+            local_model_max_output_tokens=_env_strict_int(
+                "LOCAL_AGENT_LOCAL_MODEL_MAX_OUTPUT_TOKENS", model_max_tokens, minimum=1),
+            remote_model_max_output_tokens=_env_strict_int(
+                "LOCAL_AGENT_REMOTE_MODEL_MAX_OUTPUT_TOKENS", model_max_tokens, minimum=1),
+            ordinary_estimated_request_admission=_env_strict_bool(
+                "LOCAL_AGENT_ORDINARY_ESTIMATED_REQUEST_ADMISSION", False),
+            shared_run_budget=_env_strict_bool("LOCAL_AGENT_SHARED_RUN_BUDGET", False),
             history_window_size=_env_strict_int(
                 "LOCAL_AGENT_HISTORY_WINDOW_SIZE",
                 preset["history_window_size"],

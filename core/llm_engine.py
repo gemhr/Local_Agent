@@ -430,6 +430,15 @@ class RemoteLLMEngine:
             "stream": stream,
         }
         if self._supports_deepseek_thinking():
+            if enable_thinking and (tools or any(
+                message.get("role") == "tool" or message.get("tool_calls") for message in messages
+            )):
+                raise RemoteLLMError(
+                    "DeepSeek thinking with tool turns is unsupported",
+                    model_failure_category="PROVIDER_CONFIGURATION_ERROR",
+                    safe_error_code="REMOTE_THINKING_TOOLS_UNSUPPORTED",
+                    provider_started=False, provider_responded=False,
+                )
             body["thinking"] = {
                 "type": "enabled" if enable_thinking else "disabled",
             }
@@ -892,6 +901,7 @@ class RemoteLLMEngine:
         cancellation_token: object | None = None,
         timeout_seconds: float | None = None,
         on_usage=None,
+        response_format: dict[str, str] | None = None,
     ) -> Generator[str, None, None]:
         with self._session_lock:
             if self._closed:
@@ -911,6 +921,7 @@ class RemoteLLMEngine:
                         run_context=run_context,
                         cancellation_token=cancellation_token,
                         timeout_seconds=timeout_seconds,
+                        response_format=response_format,
                     )
                 )
             except (RemoteLLMError, RunCancelledError, RunDeadlineExceededError, asyncio.CancelledError) as exc:

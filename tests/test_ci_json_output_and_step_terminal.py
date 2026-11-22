@@ -36,12 +36,12 @@ def test_final_json_wire_and_refusal_keep_original_contract(monkeypatch):
     report=dict(schema_version='ci-diagnosis.v1',kind='REPORT',incident_id=v['incident_id'],diagnosis_status='SUPPORTED',
         failure_stage='PARSER',root_cause_hypothesis='结构测试',supporting_evidence=v['supporting_evidence'],
         uncertainties=[],recommended_checks=['核对能力'],recommended_owner_role='TOOL_MAINTAINER')
-    async def request(delta,opts):
+    async def request(delta,opts,finish="stop"):
         sent=[]
         def transport(req):
             sent.append(req.content)
             events=[{'choices':[{'index':0,'delta':delta,'finish_reason':None}]},
-                {'choices':[{'index':0,'delta':{},'finish_reason':'stop'}]}]
+                {'choices':[{'index':0,'delta':{},'finish_reason':finish}]}]
             return httpx.Response(200,text=''.join('data: '+json.dumps(e)+'\n\n' for e in events)+'data: [DONE]\n\n',
                 headers={'content-type':'text/event-stream'})
         async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
@@ -56,10 +56,17 @@ def test_final_json_wire_and_refusal_keep_original_contract(monkeypatch):
             assert sent==[measured]
             assert json.loads(sent[0]).get('response_format')==opts.get('response_format')
             return result
-    for delta,accepted in [({'content':json.dumps(report)},True),({'content':'   '},False),
-        ({'content':v['final_output']},False),({'refusal':'拒答'},True),
-        ({'content':json.dumps({'kind':'REFUSAL','reason':'拒答'})},False)]:
-        response=asyncio.run(request(delta,options))
+    for delta, finish, accepted in [
+        ({'content':json.dumps(report)}, 'stop', True),
+        ({'content':'   '}, 'stop', False),
+        ({'content':'{"kind":'}, 'stop', False),
+        ({'content':json.dumps(report)}, 'length', False),
+        ({'content':'{"kind":"REPORT"}'}, 'stop', False),
+        ({'content':v['final_output']}, 'stop', False),
+        ({'refusal':'拒答'}, 'stop', True),
+        ({'content':json.dumps({'kind':'REFUSAL','reason':'拒答'})}, 'stop', False),
+    ]:
+        response=asyncio.run(request(delta,options,finish))
         if accepted:assert drive(monkeypatch,response).complete
         else:
             with pytest.raises(LoopStopped,match='LOOP_DECISION_INVALID'):drive(monkeypatch,response)

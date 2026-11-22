@@ -103,7 +103,8 @@ def drive(monkeypatch,response,agent=None,observe_restriction=None):
     with monkeypatch.context() as patch:
         patch.setattr(driver_v2,'pinned_loop_config',lambda *a,**kw:frame.pinned_config)
         patch.setattr(driver_v2,'consider_stop',lambda *a:None)
-        patch.setattr(driver_v2,'prepare_context',lambda *a:{'messages':[],'options':{'tools':[],'tool_choice':'none'}})
+        patch.setattr(driver_v2,'prepare_context',lambda *a:{
+            'messages':[], 'options':{'tools':[],'tool_choice':'none'}, 'output_reserve':router.max_tokens})
         if observe_restriction is not None:
             original=driver_v2.enforce_final_only
             def restriction(*args):observe_restriction.append(args[1].kind);return original(*args)

@@ -287,10 +287,15 @@ async def test_finite_dag_delivers_protected_synthesis(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("committed", [True, False], ids=["winner", "abandoned"])
+@pytest.mark.parametrize(("committed", "profile_narrowed"), [
+    pytest.param(True, False, id="winner"),
+    pytest.param(False, False, id="abandoned"),
+    pytest.param(True, True, id="profile-narrowed"),
+])
 async def test_synthesis_headroom_is_atomic_and_recovery_preserves_durable_winner(
-        clean_database, tmp_path, committed):
+        clean_database, tmp_path, committed, profile_narrowed):
     import asyncio
+    from dataclasses import replace
     from datetime import UTC, datetime
     from uuid import uuid4
     from core.persistence.repositories.execution import DurableExecutionRepository
@@ -377,17 +382,24 @@ async def test_synthesis_headroom_is_atomic_and_recovery_preserves_durable_winne
         await repo.complete_step(resumed, step_id=other.step_id, plan_version=1, attempt=number,
             result={"content": "other evidence", "complete": True})
         ready = await repo.load(run_id)
+        if profile_narrowed:
+            # 旧 fixed-plan Root 只冻结了汇总 cap，恢复使用当前模型能力。
+            profile, = factory._router.model_profiles
+            factory._router.model_profiles = (replace(profile, max_output_tokens=64),)
         scope = await factory.create_rehydrated_run_scope(ready, lease=resumed, persist=False)
+        should_deliver = committed and not profile_narrowed
         try:
             result = await scope.execute()
-            assert result.status.value == ("SUCCEEDED" if committed else "FAILED"), result.error_code
+            assert result.status.value == ("SUCCEEDED" if should_deliver else "FAILED"), result.error_code
+            if profile_narrowed:
+                assert result.error_code == "SYNTHESIS_FAILED"
         finally:
             await scope.close(abort=True)
         delivered = await repo.load(run_id)
-        assert len(provider.requests) == int(committed) and len(delivered.models) == 1 + int(committed)
+        assert len(provider.requests) == int(should_deliver) and len(delivered.models) == 1 + int(should_deliver)
         assert delivered.root.budget_operations[attempt(winner.step_id)["operation_id"]] == (
             image.root.budget_operations[attempt(winner.step_id)["operation_id"]])
         records = await factory.services.event_journal.read_after(run_id, 0, 1000)
-        assert sum(record.event_type is RuntimeEventType.OUTPUT_DELTA for record in records) == int(committed)
+        assert sum(record.event_type is RuntimeEventType.OUTPUT_DELTA for record in records) == int(should_deliver)
     finally:
         await control.release(resumed)

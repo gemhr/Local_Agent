@@ -71,7 +71,16 @@ async def context_assembly(database, directory, *, provider=None, repository=Non
 
 @pytest.mark.asyncio
 async def test_long_context_compacts_and_finishes(clean_database, tmp_path):
-    factory, repo, model, tools = await context_assembly(clean_database, tmp_path)
+    from core.runtime.budget import BudgetUsage
+
+    class MeasuredSummary(ContextProvider):
+        def invoke_request(self, *args, **kwargs):
+            response = super().invoke_request(*args, **kwargs)
+            if kwargs["run_context"].loop_model_purpose == "COMPACTION":
+                return replace(response, actual_usage=BudgetUsage(input_tokens=43, output_tokens=7, total_tokens=50))
+            return response
+
+    factory, repo, model, tools = await context_assembly(clean_database, tmp_path, provider=MeasuredSummary())
     result, run_id = await execute(factory)
     image = await repo.load(run_id)
     assert result.status.value == "SUCCEEDED", (result.error_code, image.loop_frames[0].stop_code, [(r["purpose"], r["iteration"]) for r in model.requests], [i.decision_kind for i in image.loop_iterations], image.loop_frames[0].context_seed["protocol_mode"])
@@ -79,6 +88,11 @@ async def test_long_context_compacts_and_finishes(clean_database, tmp_path):
     operation = image.context_operations[0]
     assert operation.state == "ACCEPTED" and operation.attempt_count == 1
     assert len(image.models) == image.root.budget_consumed["model_calls"] == 5
+    measured, = [row for row in image.models if row.purpose == "COMPACTION"]
+    assert measured.usage_evidence["total_tokens"] == 50
+    settled, = [operation for operation in image.root.budget_operations.values()
+                if operation.get("actual", {}).get("total_tokens") == 50]
+    assert settled["source"] == "ACTUAL"
     summary_request = next(r for r in model.requests if r["purpose"] == "COMPACTION")
     assert "additionalProperties" in summary_request["messages"][0]["content"]
     assert "response_format" not in summary_request["options"]
@@ -121,6 +135,27 @@ def test_mandatory_source_pairs_and_invalid_summary():
         parse_summary(response(json.dumps(summary)), groups)
     with pytest.raises(LoopStopped):
         parse_summary(response('{"version":1,"version":1,"groups":[]}'), groups)
+
+
+@pytest.mark.asyncio
+async def test_context_compaction_request_too_large_is_never_dispatched(clean_database, tmp_path):
+    factory, repo, model, _ = await context_assembly(clean_database, tmp_path)
+    profile, = factory._router.model_profiles
+    factory._router.model_profiles = (replace(profile, request_counting_mode="EXACT",
+                                               request_counting_version="fixture-full-request.v1"),)
+
+    def count(messages, options, _output):
+        if any("additionalProperties" in message["content"] for message in messages if message["role"] == "system"):
+            return profile.context_window * 2
+        return len(json.dumps(messages, ensure_ascii=False).encode()) + len(json.dumps(options).encode())
+
+    model.count_request_tokens = count
+    result, run_id = await execute(factory)
+    image = await repo.load(run_id)
+    assert result.status.value == "SUCCEEDED" or result.error_code in {"LOOP_CONTEXT_EXHAUSTED", "CONTEXT_COMPACTION_FAILED"}
+    assert len(model.requests) >= 3 and not image.context_operations
+    assert all(r["purpose"] == "DECISION" for r in model.requests)
+    assert all(row.request_assessment["required_window"] <= profile.context_window for row in image.models)
 
 
 @pytest.mark.asyncio

@@ -174,6 +174,19 @@ class GeneratorModelAdapter:
         capability = getattr(self._engine, "supports_native_tool_calling", None)
         return bool(capability()) if callable(capability) else False
 
+    def request_options_for_capacity(self, messages, max_tokens, options):
+        """返回实际远端 JSON 的消息外字段，供 fixed-plan 容量计算。"""
+        from core.llm_engine import RemoteLLMEngine
+
+        if not isinstance(self._engine, RemoteLLMEngine):
+            return options
+        thinking = options.get("enable_thinking", False if "tools" in options else self._engine.enable_thinking)
+        body = self._engine._body(list(messages), temperature=options.get("temperature", 0.7),
+            max_tokens=max_tokens, enable_thinking=self._engine.enable_thinking if thinking is None else thinking,
+            stream=True, tools=options.get("tools"), tool_choice=options.get("tool_choice", "auto"),
+            response_format=options.get("response_format"))
+        return {name: value for name, value in body.items() if name != "messages"}
+
     def invoke(
         self,
         messages: Sequence[Mapping[str, str]],
@@ -633,6 +646,7 @@ class ModelInvocationRouter:
         invocation_evidence: Mapping[str, object] | None = None,
         async_submit: Callable[[object], object] | None = None,
         on_output_delta: Callable[[str], Awaitable[None]] | None = None,
+        fixed_requests: Mapping[ModelProfileId, tuple[int, Mapping[str, object]]] | None = None,
     ) -> ModelInvocationResult:
         recorder = current_span_recorder() or self.span_recorder or NoopSpanRecorder()
         handle = start_span_safely(
@@ -700,6 +714,7 @@ class ModelInvocationRouter:
                 invocation_evidence=invocation_evidence,
                 async_submit=async_submit,
                 on_output_delta=on_output_delta,
+                fixed_requests=fixed_requests,
             )
         except RunCancelledError:
             handle.end_cancelled("RUN_CANCELLED")
@@ -977,6 +992,7 @@ class ModelInvocationRouter:
         invocation_evidence: Mapping[str, object] | None = None,
         async_submit: Callable[[object], object] | None = None,
         on_output_delta: Callable[[str], Awaitable[None]] | None = None,
+        fixed_requests: Mapping[ModelProfileId, tuple[int, Mapping[str, object]]] | None = None,
     ) -> ModelInvocationResult:
         if routing_decision.confirmation_required:
             raise ModelInvocationConfirmationRequired()
@@ -1070,6 +1086,8 @@ class ModelInvocationRouter:
                     break
                 continue
             context_assessments = getattr(run_context, "loop_request_assessments", None)
+            if fixed_requests is not None:
+                token_estimate, generation_options = fixed_requests[candidate.profile_id]
             if context_assessments is not None:
                 from core.runtime.model_context import assess_request
                 from .agent_loop.contracts import LoopStopped
