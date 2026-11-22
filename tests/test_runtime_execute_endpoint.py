@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -10,9 +11,11 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 import server
+from core.auth import Principal
 from core.chat_service import ChatService
 from core.agent_platform.application import AgentApplicationService
 from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
+from core.agent_platform.runtime_adapter import NativeRuntimeAdapter
 from core.request_payload import REQUEST_PAYLOAD_POLICY
 from core.runtime import (
     BudgetLedger,
@@ -45,8 +48,17 @@ def _install_chat_service(monkeypatch, service):
     monkeypatch.setattr(
         server.app.state,
         "agent_application_service",
-        AgentApplicationService(service, _TEST_AGENT_REGISTRY),
+        AgentApplicationService(service, _TEST_AGENT_REGISTRY, runtime_adapter=NativeRuntimeAdapter(service)),
         raising=False,
+    )
+
+
+def _principal():
+    now = datetime.now(UTC)
+    return Principal(
+        user_id=uuid.uuid4(), subject="test-user", roles=frozenset({"USER"}),
+        token_id="test-token", issued_at=now, expires_at=now + timedelta(minutes=5),
+        tenant_id="test-tenant",
     )
 
 
@@ -56,19 +68,20 @@ class _ConnectedRequest:
     async def is_disconnected(self) -> bool:
         return False
 
-    state = SimpleNamespace(
-        principal=SimpleNamespace(authz_domain_id="test-domain")
-    )
+    state = SimpleNamespace(principal=_principal())
 
 
-class _EmptyChannel:
-    """Stub scope 的空事件通道：立即结束并支持关闭。"""
+class _TerminalChannel:
+    def __init__(self, result):
+        self._result = result
 
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        raise StopAsyncIteration
+    async def __aiter__(self):
+        result = self._result
+        yield RuntimeEvent.from_draft(RuntimeEventDraft(
+            run_id=result.run_id, trace_id="test-trace", component="test",
+            event_type=RuntimeEventType.RUN_COMPLETED,
+            payload=RunCompletedPayload(result.status.value, result.stop_reason.value),
+        ), 1)
 
     async def close(self) -> None:
         return None
@@ -80,7 +93,7 @@ class _StubScope:
     def __init__(self, result: RunCoordinatorResult) -> None:
         self._result = result
         self.agent_state = AgentState.for_run_context(result.run_id)
-        self._channel = _EmptyChannel()
+        self._channel = _TerminalChannel(result)
         self.run_context = SimpleNamespace(
             attach_retrieval_cache_access=lambda _domain: None
         )
@@ -90,7 +103,7 @@ class _StubScope:
         return self._result.run_id
 
     @property
-    def event_channel(self) -> _EmptyChannel:
+    def event_channel(self) -> _TerminalChannel:
         return self._channel
 
     async def execute(self) -> RunCoordinatorResult:
@@ -212,7 +225,7 @@ def _test_request() -> Request:
         "scheme": "http", "server": ("test", 80), "client": ("test", 1),
         "root_path": "",
     })
-    request.state.principal = SimpleNamespace(authz_domain_id="test-domain")
+    request.state.principal = _principal()
     return request
 
 
@@ -533,7 +546,14 @@ async def test_api_chat_still_text_stream_with_run_id_header(monkeypatch):
                     run_id=kwargs["run_id"],
                 )
             )
-            yield type("Event", (), {"payload": OutputDeltaPayload("coordinated")})()
+            for sequence, (event_type, payload) in enumerate((
+                (RuntimeEventType.OUTPUT_DELTA, OutputDeltaPayload("coordinated")),
+                (RuntimeEventType.RUN_COMPLETED, RunCompletedPayload("SUCCEEDED", "COMPLETED")),
+            ), 1):
+                yield RuntimeEvent.from_draft(RuntimeEventDraft(
+                    run_id=kwargs["run_id"], trace_id="test-trace", component="test",
+                    event_type=event_type, payload=payload,
+                ), sequence)
 
     _install_chat_service(monkeypatch, _ChatServiceSpy())
     run_id = "49796282cdb643c7b8850942f7b66bd1"
@@ -548,7 +568,10 @@ async def test_api_chat_still_text_stream_with_run_id_header(monkeypatch):
 
     assert response.media_type == "text/plain"
     assert response.headers["X-Run-Id"] == run_id
-    assert [chunk async for chunk in response.body_iterator] == ["coordinated"]
+    chunks = [chunk async for chunk in response.body_iterator]
+    assert chunks[0] == "coordinated"
+    assert '"event_type":"RUN_COMPLETED"' in chunks[1]
+    assert len(chunks) == 2
 
 
 @pytest.mark.asyncio

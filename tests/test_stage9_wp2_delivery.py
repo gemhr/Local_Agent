@@ -454,6 +454,10 @@ async def test_v1_subscription_disconnect_does_not_cancel_supervised_producer(
                             run_id=run_id,
                         )
                     )
+                    yield _event(
+                        3, RuntimeEventType.RUN_COMPLETED,
+                        RunCompletedPayload("SUCCEEDED", "COMPLETED"), run_id=run_id,
+                    )
                 finally:
                     producer_finished.set()
 
@@ -569,9 +573,7 @@ async def test_legacy_disconnect_still_requests_client_disconnected_cancel(monke
                 yield None
 
     class Request:
-        state = SimpleNamespace(
-            principal=SimpleNamespace(authz_domain_id="tenant:legacy")
-        )
+        state = SimpleNamespace(principal=_principal(uuid.uuid4()))
 
         async def is_disconnected(self):
             return True

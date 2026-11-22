@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +11,15 @@ from core.agent_platform.application import (
     ExecutionRequest,
 )
 from core.agent_platform.contracts import AgentDefinition
-from core.runtime.events import OutputDeltaPayload
+from core.agent_platform.runtime_adapter import NativeRuntimeAdapter
+from core.runtime.events import (
+    OutputDeltaPayload,
+    RunCompletedPayload,
+    RunStartedPayload,
+    RuntimeEvent,
+    RuntimeEventDraft,
+    RuntimeEventType,
+)
 from core.runtime.state import RunStatus, StopReason
 
 
@@ -60,17 +69,18 @@ class _ChatService:
 
 def test_execute_resolves_version_and_projects_runtime_identity():
     chat = _ChatService()
-    service = AgentApplicationService(chat, _Registry())
+    service = AgentApplicationService(chat, _Registry(), runtime_adapter=NativeRuntimeAdapter(chat))
 
     import asyncio
     result = asyncio.run(service.execute(ExecutionRequest(
-        "business_agent", "question", expected_agent_version="v1", run_id="requested-run"
+        "business_agent", "question", expected_agent_version="v1"
     )))
 
-    assert result.run_id == "requested-run"
+    assert result.run_id == "runtime-run"
     assert result.trace_id == "runtime-trace"
     assert result.agent_version == "v1"
     assert result.output == "answer"
+    assert len(chat.calls) == 1
     assert chat.calls[0][2]["agent_version"] == "v1"
     assert result.toolset_identity == "a" * 64
     assert result.resolved_model_profile_id == "default"
@@ -101,6 +111,22 @@ def test_runtime_failure_is_not_projected_as_business_success():
     assert result.status is RunStatus.FAILED
     assert result.error_code == "RUNTIME_FAILED"
     assert result.output is None
+
+
+@pytest.mark.asyncio
+async def test_native_single_call_budget_comes_from_registration():
+    registration = _registration()
+    registration.definition = replace(registration.definition, business_options={"stage13_single_call": True})
+    chat = _ChatService()
+    application = AgentApplicationService(chat, _Registry(registration))
+
+    await application.execute(ExecutionRequest("business_agent", "question", timeout_seconds=15))
+
+    _, _, kwargs = chat.calls[0]
+    assert kwargs["persist"] is False
+    assert kwargs["budget"].max_model_calls == kwargs["budget"].max_remote_model_calls == 1
+    assert kwargs["budget"].max_retries == 0
+    assert kwargs["budget"].max_elapsed_seconds == 15
 
 
 def test_business_output_validation_does_not_rewrite_runtime_terminal():
@@ -135,7 +161,16 @@ class _StreamingChatService:
             status=RunStatus.SUCCEEDED, stop_reason=StopReason.COMPLETED,
             error_code=None, safe_message="",
         ))
-        yield SimpleNamespace(payload=OutputDeltaPayload("answer"))
+        for sequence, (event_type, payload) in enumerate((
+            (RuntimeEventType.RUN_STARTED, RunStartedPayload("RUNNING")),
+            (RuntimeEventType.OUTPUT_DELTA, OutputDeltaPayload("ans")),
+            (RuntimeEventType.OUTPUT_DELTA, OutputDeltaPayload("wer")),
+            (RuntimeEventType.RUN_COMPLETED, RunCompletedPayload("SUCCEEDED", "COMPLETED")),
+        ), 1):
+            yield RuntimeEvent.from_draft(RuntimeEventDraft(
+                run_id="run", trace_id="trace", event_type=event_type,
+                component="test", payload=payload,
+            ), sequence)
 
 
 def test_stream_projects_one_execution_as_safe_business_events():
@@ -147,8 +182,11 @@ def test_stream_projects_one_execution_as_safe_business_events():
         ).stream(ExecutionRequest("business_agent", "question"))]
 
     events = asyncio.run(collect())
-    assert [event.kind for event in events] == ["output_delta", "terminal"]
-    assert events[0].output_delta == "answer"
+    assert [event.kind for event in events] == [
+        "started", "control_delta", "output_delta", "output_delta", "control_delta", "terminal",
+    ]
+    assert {event.run_id for event in events} == {"run"}
+    assert [event.output_delta for event in events if event.kind == "output_delta"] == ["ans", "wer"]
     assert events[-1].status is RunStatus.SUCCEEDED
 
 
@@ -167,8 +205,8 @@ def test_stream_suppresses_invalid_structured_body_and_keeps_runtime_success():
         ).stream(ExecutionRequest("business_agent", "question"))]
 
     events = asyncio.run(collect())
-    assert [event.kind for event in events] == ["terminal"]
-    assert events[0].status is RunStatus.SUCCEEDED
-    assert events[0].business_output_valid is False
-    assert events[0].business_error_code == "BUSINESS_OUTPUT_INVALID"
-    assert events[0].output_disposition == "REJECTED"
+    assert [event.kind for event in events] == ["started", "control_delta", "control_delta", "terminal"]
+    assert events[-1].status is RunStatus.SUCCEEDED
+    assert events[-1].business_output_valid is False
+    assert events[-1].business_error_code == "BUSINESS_OUTPUT_INVALID"
+    assert events[-1].output_disposition == "REJECTED"

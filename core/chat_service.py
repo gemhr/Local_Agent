@@ -20,6 +20,7 @@ from core.runtime import (
     RunCoordinatorResult,
     OutputDeltaPayload,
     RuntimeEvent,
+    RuntimeEventType,
     RunEventJournal,
     ChatStreamCompatibilityAdapter,
     ChatStreamProtocolError,
@@ -155,7 +156,11 @@ class ChatService:
         if not results:
             raise RuntimeError("Coordinated Runtime 未返回结构化结果")
         result = results[0]
-        return output if result.status.value == "SUCCEEDED" else None, result
+        if result.status.value != "SUCCEEDED":
+            return None, result
+        if not any(event.event_type is RuntimeEventType.RUN_COMPLETED for event in events):
+            raise ChatRuntimeTransportError("RUNTIME_TERMINAL_MISSING")
+        return output, result
 
     async def run_coordinated_agent_evaluation(
         self,

@@ -157,6 +157,7 @@ def test_model_capabilities_are_separate_from_default_request_cap(monkeypatch, b
     ("remote", False), ("remote", True), ("local", False), ("hybrid", True),
 ])
 async def test_server_wires_trusted_model_policies(monkeypatch, tmp_path, clean_database, backend, enabled):
+    from core.agent_platform.runtime_adapter import NativeRuntimeAdapter
     from core.runtime.request_counting_admission import ORDINARY_ESTIMATE
 
     monkeypatch.setenv("LOCAL_AGENT_LLM_BACKEND", backend)
@@ -175,6 +176,9 @@ async def test_server_wires_trusted_model_policies(monkeypatch, tmp_path, clean_
     monkeypatch.setattr(server, "LocalLLMEngine", lambda **_: ScriptedEvaluationLLMEngine())
     app = FastAPI()
     async with server.lifespan(app):
+        adapter = app.state.agent_application_service._runtime_adapter
+        assert isinstance(adapter, NativeRuntimeAdapter)
+        assert adapter._chat_service is app.state.chat_service
         factory = app.state.coordinated_runtime_factory
         profiles = {profile.profile_id.value: profile for profile in factory._router.model_profiles}
         assert factory._ordinary_request_counting_policy == (ORDINARY_ESTIMATE if enabled else None)

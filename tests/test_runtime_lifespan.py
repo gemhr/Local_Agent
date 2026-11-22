@@ -1,39 +1,32 @@
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 import server
-from core.runtime import RunRegistry, RuntimeLifecycleState
-from core.runtime.events import OutputDeltaPayload
+from core.runtime import RuntimeLifecycleState
+from core.runtime.events import OutputDeltaPayload, RunCompletedPayload, RuntimeEvent, RuntimeEventDraft, RuntimeEventType
 from core.runtime.state import RunStatus, StopReason
-from tests.test_runtime_execute_endpoint import _install_chat_service, _result
-
-
-class ConnectedRequest:
-    def __init__(self) -> None:
-        self.state = SimpleNamespace(
-            principal=SimpleNamespace(authz_domain_id="test-user")
-        )
-
-    async def is_disconnected(self) -> bool:
-        return False
+from tests.test_runtime_execute_endpoint import _ConnectedRequest, _install_chat_service, _result
 
 
 class RoutingService:
     def __init__(self) -> None:
         self.coordinated_calls = 0
-        self.run_registry = RunRegistry()
+        self.run_registry = server.RunRegistry()
 
     async def stream_coordinated_agent_events(self, *args, _result_out=None, **kwargs):
         self.coordinated_calls += 1
-        _result_out.append(
-            _result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=kwargs["run_id"])
-        )
-        yield SimpleNamespace(payload=OutputDeltaPayload("coordinated"))
+        run_id = kwargs["run_id"]
+        _result_out.append(_result(RunStatus.SUCCEEDED, StopReason.COMPLETED, run_id=run_id))
+        for sequence, (event_type, payload) in enumerate((
+            (RuntimeEventType.OUTPUT_DELTA, OutputDeltaPayload("coordinated")),
+            (RuntimeEventType.RUN_COMPLETED, RunCompletedPayload("SUCCEEDED", "COMPLETED")),
+        ), 1):
+            yield RuntimeEvent.from_draft(RuntimeEventDraft(
+                run_id=run_id, trace_id="test-trace", event_type=event_type, component="test", payload=payload,
+            ), sequence)
 
 
 @pytest.mark.asyncio
@@ -43,7 +36,7 @@ async def test_chat_endpoint_routes_only_through_coordinated_runtime(
     service = RoutingService()
     _install_chat_service(monkeypatch, service)
 
-    async def bind_for_routing_test(_request, *, run_id: str, agent_id: str) -> None:
+    async def bind_for_routing_test(_request, **kwargs) -> None:
         return None
 
     monkeypatch.setattr(
@@ -56,11 +49,11 @@ async def test_chat_endpoint_routes_only_through_coordinated_runtime(
             query="hello",
             run_id="49796282cdb643c7b8850942f7b66bd1",
         ),
-        ConnectedRequest(),
+        _ConnectedRequest(),
     )
     chunks = [chunk async for chunk in response.body_iterator]
 
-    assert chunks == ["coordinated"]
+    assert [chunk for chunk in chunks if not chunk.startswith("[[ORCH]]")] == ["coordinated"]
     assert service.coordinated_calls == 1
 
 

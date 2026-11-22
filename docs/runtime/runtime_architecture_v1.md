@@ -7,7 +7,10 @@
 ### Stage11 WP2 业务接入与绑定事实
 
 生产业务入口为 `AgentApplicationService`；HTTP、Evaluation execution 和 Stage8
-共享其解析路径。startup 汇集 builtin、BusinessTool、MCP registrations 与可信
+共享其解析路径。普通 execute/stream 通过 Run 级 Runtime Adapter 执行。生产
+lifespan 注入 NativeRuntimeAdapter，由其调用同一个 ChatService 并投影原生事件和结果。
+业务 Schema 校验留在应用服务，原生 Scope 继续持有执行、取消及持久终态。
+startup 汇集 builtin、BusinessTool、MCP registrations 与可信
 permission seeds，编译单一 AgentRegistry 后 freeze ToolRegistry。
 `actual_allowed_tools` 同时约束 Governance、Discovery 和 toolset identity；MCP policy
 不能在 compile 后扩权，当前 Run 的冻结 Tool snapshot 仍是额外执行限制。
@@ -35,7 +38,7 @@ Settings.load()
 -> ApplicationRuntimeServices 收拢依赖与 close ownership
 -> CoordinatedRuntimeFactory 创建每请求 CoordinatedRunScope
 -> ChatService 只暴露 Coordinated Runtime 生产入口
--> /api/chat 直接进入唯一 Coordinated 路径
+-> /api/chat → AgentApplicationService → NativeRuntimeAdapter → ChatService
 -> GracefulShutdownCoordinator 在 lifespan 退出时编排唯一 shutdown
 ```
 
@@ -58,7 +61,7 @@ HTTP server、不创建第二个数据库池。Kafka offset 仅在 PostgreSQL co
 
 | 问题 | 冻结结论 |
 |---|---|
-| Runtime 路径 | `/api/chat` 固定使用 `ChatService` 的 Coordinated Runtime 入口，不存在运行时选择器 |
+| Runtime 路径 | `/api/chat` 经应用服务与 NativeRuntimeAdapter 使用 `ChatService` 的 Coordinated Runtime 入口 |
 | Runtime 配置 | 不存在 Runtime mode 环境变量或请求级切换 |
 | Production Runtime | `COORDINATED` |
 | Legacy 启用 | 已删除；生产与测试入口均使用 Coordinated Runtime |

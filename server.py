@@ -212,6 +212,7 @@ from core.agent_platform.application import (
 )
 from core.agent_platform.registry import compile_agent_catalog
 from core.agent_platform.registrations import BUSINESS_REGISTRATION_BUNDLE
+from core.agent_platform.runtime_adapter import NativeRuntimeAdapter
 from core.runtime.agent_evalops_trace_exporter import AgentEvalOpsTraceExporter
 from core.runtime.trace_export_dispatcher import TraceExportDispatcher
 from core.settings import (
@@ -1613,6 +1614,7 @@ async def lifespan(app: FastAPI):
     agent_application_service = AgentApplicationService(
         chat_service,
         agent_registry,
+        runtime_adapter=NativeRuntimeAdapter(chat_service),
     )
     app.state.agent_application_service = agent_application_service
     app.state.runtime_services = runtime_services

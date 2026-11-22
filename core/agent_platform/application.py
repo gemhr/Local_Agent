@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
+from contextlib import aclosing
 import math
 import json
 from collections.abc import AsyncIterator, Mapping
@@ -11,8 +12,13 @@ from typing import Any
 
 from core.runtime.memory_scope import MemoryAccessContext
 from core.runtime.state import RunStatus, StopReason
-from core.runtime.events import OutputDeltaPayload, RuntimeEvent
-from core.runtime.stream_adapter import ChatStreamCompatibilityAdapter, ChatStreamChunkKind
+from core.agent_platform.runtime_adapter import (
+    ExecutionResult,
+    NativeRuntimeAdapter,
+    RuntimeAdapter,
+    RuntimeAdapterError,
+    RuntimeRequest,
+)
 from core.runtime.business_output_schema import schema_matches as _schema_matches
 
 
@@ -67,30 +73,6 @@ class ExecutionRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionResult:
-    run_id: str
-    trace_id: str
-    session_id: str | None
-    agent_id: str
-    agent_version: str | None
-    workflow_id: str | None
-    workflow_version: str | None
-    status: RunStatus
-    stop_reason: StopReason
-    error_code: str | None
-    safe_message: str
-    output: str | None
-    business_output_valid: bool | None = None
-    toolset_identity: str | None = None
-    resolved_model_profile_id: str | None = None
-    resolved_retrieval_profile_id: str | None = None
-    resolved_memory_profile_id: str | None = None
-    business_error_code: str | None = None
-    output_disposition: str = "NOT_EVALUATED"
-    rejected_output: str | None = field(default=None, repr=False, compare=False)
-
-
-@dataclass(frozen=True, slots=True)
 class ExecutionEvent:
     kind: str
     run_id: str | None
@@ -114,9 +96,14 @@ class ExecutionEvent:
 class AgentApplicationService:
     """解析冻结注册、执行 Runtime 并投影其真实 terminal outcome。"""
 
-    def __init__(self, chat_service, registry) -> None:
+    def __init__(self, chat_service, registry, *, runtime_adapter: RuntimeAdapter | None = None) -> None:
         self._chat_service = chat_service
         self._registry = registry
+        self._native_adapter = (
+            runtime_adapter if isinstance(runtime_adapter, NativeRuntimeAdapter)
+            else NativeRuntimeAdapter(chat_service)
+        )
+        self._runtime_adapter = runtime_adapter if runtime_adapter is not None else self._native_adapter
 
     def _resolve_request(self, request: ExecutionRequest):
         if not isinstance(request, ExecutionRequest):
@@ -167,63 +154,37 @@ class AgentApplicationService:
     ) -> AsyncIterator[ExecutionEvent]:
         """单次执行并只投影安全 identity、输出 delta 和 terminal。"""
         registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
-        session_id = request.session_id or "default"
-        result_out = []
-        output_parts: list[str] = []
+        runtime_request = RuntimeRequest(
+            agent_id=request.agent_id, input=effective_input, agent_version=definition.agent_version,
+            workflow_id=workflow_id, workflow_version=workflow_version,
+            run_id=request.run_id, session_id=request.session_id, timeout_seconds=request.timeout_seconds,
+            retrieval_cache_authz_domain=retrieval_cache_authz_domain, memory_access_context=memory_access_context,
+        )
+        result = None
         deferred_deltas: list[str] = []
-        wire_adapter = ChatStreamCompatibilityAdapter()
-        protocol_seen = False
-        async for event in self._chat_service.stream_coordinated_agent_events(
-            request.agent_id,
-            effective_input,
-            run_id=request.run_id,
-            session_id=request.session_id,
-            timeout_seconds=request.timeout_seconds,
-            agent_version=definition.agent_version,
-            workflow_id=workflow_id,
-            workflow_version=workflow_version,
-            retrieval_cache_authz_domain=retrieval_cache_authz_domain,
-            memory_access_context=memory_access_context,
-            _result_out=result_out,
-        ):
-            chunk = None
-            if isinstance(event, RuntimeEvent):
-                protocol_seen = True
-                if not output_parts and not deferred_deltas:
+        try:
+            async with aclosing(self._runtime_adapter.stream(runtime_request)) as events:
+                async for event in events:
+                    if isinstance(event, ExecutionResult):
+                        result = event
+                        break
+                    if event.kind == "output_delta" and definition.output_schema is not None:
+                        deferred_deltas.append(event.text or "")
+                        continue
                     yield ExecutionEvent(
-                        kind="started", run_id=event.run_id, trace_id=event.trace_id,
-                        session_id=session_id, agent_id=definition.agent_id,
+                        kind=event.kind, run_id=event.run_id,
+                        trace_id=event.trace_id if event.kind == "started" else None,
+                        session_id=request.session_id or "default", agent_id=definition.agent_id,
                         agent_version=definition.agent_version, workflow_id=workflow_id,
                         workflow_version=workflow_version,
+                        output_delta=event.text if event.kind == "output_delta" else None,
+                        control_delta=event.text if event.kind == "control_delta" else None,
                     )
-                chunk = wire_adapter.adapt(event)
-            if chunk is not None and chunk.kind is ChatStreamChunkKind.CONTROL:
-                yield ExecutionEvent(
-                    kind="control_delta", run_id=event.run_id, trace_id=None,
-                    session_id=session_id, agent_id=definition.agent_id,
-                    agent_version=definition.agent_version, workflow_id=workflow_id,
-                    workflow_version=workflow_version, control_delta=chunk.text,
-                )
-            if isinstance(event.payload, OutputDeltaPayload):
-                output_parts.append(event.payload.text)
-                if definition.output_schema is not None:
-                    deferred_deltas.append(event.payload.text)
-                else:
-                    yield ExecutionEvent(
-                        kind="output_delta", run_id=request.run_id, trace_id=None,
-                        session_id=session_id, agent_id=definition.agent_id,
-                        agent_version=definition.agent_version, workflow_id=workflow_id,
-                        workflow_version=workflow_version,
-                        output_delta=event.payload.text,
-                    )
-        if not result_out:
+        except RuntimeAdapterError as exc:
+            raise AgentApplicationError(exc.error_code, exc.safe_message) from None
+        if result is None:
             raise AgentApplicationError("RUNTIME_RESULT_MISSING", "Runtime 未返回结构化结果")
-        missing_terminal = wire_adapter.finish() if protocol_seen else None
-        if missing_terminal is not None:
-            raise AgentApplicationError("RUNTIME_TERMINAL_MISSING", "Runtime 事件流缺少终态")
-        runtime_output = "".join(output_parts)
-        result = self._project_result(result_out[0], runtime_output, registration)
-        result = self._validate_output(result, definition)
+        result = self._validate_output(self._apply_registration(result, registration), definition)
         if definition.output_schema is not None and result.business_output_valid:
             for delta in deferred_deltas:
                 yield ExecutionEvent(
@@ -269,34 +230,14 @@ class AgentApplicationService:
         return replace(result, business_output_valid=True, output_disposition="ACCEPTED")
 
     @staticmethod
-    def _project_result(runtime_result, output: str | None, registration=None) -> ExecutionResult:
-        error_code = runtime_result.error_code
-        safe_message = runtime_result.safe_message
-        definition = getattr(registration, "definition", None)
-        return ExecutionResult(
-            run_id=runtime_result.run_id,
-            trace_id=runtime_result.trace_id,
-            session_id=runtime_result.session_id,
-            agent_id=runtime_result.agent_id or "",
-            agent_version=runtime_result.agent_version,
-            workflow_id=runtime_result.workflow_id,
-            workflow_version=runtime_result.workflow_version,
-            status=runtime_result.status,
-            stop_reason=runtime_result.stop_reason,
-            error_code=error_code,
-            safe_message=safe_message,
-            output=output if runtime_result.status is RunStatus.SUCCEEDED else None,
-            business_output_valid=None,
+    def _apply_registration(result: ExecutionResult, registration) -> ExecutionResult:
+        definition = registration.definition
+        return replace(
+            result,
             toolset_identity=getattr(registration, "toolset_identity", None),
             resolved_model_profile_id=getattr(definition, "model_profile_id", None),
-            resolved_retrieval_profile_id=(
-                getattr(definition, "retrieval_profile_id", None) or "NONE"
-                if definition is not None else None
-            ),
-            resolved_memory_profile_id=(
-                getattr(definition, "memory_profile_id", None) or "NONE"
-                if definition is not None else None
-            ),
+            resolved_retrieval_profile_id=getattr(definition, "retrieval_profile_id", None) or "NONE",
+            resolved_memory_profile_id=getattr(definition, "memory_profile_id", None) or "NONE",
         )
 
     async def execute(
@@ -308,36 +249,26 @@ class AgentApplicationService:
         adaptive_route: dict | None = None,
     ) -> ExecutionResult:
         registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
-        runtime_options = {}
+        runtime_request = RuntimeRequest(
+            agent_id=request.agent_id, input=effective_input, agent_version=definition.agent_version,
+            workflow_id=workflow_id, workflow_version=workflow_version,
+            run_id=request.run_id, session_id=request.session_id, timeout_seconds=request.timeout_seconds,
+            retrieval_cache_authz_domain=retrieval_cache_authz_domain, memory_access_context=memory_access_context,
+        )
+        route = None
         if adaptive_route is not None:
             from core.agent_platform.ci_status import validate_route
             route = validate_route(adaptive_route, agent_id=request.agent_id)
             if route["query"] != json.loads(request.input):
                 raise AgentApplicationError("CI_STATUS_INPUT_INVALID", "查询与可信绑定不一致")
-            runtime_options["adaptive_route"] = route
-        if definition.business_options.get("stage13_single_call") is True:
-            from core.runtime.budget import RunBudget
-            runtime_options = {"persist": False, "budget": RunBudget(
-                max_model_calls=1, max_remote_model_calls=1, max_retries=0,
-                max_step_starts=1, max_tool_calls=8, max_concurrency=1,
-                max_elapsed_seconds=min(90, request.timeout_seconds or 90),
-            )}
-        output, runtime_result = await self._chat_service.run_coordinated_agent(
-            request.agent_id,
-            effective_input,
-            run_id=request.run_id,
-            session_id=request.session_id,
-            timeout_seconds=request.timeout_seconds,
-            agent_version=definition.agent_version,
-            workflow_id=workflow_id,
-            workflow_version=workflow_version,
-            retrieval_cache_authz_domain=retrieval_cache_authz_domain,
-            memory_access_context=memory_access_context,
-            **runtime_options,
-        )
-        # Output is available only on Runtime success; status and stop reason
-        # are copied from the Runtime result without a second terminal model.
-        return self._validate_output(self._project_result(runtime_result, output, registration), definition)
+        single_call = definition.business_options.get("stage13_single_call") is True
+        if route is not None or single_call:
+            result = await self._native_adapter.execute_trusted(
+                runtime_request, adaptive_route=route, single_call=single_call,
+            )
+        else:
+            result = await self._runtime_adapter.execute(runtime_request)
+        return self._validate_output(self._apply_registration(result, registration), definition)
 
     async def execute_evaluation(
         self,
@@ -357,7 +288,7 @@ class AgentApplicationService:
         memory_access_context: MemoryAccessContext | None = None,
     ) -> ExecutionResult:
         """受信任评测入口；控制 seam 不属于 PUBLIC ExecutionRequest。"""
-        _registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
+        registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
         output, runtime_result = await self._chat_service.run_coordinated_agent_evaluation(
             request.agent_id,
             effective_input,
@@ -380,7 +311,8 @@ class AgentApplicationService:
             workflow_id=workflow_id,
             workflow_version=workflow_version,
         )
-        return self._validate_output(self._project_result(runtime_result, output, _registration), definition)
+        result = self._native_adapter.project_result(runtime_result, output)
+        return self._validate_output(self._apply_registration(result, registration), definition)
 
     async def execute_agent_loop(self, request: ExecutionRequest, *, loop_correlation: dict) -> ExecutionResult:
         """受信 Loop 评测入口：policy 来自注册定义而非请求正文。"""

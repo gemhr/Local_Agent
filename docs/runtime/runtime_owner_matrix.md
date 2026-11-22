@@ -58,7 +58,7 @@ test-only AST Gate 只是全production Python surface的owner/sink oracle，不�
 
 | fact | authoritative_owner | readers | writers | persistence_location | lifecycle_scope | must_not_own |
 |---|---|---|---|---|---|---|
-| runtime selection | Coordinated Runtime 固定入口 | `/api/chat`, ChatService | lifespan 装配一次 | CoordinatedRuntimeFactory | APPLICATION_SCOPE | Runtime failure handler、Model router、HTTP retry |
+| runtime selection | `server.py::lifespan()` 注入 NativeRuntimeAdapter | AgentApplicationService, ChatService | lifespan 装配一次 | CoordinatedRuntimeFactory | APPLICATION_SCOPE | Runtime failure handler、Model router、HTTP retry |
 | run identity | RunIdentifiers / RunContext | State、Event、Trace、Registry、Journal | `create_run_context()` | Event/Journal/Snapshot 中的安全 identity | RUN_SCOPE | Report、Fault controller、Adapter |
 | trace identity | RunIdentifiers / RunContext | Emitter、Span recorder、Journal | `create_run_context()` | Event/Journal/Snapshot | RUN_SCOPE | Model/Tool adapter、Report |
 | run state | AgentState | Coordinator、Scheduler、Snapshot、observer | AgentStateMachine，经 Parent Runtime 调用 | AgentState schema / RunSnapshot 投影 | RUN_SCOPE | Plan、Report、RecoveryValidator |
