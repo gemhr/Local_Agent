@@ -70,6 +70,7 @@ class _ClosingTransport(httpx.MockTransport):
 @pytest.mark.asyncio
 async def test_application_selects_instances_and_keeps_concurrent_runs_isolated():
     local, managed = _instance(), _instance("managed", "MANAGED", 4097)
+    managed = replace(managed, use_instance_tool_permissions=True)
     instances = {4096: local, 4097: managed}
     session_count = 0
     received = {}
@@ -95,7 +96,10 @@ async def test_application_selects_instances_and_keeps_concurrent_runs_isolated(
         assert re.fullmatch(r"msg_[0-9a-f]{12}[A-Za-z0-9]{14}", prompt["messageID"])
         assert prompt["model"] == {"providerID": "example", "modelID": "model/flash"}
         assert prompt["agent"] == "text"
-        assert prompt["tools"] == {"*": False}
+        if instance is local:
+            assert prompt["tools"] == {"*": False}
+        else:
+            assert "tools" not in prompt
         query = prompt["parts"][0]["text"]
         received[query] = (instance.instance_id, session_id, prompt["messageID"])
         if instance is local:
@@ -249,6 +253,8 @@ def test_settings_resolve_instance_secret_and_fail_closed(monkeypatch):
     monkeypatch.setenv(entry["password_env"], instance.password)
     assert Settings.load().opencode_instances == (instance,)
     assert instance.password not in repr(Settings.load().opencode_instances)
+    monkeypatch.setenv("LOCAL_AGENT_OPENCODE_INSTANCES", json.dumps([dict(entry, use_instance_tool_permissions=True)]))
+    assert Settings.load().opencode_instances[0].use_instance_tool_permissions is True
     user_id = uuid4()
     grant = {"tenant_id": "tenant-a", "user_id": str(user_id).upper()}
     for grants, expected in (([], frozenset()), ([grant], frozenset({("tenant-a", user_id)}))):
@@ -259,6 +265,7 @@ def test_settings_resolve_instance_secret_and_fail_closed(monkeypatch):
         ([dict(entry, base_url="http://untrusted.invalid")], "INVALID_ENDPOINT"),
         ([dict(entry, allowed_principals={})], "INVALID_ALLOWED_PRINCIPALS"),
         ([dict(entry, allowed_principals=[dict(grant, user_id="bad-uuid")])], "INVALID_ALLOWED_PRINCIPALS"),
+        ([dict(entry, use_instance_tool_permissions="true")], "INVALID_TOOL_PERMISSIONS_MODE"),
     ):
         monkeypatch.setenv("LOCAL_AGENT_OPENCODE_INSTANCES", json.dumps(invalid))
         with pytest.raises(SettingsValidationError, match=reason):

@@ -31,7 +31,7 @@ class OpenCodeEventProjection:
         self.trace_id = trace_id
         self.session_id = session_id
         self.user_message_id = user_message_id
-        self._assistant_id: str | None = None
+        self._assistant_ids: set[str] = set()
         self._text_parts: dict[str, str] = {}
         self._seen: dict[str, None] = {}
         self._progress: str | None = None
@@ -48,9 +48,9 @@ class OpenCodeEventProjection:
                 isinstance(info, dict) and info.get("role") == "assistant"
                 and info.get("sessionID") == self.session_id and info.get("parentID") == self.user_message_id
                 and isinstance(info.get("id"), str) and re.fullmatch(r"msg_[A-Za-z0-9]+", info["id"])
-                and info["id"] != self.user_message_id and self._assistant_id is None
+                and info["id"] != self.user_message_id
             ):
-                self._assistant_id = info["id"]
+                self._assistant_ids.add(info["id"])
             return None
         if event_type == "message.part.updated":
             part = properties.get("part")
@@ -96,8 +96,8 @@ class OpenCodeEventProjection:
 
     def _owns_part(self, part: object) -> bool:
         return (
-            self._assistant_id is not None and isinstance(part, dict)
-            and part.get("sessionID") == self.session_id and part.get("messageID") == self._assistant_id
+            isinstance(part, dict) and part.get("sessionID") == self.session_id
+            and isinstance(part.get("messageID"), str) and part["messageID"] in self._assistant_ids
         )
 
     def _control(self, event_id: str, phase: str) -> RuntimeUpdate | None:

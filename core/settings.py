@@ -109,6 +109,7 @@ class OpenCodeInstanceSettings:
     model_id: str | None = None
     agent: str | None = None
     allowed_principals: frozenset[tuple[str, uuid.UUID]] = field(default_factory=frozenset, repr=False)
+    use_instance_tool_permissions: bool = False
 
 
 def _env_opencode_instances() -> tuple[OpenCodeInstanceSettings, ...]:
@@ -124,7 +125,8 @@ def _env_opencode_instances() -> tuple[OpenCodeInstanceSettings, ...]:
         raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "EXPECTED_LIST")
 
     required = {"instance_id", "deployment", "base_url", "workspace", "password_env"}
-    optional = {"username", "provider_id", "model_id", "agent", "allowed_principals"}
+    structured = {"allowed_principals", "use_instance_tool_permissions"}
+    optional = {"username", "provider_id", "model_id", "agent"} | structured
     instances = {}
     for entry in entries:
         if (
@@ -132,7 +134,7 @@ def _env_opencode_instances() -> tuple[OpenCodeInstanceSettings, ...]:
             or not required <= entry.keys() <= required | optional
             or any(
                 not isinstance(value, str) or not value.strip()
-                for key, value in entry.items() if key != "allowed_principals"
+                for key, value in entry.items() if key not in structured
             )
         ):
             raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_INSTANCE")
@@ -189,11 +191,15 @@ def _env_opencode_instances() -> tuple[OpenCodeInstanceSettings, ...]:
                 allowed_principals.add((grant["tenant_id"], uuid.UUID(grant["user_id"])))
         except ValueError:
             raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_ALLOWED_PRINCIPALS") from None
+        use_instance_tool_permissions = entry.get("use_instance_tool_permissions", False)
+        if not isinstance(use_instance_tool_permissions, bool):
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_TOOL_PERMISSIONS_MODE")
         instances[instance_id] = OpenCodeInstanceSettings(
             instance_id=instance_id, deployment=deployment, base_url=base_url, workspace=workspace,
             password=password, username=username, provider_id=entry.get("provider_id"),
             model_id=entry.get("model_id"), agent=entry.get("agent"),
             allowed_principals=frozenset(allowed_principals),
+            use_instance_tool_permissions=use_instance_tool_permissions,
         )
     return tuple(instances.values())
 

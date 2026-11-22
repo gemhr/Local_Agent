@@ -227,6 +227,14 @@ async def test_external_v1_feed_and_result_survive_application_restart(clean_dat
         final = _assistant("ses_local", user_message, "hello world")
         assistant_id = final["info"]["id"]
         part = {"id": "prt_good", "sessionID": "ses_local", "messageID": assistant_id, "type": "text", "text": ""}
+        tool_part = {
+            "id": "prt_read", "sessionID": "ses_local", "messageID": "msg_tool",
+            "type": "tool", "state": {"status": "completed", "output": "private tool output"},
+        }
+        sse.send("foreign-assistant", "message.updated", info={**final["info"], "id": "msg_tool", "parentID": "msg_other"})
+        sse.send("foreign-tool", "message.part.updated", part={**tool_part, "state": {"status": "error"}})
+        sse.send("tool-assistant", "message.updated", info={**final["info"], "id": "msg_tool"})
+        sse.send("tool", "message.part.updated", part=tool_part)
         sse.send("other", "message.updated", info={**final["info"], "sessionID": "ses_other"})
         sse.send("assistant", "message.updated", info=final["info"])
         sse.send("part", "message.part.updated", part=part)
@@ -261,9 +269,12 @@ async def test_external_v1_feed_and_result_survive_application_restart(clean_dat
             assert accepted.status_code == 200
             await _until(prefix_available)
             prefix = await feed.read_after(run_id, 0)
-            assert [(event.event_type, event.payload) for event in prefix[-2:]] == [
+            assert [(event.event_type, event.payload) for event in prefix[-3:]] == [
+                ("run.progress", {"phase": "tool.completed"}),
                 ("run.progress", {"phase": "session.busy"}), ("output.delta", {"text": "hello"}),
             ]
+            assert all(event.payload.get("phase") != "tool.error" for event in prefix)
+            assert "private tool output" not in str(prefix)
             await asyncio.wait_for(sse.closed.wait(), timeout=2)
             assert (await runs.get(run_id)).observation_state == "ACTIVE"
             rejected = await client.post("/api/v1/chat", json=payload, headers=headers)

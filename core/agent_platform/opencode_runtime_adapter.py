@@ -122,8 +122,9 @@ class OpenCodeRuntimeAdapter:
         prompt = {
             "messageID": user_message_id,
             "parts": [{"type": "text", "text": request.input}],
-            "tools": {"*": False},
         }
+        if not self._instance.use_instance_tool_permissions:
+            prompt["tools"] = {"*": False}
         if self._instance.model_id is not None:
             prompt["model"] = {
                 "providerID": self._instance.provider_id,
