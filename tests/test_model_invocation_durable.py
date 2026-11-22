@@ -299,8 +299,8 @@ async def test_worker_bridge_keeps_cancelled_attempt_evidence():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("terminal", ["cancel", "deadline"])
-async def test_durable_terminal_after_usage_keeps_attempt_and_settles_operation(clean_database, tmp_path, terminal):
+@pytest.mark.parametrize(("terminal", "shared"), [("cancel", False), ("deadline", False), ("cancel", True)])
+async def test_durable_terminal_after_usage_keeps_attempt_and_settles_operation(clean_database, tmp_path, terminal, shared):
     import httpx
     from core.llm_engine import RemoteLLMEngine
     from core.runtime.model_invocation import GeneratorModelAdapter
@@ -324,6 +324,10 @@ async def test_durable_terminal_after_usage_keeps_attempt_and_settles_operation(
         engine = RemoteLLMEngine("https://example.test", "deepseek-flash", provider_kind="deepseek", client=client)
         factory, repo, _, _ = await assembly(clean_database, tmp_path, [], context_policy={"version": 2},
             context_model=GeneratorModelAdapter(engine))
+        if shared:
+            from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+            factory = CoordinatedRuntimeFactory(factory._router, factory._services,
+                agent_registry=factory._agent_registry, execution_repository=repo, shared_run_budget=True)
         scope = await factory.create_run_scope("core_router", "public input", execution_policy="durable-agent-loop.v2",
             timeout_seconds=5 if terminal == "deadline" else 10, persist=False)
         task = asyncio.create_task(scope.execute())
@@ -339,7 +343,10 @@ async def test_durable_terminal_after_usage_keeps_attempt_and_settles_operation(
             assert calls == 1 and attempt.state == "UNKNOWN" and attempt.result_binding is None
             assert attempt.usage_evidence["total_tokens"] == 5
             operation, = image.root.budget_operations.values()
-            assert operation["state"] == "SETTLED" and operation["source"] == "ESTIMATED"
+            assert operation["state"] == "SETTLED"
+            assert operation["source"] == ("ACTUAL" if shared else "ESTIMATED")
+            if shared:
+                assert operation["actual"]["total_tokens"] == 5
             assert image.root.budget_consumed["model_calls"] == 1
             assert not any(image.root.budget_reserved.values())
         finally:

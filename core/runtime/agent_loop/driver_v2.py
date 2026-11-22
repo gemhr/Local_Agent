@@ -41,7 +41,7 @@ class AgentLoopDriverV2:
                     raise LoopStopped("LOOP_ITERATION_LIMIT")
                 if context.memory_guard is not None:
                     context.memory_guard.check(submit, seed_digest=frame.seed_digest if frame.frame_role == "ROOT" else None)
-                consider_stop(repo, submit, frame, iterations, context, self.router.model_profiles)
+                consider_stop(repo, submit, frame, iterations, context, self.router, claim.capability_requirements, definition)
                 frame, iterations = load()
                 observed = [i for i in iterations if i.state == "OBSERVED"]
                 if len(observed) >= 2 and frame.adaptive_decision is None:
@@ -56,7 +56,7 @@ class AgentLoopDriverV2:
                 try:
                     result = self.router._invoke_model_contract(agent_id=claim.preferred_agent, user_query="",
                         messages=payload["messages"], context_requirements=None, run_context=context,
-                        capability_requirements=claim.capability_requirements, max_tokens=self.router.max_tokens,
+                        capability_requirements=claim.capability_requirements, max_tokens=payload["output_reserve"],
                         event_emitter=emitter, generation_options=payload["options"], business_definition=definition)
                 except ModelInvocationChainError as exc:
                     if exc.failure_category is not ModelFailureCategory.CONTEXT_LIMIT_EXCEEDED:
@@ -91,7 +91,9 @@ class AgentLoopDriverV2:
                 if delegation is not None:
                     row, _ = submit(repo.load_delegation(lease, frame.frame_id, current.iteration_no))
                     from core.runtime.budget import BudgetUsage
-                    context.budget_ledger.allocate_delegation(row.delegation_id, BudgetUsage(**row.frozen["allocation"], _allow_independent_total=True))
+                    context.budget_ledger.allocate_delegation(row.delegation_id,
+                        BudgetUsage(**row.frozen["allocation"], _allow_independent_total=True),
+                        shared_tokens=row.frozen.get("shared_tokens", False))
                 continue
             if current is None or current.decision_id is None:
                 raise LoopStopped("LOOP_RESULT_UNAVAILABLE")

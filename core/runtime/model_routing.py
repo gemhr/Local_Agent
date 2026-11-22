@@ -8,13 +8,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping
 
-from core.runtime.budget import BudgetPolicy, BudgetSnapshot, BudgetUsage
+from core.runtime.budget import BudgetPolicy, BudgetSnapshot
 from core.runtime.circuit_breaker import (
     ModelCircuitBreakerSnapshot,
     ModelCircuitState,
 )
 from core.runtime.model_context import ModelContextRequirements
 from core.runtime.model_selection import (
+    model_request_usage,
     ModelPreference,
     ModelProfile,
     ModelProfileId,
@@ -123,6 +124,8 @@ class ModelRoutingPolicy:
         preference: ModelPreference,
         budget_snapshot: BudgetSnapshot | None = None,
         breaker_snapshots: Mapping[str, ModelCircuitBreakerSnapshot] | None = None,
+        request_output_tokens: int | None = None,
+        candidate_input_tokens: Mapping[ModelProfileId, int] | None = None,
     ) -> ModelRoutingDecision:
         initial = selection_decision.selected_profile_id
         if selection_decision.confirmation_required or initial is None:
@@ -154,7 +157,9 @@ class ModelRoutingPolicy:
         for profile in ordered:
             if not self._preference_allows(preference, profile):
                 continue
-            if self._missing(profile, capability_requirements, required_context):
+            if self._selection_policy.request_constraint_failures(
+                profile, capability_requirements, required_context, request_output_tokens
+            ):
                 continue
             adjustment = self._adjustment(initial_profile, profile)
             if (
@@ -168,7 +173,8 @@ class ModelRoutingPolicy:
             ):
                 continue
             if budget_snapshot is not None and not self._budget_feasible(
-                budget_snapshot, profile, context_requirements.estimated_input_tokens
+                budget_snapshot, profile, (candidate_input_tokens or {}).get(
+                    profile.profile_id, context_requirements.estimated_input_tokens), request_output_tokens
             ):
                 continue
             if adjustment == RoutingAdjustment.DOWNGRADE_TO_LOCAL:
@@ -257,30 +263,8 @@ class ModelRoutingPolicy:
         }[adjustment]
 
     @staticmethod
-    def _missing(
-        profile: ModelProfile,
-        requirements: TaskCapabilityRequirements,
-        required_context: int,
-    ) -> tuple[str, ...]:
-        missing = []
-        if profile.context_window < required_context:
-            missing.append("context_window")
-        pairs = (
-            ("requires_tools", "supports_tools"),
-            ("requires_structured_output", "supports_structured_output"),
-            ("requires_code_reasoning", "supports_code_reasoning"),
-            ("requires_long_reasoning", "supports_long_reasoning"),
-        )
-        for required_name, supported_name in pairs:
-            if getattr(requirements, required_name) and not getattr(
-                profile, supported_name
-            ):
-                missing.append(required_name)
-        return tuple(missing)
-
-    @staticmethod
     def _budget_feasible(
-        snapshot: BudgetSnapshot, profile: ModelProfile, input_tokens: int
+        snapshot: BudgetSnapshot, profile: ModelProfile, input_tokens: int, request_output_tokens: int | None = None
     ) -> bool:
         metadata = profile.cost_profile
         if metadata is None and (
@@ -288,26 +272,5 @@ class ModelRoutingPolicy:
             or snapshot.run_budget.max_remote_model_calls is not None
         ):
             return False
-        output_tokens = profile.max_output_tokens
-        cost_units = 1
-        if metadata is not None:
-            cost_units = (
-                metadata.fixed_call_cost_units
-                + (input_tokens * metadata.input_cost_units_per_1k_tokens + 999)
-                // 1000
-                + (
-                    output_tokens * metadata.output_cost_units_per_1k_tokens + 999
-                )
-                // 1000
-            )
-        return BudgetPolicy.feasible(
-            snapshot,
-            BudgetUsage(
-                model_calls=1,
-                remote_model_calls=int(profile.effective_is_remote),
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                total_tokens=input_tokens + output_tokens,
-                cost_units=cost_units,
-            ),
-        )
+        output_tokens = profile.max_output_tokens if request_output_tokens is None else request_output_tokens
+        return BudgetPolicy.feasible(snapshot, model_request_usage(profile, input_tokens, output_tokens))

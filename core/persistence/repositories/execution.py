@@ -34,6 +34,8 @@ from core.runtime.execution_aggregate import (
     StepExecutionStatus,
     canonical_payload_digest,
 )
+from core.runtime.budget import SynthesisBudget
+from core.runtime.planning import ExecutionKind, OutputPolicy
 from core.runtime.run_control import DurableRunControlService, RunLease
 from core.runtime.snapshot_serialization import to_primitive
 
@@ -92,6 +94,14 @@ class DurableExecutionRepository:
             raise ValueError("fencing_token must be a non-negative integer")
         token = lease.fencing_token if lease is not None else (fencing_token or 0)
         values = root.as_row_values()
+        synthesis_pin = root.resume_input.get("synthesis_budget")
+        if synthesis_pin is not None:
+            pin = SynthesisBudget(**synthesis_pin)
+            if (self.run_control is None or root.execution_policy != "fixed-plan.v1"
+                    or not any(step.step_id == pin.step_id and step.execution_kind is ExecutionKind.SYNTHESIS
+                        and step.output_policy is OutputPolicy.FINAL_SYNTHESIS for step in root.plan.steps)
+                    or any(f"max_{d}" not in root.budget_totals for d in pin.headroom)):
+                raise ValueError("SYNTHESIS_BUDGET_INVALID")
         values["last_committed_fencing_token"] = token
         async with self.database.transaction() as session:
             if self.run_control is not None:
@@ -101,6 +111,14 @@ class DurableExecutionRepository:
             loop = root.resume_input.get("agent_loop") or {}
             from core.runtime.request_counting_admission import ordinary_policy_for_run
             ordinary_policy_for_run(None, root.execution_policy, root=root, receipt=quality_receipt)
+            loop_policy = loop.get("loop_policy", {})
+            if loop_policy.get("budget_strategy") == "shared-root.v1":
+                if (root.execution_policy != "durable-agent-loop.v2" or quality_receipt is not None
+                        or loop.get("correlation") or loop.get("e2e_test_admission") is not None
+                        or loop.get("pinned_config", {}).get("request_counting_exception") is not None
+                        or any(loop_policy.get(name) != root.budget_totals.get(f"max_{name}")
+                               for name in ("total_tokens", "cost_units"))):
+                    raise ValueError("LOOP_SHARED_BUDGET_PIN_INVALID")
             admission = loop.get("e2e_test_admission")
             if admission is not None or loop.get("pinned_config", {}).get("request_counting_exception") is not None:
                 from core.runtime.request_counting_admission import validate_record
@@ -320,6 +338,9 @@ class DurableExecutionRepository:
                     frame.stop_code = "LOOP_MODEL_RECOVERY_EXHAUSTED"
                 await session.flush()
                 return await self._load_in_session(session, lease.run_id)
+            protected_dag = "synthesis_budget" in root.resume_input
+            if protected_dag:
+                self._settle_recovery_budget(root, lease)
             models = tuple((await session.execute(select(RuntimeModelInvocationRow).where(RuntimeModelInvocationRow.run_id == lease.run_id).with_for_update())).scalars().all())
             for model in models:
                 if model.state == ModelAttemptState.STARTED.value:
@@ -344,6 +365,10 @@ class DurableExecutionRepository:
                 if unresolved_tool or unknown_count >= 2:
                     step.status = StepExecutionStatus.BLOCKED.value
                     step.safe_error = "TOOL_OUTCOME_UNKNOWN" if unresolved_tool else "MODEL_RECOVERY_EXHAUSTED"
+                elif protected_dag and step_models:
+                    # 普通 DAG 没有 Loop 的决策游标，不能把单笔模型结果当成步骤结果。
+                    step.status = StepExecutionStatus.BLOCKED.value
+                    step.safe_error = "MODEL_RECOVERY_EXHAUSTED"
                 elif pending_approval:
                     # Approval waiting is an already-started step and must not
                     # issue a second approval request.
@@ -481,7 +506,19 @@ class DurableExecutionRepository:
                     raise ValueError("Loop model requires budget reservation")
                 await self.reserve_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=reserved_usage, kind="MODEL", resume_generation=resume_generation, frame_id=loop_frame_id)
             if loop_frame_id is None:
-                await session.get(RuntimeRunExecutionRow, lease.run_id, with_for_update=True)
+                root = await session.get(RuntimeRunExecutionRow, lease.run_id, with_for_update=True)
+                pin = root.resume_input.get("synthesis_budget") if root is not None else None
+                if pin is not None:
+                    await self._assert_budget_admission_active(session, lease, root)
+                    step = await session.get(RuntimeStepExecutionRow, (lease.run_id, step_id))
+                    if (step is None or step.plan_version != root.plan_version
+                            or step.status != StepExecutionStatus.RUNNING.value or step.current_attempt != attempt
+                            or operation_id != f"model:{step_id}:{attempt}:{model_attempt}" or reserved_usage is None):
+                        raise RuntimeError("SYNTHESIS_BUDGET_BINDING_INVALID")
+                    self._reserve_root_budget(root, lease, operation_id=operation_id, usage=reserved_usage,
+                        kind="MODEL", headroom=SynthesisBudget(**pin).held_for(step_id))
+                elif operation_id is not None:
+                    raise RuntimeError("SYNTHESIS_BUDGET_BINDING_INVALID")
             await self._memory_admission(session, lease, f"model:{step_id}:{attempt}:{model_attempt}")
             if purpose == "FORMATION":
                 from core.persistence.models import MemoryOperationRow, RuntimeMemoryBindingRow
@@ -582,8 +619,9 @@ class DurableExecutionRepository:
                 await journal_append(session)
             await session.flush()
 
-    async def finish_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, state: ModelAttemptState, result: Mapping[str, Any] | None = None, usage: Mapping[str, Any] | None = None, cost: Mapping[str, Any] | None = None, safe_error: str | None = None, journal_append: JournalAppend | None = None, resume_generation: int | None = None, operation_id: str | None = None, actual_usage: Any = None, usage_source: str = "ACTUAL", loop_frame_id: str | None = None) -> None:
-        """Fenced STARTED -> COMPLETED/UNKNOWN; no provider lookup."""
+    async def finish_model_attempt(self, lease: RunLease, *, step_id: str, attempt: int, model_attempt: int, state: ModelAttemptState, result: Mapping[str, Any] | None = None, usage: Mapping[str, Any] | None = None, cost: Mapping[str, Any] | None = None, safe_error: str | None = None, journal_append: JournalAppend | None = None, resume_generation: int | None = None, operation_id: str | None = None, actual_usage: Any = None, usage_source: str = "ACTUAL", loop_frame_id: str | None = None) -> tuple[ModelAttemptState, dict] | None:
+        """提交 Attempt，并返回本次耐久预算 operation 的实际结算。"""
+        settlement = None
         if state not in {ModelAttemptState.COMPLETED, ModelAttemptState.UNKNOWN, ModelAttemptState.REJECTED}:
             raise ValueError("model finish state must be COMPLETED or UNKNOWN")
         if state in {ModelAttemptState.UNKNOWN, ModelAttemptState.REJECTED} and result is not None:
@@ -603,19 +641,30 @@ class DurableExecutionRepository:
                 if operation_id is None:
                     raise ValueError("Loop model requires budget operation")
                 try:
-                    await self.settle_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=actual_usage, source=usage_source, resume_generation=resume_generation, frame_id=loop_frame_id)
+                    settlement = await self.settle_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=actual_usage, source=usage_source, resume_generation=resume_generation, frame_id=loop_frame_id)
                 except RuntimeError as exc:
                     if not frame.context_policy or not str(exc).startswith("LOOP_BUDGET_EXHAUSTED:"):
                         raise
                     # 原额度仍保守结算；reported actual 保留在原 Attempt，禁止恢复成 winner。
                     dimension = str(exc).rsplit(":", 1)[1]
-                    await self.settle_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=None, source="ESTIMATED", resume_generation=resume_generation, frame_id=loop_frame_id)
+                    settlement = await self.settle_budget_operation_in_transaction(session, lease, operation_id=operation_id, usage=None, source="ESTIMATED", resume_generation=resume_generation, frame_id=loop_frame_id)
+                    settlement = {**settlement, "rejected_dimension": dimension}
                     state, normalized_result, digest = ModelAttemptState.UNKNOWN, None, None
                     safe_error = "BUDGET_EXHAUSTED"
                     cost = {"actual_exceeded_budget": True}
                     frame.phase, frame.stop_code = "STOPPED", "LOOP_BUDGET_EXHAUSTED"
                     frame.stop_details = {"budget_dimension": dimension}
                     self._touch_loop(frame, lease)
+            else:
+                root = await session.get(RuntimeRunExecutionRow, lease.run_id, with_for_update=True)
+                protected = root is not None and "synthesis_budget" in root.resume_input
+                if protected != (operation_id is not None):
+                    raise RuntimeError("SYNTHESIS_BUDGET_BINDING_INVALID")
+                if protected:
+                    if operation_id != f"model:{step_id}:{attempt}:{model_attempt}":
+                        raise RuntimeError("SYNTHESIS_BUDGET_BINDING_INVALID")
+                    settlement = self._settle_root_budget(root, lease, operation_id=operation_id,
+                        usage=actual_usage, source=usage_source, soft_limits=True)
             row = (await session.execute(select(RuntimeModelInvocationRow).where(
                 RuntimeModelInvocationRow.run_id == lease.run_id,
                 RuntimeModelInvocationRow.step_id == step_id,
@@ -641,6 +690,7 @@ class DurableExecutionRepository:
                     raise TypeError("journal_append must be callable")
                 await journal_append(session)
             await session.flush()
+        return (state, settlement) if settlement is not None else None
 
     async def finalize_terminal(self, lease: RunLease, *, event: Any, journal: Any, client_event_feed: Any = None, final_result_binding: Mapping[str, Any] | None = None) -> Any:
         """Atomically update root, append terminal evidence and close control."""
@@ -674,6 +724,18 @@ class DurableExecutionRepository:
                         operations[key] = {**allocation, "state": "RELEASED", "released": allocation["unspent"],
                             "unspent": {}, "release_source": "ROOT_TERMINAL"}
                 root.budget_operations = operations
+            elif "synthesis_budget" in root.resume_input and any(root.budget_reserved.values()):
+                self._settle_recovery_budget(root, lease, source="ESTIMATED")
+                started = (await session.scalars(select(RuntimeModelInvocationRow).where(
+                    RuntimeModelInvocationRow.run_id == lease.run_id,
+                    RuntimeModelInvocationRow.state == ModelAttemptState.STARTED.value,
+                ).with_for_update())).all()
+                for model in started:
+                    model.state = ModelAttemptState.UNKNOWN.value
+                    model.completed_at = func.now()
+                    model.version += 1
+                    model.last_committed_fencing_token = lease.fencing_token
+                    model.updated_at = func.now()
             append_status = await append_in_transaction(session, event)
             if client_event_feed is not None:
                 append_projection = getattr(client_event_feed, "append_event_in_transaction", None)
@@ -716,14 +778,18 @@ class DurableExecutionRepository:
         if row_version is not None and frame.row_version != row_version:
             raise RuntimeError("LOOP_CAS_CONFLICT")
         if not allow_control_stop:
-            control = await session.get(RunControlRow, lease.run_id)
-            if control.cancel_requested_at is not None:
-                from core.runtime.cancellation import RunCancelledError
-                raise RunCancelledError(control.cancel_reason or "REQUEST_CANCELLED")
-            if root.absolute_deadline is not None and root.absolute_deadline <= datetime.now(UTC):
-                from core.runtime.context import RunDeadlineExceededError
-                raise RunDeadlineExceededError()
+            await self._assert_budget_admission_active(session, lease, root)
         return root, frame
+
+    @staticmethod
+    async def _assert_budget_admission_active(session, lease, root):
+        control = await session.get(RunControlRow, lease.run_id)
+        if control.cancel_requested_at is not None:
+            from core.runtime.cancellation import RunCancelledError
+            raise RunCancelledError(control.cancel_reason or "REQUEST_CANCELLED")
+        if root.absolute_deadline is not None and root.absolute_deadline <= datetime.now(UTC):
+            from core.runtime.context import RunDeadlineExceededError
+            raise RunDeadlineExceededError()
 
     @staticmethod
     def _validate_loop_frame(frame: RuntimeLoopFrameRow) -> None:
@@ -872,7 +938,8 @@ class DurableExecutionRepository:
                 expected_options = loop_options(frame)
             if frame.adaptive_decision is not None and current is None and frame.current_iteration >= frame.adaptive_decision["effective_iteration"]:
                 raise RuntimeError("LOOP_DECISION_INVALID")
-            if candidate["options"] != expected_options or candidate["output_reserve"] != frame.pinned_config["max_tokens"]:
+            expected_reserve = (frame.adaptive_decision or {}).get("output_reserve", frame.pinned_config["max_tokens"])
+            if candidate["options"] != expected_options or candidate["output_reserve"] != expected_reserve:
                 raise RuntimeError("CONTEXT_VALIDATION_FAILED")
             expected = snapshot_candidate(frame, groups, candidate["options"], candidate["output_reserve"], summary=candidate["summary"], kind=candidate["kind"])
             budget_valid = validation.get("budget") is True
@@ -1122,6 +1189,11 @@ class DurableExecutionRepository:
 
     async def reserve_budget_operation_in_transaction(self, session: AsyncSession, lease: RunLease, *, operation_id: str, usage: Any, kind: str, resume_generation: int, frame_id: str) -> dict:
         root, frame = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation)
+        return self._reserve_root_budget(root, lease, operation_id=operation_id, usage=usage,
+            kind=kind, resume_generation=resume_generation, delegation_id=frame.delegation_id)
+
+    def _reserve_root_budget(self, root, lease, *, operation_id, usage, kind,
+                             resume_generation=None, delegation_id=None, headroom=None):
         values = self._budget_usage(usage)
         operations = dict(root.budget_operations)
         if operation_id in operations:
@@ -1131,20 +1203,26 @@ class DurableExecutionRepository:
             return stored
         if len(operations) >= 512:
             raise RuntimeError("LOOP_BUDGET_OPERATION_LIMIT")
-        allocation = operations.get(f"delegation:{frame.delegation_id}") if frame.delegation_id else None
+        allocation = operations.get(f"delegation:{delegation_id}") if delegation_id else None
         if allocation is not None:
-            if allocation["state"] != "RESERVED" or allocation.get("overrun") or any(n > allocation["unspent"].get(d, 0) for d, n in values.items()):
+            from core.runtime.budget import SHARED_TOKEN_DIMENSIONS
+            shared = {d: n for d, n in values.items() if allocation.get("shared_tokens") and d in SHARED_TOKEN_DIMENSIONS}
+            held = {d: n for d, n in values.items() if d not in shared}
+            if allocation["state"] != "RESERVED" or allocation.get("overrun") or any(n > allocation["unspent"].get(d, 0) for d, n in held.items()):
                 raise RuntimeError("DELEGATION_BUDGET_EXHAUSTED")
-            allocation = {**allocation, "unspent": self._budget_add(allocation["unspent"], values, -1)}
-            operations[f"delegation:{frame.delegation_id}"] = allocation
-            reserved = dict(root.budget_reserved)
+            allocation = {**allocation, "unspent": self._budget_add(allocation["unspent"], held, -1)}
+            operations[f"delegation:{delegation_id}"] = allocation
+            reserved = self._budget_add(root.budget_reserved, shared)
         else:
             reserved = self._budget_add(root.budget_reserved, values)
         for dimension, count in values.items():
             limit = root.budget_totals.get(f"max_{dimension}")
+            if limit is not None and headroom is not None:
+                limit -= headroom.get(dimension, 0)
             if limit is not None and root.budget_consumed.get(dimension, 0) + reserved.get(dimension, 0) > limit:
                 raise RuntimeError(f"LOOP_BUDGET_EXHAUSTED:{dimension}")
-        operation = {"kind": kind, "state": "RESERVED", "reserved": values, "actual": None, "source": None, "generation": resume_generation, **({"delegation_id": frame.delegation_id} if frame.delegation_id else {})}
+        operation = {"kind": kind, "state": "RESERVED", "reserved": values, "actual": None, "source": None,
+                     "generation": resume_generation, **({"delegation_id": delegation_id} if delegation_id else {})}
         operations[operation_id] = operation
         root.budget_operations, root.budget_reserved = operations, reserved
         root.execution_version += 1
@@ -1158,13 +1236,17 @@ class DurableExecutionRepository:
 
     async def settle_budget_operation_in_transaction(self, session: AsyncSession, lease: RunLease, *, operation_id: str, usage: Any = None, source: str = "ACTUAL", resume_generation: int, frame_id: str) -> dict:
         root, _ = await self._lock_loop(session, lease, frame_id, resume_generation=resume_generation, allow_control_stop=True)
+        return self._settle_root_budget(root, lease, operation_id=operation_id, usage=usage, source=source,
+            soft_limits=root.execution_policy == "durable-agent-loop.v2")
+
+    def _settle_root_budget(self, root, lease, *, operation_id, usage, source, soft_limits):
         operations = dict(root.budget_operations)
         stored = operations.get(operation_id)
         if stored is None:
             raise RuntimeError("LOOP_BUDGET_OPERATION_MISSING")
         values = stored["reserved"] if usage is None else self._budget_usage(usage)
         if stored["state"] == "SETTLED":
-            if stored["actual"] != values:
+            if stored["actual"] != values or stored["source"] != source:
                 raise RuntimeError("LOOP_BUDGET_SETTLEMENT_CONFLICT")
             return stored
         reserved = self._budget_add(root.budget_reserved, stored["reserved"], -1)
@@ -1173,14 +1255,20 @@ class DurableExecutionRepository:
         if delegation:
             key = f"delegation:{delegation}"
             allocation = operations[key]
-            balance = self._budget_add(allocation["unspent"], stored["reserved"])
-            unspent = {d: max(0, n-values.get(d, 0)) for d, n in balance.items()}
+            from core.runtime.budget import SHARED_TOKEN_DIMENSIONS
+            held_reserved = stored["reserved"]
+            held_values = values
+            if allocation.get("shared_tokens"):
+                held_reserved = {d: n for d, n in held_reserved.items() if d not in SHARED_TOKEN_DIMENSIONS}
+                held_values = {d: n for d, n in values.items() if d not in SHARED_TOKEN_DIMENSIONS}
+            balance = self._budget_add(allocation["unspent"], held_reserved)
+            unspent = {d: max(0, n-held_values.get(d, 0)) for d, n in balance.items()}
             reserved = self._budget_add(reserved, {d: unspent.get(d,0)-allocation["unspent"].get(d,0) for d in set(unspent)|set(allocation["unspent"])})
-            operations[key] = {**allocation, "unspent": unspent, "consumed": self._budget_add(allocation["consumed"], values),
-                "overrun": allocation.get("overrun", False) or any(n>balance.get(d,0) for d,n in values.items())}
+            operations[key] = {**allocation, "unspent": unspent, "consumed": self._budget_add(allocation["consumed"], held_values),
+                "overrun": allocation.get("overrun", False) or any(n>balance.get(d,0) for d,n in held_values.items())}
         for dimension in values:
             limit = root.budget_totals.get(f"max_{dimension}")
-            if root.execution_policy != "durable-agent-loop.v2" and limit is not None and consumed.get(dimension, 0) + reserved.get(dimension, 0) > limit:
+            if not soft_limits and limit is not None and consumed.get(dimension, 0) + reserved.get(dimension, 0) > limit:
                 raise RuntimeError(f"LOOP_BUDGET_EXHAUSTED:{dimension}")
         root.budget_reserved, root.budget_consumed = reserved, consumed
         operation = {**stored, "state": "SETTLED", "actual": values, "source": source}
@@ -1191,7 +1279,7 @@ class DurableExecutionRepository:
         root.updated_at = func.now()
         return operation
 
-    def _settle_recovery_budget(self, root: RuntimeRunExecutionRow, lease: RunLease) -> None:
+    def _settle_recovery_budget(self, root: RuntimeRunExecutionRow, lease: RunLease, *, source="RECOVERY_CONSERVATIVE") -> None:
         operations = dict(root.budget_operations)
         changed = False
         for key, operation in operations.items():
@@ -1199,11 +1287,15 @@ class DurableExecutionRepository:
                 changed = True
                 root.budget_reserved = self._budget_add(root.budget_reserved, operation["reserved"], -1)
                 root.budget_consumed = self._budget_add(root.budget_consumed, operation["reserved"])
-                operations[key] = {**operation, "state": "SETTLED", "actual": operation["reserved"], "source": "RECOVERY_CONSERVATIVE"}
+                operations[key] = {**operation, "state": "SETTLED", "actual": operation["reserved"], "source": source}
                 if operation.get("delegation_id"):
                     eid = f"delegation:{operation['delegation_id']}"
                     envelope = operations[eid]
-                    operations[eid] = {**envelope, "consumed": self._budget_add(envelope["consumed"], operation["reserved"])}
+                    held = operation["reserved"]
+                    if envelope.get("shared_tokens"):
+                        from core.runtime.budget import SHARED_TOKEN_DIMENSIONS
+                        held = {d: n for d, n in held.items() if d not in SHARED_TOKEN_DIMENSIONS}
+                    operations[eid] = {**envelope, "consumed": self._budget_add(envelope["consumed"], held)}
         root.budget_operations = operations
         if changed:
             root.execution_version += 1

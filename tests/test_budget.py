@@ -108,3 +108,50 @@ def test_interrupted_stream_keeps_original_error_and_settles_overrun_once():
         ledger.commit(reservation, reported)
     assert ledger.snapshot().committed_usage == reported
     assert ledger.snapshot().active_reservation_count == 0
+
+
+def test_children_compete_for_shared_root_tokens():
+    ledger = BudgetLedger(RunBudget(max_total_tokens=10000, max_model_calls=4))
+    for child in ("left", "right"):
+        ledger.allocate_delegation(child, BudgetUsage(model_calls=2), shared_tokens=True)
+
+    def reserve(child):
+        try:
+            return ledger.reserve(BudgetUsage(model_calls=1, input_tokens=7000, total_tokens=7000),
+                                  reservation_type="model", delegation_id=child)
+        except BudgetExceededError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        winner, = [r for r in executor.map(reserve, ("left", "right")) if r is not None]
+    ledger.commit(winner, BudgetUsage(model_calls=1, input_tokens=11000, total_tokens=11000),
+                  durable_committed=True)
+    snapshot = ledger.snapshot()
+    assert snapshot.committed_usage.total_tokens == 11000
+    assert snapshot.remaining_limit("total_tokens") == snapshot.active_reservation_count == 0
+    assert snapshot.overrun("total_tokens") == 1000
+    assert snapshot.remaining_limit("cost_units") is None
+    assert reserve("left") is None and reserve("right") is None
+
+
+def test_overrun_only_blocks_positive_usage_in_exhausted_dimensions():
+    ledger = BudgetLedger.from_durable(
+        RunBudget(max_input_tokens=5, max_output_tokens=5, max_total_tokens=10,
+                  max_cost_units=2, max_model_calls=2, max_retries=0),
+        committed_usage=BudgetUsage(input_tokens=6, output_tokens=6, total_tokens=12,
+                                    cost_units=3, model_calls=1),
+    )
+    step = BudgetUsage(step_starts=1, model_calls=1)
+    ledger.commit(ledger.reserve(step, reservation_type="step"), step)
+    for dimension, demand in (
+        ("input_tokens", BudgetUsage(input_tokens=1, total_tokens=1)),
+        ("output_tokens", BudgetUsage(output_tokens=1, total_tokens=1)),
+        ("total_tokens", BudgetUsage(total_tokens=1)),
+        ("cost_units", BudgetUsage(cost_units=1)),
+        ("model_calls", BudgetUsage(model_calls=1)),
+        ("retries", BudgetUsage(retries=1)),
+    ):
+        with pytest.raises(BudgetExceededError) as failed:
+            ledger.reserve(demand, reservation_type="model")
+        assert failed.value.dimension == dimension
+    assert ledger.snapshot().committed_usage.total_tokens == 12

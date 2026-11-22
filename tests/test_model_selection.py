@@ -116,3 +116,23 @@ def test_budget_require_confirmation_is_not_a_model_selection():
     remote=ModelProfile(ModelProfileId.REMOTE_ADVANCED,16384,512,True,True,True,True,2,2,cost(ModelProfileId.REMOTE_ADVANCED,True,5))
     d=ModelSelectionPolicy().select(ModelSelectionRequest('x',TaskCapabilityRequirements(requires_multi_agent=True),ModelContextRequirements(10,20,False,False,False,1,0,0,False,False),ModelPreference.AUTO,(local,remote),snapshot(max_cost_units=0),ModelSelectionObjective.QUALITY_FIRST,BudgetInsufficientAction.REQUIRE_CONFIRMATION))
     assert d.confirmation_required and d.selected_profile_id is None and d.capability_preferred_profile_id == ModelProfileId.REMOTE_ADVANCED
+
+
+def test_short_output_reservation_is_shared_by_selection_and_routing():
+    from dataclasses import replace
+    from core.runtime.budget import BudgetLedger, RunBudget
+    from core.runtime.model_routing import ModelRoutingPolicy
+
+    primary = replace(profile(ModelProfileId.REMOTE_ADVANCED, window=16000), max_output_tokens=4096)
+    short_profile = replace(profile(ModelProfileId.LOCAL_FAST, window=8000), max_output_tokens=512)
+    selection = replace(request(context=ModelContextRequirements(2000, 3024, True, False, False, 1, 0, 0, False, False),
+                                profiles=(primary, short_profile)),
+        request_output_tokens=1024, budget_snapshot=BudgetLedger(RunBudget(max_total_tokens=4000)).snapshot())
+    chosen = ModelSelectionPolicy().select(selection)
+    route = ModelRoutingPolicy().route(selection_decision=chosen, capability_requirements=selection.capability_requirements,
+        context_requirements=selection.context_requirements, profiles=selection.available_profiles,
+        preference=selection.preference, budget_snapshot=selection.budget_snapshot, request_output_tokens=1024)
+    assert [c.profile_id for c in route.candidates] == [primary.profile_id]
+    with pytest.raises(ModelSelectionError, match="budget_unavailable"):
+        ModelSelectionPolicy().select(replace(selection,
+            budget_snapshot=BudgetLedger(RunBudget(max_total_tokens=3023)).snapshot()))

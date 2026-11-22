@@ -386,6 +386,27 @@ Memory 不新增环境开关：persist=True 需要独立 typed MemoryAccessConte
 受信 business_options.execution_policy=`durable-agent-loop.v2`；LoopPolicyV2 固定 Batch≤4/并发≤2/写≤1、Child 深度1/累计≤2/活动≤1。缺省 total_tokens/cost_units 各65536；可配置更严有限额度。ContextPolicyV2 默认开启，需完整请求可靠计量；旧 v1 的 Context 配置不自动升级。delegation_allowlist 来自受信 AgentDefinition，缺省为空，Child 目标必须显式启用 v2。Migration head 0034_agent_batches_delegations，部署者迁移；本实现不自动迁移业务库。详见 [合同](agent_execution_v2.md)。
 # 隔离 CI E2E 的请求计量豁免
 
+### 普通任务共享预算
+
+受信组装可为新的普通 durable v2 Run 启用 `CoordinatedRuntimeFactory(shared_run_budget=True)`。
+该开关缺省关闭，配置和外部请求字段不赋予用户开启权限。评测 Receipt 和关联运行继续使用原有预算。
+启用后的 `loop_policy.budget_strategy=shared-root.v1` 随 Root/Frame 持久化，旧 Run 按原冻结策略继续运行。
+没有显式限额时，Root 的累计 Token 和内部成本上限缺省不设。可信调用方仍可使用 `RunBudget` 设置累计上限。
+单次上下文窗口和输出上限，以及时限、次数、并发、权限与审批继续独立检查。
+
+每次请求按实际输出上限和候选输入需求预约。共享 Child envelope 保留调用次数额度，Token 与内部成本按请求从 Root 可用额度预约。
+持久 operation 是 durable 结算权威。实际超额可保留，后续预约仍须满足剩余额度。UNKNOWN 继续使用标记来源的保守占用。
+`BudgetSnapshot.remaining_limit` 用 None 表示未设上限，`overrun` 返回已发生的超额。内部 `cost_units` 不是实际货币金额。
+
+启用共享预算且设置累计输入、输出、总 Token 或内部成本上限的 CI 调查可提前触发原 FINAL_ONLY，并冻结本次较短的输出预留。
+最终报告仍通过原请求、业务 Schema 和 OutputGate。不承诺真实 Provider 用量始终低于预算。
+
+同一受信开关可为新的普通固定计划 DAG 启用必要汇总保护。Run 须显式设置累计 Token 或内部成本上限，
+且冻结的 Plan 须有最终 Synthesis Step。Root 冻结 `synthesis-headroom.v1`，根据已知汇总提示和可用 Profile
+保护一次短汇总的基本资源。前置步骤的进程预约和持久预约都服从此限制，汇总使用完整依赖结果重新准入。
+保护量不计入用量或活动预约。实际超额可以压缩最终余额，汇总仍按原合同失败或交付。
+恢复保留已提交步骤结果。已有模型记录但缺少完整步骤结果的在途步骤保守阻断，以免重复模型请求或交付。
+
 普通 durable v2 Run 默认使用严格可信准入。服务端组装可通过
 `CoordinatedRuntimeFactory(ordinary_request_counting_policy="ordinary-estimated-request-admission.v1")`
 为普通新 Run 显式选择估算准入。当前应用组装使用默认值，HTTP 请求体不接受该配置，评测关联或 Receipt 排除普通策略。

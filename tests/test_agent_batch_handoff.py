@@ -87,7 +87,8 @@ def handoff(target="reader"):
 
 
 @pytest.mark.asyncio
-async def test_handoff_child_result_and_budget_conservation(clean_database, tmp_path):
+@pytest.mark.parametrize("shared", [False, True, "limited", "ordinary"])
+async def test_handoff_child_result_and_budget_conservation(clean_database, tmp_path, shared):
     def parent_final(messages):
         results = [json.loads(m["content"]) for m in messages if m["role"] == "tool"]
         assert len(results) == 1 and results[0]["trust"] == "AGENT_DERIVED_DATA"
@@ -95,9 +96,51 @@ async def test_handoff_child_result_and_budget_conservation(clean_database, tmp_
         return ModelAdapterResponse("parent final", finish_reason="stop", tool_call_count=0)
     model = Provider([handoff(), batch("loop_a"),
         ModelAdapterResponse("child final", finish_reason="stop", tool_call_count=0), parent_final])
+    profile = None
+    admission = None
+    if shared == "ordinary":
+        from core.runtime.request_counting_admission import ORDINARY_ESTIMATE
+        from tests.test_request_counting_admission import remote_profile
+        profile, admission = remote_profile(), ORDINARY_ESTIMATE
     factory, repo, _, tools = await assembly(clean_database, tmp_path, [], context_model=model,
-        context_policy={"version": 2}, delegation_target="reader")
-    scope = await factory.create_run_scope("core_router", "调用 loop_a 和 loop_b，委派 reader 后回答", execution_policy=LOOP_POLICY_V2, persist=False)
+        context_policy={"version": 2}, delegation_target="reader", model_profile=profile)
+    if shared:
+        from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+        factory = CoordinatedRuntimeFactory(factory._router, factory._services,
+            agent_registry=factory._agent_registry, execution_repository=repo, shared_run_budget=True,
+            ordinary_request_counting_policy=admission)
+    limit = None
+    raced = []
+    if shared == "limited":
+        import asyncio
+        from core.runtime.budget import RunBudget
+        limit = RunBudget(max_total_tokens=30000)
+        original_start = repo.start_model_attempt
+
+        async def race_before_child(lease, **kwargs):
+            if not raced:
+                current = await repo.load(lease.run_id)
+                child = next((frame for frame in current.loop_frames if frame.frame_role == "CHILD"), None)
+                if child is not None:
+                    remaining = 30000 - current.root.budget_consumed["total_tokens"]
+                    demand = (remaining * 3) // 4
+                    frames = tuple(current.loop_frames)
+                    reserved = await asyncio.gather(*(repo.reserve_budget_operation(
+                        lease, operation_id=f"race:{frame.frame_id}", usage={"total_tokens": demand},
+                        kind="MODEL", resume_generation=frame.resume_generation, frame_id=frame.frame_id)
+                        for frame in frames), return_exceptions=True)
+                    winners = [frame for frame, outcome in zip(frames, reserved) if isinstance(outcome, dict)]
+                    assert len(winners) == 1
+                    assert any("LOOP_BUDGET_EXHAUSTED:total_tokens" in str(e) for e in reserved if isinstance(e, Exception))
+                    winner, = winners
+                    await repo.settle_budget_operation(lease, operation_id=f"race:{winner.frame_id}", usage={},
+                        source="RELEASED_UNSENT", resume_generation=winner.resume_generation, frame_id=winner.frame_id)
+                    raced.extend(reserved)
+            return await original_start(lease, **kwargs)
+
+        repo.start_model_attempt = race_before_child
+    scope = await factory.create_run_scope("core_router", "调用 loop_a 和 loop_b，委派 reader 后回答", execution_policy=LOOP_POLICY_V2,
+        persist=False, budget=limit)
     try:
         result = await scope.execute()
         assert result.status.value == "SUCCEEDED", (result.error_code,result.safe_message)
@@ -113,6 +156,14 @@ async def test_handoff_child_result_and_budget_conservation(clean_database, tmp_
         assert delegation.observed and delegation.result["content"] == "child final"
         operations = image.root.budget_operations
         allocation = operations[delegation.envelope_id]
+        if shared:
+            assert image.root.budget_totals.get("max_total_tokens") == (30000 if limit else None)
+            assert image.root.budget_totals.get("max_cost_units") is None
+            assert len(raced) == (2 if limit else 0)
+            assert allocation["shared_tokens"] and "total_tokens" not in allocation["reserved"]
+            assert child.loop_policy["budget_strategy"] == "shared-root.v1"
+        else:
+            assert allocation["reserved"]["input_tokens"] and allocation["reserved"]["output_tokens"]
         child_ops = [o for o in operations.values() if o.get("delegation_id") == delegation.delegation_id]
         assert allocation["state"] == "RELEASED" and not allocation["unspent"]
         for dimension, amount in allocation["reserved"].items():
@@ -123,6 +174,9 @@ async def test_handoff_child_result_and_budget_conservation(clean_database, tmp_
             assert amount == sum(o["actual"].get(dimension,0) for o in operations.values()
                 if o["kind"] != "DELEGATION_ALLOCATION" and o["state"] == "SETTLED")
         assert len(tools[0].calls) == 1 and len(model.requests) == 4
+        if admission:
+            assert all(m.request_assessment["mode"] == "HEURISTIC" for m in image.models)
+            assert all(m.request_assessment["request_counting_policy"] == admission for m in image.models)
     finally:
         await scope.close(abort=True)
 
@@ -516,5 +570,132 @@ async def test_batch_atomic_protocol_and_runtime(clean_database, tmp_path):
         assert len([r for r in compact.requests if r["purpose"]=="COMPACTION"])==1
         evidence=await repo.read_agent_execution_evidence(scope.run_id)
         assert evidence["body"]["coverage"]=="COMPLETE",evidence["body"]["gaps"]
+    finally:
+        await scope.close(abort=True)
+
+
+@pytest.mark.asyncio
+async def test_v2_committed_overrun_is_mirrored_and_rehydrates(clean_database, tmp_path):
+    from core.runtime.budget import BudgetExceededError, BudgetUsage, RunBudget
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory, _rehydrated_budget
+
+    actual = BudgetUsage(input_tokens=11000, total_tokens=11000)
+    model = Provider([ModelAdapterResponse("final", actual_usage=actual, finish_reason="stop", tool_call_count=0)])
+    initial, repo, _, _ = await assembly(clean_database, tmp_path, [], context_model=model,
+        context_policy={"version": 2})
+    factory = CoordinatedRuntimeFactory(initial._router, initial._services, agent_registry=initial._agent_registry,
+        execution_repository=repo, shared_run_budget=True)
+    scope = await factory.create_run_scope("core_router", "public task", execution_policy=LOOP_POLICY_V2,
+        persist=False, budget=RunBudget(max_total_tokens=10000))
+    try:
+        result = await scope.execute()
+        image = await repo.load(scope.run_id)
+        assert result.status.value == "SUCCEEDED", result.error_code
+        assert image.root.budget_totals["max_total_tokens"] == 10000
+        row, = image.models
+        assert row.usage_evidence["total_tokens"] == 11000 and row.state == "COMPLETED"
+        operation, = image.root.budget_operations.values()
+        assert operation["source"] == "ACTUAL" and operation["actual"]["total_tokens"] == 11000
+        assert image.root.budget_consumed["total_tokens"] == 11000 and not any(image.root.budget_reserved.values())
+        for ledger in (scope.run_context.budget_ledger, _rehydrated_budget(image.root, scope.run_context)):
+            snap = ledger.snapshot()
+            assert snap.committed_usage.total_tokens == 11000
+            assert snap.active_reservation_count == snap.remaining.total_tokens == 0
+            with pytest.raises(BudgetExceededError):
+                ledger.reserve(BudgetUsage(total_tokens=1), reservation_type="model")
+        assert len(model.requests) == 1
+    finally:
+        await scope.close(abort=True)
+
+
+@pytest.mark.asyncio
+async def test_overrun_takeover_reuses_committed_model_and_delivers(clean_database, tmp_path, monkeypatch):
+    from datetime import UTC, datetime
+    from core.runtime.agent_loop.contracts import LoopSuspended
+    from core.runtime.budget import BudgetExceededError, BudgetUsage, RunBudget
+    from core.runtime.run_control import OwnershipLost
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+
+    model = Provider([ModelAdapterResponse("recovered final",
+        actual_usage=BudgetUsage(input_tokens=11000, total_tokens=11000),
+        finish_reason="stop", tool_call_count=0)])
+    initial, repo, _, _ = await assembly(clean_database, tmp_path, [], context_model=model,
+        context_policy={"version": 2})
+    factory = CoordinatedRuntimeFactory(initial._router, initial._services, agent_registry=initial._agent_registry,
+        execution_repository=repo, shared_run_budget=True)
+    scope = await factory.create_run_scope("core_router", "public task", execution_policy=LOOP_POLICY_V2,
+        persist=False, budget=RunBudget(max_total_tokens=10000))
+    ledger = scope.run_context.budget_ledger
+    original = ledger.commit
+
+    def suspend_before_mirror(*args, **kwargs):
+        if kwargs.get("durable_committed"):
+            assert ledger.snapshot().committed_usage.total_tokens == 0
+            raise LoopSuspended(next_recovery_at=datetime.now(UTC))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ledger, "commit", suspend_before_mirror)
+    try:
+        with pytest.raises(LoopSuspended):
+            await scope.execute()
+        old_lease = scope.run_context.durable_lease
+        before = await repo.load(scope.run_id)
+        row, = before.models
+        assert row.state == "COMPLETED" and before.root.budget_consumed["total_tokens"] == 11000
+    finally:
+        await scope.close(abort=True)
+    lease = await repo.run_control.claim(scope.run_id, "overrun-takeover")
+    recovered = await repo.prepare_recovery(lease)
+    await repo.prepare_recovery(lease)
+    with pytest.raises(OwnershipLost):
+        await repo.finish_model_attempt(old_lease, step_id=row.step_id,
+            attempt=row.attempt_number, model_attempt=row.model_attempt_number, state=row.state)
+    restored = await initial.create_rehydrated_run_scope(recovered, lease=lease)
+    try:
+        fresh = restored.run_context.budget_ledger
+        assert fresh.snapshot().committed_usage.total_tokens == 11000
+        with pytest.raises(BudgetExceededError):
+            fresh.reserve(BudgetUsage(total_tokens=1), reservation_type="model")
+        result = await restored.execute()
+        assert result.status.value == "SUCCEEDED", result.error_code
+    finally:
+        await restored.close(abort=True)
+    after = await repo.load(scope.run_id)
+    assert after.steps[0].typed_result_payload["content"] == "recovered final"
+    assert after.root.budget_operations == before.root.budget_operations
+    assert after.root.budget_consumed["total_tokens"] == 11000
+    assert len(after.models) == len(model.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_shared_durable_proven_unsent_releases_model_budget(clean_database, tmp_path):
+    from core.llm_engine import UsageDelta
+    from core.runtime.agent_loop.contracts import LoopPolicyV2
+    from core.runtime.model_invocation import ModelAdapterInvocationError
+    from core.runtime.model_routing import ModelFailureCategory
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+
+    def fail_before_send(_messages):
+        raise ModelAdapterInvocationError(ModelFailureCategory.TRANSIENT_PROVIDER_FAILURE,
+            provider_started=False, provider_responded=False, provider_usage=UsageDelta())
+
+    initial, repo, model, _ = await assembly(clean_database, tmp_path, [], context_model=Provider([fail_before_send]),
+        context_policy={"version": 2})
+    factory = CoordinatedRuntimeFactory(initial._router, initial._services, agent_registry=initial._agent_registry,
+        execution_repository=repo, shared_run_budget=True)
+    scope = await factory.create_run_scope("core_router", "public task", execution_policy=LOOP_POLICY_V2,
+        persist=False, loop_policy=LoopPolicyV2(max_retries=0))
+    try:
+        result = await scope.execute()
+        assert result.status.value == "FAILED"
+        image = await repo.load(scope.run_id)
+        attempt, = image.models
+        assert attempt.state == "UNKNOWN" and attempt.usage_evidence.get("total_tokens") is None
+        operation, = image.root.budget_operations.values()
+        assert operation["source"] == "RELEASED_UNSENT" and not operation["actual"]
+        assert not any(image.root.budget_reserved.values()) and not any(image.root.budget_consumed.values())
+        snapshot = scope.run_context.budget_ledger.snapshot()
+        assert snapshot.active_reservation_count == snapshot.committed_usage.model_calls == 0
+        assert len(model.requests) == 1
     finally:
         await scope.close(abort=True)

@@ -248,7 +248,7 @@ async def test_forged_persistent_annotation_cannot_initialize_root(clean_databas
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["allowed", "recover", "messages_tampered", "options_tampered", "started_tampered", "over_capacity"])
+@pytest.mark.parametrize("scenario", ["allowed", "recover", "shared_recover", "messages_tampered", "options_tampered", "started_tampered", "over_capacity"])
 async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_database, tmp_path, scenario):
     from core.runtime.agent_loop.execution_evidence import build_execution_evidence
     from core.runtime.model_invocation import ModelAdapterResponse
@@ -268,7 +268,8 @@ async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_d
     initial, repo, _, _ = await assembly(clean_database, tmp_path, [], context_model=model,
         context_policy={"version": 2}, model_profile=profile, max_tokens=4096)
     factory = CoordinatedRuntimeFactory(initial._router, initial._services, agent_registry=initial._agent_registry,
-        event_channel_capacity=256, execution_repository=repo, ordinary_request_counting_policy=ORDINARY_ESTIMATE)
+        event_channel_capacity=256, execution_repository=repo, ordinary_request_counting_policy=ORDINARY_ESTIMATE,
+        shared_run_budget=scenario == "shared_recover")
     if scenario in {"messages_tampered", "options_tampered"}:
         router = factory._router.model_invocation_router
         original = router.invoke
@@ -290,7 +291,7 @@ async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_d
             return await original_start(lease, **kwargs)
 
         repo.start_model_attempt = tampered_start
-    elif scenario == "recover":
+    elif scenario in {"recover", "shared_recover"}:
         from datetime import UTC, datetime
         from core.runtime.agent_loop.contracts import LoopSuspended
 
@@ -303,7 +304,7 @@ async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_d
     query = "证据" * 2750 if scenario == "over_capacity" else "public input"
     scope = await factory.create_run_scope("core_router", query, execution_policy=EXECUTION, persist=False)
     try:
-        if scenario == "recover":
+        if scenario in {"recover", "shared_recover"}:
             from core.runtime.recovery_coordinator import RecoveryCoordinator
 
             with pytest.raises(LoopSuspended):
@@ -327,7 +328,10 @@ async def test_trusted_ordinary_estimate_reaches_persisted_model_attempt(clean_d
             result = await scope.execute()
         image = await repo.load(scope.run_id)
         assert image.root.resume_input["agent_loop"]["pinned_config"][ORDINARY_POLICY_KEY] == ORDINARY_ESTIMATE
-        if scenario in {"allowed", "recover"}:
+        if scenario == "shared_recover":
+            assert image.root.resume_input["agent_loop"]["loop_policy"]["budget_strategy"] == "shared-root.v1"
+            assert image.root.budget_totals.get("max_total_tokens") is None
+        if scenario in {"allowed", "recover", "shared_recover"}:
             assert result.status.value == "SUCCEEDED"
             assert len(model.requests) == 1 and len(image.models) == 1
             attempt = image.models[0]

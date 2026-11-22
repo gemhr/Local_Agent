@@ -54,18 +54,32 @@ class LoopPolicyV2(LoopPolicyV1):
     max_child_depth: int = 1
     max_delegations: int = 2
     max_active_children: int = 1
-    total_tokens: int = 65536
-    cost_units: int = 65536
+    total_tokens: int | None = 65536
+    cost_units: int | None = 65536
+    budget_strategy: str | None = None
 
     def __post_init__(self):
         super().__post_init__()
         for key, ceiling in (("max_batch_size", 4), ("max_batch_concurrency", 2),
                              ("max_child_depth", 1), ("max_delegations", 2), ("max_active_children", 1),
                              ("total_tokens", 1000000), ("cost_units", 1000000)):
+            if key in {"total_tokens", "cost_units"} and self.budget_strategy == "shared-root.v1":
+                value = getattr(self, key)
+                if value is None or type(value) is int and value >= 0:
+                    continue
+                raise ValueError(f"invalid loop limit: {key}")
             if type(getattr(self, key)) is not int or not 1 <= getattr(self, key) <= ceiling:
                 raise ValueError(f"invalid loop limit: {key}")
         if self.failure_mode not in {"FAIL_FAST", "BEST_EFFORT"}:
             raise ValueError("invalid batch failure mode")
+        if self.budget_strategy not in {None, "shared-root.v1"}:
+            raise ValueError("invalid budget strategy")
+
+    def to_dict(self):
+        policy = super().to_dict()
+        if self.budget_strategy is None:
+            policy.pop("budget_strategy")
+        return policy
 
 
 @dataclass(frozen=True)

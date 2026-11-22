@@ -372,7 +372,7 @@ async def test_multi_step_plan_runs_and_delivers_unique_final() -> None:
     services = make_services(span_recorder=recorder)
     router = RecordingRouter(delegated_json(multi_step=True))
     scope = await _test_runtime_factory(router, services).create_run_scope(
-        "core_router", "coordinate two professional reviews"
+        "core_router", "coordinate two professional reviews", persist=False
     )
 
     result = await scope.execute()

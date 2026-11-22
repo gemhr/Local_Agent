@@ -76,6 +76,26 @@ class SynthesisAgentAdapter:
     def __init__(self, router) -> None:
         self._router = router
 
+    def budget_protection(self, step, instruction, run_context):
+        from core.runtime.budget import SHARED_TOKEN_DIMENSIONS, SynthesisBudget
+        from core.runtime.model_selection import model_request_usage
+
+        snapshot = run_context.budget_ledger.snapshot()
+        dimensions = tuple(d for d in SHARED_TOKEN_DIMENSIONS if snapshot.remaining_limit(d) is not None)
+        if not dimensions:
+            return None
+        router = self._router
+        cap = min(max(1, router.max_tokens // 2), max(p.max_output_tokens for p in router.model_profiles))
+        items = self._build_context_items(instruction, ())
+        _, context, messages = router._prepare_synthesis_context(
+            run_context.run_id, step.preferred_agent, items, cap)
+        _, profile, _ = router._select_model_decision(step.preferred_agent, instruction, messages,
+            context.model_requirements, capability_requirements=step.capability_requirements,
+            request_output_tokens=cap)
+        # 依赖正文尚未知。这里只保护已知输入与短输出，汇总前再检查完整请求。
+        usage = model_request_usage(profile, router._estimate_messages_tokens(messages), cap)
+        return SynthesisBudget(step.step_id, cap, {d: getattr(usage, d) for d in dimensions})
+
     def execute(
         self,
         request: AgentExecutionRequest,

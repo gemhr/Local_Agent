@@ -21,6 +21,7 @@ from core.persistence.models import RuntimeLoopActionRow
 from core.persistence.sync_bridge import SyncPersistenceBridge
 from core.runtime.agent_loop.contracts import LoopSuspended, HANDOFF_FUNCTION
 from core.runtime.agent_loop.adaptive_stop import enforce_final_only
+from core.runtime.budget import BudgetUsage, RunBudget
 from core.runtime.memory_scope import MemoryAccessContext
 from core.runtime.model_invocation import ModelAdapterResponse, NativeToolCall
 from core.runtime.model_selection import ModelProfile, ModelProfileId, ModelCostProfile
@@ -53,7 +54,8 @@ class InvestigationProvider:
             uncertainties=["缺少解析原始日志，不能确认根因"] if insufficient else [], recommended_checks=["核对解析能力"], recommended_owner_role="TOOL_MAINTAINER")
 
     def invoke_request(self, messages, *, generation_options, run_context, max_tokens):
-        self.requests.append(dict(messages=deepcopy(messages), options=deepcopy(generation_options), iteration=run_context.loop_iteration_no))
+        self.requests.append(dict(messages=deepcopy(messages), options=deepcopy(generation_options),
+            iteration=run_context.loop_iteration_no, max_tokens=max_tokens))
         n = len(self.requests)
         by_kind = {e["kind"]: e["evidence_id"] for e in self.execution.evidence_manifest}
         if generation_options.get("tool_choice") == "none":
@@ -159,7 +161,10 @@ async def test_continue_then_coverage_stops_extra_investigation(clean_database, 
     assert frame.adaptive_decision["reason"] == "COVERAGE_SUFFICIENT" and frame.adaptive_decision["effective_iteration"] == 4
     assert frame.final_delivery_receipt["status"] == "DELIVERED"
     snap = image_b.context_snapshots[-1]
-    assert snap.payload["options"] == {"tools": [], "tool_choice": "none"}
+    assert snap.payload["options"] == {
+        "tools": [], "tool_choice": "none", "response_format": {"type": "json_object"},
+    }
+    assert adaptive.model.requests[-1]["options"] == snap.payload["options"]
     assert snap.payload["adaptive_decision"] == frame.adaptive_decision
     for q, image in ((ordinary, image_a), (adaptive, image_b)):
         report = validate_report(final_content(image), q.row, q.incident, q.execution, image, await actions(q))
@@ -297,3 +302,246 @@ async def test_deadline_and_invalid_sources_do_not_become_success(clean_database
         await scope.close(abort=True)
     assert result.status.value == "FAILED" and result.error_code == "DEADLINE_EXCEEDED"
     assert len(q.model.requests) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("total", [8500, 4400])
+async def test_shared_ci_tokens_preserve_short_final_attempt(clean_database, tmp_path, total):
+    from core.runtime.budget import RunBudget
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+
+    q = await build(clean_database, tmp_path, limited=True)
+    factory = CoordinatedRuntimeFactory(q.factory._router, q.factory._services,
+        agent_registry=q.factory._agent_registry, execution_repository=q.repo, shared_run_budget=True)
+    scope = await factory.create_run_scope(q.row.agent_id, "调查授权 CI 执行失败", run_id=q.row.run_id,
+        session_id=q.row.session_id, memory_access_context=q.access, timeout_seconds=180, persist=True,
+        budget=RunBudget(max_total_tokens=total))
+    result, image = await run(q, scope)
+    if total == 4400:
+        assert result.status.value == "FAILED" and result.error_code == "LOOP_EVIDENCE_INSUFFICIENT"
+        assert not q.model.requests and not image.models
+        return
+    assert result.status.value == "SUCCEEDED", (result.error_code, image.root.budget_consumed,
+        [(row.state, row.safe_error, row.request_assessment.get("input_bound")) for row in image.models],
+        image.loop_frames[0].adaptive_decision)
+    frame, = image.loop_frames
+    assert frame.adaptive_decision["output_reserve"] == 256
+    assert frame.adaptive_decision["reason"] == "BUDGET_RESERVE"
+    assert image.context_snapshots[-1].payload["output_reserve"] == 256
+    assert image.models[-1].request_assessment["output_reserve"] == 256
+    assert q.model.requests[-1]["options"]["tool_choice"] == "none"
+    assert len(q.model.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("budget", "actual_input", "actual_output", "expected_calls"), [
+    pytest.param(RunBudget(max_output_tokens=700), 0, 300, 2, id="output"),
+    pytest.param(RunBudget(max_input_tokens=8000), 6000, 300, 1, id="input"),
+    pytest.param(RunBudget(max_cost_units=2), 0, 300, 2, id="cost"),
+    pytest.param(RunBudget(max_total_tokens=20000, max_input_tokens=20000,
+                           max_output_tokens=700, max_cost_units=4), 0, 300, 2, id="combined"),
+    pytest.param(RunBudget(max_output_tokens=700), 0, 750, 1, id="actual-overrun"),
+])
+async def test_shared_ci_final_checks_every_cumulative_limit(
+        clean_database, tmp_path, monkeypatch, budget, actual_input, actual_output, expected_calls):
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+
+    q = await build(clean_database, tmp_path, limited=True)
+    invoke = q.model.invoke_request
+
+    def invoke_with_usage(*args, **kwargs):
+        result = invoke(*args, **kwargs)
+        if len(q.model.requests) == 1:
+            usage = BudgetUsage(input_tokens=actual_input, output_tokens=actual_output,
+                                total_tokens=actual_input + actual_output)
+        else:
+            usage = BudgetUsage(output_tokens=200, total_tokens=200)
+        return replace(result, actual_usage=usage)
+
+    monkeypatch.setattr(q.model, "invoke_request", invoke_with_usage)
+    factory = CoordinatedRuntimeFactory(q.factory._router, q.factory._services,
+        agent_registry=q.factory._agent_registry, execution_repository=q.repo, shared_run_budget=True)
+    scope = await factory.create_run_scope(q.row.agent_id, "调查授权 CI 执行失败", run_id=q.row.run_id,
+        session_id=q.row.session_id, memory_access_context=q.access, timeout_seconds=180,
+        persist=True, budget=budget)
+    result, image = await run(q, scope)
+    assert len(q.model.requests) == expected_calls, (result.error_code, image.loop_frames[0].adaptive_decision)
+    assert image.root.budget_consumed["output_tokens"] == actual_output + (200 if expected_calls == 2 else 0)
+    if expected_calls == 1:
+        assert result.status.value == "FAILED"
+        assert result.error_code in {"BUDGET_EXHAUSTED", "LOOP_EVIDENCE_INSUFFICIENT"}
+        return
+    assert result.status.value == "SUCCEEDED", result.error_code
+    assert image.loop_frames[0].adaptive_decision["output_reserve"] == 256
+    assert image.context_snapshots[-1].payload["output_reserve"] == 256
+    assert image.models[-1].request_assessment["output_reserve"] == 256
+    assert [r["max_tokens"] for r in q.model.requests] == [512, 256]
+    assert json.loads(final_content(image))["diagnosis_status"] == "INSUFFICIENT_EVIDENCE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", ["single", "ineligible-cheap", "final-only", "small-window"])
+async def test_shared_ci_short_final_ignores_ineligible_cheap_profile(clean_database, tmp_path, extra):
+    from core.runtime.model_invocation import ModelAdapterResolver
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+
+    q = await build(clean_database, tmp_path, limited=True)
+    router = q.factory._router
+    cheap_model = None
+    if extra != "single":
+        working, = router.model_profiles
+        cheap_id = ModelProfileId.REMOTE_ADVANCED
+        cheap = replace(working, profile_id=cheap_id,
+                        max_output_tokens={"ineligible-cheap": 128, "final-only": 256, "small-window": 512}[extra],
+                        context_window=1024 if extra == "small-window" else working.context_window,
+                        model_identity="ci-cheap", cost_profile=ModelCostProfile(cheap_id, False))
+        cheap_model = InvestigationProvider(q.execution, q.incident.incident_id, limited=True)
+        router.model_profiles = (working, cheap)
+        router.model_adapter_resolver = ModelAdapterResolver({
+            working.profile_id: q.model, cheap.profile_id: cheap_model,
+        })
+    factory = CoordinatedRuntimeFactory(router, q.factory._services,
+        agent_registry=q.factory._agent_registry, execution_repository=q.repo, shared_run_budget=True)
+    cost_limit = 1 if extra == "final-only" else 2
+    scope = await factory.create_run_scope(q.row.agent_id, "调查授权 CI 执行失败", run_id=q.row.run_id,
+        session_id=q.row.session_id, memory_access_context=q.access, timeout_seconds=180,
+        persist=True, budget=RunBudget(max_cost_units=cost_limit))
+    result, image = await run(q, scope)
+    caps = [request["max_tokens"] for request in q.model.requests]
+    assert result.status.value == "SUCCEEDED", (result.error_code, caps)
+    if extra == "final-only":
+        assert caps == [512] and [request["max_tokens"] for request in cheap_model.requests] == [256]
+        assert image.models[-1].profile_identity == "ci-cheap"
+    else:
+        assert caps == [512, 256]
+    if cheap_model is not None and extra != "final-only":
+        assert not cheap_model.requests
+    assert image.root.budget_consumed["cost_units"] == cost_limit and not any(image.root.budget_reserved.values())
+    assert len(image.models) == 2
+    frame, = image.loop_frames
+    assert frame.committed_observation_cursor == 1
+    assert frame.adaptive_decision["output_reserve"] == image.context_snapshots[-1].payload["output_reserve"] == 256
+    assert image.models[-1].request_assessment["output_reserve"] == 256
+    assert frame.final_delivery_receipt["status"] == "DELIVERED"
+    report = validate_report(final_content(image), q.row, q.incident, q.execution, image, await actions(q))
+    assert report["diagnosis_status"] == "INSUFFICIENT_EVIDENCE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["strict", "ordinary", "no-final"])
+async def test_shared_ci_final_respects_effective_request_admission(clean_database, tmp_path, mode):
+    from core.runtime.request_counting_admission import ORDINARY_ESTIMATE, ORDINARY_POLICY_KEY
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+
+    q = await build(clean_database, tmp_path, limited=True)
+    router = q.factory._router
+    profile, = router.model_profiles
+    if mode == "no-final":
+        # 只有附有调查证据的 JSON 终稿会超过该 Provider 的窗口。
+        def count_request_tokens(messages, options, _output):
+            if options.get("response_format") and any(msg["role"] == "tool" for msg in messages):
+                return profile.context_window
+            return 3000
+
+        q.model.count_request_tokens = count_request_tokens
+        router.model_profiles = (replace(profile, request_counting_mode="EXACT", request_counting_version="synthetic-exact.v1"),)
+    else:
+        router.model_profiles = (replace(profile, request_counting_mode="HEURISTIC"),)
+    factory = CoordinatedRuntimeFactory(router, q.factory._services,
+        agent_registry=q.factory._agent_registry, execution_repository=q.repo, shared_run_budget=True,
+        ordinary_request_counting_policy=ORDINARY_ESTIMATE if mode == "ordinary" else None)
+    scope = await factory.create_run_scope(q.row.agent_id, "调查授权 CI 执行失败", run_id=q.row.run_id,
+        session_id=q.row.session_id, memory_access_context=q.access, timeout_seconds=180, persist=True,
+        budget=RunBudget(max_cost_units=2))
+    result, image = await run(q, scope)
+    caps = [r["max_tokens"] for r in q.model.requests]
+    frame, = image.loop_frames
+    if mode == "strict":
+        assert caps == [] and not image.models
+        assert result.status.value == "FAILED" and result.error_code == "CONTEXT_BUDGET_UNCERTAIN"
+    elif mode == "no-final":
+        assert caps == [512] and len(image.models) == 1
+        assert frame.committed_observation_cursor == 1 and frame.final_delivery_receipt is None
+        assert result.status.value == "FAILED" and result.error_code == "LOOP_EVIDENCE_INSUFFICIENT"
+    else:
+        assert caps == [512, 256] and result.status.value == "SUCCEEDED", (result.error_code, caps)
+        assert frame.final_delivery_receipt["status"] == "DELIVERED"
+        for row in image.models:
+            assert row.request_assessment["admissible"] is False
+            assert row.request_assessment[ORDINARY_POLICY_KEY] == ORDINARY_ESTIMATE
+        assert image.context_snapshots[-1].validation["ordinary_admission"] == [image.models[-1].request_assessment]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("cost_limit", "primary_cost", "primary_caps", "backup_caps"), [
+    pytest.param(2, 3, [], [512, 256], id="initial-backup-affordable"),
+    pytest.param(2, 2, [], [], id="initial-would-exhaust-final"),
+    pytest.param(3, 2, [512], [256], id="cost-3"),
+    pytest.param(4, 2, [512, 256], [], id="cost-4"),
+    pytest.param(5, 2, [512, 512], [256], id="can-continue"),
+    pytest.param(5, 3, [512], [512, 256], id="backup-affordable"),
+    pytest.param(None, 2, [512, 512], [], id="no-cumulative-limit"),
+])
+async def test_shared_ci_reserves_final_by_actual_route_priority(
+        clean_database, tmp_path, cost_limit, primary_cost, primary_caps, backup_caps):
+    from core.runtime.events import RuntimeEventType
+    from core.runtime.model_invocation import ModelAdapterResolver
+    from core.runtime.runtime_factory import CoordinatedRuntimeFactory
+
+    q = await build(clean_database, tmp_path, limited=True)
+    router = q.factory._router
+    working, = router.model_profiles
+    primary = replace(working, cost_profile=replace(working.cost_profile, fixed_call_cost_units=primary_cost))
+    backup_id = ModelProfileId.REMOTE_BACKUP
+    backup = replace(working, profile_id=backup_id, model_identity="ci-route-backup",
+                     cost_profile=replace(working.cost_profile, profile_id=backup_id))
+
+    class RouteProvider(InvestigationProvider):
+        def invoke_request(self, messages, *, generation_options, run_context, max_tokens):
+            if run_context.loop_iteration_no == 2 and generation_options.get("tool_choice") != "none":
+                self.requests.append({"max_tokens": max_tokens})
+                return calls(("second-context", TOOL_NAMES[0], {}))
+            return super().invoke_request(messages, generation_options=generation_options,
+                                          run_context=run_context, max_tokens=max_tokens)
+
+    primary_model = RouteProvider(q.execution, q.incident.incident_id, limited=True)
+    backup_model = RouteProvider(q.execution, q.incident.incident_id, limited=True)
+    router.model_profiles = (primary, backup)
+    router.model_adapter_resolver = ModelAdapterResolver({
+        primary.profile_id: primary_model, backup.profile_id: backup_model,
+    })
+    factory = CoordinatedRuntimeFactory(router, q.factory._services,
+        agent_registry=q.factory._agent_registry, execution_repository=q.repo, shared_run_budget=True)
+    budget = RunBudget(max_cost_units=cost_limit) if cost_limit is not None else RunBudget(max_model_calls=2)
+    scope = await factory.create_run_scope(q.row.agent_id, "调查授权 CI 执行失败", run_id=q.row.run_id,
+        session_id=q.row.session_id, memory_access_context=q.access, timeout_seconds=180,
+        persist=True, budget=budget)
+    result, image = await run(q, scope)
+    trace = [[r["max_tokens"] for r in m.requests] for m in (primary_model, backup_model)]
+    frame, = image.loop_frames
+    notes = await factory.services.event_journal.read_after(q.row.run_id, 0, 1000)
+    output_count = sum(note.event_type is RuntimeEventType.OUTPUT_DELTA for note in notes)
+    assert not any(image.root.budget_reserved.values())
+    if not primary_caps and not backup_caps:
+        assert result.status.value == "FAILED" and result.error_code == "LOOP_EVIDENCE_INSUFFICIENT"
+        assert trace == [[], []]
+        assert not image.models and not image.context_snapshots
+        assert not any(image.root.budget_consumed.values()) and not image.root.budget_operations
+        assert frame.committed_observation_cursor == 0
+        assert frame.adaptive_decision is None and frame.final_delivery_receipt is None
+        assert output_count == 0
+        return
+
+    assert result.status.value == "SUCCEEDED", (result.error_code, trace)
+    assert trace == [primary_caps, backup_caps]
+    assert len(image.models) == len(primary_caps) + len(backup_caps)
+    assert image.root.budget_consumed["cost_units"] == primary_cost * len(primary_caps) + len(backup_caps)
+    assert frame.committed_observation_cursor == len(image.models) - 1
+    expected_cap = 512 if cost_limit is None else 256
+    assert frame.adaptive_decision.get("output_reserve") == (None if cost_limit is None else expected_cap)
+    assert image.context_snapshots[-1].payload["output_reserve"] == expected_cap
+    assert image.models[-1].request_assessment["output_reserve"] == expected_cap
+    assert frame.final_delivery_receipt["status"] == "DELIVERED"
+    assert output_count == 1
+    report = validate_report(final_content(image), q.row, q.incident, q.execution, image, await actions(q))
+    assert report["diagnosis_status"] == "INSUFFICIENT_EVIDENCE"

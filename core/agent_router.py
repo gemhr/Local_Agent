@@ -1458,6 +1458,9 @@ class AgentRouter:
         capability_requirements: TaskCapabilityRequirements | None = None,
         business_definition=None,
         available_profiles=None,
+        request_output_tokens=None,
+        candidate_input_tokens=None,
+        step_id=None,
     ):
         """返回 Selection Decision、首次 Profile 与最终上下文需求。"""
         estimated = self._estimate_messages_tokens(messages)
@@ -1478,7 +1481,8 @@ class AgentRouter:
             )
             if not available_profiles:
                 raise ValueError("Agent 引用了不可用的 Model profile")
-        decision = self.model_selection_policy.select(ModelSelectionRequest(agent_id, capabilities, requirements, ModelPreference.AUTO, available_profiles, run_context.budget_ledger.snapshot() if run_context is not None and run_context.budget_ledger is not None else None))
+        decision = self.model_selection_policy.select(ModelSelectionRequest(agent_id, capabilities, requirements, ModelPreference.AUTO, available_profiles, run_context.budget_ledger.snapshot(getattr(run_context, "delegation_id", None), step_id=step_id) if run_context is not None and run_context.budget_ledger is not None else None,
+            request_output_tokens=request_output_tokens, candidate_input_tokens=candidate_input_tokens))
         profile = next(profile for profile in self.model_profiles if profile.profile_id == decision.selected_profile)
         final_required = self.model_selection_policy.required_context_window(requirements.minimum_context_window)
         if profile.context_window < final_required:
@@ -1508,6 +1512,7 @@ class AgentRouter:
             run_context,
             capability_requirements,
             business_definition,
+            request_output_tokens=self.max_tokens,
         )
         profile = next(
             profile
@@ -2736,6 +2741,8 @@ class AgentRouter:
             run_context,
             capability_requirements,
             business_definition,
+            request_output_tokens=max_tokens,
+            step_id=getattr(event_emitter, "step_id", None),
         )
         final_budget = self.context_builder.prepare_final_provider_messages(
             messages,
@@ -2765,8 +2772,9 @@ class AgentRouter:
             context_requirements=requirements,
             profiles=self.model_profiles,
             preference=ModelPreference.AUTO,
-            budget_snapshot=run_context.budget_ledger.snapshot(),
+            budget_snapshot=run_context.budget_ledger.snapshot(step_id=getattr(event_emitter, "step_id", None)),
             breaker_snapshots=breaker_snapshots,
+            request_output_tokens=max_tokens,
         )
         invocation_evidence: dict[str, object] = {
             "estimated_input_tokens": final_budget.estimated_input_tokens,
@@ -2933,20 +2941,22 @@ class AgentRouter:
         final_output_sink=None,
     ) -> str:
         """按已绑定 source/trust 的上下文调用统一模型合同，不经过 Tool planner。"""
-        secured_items = self._items_with_canonical_security(context_items)
-        context_result = self.context_builder.build(
-            ContextBuildRequest(
-                run_id=run_context.run_id,
-                agent_id=agent_id,
-                items=secured_items,
-                max_input_tokens=self.model_context_window,
-                reserved_output_tokens=self.max_tokens,
-            )
-        )
-        messages = self.context_builder.bind_messages(
-            context_result.included_items,
-            separate_data_messages=True,
-        )
+        protection = run_context.budget_ledger.synthesis_budget if run_context.budget_ledger is not None else None
+        protected = protection is not None and protection.step_id == getattr(event_emitter, "step_id", None)
+        output_limit = protection.output_cap if protected else self.max_tokens
+        secured_items, context_result, messages = self._prepare_synthesis_context(
+            run_context.run_id, agent_id, context_items, output_limit)
+        requirements = context_result.model_requirements
+        if not protected and run_context.budget_ledger is not None:
+            budget = run_context.budget_ledger.snapshot()
+            if budget.run_budget.max_total_tokens is not None:
+                available_output = budget.remaining.total_tokens - self._estimate_messages_tokens(messages)
+                if max(1, output_limit // 2) <= available_output < output_limit:
+                    requirements = replace(requirements,
+                        minimum_context_window=requirements.minimum_context_window - output_limit + available_output,
+                        raw_minimum_context_window=(requirements.raw_minimum_context_window - output_limit + available_output
+                            if requirements.raw_minimum_context_window else 0))
+                    output_limit = available_output
         synthesis_system = next(
             (
                 item.content
@@ -2959,10 +2969,10 @@ class AgentRouter:
             agent_id=agent_id,
             user_query=user_query,
             messages=messages,
-            context_requirements=context_result.model_requirements,
+            context_requirements=requirements,
             run_context=run_context,
             capability_requirements=capability_requirements,
-            max_tokens=self.max_tokens,
+            max_tokens=output_limit,
             event_emitter=event_emitter,
             fault_controller=fault_controller,
             prompt_identity=build_prompt_identity(
@@ -2972,6 +2982,15 @@ class AgentRouter:
             final_output_sink=final_output_sink,
         )
         return invocation_result.output
+
+    def _prepare_synthesis_context(self, run_id, agent_id, items, output_limit):
+        secured_items = self._items_with_canonical_security(items)
+        context_result = self.context_builder.build(ContextBuildRequest(
+            run_id=run_id, agent_id=agent_id, items=secured_items,
+            max_input_tokens=self.model_context_window, reserved_output_tokens=output_limit,
+        ))
+        messages = self.context_builder.bind_messages(context_result.included_items, separate_data_messages=True)
+        return secured_items, context_result, messages
 
     def complete_planning_decision(
         self,

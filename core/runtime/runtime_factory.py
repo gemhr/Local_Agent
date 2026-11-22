@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import math
 import time
@@ -113,13 +113,18 @@ def _rehydrated_budget(root: object, context) -> BudgetLedger:
     budget = RunBudget(**limits)
     committed = _usage_from_mapping(getattr(root, "budget_consumed", {}))
     reserved = _usage_from_mapping(getattr(root, "budget_reserved", {}))
-    return BudgetLedger.from_durable(
+    ledger = BudgetLedger.from_durable(
         budget,
         committed_usage=committed,
         reserved_usage=reserved,
         budget_operations=getattr(root, "budget_operations", {}),
         deadline_remaining=context.remaining_seconds,
     )
+    pin = (getattr(root, "resume_input", None) or {}).get("synthesis_budget")
+    if pin is not None:
+        from core.runtime.budget import SynthesisBudget
+        ledger.synthesis_budget = SynthesisBudget(**pin)
+    return ledger
 
 
 def _rehydrate_agent_state(
@@ -611,6 +616,7 @@ class CoordinatedRuntimeFactory:
         "_agent_registry",
         "_request_counting_exception",
         "_ordinary_request_counting_policy",
+        "_shared_run_budget",
     )
 
     def __init__(
@@ -628,6 +634,7 @@ class CoordinatedRuntimeFactory:
         execution_repository=None,
         request_counting_exception=None,
         ordinary_request_counting_policy=None,
+        shared_run_budget: bool = False,
     ) -> None:
         if not isinstance(services, ApplicationRuntimeServices):
             raise TypeError("services must be ApplicationRuntimeServices")
@@ -681,6 +688,7 @@ class CoordinatedRuntimeFactory:
         if ordinary_request_counting_policy not in (None, ORDINARY_ESTIMATE):
             raise ValueError("CONTEXT_ADMISSION_POLICY_INVALID")
         self._ordinary_request_counting_policy = ordinary_request_counting_policy
+        self._shared_run_budget = shared_run_budget
         self._request_counting_exception = request_counting_exception
         if request_counting_exception is not None:
             from core.runtime.request_counting_admission import TrustedException, AGENT, LIMITS
@@ -834,8 +842,9 @@ class CoordinatedRuntimeFactory:
         if getattr(lease, "run_id", run_id) != run_id:
             raise ValueError("recovery lease run_id mismatch")
         is_loop = getattr(root, "execution_policy", "fixed-plan.v1") in {LOOP_POLICY, LOOP_POLICY_V2}
-        if (is_loop or root.resume_input.get("adaptive_route") is not None) and query is not None:
-            raise ValueError("Loop recovery cannot override frozen input")
+        if (is_loop or root.resume_input.get("adaptive_route") is not None
+                or "synthesis_budget" in root.resume_input) and query is not None:
+            raise ValueError("Recovery cannot override frozen input")
         payload = getattr(root, "plan_payload", None)
         plan = plan_from_payload(payload)
         expected_fingerprint = getattr(root, "plan_fingerprint", None)
@@ -1048,6 +1057,7 @@ class CoordinatedRuntimeFactory:
             raise ValueError("CI_STATUS_TRUSTED_BINDING_REQUIRED")
         if selected_policy not in {"fixed-plan.v1", LOOP_POLICY, LOOP_POLICY_V2}:
             raise ValueError("unsupported execution policy")
+        explicit_budget, explicit_loop_policy = budget, loop_policy
         if selected_policy in {LOOP_POLICY, LOOP_POLICY_V2}:
             if self._agent_registry.resolve(agent_id).workflow is not None:
                 raise ValueError("Loop policy requires a single Agent registration")
@@ -1061,6 +1071,8 @@ class CoordinatedRuntimeFactory:
             if selected_policy == LOOP_POLICY_V2 and not isinstance(loop_policy, LoopPolicyV2):
                 raise ValueError("v2 requires LoopPolicyV2")
             if rehydrated_root is None:
+                if getattr(loop_policy, "budget_strategy", None) is not None:
+                    raise ValueError("共享预算必须由 Factory 选择")
                 budget_values = {name: getattr(budget or RunBudget(), name) for name in RunBudget.__dataclass_fields__}
                 for name in ("max_model_calls", "max_tool_calls", "max_retries", "max_elapsed_seconds"):
                     cap = getattr(loop_policy, name)
@@ -1161,6 +1173,18 @@ class CoordinatedRuntimeFactory:
                 run_context.attach_execution_repository(repository)
             from core.persistence.repositories.agent_quality import AgentQualityReceiptRepository
             quality_receipt = await AgentQualityReceiptRepository(repository.database).read(run_context.run_id) if repository else None
+            run_context.enable_synthesis_budget = (
+                self._shared_run_budget and rehydrated_root is None and selected_policy == "fixed-plan.v1"
+                and quality_receipt is None and adaptive_route is None and explicit_budget is not None
+            )
+            if (self._shared_run_budget and rehydrated_root is None and selected_policy == LOOP_POLICY_V2
+                    and quality_receipt is None and not run_context.loop_correlation):
+                explicit = explicit_budget or RunBudget()
+                if explicit_loop_policy is None:
+                    budget = replace(budget, max_total_tokens=explicit.max_total_tokens, max_cost_units=explicit.max_cost_units)
+                loop_policy = replace(loop_policy, budget_strategy="shared-root.v1",
+                    total_tokens=budget.max_total_tokens, cost_units=budget.max_cost_units)
+                run_context.loop_policy = loop_policy
             frozen_effect = ((rehydrated_root.resume_input.get("agent_loop") or {}).get("memory_effect_policy")
                              if rehydrated_root is not None else
                              quality_receipt.execution_manifest.get("memory_effect_policy") if quality_receipt else None)
@@ -1383,6 +1407,8 @@ class CoordinatedRuntimeFactory:
                 rehydrated_gate = None
                 rehydrated_driver = None
                 if rehydrated_root is not None:
+                    if ledger.synthesis_budget is not None:
+                        coordinator._planning_request = PlanningRequest(agent_id, query)
                     rehydrated_store = StepResultStore(
                         static_plan,
                         run_id=run_context.run_id,

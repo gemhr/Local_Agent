@@ -1236,6 +1236,16 @@ class RunCoordinator:
         )
         self.run_context.raise_if_inactive()
         self._freeze_dynamic_plan(resolved)
+        if getattr(self.run_context, "enable_synthesis_budget", False):
+            from core.runtime.synthesis import SynthesisAgentAdapter
+
+            for step in resolved.plan.steps:
+                if step.output_policy is OutputPolicy.FINAL_SYNTHESIS:
+                    binding = self._invocation_bindings.resolve_for_step(step.step_id, expected_agent_id=step.preferred_agent)
+                    driver = self._multi_agent_driver
+                    self.budget_ledger.synthesis_budget = SynthesisAgentAdapter(driver._router).budget_protection(
+                        step, driver._build_instruction(step, binding.instruction), self.run_context)
+                    break
         await self._initialize_durable_execution()
         self._update_memory_retrieval_injection(resolved, injection_reports)
         await self._emit_memory_retrieval_observation()
@@ -1309,6 +1319,9 @@ class RunCoordinator:
                 key: dict(value) for key, value in self.run_context.data.performer_binding_identities.items()
             },
         }
+        if self.budget_ledger.synthesis_budget is not None:
+            from dataclasses import asdict
+            resume_input["synthesis_budget"] = asdict(self.budget_ledger.synthesis_budget)
         if self.run_context.adaptive_route is not None:
             resume_input["adaptive_route"] = self.run_context.adaptive_route
         if getattr(self.run_context, "adaptive_evaluation_environment", None) is not None:
@@ -1690,6 +1703,7 @@ class RunCoordinator:
                 )
             finally:
                 await self._stop_executor_task(cleanup_error_codes)
+                self.budget_ledger.synthesis_budget = None
                 self._seal_step_result_store(cleanup_error_codes)
                 if not suspended:
                     if decision is None:
@@ -1929,13 +1943,16 @@ class RunCoordinator:
             finally:
                 if self._executor_task.done():
                     self._executor_task = None
-            if self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2} and report.was_cancelled:
+            if report.was_cancelled and (self.run_context.execution_policy in {LOOP_POLICY, LOOP_POLICY_V2}
+                                         or self.budget_ledger.synthesis_budget is not None):
                 # 事务内看见的 durable cancel 可早于续租线程的下一次轮询。
                 intent = await self._durable_repository.run_control.cancel_intent(self.run_context.run_id)
                 if intent is not None:
                     self.run_handle.cancellation_source.cancel(intent.reason, intent.created_at)
                 self.run_context.raise_if_inactive()
-                return self._infrastructure_decision("LOOP_CANCELLATION_UNCONFIRMED")
+                code = ("LOOP_CANCELLATION_UNCONFIRMED" if self.budget_ledger.synthesis_budget is None
+                        else "COORDINATOR_CANCELLATION_UNCONFIRMED")
+                return self._infrastructure_decision(code)
             # WP3: consume safe completion failures before the next Scheduler
             # success decision; raw StepResult never enters this report.
             decision = self._decision_from_batch_report(report)

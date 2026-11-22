@@ -113,6 +113,19 @@ class ModelProfile:
         """返回显式 Breaker Key；旧 Profile 使用固定、安全兼容键。"""
         return self.breaker_key or f"profile:{self.profile_id.value}"
 
+def model_request_usage(profile: ModelProfile, input_tokens: int, output_tokens: int, *, retries: int = 0) -> BudgetUsage:
+    """候选预检和实际预约使用同一份请求需求。"""
+    metadata = profile.cost_profile
+    cost = 1 if metadata is None else (
+        metadata.fixed_call_cost_units
+        + (input_tokens * metadata.input_cost_units_per_1k_tokens + 999) // 1000
+        + (output_tokens * metadata.output_cost_units_per_1k_tokens + 999) // 1000
+    )
+    return BudgetUsage(model_calls=1, remote_model_calls=int(profile.effective_is_remote),
+        input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=input_tokens + output_tokens,
+        cost_units=cost, retries=retries)
+
+
 @dataclass(frozen=True, slots=True)
 class ModelSelectionRequest:
     agent_id: str; capability_requirements: TaskCapabilityRequirements; context_requirements: ModelContextRequirements
@@ -120,6 +133,8 @@ class ModelSelectionRequest:
     budget_snapshot: BudgetSnapshot | None = None
     selection_objective: ModelSelectionObjective = ModelSelectionObjective.QUALITY_FIRST
     budget_insufficient_action: BudgetInsufficientAction = BudgetInsufficientAction.REJECT
+    request_output_tokens: int | None = None
+    candidate_input_tokens: dict[ModelProfileId, int] | None = None
 
 @dataclass(frozen=True, slots=True)
 class ModelSelectionDecision:
@@ -156,19 +171,25 @@ class ModelSelectionPolicy:
             profile_id = ModelProfileId.LOCAL_FAST if request.preference == ModelPreference.FORCE_LOCAL else ModelProfileId.REMOTE_ADVANCED
             profile = profiles.get(profile_id)
             if profile is None: raise ModelSelectionError("requested_profile_unavailable", requested_profile=profile_id)
-            missing = self._missing(profile, request.capability_requirements, final_required)
+            missing = self.request_constraint_failures(
+                profile, request.capability_requirements, final_required, request.request_output_tokens)
             if missing: raise ModelSelectionError("forced_profile_constraints_unmet", requested_profile=profile_id, missing_capabilities=tuple(missing), required_context_window=final_required, available_context_window=profile.context_window)
             self._require_metadata_if_needed(request, profile)
-            if request.budget_snapshot is not None and not BudgetPolicy.feasible(request.budget_snapshot, self._estimated_usage(profile, request.context_requirements.estimated_input_tokens)):
+            if request.budget_snapshot is not None and not BudgetPolicy.feasible(request.budget_snapshot, self._request_usage(request, profile)):
                 raise ModelSelectionError("forced_remote_budget_unavailable" if profile_id == ModelProfileId.REMOTE_ADVANCED else "forced_profile_budget_unavailable", requested_profile=profile_id)
             reason = ModelSelectionReason.USER_FORCED_LOCAL if profile_id == ModelProfileId.LOCAL_FAST else ModelSelectionReason.USER_FORCED_REMOTE
             return self._decision(profile_id, reason, request.context_requirements.was_truncated)
-        eligible = [p for p in profiles.values() if not self._missing(p, request.capability_requirements, final_required)]
+        eligible = [p for p in profiles.values()
+            if not self.request_constraint_failures(
+                p, request.capability_requirements, final_required, request.request_output_tokens)]
+        if not eligible:
+            raise ModelSelectionError("no_profile_satisfies_constraints", required_context_window=final_required,
+                available_context_window=max(p.context_window for p in profiles.values()))
         if request.selection_objective == ModelSelectionObjective.COST_FIRST:
             for profile in eligible: self._require_metadata_if_needed(request, profile)
         if request.budget_snapshot is not None:
             for profile in eligible: self._require_metadata_if_needed(request, profile)
-            feasible = [p for p in eligible if BudgetPolicy.feasible(request.budget_snapshot, self._estimated_usage(p, request.context_requirements.estimated_input_tokens))]
+            feasible = [p for p in eligible if BudgetPolicy.feasible(request.budget_snapshot, self._request_usage(request, p))]
             preferred_remote = profiles.get(ModelProfileId.REMOTE_ADVANCED) in eligible and self._requires_remote(request.capability_requirements, profiles.get(ModelProfileId.LOCAL_FAST), raw_required)
             if not feasible:
                 raise ModelSelectionError("budget_unavailable")
@@ -221,6 +242,13 @@ class ModelSelectionPolicy:
     def _latency(profile: ModelProfile) -> int:
         return profile.cost_profile.estimated_latency_ms if profile.cost_profile else profile.latency_tier
 
+    def _request_usage(self, request: ModelSelectionRequest, profile: ModelProfile) -> BudgetUsage:
+        input_tokens = (request.candidate_input_tokens or {}).get(
+            profile.profile_id, request.context_requirements.estimated_input_tokens)
+        if request.request_output_tokens is None:
+            return self._estimated_usage(profile, input_tokens)
+        return model_request_usage(profile, input_tokens, request.request_output_tokens)
+
     def _estimated_usage(self, profile: ModelProfile, input_tokens: int) -> BudgetUsage:
         output = profile.max_output_tokens
         return BudgetUsage(model_calls=1, remote_model_calls=int(profile.cost_profile.is_remote) if profile.cost_profile else 0, input_tokens=input_tokens, output_tokens=output, total_tokens=input_tokens + output, cost_units=self._cost(profile, input_tokens))
@@ -237,11 +265,14 @@ class ModelSelectionPolicy:
         """计算指定 Profile 可安全承载的最大总窗口。"""
         return floor(context_window / self.context_window_safety_ratio)
     @staticmethod
-    def _missing(profile: ModelProfile, req: TaskCapabilityRequirements, required_context: int) -> list[str]:
+    def request_constraint_failures(profile: ModelProfile, req: TaskCapabilityRequirements,
+                                    required_context: int, output_tokens: int | None) -> list[str]:
         missing = []
         if profile.context_window < required_context: missing.append("context_window")
         for attr, name in (("requires_tools", "tools"), ("requires_structured_output", "structured_output"), ("requires_code_reasoning", "code_reasoning"), ("requires_long_reasoning", "long_reasoning")):
             if getattr(req, attr) and not getattr(profile, f"supports_{name}"): missing.append(name)
+        if output_tokens is not None and output_tokens > profile.max_output_tokens:
+            missing.append("output_limit")
         return missing
     def _first_missing_reason(self, local: ModelProfile | None, req: TaskCapabilityRequirements, required_context: int) -> ModelSelectionReason:
         if local is None or local.context_window < required_context: return ModelSelectionReason.CONTEXT_WINDOW_REQUIRED

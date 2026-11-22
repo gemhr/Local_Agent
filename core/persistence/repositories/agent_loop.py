@@ -12,7 +12,7 @@ def identity(frame_id, iteration, suffix):
     return uuid5(NAMESPACE_URL, f"{frame_id}:{iteration}:{suffix}").hex
 
 
-async def consider_final_only(repo, lease, frame_id, *, resume_generation, row_version, reserve):
+async def consider_final_only(repo, lease, frame_id, *, resume_generation, row_version, reserve, output_reserve=None):
     from core.persistence.models import RuntimeAgentDelegationRow
     from core.runtime.agent_loop.adaptive_stop import stop_policy, evidence_identity
     from core.agent_platform.ci_evidence import investigation_evidence
@@ -43,6 +43,11 @@ async def consider_final_only(repo, lease, frame_id, *, resume_generation, row_v
         value = dict(version="final-only.v1", policy_digest=policy["digest"], observation_cursor=frame.committed_observation_cursor,
             evidence_digest=evidence_identity(frame, rows, seen), effective_iteration=frame.current_iteration + 1,
             allowed_actions="FINAL_ONLY", reason="COVERAGE_SUFFICIENT" if coverage else "BUDGET_RESERVE", insufficient=not coverage)
+        if output_reserve is not None:
+            if (frame.loop_policy.get("budget_strategy") != "shared-root.v1" or type(output_reserve) is not int
+                    or not 1 <= output_reserve <= frame.pinned_config["max_tokens"]):
+                raise RuntimeError("LOOP_ADAPTIVE_DECISION_INVALID")
+            value["output_reserve"] = output_reserve
         frame.adaptive_decision = {**value, "decision_id": digest(value)}
         repo._touch_loop(frame, lease)
         await session.flush()

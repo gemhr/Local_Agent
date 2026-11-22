@@ -124,10 +124,49 @@ def request_assessments(router, messages, options, reserve, capabilities, defini
     return assessments, effective
 
 
-def invoke_context_model(router, agent_id, messages, context, capabilities, reserve, emitter, options, definition):
-    """Router 的新 policy 分支；复用原 Selection/Routing/Invocation/预算 Owner。"""
+def eligible_context_assessments(router, assessments, context, capabilities, *, frame=None, purpose=None, target_percent=None):
+    """在预算比较之前检查一次具体请求的能力、容量和生效计量准入。"""
+    allowed = getattr(context, "loop_allowed_model_profiles", None)
+    profiles = {p.profile_id.value: p for p in router.model_profiles}
+    result = []
+    for assessment in assessments:
+        profile = profiles.get(assessment.profile_id)
+        if profile is None or (allowed is not None and assessment.profile_id not in allowed):
+            continue
+        if (target_percent is not None and assessment.required_window * 100 > assessment.window * target_percent
+                or router.model_selection_policy.request_constraint_failures(
+                    profile, capabilities, assessment.required_window, assessment.output_reserve)):
+            continue
+        if context_eligible(assessment, context, (profile,), frame=frame, purpose=purpose):
+            result.append(assessment)
+    return result
+
+
+def route_context_request(router, agent_id, messages, context, capabilities, reserve, definition,
+                          eligible, budget, *, include_breakers=False):
+    """对已通过请求准入的候选执行原选模与路由，不预约预算。"""
     from core.runtime.model_context import ModelContextRequirements
     from core.runtime.model_selection import ModelPreference
+
+    inputs = {a.profile_id: a.input_bound for a in eligible}
+    profiles = tuple(p for p in router.model_profiles if p.profile_id.value in inputs)
+    estimates = {p.profile_id: inputs[p.profile_id.value] for p in profiles}
+    input_bound = min(estimates.values())
+    requirements = ModelContextRequirements(input_bound, input_bound + reserve,
+        True, False, False, len(messages), 0, 0, False, True)
+    decision, _, requirements = router._select_model_decision(agent_id, "", messages, requirements,
+        context, capabilities, definition, available_profiles=profiles, request_output_tokens=reserve,
+        candidate_input_tokens=estimates)
+    breakers = (router.circuit_breaker_registry.snapshots(tuple(p.effective_breaker_key for p in profiles))
+                if include_breakers else None)
+    return router.model_routing_policy.route(selection_decision=decision, capability_requirements=capabilities,
+        context_requirements=requirements, profiles=profiles, preference=ModelPreference.AUTO,
+        budget_snapshot=budget, request_output_tokens=reserve, candidate_input_tokens=estimates,
+        breaker_snapshots=breakers)
+
+
+def invoke_context_model(router, agent_id, messages, context, capabilities, reserve, emitter, options, definition):
+    """Router 的新 policy 分支；复用原 Selection/Routing/Invocation/预算 Owner。"""
     assessments, effective = request_assessments(router, messages, options, reserve, capabilities, definition)
     context.loop_request_assessments = {a.profile_id: a for a in assessments}
     context.loop_request_options = effective
@@ -137,20 +176,19 @@ def invoke_context_model(router, agent_id, messages, context, capabilities, rese
         step_id=emitter.step_id, async_submit=emitter.parent.submit_coroutine_from_worker)
     if restored is not None:
         return restored
-    eligible_ids = {a.profile_id for a in assessments if context_eligible(a, context, router.model_profiles)}
-    if getattr(context, "loop_allowed_model_profiles", None) is not None:
-        eligible_ids &= set(context.loop_allowed_model_profiles)
+    target = None
     if context.loop_model_purpose == "DECISION":
         image = emitter.parent.submit_coroutine_from_worker(context.execution_repository.load(context.run_id))
         snapshot = next(s for s in image.context_snapshots if s.snapshot_id == context.loop_context_snapshot_id)
         if snapshot.payload["kind"] == "COMPACTED":
             target = snapshot.payload["policy"]["target_percent"]
-            eligible_ids &= {a.profile_id for a in assessments if a.required_window * 100 <= a.window * target}
+    eligible = eligible_context_assessments(router, assessments, context, capabilities, target_percent=target)
+    eligible_ids = {a.profile_id for a in eligible}
     profiles = tuple(p for p in router.model_profiles if p.profile_id.value in eligible_ids)
     if not profiles:
         reliable = any(a.reliable for a in assessments)
         raise LoopStopped("LOOP_CONTEXT_EXHAUSTED" if reliable else "CONTEXT_BUDGET_UNCERTAIN")
-    minimal = min((a for a in assessments if a.profile_id in eligible_ids), key=lambda a: a.required_window)
+    minimal = min(eligible, key=lambda a: a.required_window)
     from core.runtime.budget import BudgetExceededError
     budget = context.budget_ledger.snapshot(getattr(context, "delegation_id", None))
     costs = [p.cost_profile.fixed_call_cost_units
@@ -161,14 +199,8 @@ def invoke_context_model(router, agent_id, messages, context, capabilities, rese
     for dimension, amount in required.items():
         if getattr(budget.run_budget, "max_" + dimension) is not None and amount > getattr(budget.remaining, dimension):
             raise BudgetExceededError(dimension, amount, getattr(budget.remaining, dimension), budget)
-    requirements = ModelContextRequirements(minimal.input_bound, minimal.input_bound + reserve,
-        True, False, False, len(messages), 0, 0, False, True)
-    decision, selected, requirements = router._select_model_decision(agent_id, "", messages, requirements,
-        context, capabilities, definition, available_profiles=profiles)
-    routing = router.model_routing_policy.route(selection_decision=decision, capability_requirements=capabilities,
-        context_requirements=requirements, profiles=profiles, preference=ModelPreference.AUTO,
-        budget_snapshot=context.budget_ledger.snapshot(getattr(context, "delegation_id", None)),
-        breaker_snapshots=router.circuit_breaker_registry.snapshots(tuple(p.effective_breaker_key for p in profiles)))
+    routing = route_context_request(router, agent_id, messages, context, capabilities, reserve, definition,
+        eligible, budget, include_breakers=True)
     return router.model_invocation_router.invoke(run_context=context, budget_ledger=context.budget_ledger,
         routing_decision=routing, messages=messages, adapter_resolver=router.model_adapter_resolver,
         circuit_breaker_registry=router.circuit_breaker_registry, token_estimate=minimal.input_bound,
@@ -219,8 +251,9 @@ def prepare_context(router, frame, iterations, context, claim, emitter, *, force
     previous = next((s for s in image.context_snapshots if s.snapshot_id == frame.current_context_snapshot_id), None)
     final_only = getattr(frame, "adaptive_decision", None) is not None
     prior_summary = previous.payload["summary"] if previous and not final_only else None
-    raw = snapshot_candidate(frame, groups, options, router.max_tokens, summary=prior_summary, kind="RAW")
-    assess = lambda artifact: request_assessments(router, artifact.payload["messages"], options, router.max_tokens, claim.capability_requirements, definition)[0]
+    reserve = (frame.adaptive_decision or {}).get("output_reserve", router.max_tokens) if final_only else router.max_tokens
+    raw = snapshot_candidate(frame, groups, options, reserve, summary=prior_summary, kind="RAW")
+    assess = lambda artifact: request_assessments(router, artifact.payload["messages"], options, reserve, claim.capability_requirements, definition)[0]
     raw_assessments = assess(raw)
     valid = [a for a in raw_assessments if context_eligible(a, context, router.model_profiles, frame=frame, purpose="DECISION")]
     reliable = [a for a in raw_assessments if a.reliable]

@@ -26,25 +26,32 @@ async def create_child(repo, session, lease, root, frame, iteration, decision, p
         for name,n in root.budget_totals.items() if isinstance(n,int)}
     from core.runtime.agent_loop.contracts import LoopPolicyV2
     target_limits = LoopPolicyV2(**prepared["config"]["agent"]["business_options"].get("loop_policy", {})).to_dict()
-    total = min(available["total_tokens"] // 2, target_limits["total_tokens"])
+    shared = frame.loop_policy.get("budget_strategy") == "shared-root.v1"
+    total = None if shared else min(available["total_tokens"] // 2, target_limits["total_tokens"])
     models = min(8, available["model_calls"] // 2, target_limits["max_model_calls"])
     tools = min(4, available["tool_calls"] // 2, target_limits["max_tool_calls"])
-    costs = min(available["cost_units"] // 2, target_limits["cost_units"])
-    if min(total,models,tools,costs) <= 0:
+    costs = None if shared else min(available["cost_units"] // 2, target_limits["cost_units"])
+    if min(models, tools) <= 0 or not shared and min(total, costs) <= 0:
         raise RuntimeError("DELEGATION_BUDGET_EXHAUSTED")
     allocation = {"model_calls": models, "remote_model_calls": min(models,available.get("remote_model_calls",models)),
-        "tool_calls": tools, "input_tokens": min(total*3//4,available.get("input_tokens",total)),
-        "output_tokens": min(total-total*3//4,available.get("output_tokens",total)), "total_tokens": total,
-        "cost_units": costs, "retries": min(target_limits["max_retries"],available.get("retries",2))}
+        "tool_calls": tools, "retries": min(target_limits["max_retries"], available.get("retries", 2))}
+    if not shared:
+        allocation.update(input_tokens=min(total * 3 // 4, available.get("input_tokens", total)),
+            output_tokens=min(total - total * 3 // 4, available.get("output_tokens", total)),
+            total_tokens=total, cost_units=costs)
     envelope = f"delegation:{did}"
     operations = dict(root.budget_operations)
     operations[envelope] = {"kind": "DELEGATION_ALLOCATION", "state": "RESERVED", "reserved": allocation,
         "unspent": allocation, "consumed": {}, "actual": None, "source": None, "generation": frame.resume_generation}
+    if shared:
+        operations[envelope]["shared_tokens"] = True
     root.budget_operations, root.budget_reserved = operations, repo._budget_add(root.budget_reserved, allocation)
     root.execution_version += 1
     root.last_committed_fencing_token, root.updated_at = lease.fencing_token, func.now()
     deadline = min(root.absolute_deadline, datetime.now(UTC)+timedelta(seconds=min(120,frame.loop_policy["max_elapsed_seconds"],target_limits["max_elapsed_seconds"])))
     frozen = {**prepared, "allocation": allocation, "child_frame_id": child_id}
+    if shared:
+        frozen["shared_tokens"] = True
     child_policy = dict(frame.loop_policy)
     child_policy.update(max_iterations=min(8,child_policy["max_iterations"]), max_model_calls=models,
         max_tool_calls=tools, total_tokens=total,cost_units=costs)
@@ -106,8 +113,14 @@ async def commit_child_result(repo,lease,frame_id,*,resume_generation,outcome,co
                 raise RuntimeError("DELEGATION_STOP_UNPROVEN")
             if stop_proof["kind"]=="LOOP_STOP" and stop_proof.get("code") not in {"LOOP_ITERATION_LIMIT","LOOP_NO_PROGRESS","LOOP_CONTEXT_EXHAUSTED","DELEGATION_LIMIT"}:
                 raise RuntimeError("DELEGATION_STOP_UNPROVEN")
+            available = allocation["unspent"]
+            if allocation.get("shared_tokens"):
+                from core.runtime.budget import SHARED_TOKEN_DIMENSIONS
+                available = {**available, **{name: max(0, limit - root.budget_consumed.get(name, 0)
+                    - root.budget_reserved.get(name, 0)) for name in SHARED_TOKEN_DIMENSIONS
+                    if (limit := root.budget_totals.get(f"max_{name}")) is not None}}
             if stop_proof["kind"]=="BUDGET" and (type(stop_proof.get("requested")) is not int
-                or stop_proof["requested"]<=allocation["unspent"].get(stop_proof.get("dimension"),0)):
+                or stop_proof["requested"]<=available.get(stop_proof.get("dimension"),0)):
                 raise RuntimeError("DELEGATION_STOP_UNPROVEN")
             by_id={t.invocation_id:t for t in tools}
             for action in actions:

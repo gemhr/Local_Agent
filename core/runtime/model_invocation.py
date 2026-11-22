@@ -39,7 +39,7 @@ from core.runtime.model_routing import (
     ModelRoutingPolicy,
     RoutingAdjustment,
 )
-from core.runtime.model_selection import ModelProfileId
+from core.runtime.model_selection import ModelProfileId, model_request_usage
 from core.runtime.retry import RetryExecutor, RetryPolicy
 from core.runtime.event_emitter import RunEventEmitter, StepEventEmitter
 from core.runtime.execution_aggregate import ModelAttemptState, canonical_payload_digest
@@ -1099,6 +1099,7 @@ class ModelInvocationRouter:
                 reservation = budget_ledger.reserve(
                     usage,
                     reservation_type="model_invocation",
+                    step_id=getattr(event_emitter, "step_id", None),
                     delegation_id=getattr(run_context, "delegation_id", None),
                 )
             except BudgetExceededError as exc:
@@ -1175,6 +1176,9 @@ class ModelInvocationRouter:
                         reserved_usage=usage,
                     )
                 except MemoryContextError:
+                    raise
+                except (RunCancelledError, RunDeadlineExceededError) as exc:
+                    exc.provider_started = False
                     raise
                 except Exception as exc:
                     raise DurableModelLifecycleError(
@@ -1318,7 +1322,8 @@ class ModelInvocationRouter:
                     else isinstance(adapter, GeneratorModelAdapter)
                     and bool(getattr(exc, "output_started", False))
                 )
-                if started or durable_attempt is not None:
+                budget_source = UsageSource.ESTIMATED if started or durable_attempt is not None else None
+                if budget_source is not None and not (durable_attempt and durable_attempt[4]):
                     # A durable STARTED row represents an uncertain provider
                     # boundary; keep the reservation consumed even when an
                     # adapter reports that it did not observe the request.
@@ -1327,7 +1332,7 @@ class ModelInvocationRouter:
                         None,
                         usage_source=UsageSource.ESTIMATED,
                     )
-                else:
+                elif durable_attempt is None:
                     budget_ledger.release(reservation)
                 if durable_attempt is not None:
                     # Once the durable STARTED marker is written, every local
@@ -1339,21 +1344,49 @@ class ModelInvocationRouter:
                     control_stopped = category in {ModelFailureCategory.CANCELLED, ModelFailureCategory.DEADLINE_EXCEEDED}
                     safe_error = ("PROVIDER_CONTEXT_REJECTED" if context_rejected
                                   else category.value if control_stopped else _safe_error_code(exc, category))
+                    reported = getattr(exc, "provider_usage", None)
+                    committed_usage = None
+                    shared_budget = durable_attempt[4] and (
+                        getattr(run_context.loop_policy, "budget_strategy", None) == "shared-root.v1"
+                        or budget_ledger.synthesis_budget is not None)
+                    missing_usage = reported is None or (
+                        reported.reason == "USAGE_MISSING" and reported.response_id_digest is None)
+                    release_unsent = bool(shared_budget and missing_usage
+                        and getattr(exc, "provider_started", None) is False
+                        and getattr(exc, "provider_responded", None) is not True)
+                    if reported is not None and shared_budget:
+                        actual_tokens = reported.actual_usage()
+                        if actual_tokens is not None:
+                            committed_usage = model_request_usage(candidate.profile, actual_tokens.input_tokens,
+                                actual_tokens.output_tokens, retries=usage.retries)
+                            committed_usage = replace(committed_usage, total_tokens=actual_tokens.total_tokens)
                     try:
-                        self._finish_durable_model_attempt(
+                        settlement = self._finish_durable_model_attempt(
                             run_context=run_context,
                             durable_attempt=durable_attempt,
                             state=ModelAttemptState.REJECTED if context_rejected else ModelAttemptState.UNKNOWN,
                             async_submit=async_submit,
                             safe_error=safe_error,
-                            provider_usage=getattr(exc, "provider_usage", None),
+                            usage=self._durable_usage(committed_usage),
+                            provider_usage=reported,
+                            release_unsent=release_unsent,
                         )
-                    except (OwnershipLost, PersistenceError):
-                        if not control_stopped:
+                    except Exception as settlement_error:
+                        if durable_attempt[4]:
+                            budget_ledger.commit(reservation, None, usage_source=UsageSource.ESTIMATED, durable_committed=True)
+                        if not control_stopped or not isinstance(settlement_error, (OwnershipLost, PersistenceError)):
                             raise
                         # 失败的持久提交由原接管流程保守结算，仍传播本次控制终止。
                         exc.add_note("MODEL_ATTEMPT_SETTLEMENT_UNAVAILABLE")
                         started_event_emitted = False
+                    else:
+                        if durable_attempt[4]:
+                            recorded = BudgetUsage(**settlement[1]["actual"]) if settlement else None
+                            budget_ledger.commit(reservation, recorded, durable_committed=settlement is not None)
+                            if settlement and settlement[1]["source"] == "ACTUAL":
+                                budget_source = UsageSource.ACTUAL
+                            elif settlement and settlement[1]["source"] == "RELEASED_UNSENT":
+                                budget_source = None
                 health_outcome = self._circuit_health_outcome(
                     category=category,
                     provider_started=started,
@@ -1379,7 +1412,7 @@ class ModelInvocationRouter:
                         False,
                         category,
                         _safe_error_code(exc, category),
-                        ModelUsageSource.ESTIMATED if started else None,
+                        budget_source,
                         provider_usage=getattr(exc, "provider_usage", None),
                     )
                 )
@@ -1486,15 +1519,16 @@ class ModelInvocationRouter:
             actual = response.actual_usage
             if response.provider_usage is not None:
                 actual = apply_provider_token_counts(usage, actual)
-            if getattr(run_context, "loop_frame_id", None) is not None and actual is not None:
+            if actual is not None and (getattr(run_context, "loop_frame_id", None) is not None
+                                       or budget_ledger.synthesis_budget is not None):
                 actual = replace(actual, model_calls=usage.model_calls, remote_model_calls=usage.remote_model_calls, retries=usage.retries, cost_units=actual.cost_units or usage.cost_units)
-                if context_assessments is not None:
-                    metadata = candidate.profile.cost_profile
-                    cost = metadata.fixed_call_cost_units + (actual.input_tokens * metadata.input_cost_units_per_1k_tokens + 999)//1000 + (actual.output_tokens * metadata.output_cost_units_per_1k_tokens + 999)//1000
-                    actual = replace(actual, cost_units=cost)
+                if context_assessments is not None or budget_ledger.synthesis_budget is not None:
+                    actual = replace(actual, cost_units=model_request_usage(
+                        candidate.profile, actual.input_tokens, actual.output_tokens).cost_units)
+            settlement = None
             if durable_attempt is not None:
                 try:
-                    self._finish_durable_model_attempt(
+                    settlement = self._finish_durable_model_attempt(
                         run_context=run_context,
                         durable_attempt=durable_attempt,
                         state=ModelAttemptState.COMPLETED,
@@ -1518,24 +1552,19 @@ class ModelInvocationRouter:
                     reset_trace_context(attempt_trace_token)
                     raise
             try:
-                budget_ledger.commit(
-                    reservation,
-                    actual,
-                    usage_source=(
-                        UsageSource.ACTUAL
-                        if actual is not None
-                        else UsageSource.ESTIMATED
-                    ),
-                )
+                if settlement is not None:
+                    state, operation = settlement
+                    snapshot = budget_ledger.commit(
+                        reservation, BudgetUsage(**operation["actual"]), durable_committed=True)
+                    if state is ModelAttemptState.UNKNOWN:
+                        dimension = operation["rejected_dimension"]
+                        raise BudgetExceededError(dimension, getattr(actual, dimension), 0, snapshot)
+                else:
+                    budget_ledger.commit(
+                        reservation, actual, usage_source=UsageSource.ACTUAL if actual is not None else UsageSource.ESTIMATED)
             except BudgetExceededError as exc:
-                # Provider 已成功响应，Circuit 视为健康；但实际 Token/Cost
-                # 超过原子可补差范围时不得把预算推过上限，也不得返回正文。
-                # 以原预留保守结算并向上返回预算失败。
-                budget_ledger.commit(
-                    reservation,
-                    None,
-                    usage_source=UsageSource.ESTIMATED,
-                )
+                if settlement is None:
+                    budget_ledger.commit(reservation, None, usage_source=UsageSource.ESTIMATED)
                 permit.record_success()
                 attempts.append(
                     self._attempt(
@@ -1923,6 +1952,9 @@ class ModelInvocationRouter:
                     compaction_operation_id=run_context.loop_compaction_operation_id if purpose == "COMPACTION" else None)
                 if purpose == "COMPACTION":
                     loop_kwargs.update(loop_iteration_no=None, invocation_group=f"context:{run_context.loop_compaction_operation_id}")
+        elif run_context.budget_ledger.synthesis_budget is not None:
+            operation_id = f"model:{step_id}:{step_attempt}:{model_attempt}"
+            loop_kwargs = dict(operation_id=operation_id, reserved_usage=self._durable_usage(reserved_usage))
         formation_operation = getattr(run_context, "memory_formation_operation_id", None)
         if formation_operation:
             operation_id = f"formation:{formation_operation}:{model_attempt}" if loop_frame_id else None
@@ -1965,12 +1997,13 @@ class ModelInvocationRouter:
         usage: Mapping[str, object] | None = None,
         safe_error: str | None = None,
         provider_usage: UsageDelta | None = None,
-    ) -> None:
+        release_unsent: bool = False,
+    ) -> tuple[ModelAttemptState, dict] | None:
         repository, step_id, step_attempt, model_attempt, operation_id, reserved_usage = durable_attempt
         finish = getattr(repository, "finish_model_attempt", None)
         if not callable(finish) or not callable(async_submit):
             raise RuntimeError("execution repository lacks fenced model completion")
-        async_submit(
+        return async_submit(
             finish(
                 run_context.durable_lease,
                 step_id=step_id,
@@ -1980,9 +2013,9 @@ class ModelInvocationRouter:
                 result=result,
                 usage={**ModelInvocationRouter._usage_evidence(None, provider_usage), **(usage or {})},
                 safe_error=safe_error,
-                **(dict(resume_generation=run_context.loop_resume_generation, operation_id=operation_id,
-                    actual_usage=usage or ModelInvocationRouter._durable_usage(reserved_usage),
-                    usage_source="ACTUAL" if usage else "ESTIMATED") if operation_id else {}),
+                **(dict(resume_generation=getattr(run_context, "loop_resume_generation", None), operation_id=operation_id,
+                    actual_usage={} if release_unsent else usage or ModelInvocationRouter._durable_usage(reserved_usage),
+                    usage_source="RELEASED_UNSENT" if release_unsent else ("ACTUAL" if usage else "ESTIMATED")) if operation_id else {}),
             )
         )
 
@@ -2147,26 +2180,7 @@ class ModelInvocationRouter:
         max_tokens: int,
         retry_index: int = 0,
     ) -> BudgetUsage:
-        metadata = candidate.profile.cost_profile
-        # 未配置成本时使用非零保守占位；生产 Profile 应显式配置并人工确认。
-        cost_units = 1
-        if metadata is not None:
-            cost_units = (
-                metadata.fixed_call_cost_units
-                + (input_tokens * metadata.input_cost_units_per_1k_tokens + 999)
-                // 1000
-                + (max_tokens * metadata.output_cost_units_per_1k_tokens + 999)
-                // 1000
-            )
-        return BudgetUsage(
-            model_calls=1,
-            remote_model_calls=int(candidate.profile.effective_is_remote),
-            input_tokens=input_tokens,
-            output_tokens=max_tokens,
-            total_tokens=input_tokens + max_tokens,
-            cost_units=cost_units,
-            retries=1 if retry_index > 0 else 0,
-        )
+        return model_request_usage(candidate.profile, input_tokens, max_tokens, retries=int(retry_index > 0))
 
     @staticmethod
     def _estimated_latency_seconds(candidate: ModelRoutingCandidate) -> float | None:
