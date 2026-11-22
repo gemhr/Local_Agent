@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from core.runtime.memory_scope import MemoryAccessContext
 from core.runtime.memory_scope import MemoryContextError
+from core.runtime.run_control import RunControlConflict
 from core.agent_router import AgentRouter
 from core.runtime.metrics import ApplicationRuntimeGaugeProvider
 from core.runtime.observability_dispatcher import RuntimeObservabilityDispatcher
@@ -247,6 +248,7 @@ class ChatService:
         workflow_id: str | None = None,
         workflow_version: str | None = None,
         adaptive_route: dict | None = None,
+        require_new_run: bool = False,
     ) -> AsyncIterator[RuntimeEvent]:
         """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
         if self._coordinated_runtime_factory is None:
@@ -270,6 +272,7 @@ class ChatService:
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
+            require_new_run=require_new_run,
             **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
         )
         try:
@@ -303,6 +306,7 @@ class ChatService:
         loop_policy=None,
         loop_correlation=None,
         adaptive_stop_enabled=None,
+        require_new_run: bool = False,
     ):
         factory = self._coordinated_runtime_factory
         if factory is None:
@@ -327,7 +331,8 @@ class ChatService:
                 agent_version=agent_version,
                 workflow_id=workflow_id,
                 workflow_version=workflow_version,
-            **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
+                **({"require_new_run": True} if require_new_run else {}),
+                **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
                 **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation, "adaptive_stop_enabled": adaptive_stop_enabled}
                    if execution_policy is not None else {}),
             )
@@ -343,6 +348,9 @@ class ChatService:
             raise ChatRuntimeTransportError(
                 "RUNTIME_SHUTTING_DOWN"
             ) from None
+        except RunControlConflict:
+            code = "RUN_ALREADY_ACCEPTED" if require_new_run else "RUNTIME_SCOPE_CREATION_FAILED"
+            raise ChatRuntimeTransportError(code) from None
         except Exception:
             raise ChatRuntimeTransportError(
                 "RUNTIME_SCOPE_CREATION_FAILED"
@@ -368,6 +376,7 @@ class ChatService:
         workflow_id: str | None = None,
         workflow_version: str | None = None,
         adaptive_route: dict | None = None,
+        require_new_run: bool = False,
     ) -> AsyncIterator[RuntimeEvent]:
         """Run the sole production coordinated event path through the factory.
 
@@ -390,6 +399,7 @@ class ChatService:
             agent_version=agent_version,
             workflow_id=workflow_id,
             workflow_version=workflow_version,
+            require_new_run=require_new_run,
             **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
         )
         consumer = self._consume_scope_events(

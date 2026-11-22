@@ -31,6 +31,8 @@ class RuntimeRequest:
     timeout_seconds: float | None = None
     retrieval_cache_authz_domain: str | None = None
     memory_access_context: MemoryAccessContext | None = None
+    runtime_instance_id: str | None = None
+    require_new_run: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +57,7 @@ class ExecutionResult:
     business_error_code: str | None = None
     output_disposition: str = "NOT_EVALUATED"
     rejected_output: str | None = field(default=None, repr=False, compare=False)
+    external_assistant_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +135,7 @@ class NativeRuntimeAdapter:
         terminal_control = None
         async with aclosing(self._chat_service.stream_coordinated_agent_events(
             request.agent_id, request.input, _result_out=results, **self._chat_kwargs(request),
+            **({"require_new_run": True} if request.require_new_run else {}),
         )) as events:
             async for event in events:
                 chunk = wire_adapter.adapt(event)

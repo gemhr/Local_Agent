@@ -521,6 +521,45 @@ class ClientDeliveryEventRow(PersistenceBase):
     )
 
 
+class ExternalRunRow(PersistenceBase):
+    """外部执行的身份与已确认状态。正文与原始事件由外部服务保存。"""
+
+    __tablename__ = "external_runtime_runs"
+
+    run_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    trace_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    instance_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    conversation_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    external_session_id: Mapped[str | None] = mapped_column(String(255))
+    user_message_id: Mapped[str | None] = mapped_column(String(255))
+    assistant_message_id: Mapped[str | None] = mapped_column(String(255))
+    observation_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    terminal_status: Mapped[str | None] = mapped_column(String(16))
+    stop_reason: Mapped[str | None] = mapped_column(String(64))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    cancel_reason: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "observation_state IN ('CREATED', 'ACTIVE', 'UNKNOWN', 'TERMINAL')",
+            name="ck_external_runtime_runs_observation_state",
+        ),
+        CheckConstraint(
+            "(observation_state = 'TERMINAL') = (terminal_status IS NOT NULL) "
+            "AND (terminal_status IS NULL OR terminal_status IN ('SUCCEEDED', 'FAILED', 'CANCELLED'))",
+            name="ck_external_runtime_runs_terminal",
+        ),
+    )
+
+
 class ToolResolutionSnapshotRow(PersistenceBase):
     """每个 Run 唯一且不可变的 Tool contract snapshot。"""
 
@@ -1617,6 +1656,7 @@ CANONICAL_TABLES = (
     "outbox_events",
     "runtime_event_journal",
     "client_delivery_events",
+    "external_runtime_runs",
     "tool_resolution_snapshots",
     "runtime_run_control_commands",
     "runtime_run_control",

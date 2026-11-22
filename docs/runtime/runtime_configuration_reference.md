@@ -157,7 +157,39 @@ Production 安全不变量（SERVER role）：backend 为 remote/hybrid 时 endp
 
 ## Runtime Selection
 
-`COORDINATED` 是唯一 production runtime；聊天 endpoint 固定通过 `CoordinatedRuntimeFactory` 创建 Run scope。
+`COORDINATED` 是默认 Native Runtime。聊天 endpoint 通过 `CoordinatedRuntimeFactory` 创建原生 Run Scope。
+
+服务端可通过 `LOCAL_AGENT_OPENCODE_INSTANCES` 登记 OpenCode CLI 1.18.26 实例。省略该变量或设置为 `[]` 时仅启用 Native。以下是 JSON 配置示例。
+
+```json
+[
+  {
+    "instance_id": "local",
+    "deployment": "LOCAL",
+    "base_url": "http://127.0.0.1:4096",
+    "workspace": "D:/agentcore-demo/workspace",
+    "password_env": "LOCAL_OPENCODE_HTTP_PASSWORD",
+    "allowed_principals": [
+      {
+        "tenant_id": "demo-tenant",
+        "user_id": "11111111-2222-4333-8444-555555555555"
+      }
+    ],
+    "provider_id": "provider",
+    "model_id": "model",
+    "agent": "build"
+  }
+]
+```
+
+- `instance_id` 唯一，使用 1–64 个小写字母、数字、点、下划线或连字符，首位为字母或数字。
+- `base_url` 为 HTTP(S) Origin。`LOCAL` 使用 `127.0.0.1` 或 `::1`。`MANAGED` 可使用远程 HTTPS，明文 HTTP 仅允许环回地址。
+- `workspace` 指向 CLI Server 侧批准的绝对目录。`username` 默认 `opencode`。`password_env` 引用启动进程的 HTTP Basic Auth 密码。CLI Server 的 Provider 凭据由该实例的启动环境单独注入。
+- `provider_id` 和 `model_id` 成对配置，`agent` 可省略。格式错误、重复实例或缺少 HTTP 密码会使 Settings 加载失败，错误只公开配置键和固定原因码。
+- `allowed_principals` 是实例级白名单。每项使用身份系统的 `tenant_id` 和 UUID `user_id`，并与认证后的 Principal 精确匹配。省略或给出空数组时拒绝所有调用者。无效清单会使 Settings 加载失败，返回固定原因 `INVALID_ALLOWED_PRINCIPALS`。
+- 已认证、具有 Run `PROCESS` 权限且在实例白名单中的调用者，可在 `POST /api/runtime/execute` 或 `POST /api/v1/chat` 为 `core_router` 指定 `runtime_instance_id`。省略实例 ID 使用 Native。后台入口的外部执行支持可选 `timeout_seconds`，省略时为 120 秒。超时在已派发时触发原 Session 的 abort。无法确认中止时，观察状态为 `UNKNOWN`。
+- 持久身份绑定包含实例 ID、部署类型、Origin 和 Workspace 的摘要。需要改变目标时应登记新的实例 ID，已有 Run 的结果查询仅访问与其绑定匹配的配置。HTTP 服务访问密码可独立轮换。
+- 升级现有 PostgreSQL 数据库时，先运行 `uv run --no-sync python -m alembic upgrade head` 安装 `0045_external_runtime_runs`。
 
 ## Role Boundary
 

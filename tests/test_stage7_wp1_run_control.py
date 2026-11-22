@@ -122,13 +122,16 @@ async def test_released_or_cancel_first_run_can_be_claimed(clean_database):
         )).scalar_one()
     assert released_row.state == "ACTIVE"
     assert released_row.terminal_sequence is None
+    with pytest.raises(RunControlConflict):
+        await control.claim(released.run_id, "instance-b", require_new_run=True)
     reclaimed = await control.claim(released.run_id, "instance-b")
     assert reclaimed.fencing_token > released.fencing_token
 
     cancel_first_run = uuid.uuid4().hex
     await control.request_cancel(cancel_first_run, "REQUEST_CANCELLED")
-    claimed = await control.claim(cancel_first_run, "instance-a")
+    claimed = await control.claim(cancel_first_run, "instance-a", require_new_run=True)
     assert claimed.fencing_token == 1
+    assert (await control.cancel_intent(cancel_first_run)).reason == "REQUEST_CANCELLED"
 
 
 @pytest.mark.asyncio

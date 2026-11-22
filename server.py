@@ -68,6 +68,7 @@ from core.persistence import (
     check_schema_readiness,
 )
 from core.persistence.repositories.execution import DurableExecutionRepository
+from core.persistence.repositories.external_runs import ExternalRunRepository
 from core.runtime.run_control import (
     DurableRunControlService,
     OwnershipLost,
@@ -212,6 +213,7 @@ from core.agent_platform.application import (
 )
 from core.agent_platform.registry import compile_agent_catalog
 from core.agent_platform.registrations import BUSINESS_REGISTRATION_BUNDLE
+from core.agent_platform.opencode_runtime_adapter import OpenCodeRuntimeAdapter
 from core.agent_platform.runtime_adapter import NativeRuntimeAdapter
 from core.runtime.agent_evalops_trace_exporter import AgentEvalOpsTraceExporter
 from core.runtime.trace_export_dispatcher import TraceExportDispatcher
@@ -335,6 +337,9 @@ class RunExecutionSupervisor:
             self._slots.release()
 
     def spawn(self, run_id: str, stream, *, reserved_slot: bool = False) -> None:
+        if run_id in self._tasks:
+            raise HTTPException(status_code=409, detail="RUN_ALREADY_ACCEPTED")
+
         async def consume() -> None:
             try:
                 async for _event in stream:
@@ -1433,6 +1438,14 @@ async def lifespan(app: FastAPI):
         if snapshot_store is not None
         else None
     )
+    client_event_feed = PostgresClientEventFeed(persistence_database, runtime_metrics)
+    external_runs = ExternalRunRepository(persistence_database, client_event_feed)
+    opencode_adapters = {}
+    for index, instance in enumerate(settings.opencode_instances):
+        opencode_adapters[instance.instance_id] = await initialization_stack.create(
+            f"opencode_adapter_{index}",
+            lambda: OpenCodeRuntimeAdapter(instance, runs=external_runs, run_registry=run_registry),
+        )
     runtime_services = await initialization_stack.run(
         lambda: ApplicationRuntimeServices(
             event_journal=event_journal,
@@ -1465,7 +1478,7 @@ async def lifespan(app: FastAPI):
             startup_dependency_snapshot=StartupDependencySnapshot(
                 knowledge_base_degraded=knowledge_base_error is not None
             ),
-            client_event_feed=PostgresClientEventFeed(persistence_database, runtime_metrics),
+            client_event_feed=client_event_feed,
             extra_closeables=(
                 ("observability_service", observability_service),
                 ("logger_checkpoint_store", logger_checkpoints),
@@ -1479,6 +1492,7 @@ async def lifespan(app: FastAPI):
                     if mcp_integration is not None
                     else ()
                 ),
+                *((f"opencode_adapter_{index}", adapter) for index, adapter in enumerate(opencode_adapters.values())),
                 ("redis_service", redis_service),
                 ("persistence_database", persistence_database),
             ),
@@ -1615,8 +1629,11 @@ async def lifespan(app: FastAPI):
         chat_service,
         agent_registry,
         runtime_adapter=NativeRuntimeAdapter(chat_service),
+        runtime_instances=opencode_adapters,
+        external_runs=external_runs,
     )
     app.state.agent_application_service = agent_application_service
+    app.state.external_runs = external_runs
     app.state.runtime_services = runtime_services
     app.state.coordinated_runtime_factory = coordinated_runtime_factory
     app.state.recovery_coordinator = recovery_coordinator
@@ -1766,6 +1783,7 @@ async def lifespan(app: FastAPI):
         app.state.recovery_coordinator = None
         app.state.run_execution_supervisor = None
         app.state.client_event_feed = None
+        app.state.external_runs = None
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.CLOSED
 
 
@@ -2379,14 +2397,17 @@ class ChatRequest(BaseModel):
     ] | None = None
 
 
-class V1ChatRequest(ChatRequest):
-    model_config = ConfigDict(extra="forbid")
-
-
 RUNTIME_EXECUTE_TIMEOUT_MAX_SECONDS = 3_600.0
 
 
-class RuntimeExecuteRequest(BaseModel):
+class V1ChatRequest(ChatRequest):
+    runtime_instance_id: Annotated[
+        StrictStr, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")
+    ] | None = None
+    timeout_seconds: Annotated[float, Field(gt=0, le=RUNTIME_EXECUTE_TIMEOUT_MAX_SECONDS, allow_inf_nan=False)] | None = None
+
+
+class _NativeRuntimeExecuteRequest(BaseModel):
     """结构化 Coordinated Runtime 执行请求。"""
     session_id: Annotated[StrictStr, Field(min_length=1, max_length=255)] | None = None
 
@@ -2409,6 +2430,12 @@ class RuntimeExecuteRequest(BaseModel):
             allow_inf_nan=False,
         ),
     ]
+
+
+class RuntimeExecuteRequest(_NativeRuntimeExecuteRequest):
+    runtime_instance_id: Annotated[
+        StrictStr, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")
+    ] | None = None
 
 
 class RuntimeExecuteResponse(BaseModel):
@@ -2636,7 +2663,7 @@ class EpisodicEvaluationControlRequest(BaseModel):
         )
 
 
-class RuntimeEvaluationExecuteV3Request(RuntimeExecuteRequest):
+class RuntimeEvaluationExecuteV3Request(_NativeRuntimeExecuteRequest):
     """v3：normal runtime fields + strict typed episodic evaluation control."""
 
     evaluation_control: EpisodicEvaluationControlRequest | None = None
@@ -2742,7 +2769,7 @@ class GovernanceEvaluationControlRequest(BaseModel):
         return project, grants
 
 
-class RuntimeEvaluationExecuteV4Request(RuntimeExecuteRequest):
+class RuntimeEvaluationExecuteV4Request(_NativeRuntimeExecuteRequest):
     evaluation_control: GovernanceEvaluationControlRequest
 
 
@@ -2890,6 +2917,16 @@ async def _authorize_run(
     await _authorization_service(request).authorize(
         principal, "RUN", run_id, action, required_scope=required_scope
     )
+
+
+async def _authorize_opencode_instance(request: Request, run_id: str, instance_id: str) -> None:
+    await _authorize_run(request, run_id, AuthorizationAction.PROCESS)
+    instance = next((item for item in settings.opencode_instances if item.instance_id == instance_id), None)
+    if instance is None:
+        raise HTTPException(status_code=422, detail="RUNTIME_INSTANCE_UNAVAILABLE")
+    principal = request.state.principal
+    if (principal.tenant_id, principal.user_id) not in instance.allowed_principals:
+        raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
 
 
 def _run_registry_for(service) -> object:
@@ -3124,6 +3161,13 @@ async def v1_chat_endpoint(payload: V1ChatRequest, request: Request):
         await _bind_new_run_and_conversation(
             request, run_id=run_id, agent_id=payload.agent_id, session_id=payload.session_id
         )
+        if payload.runtime_instance_id is not None:
+            await _authorize_opencode_instance(request, run_id, payload.runtime_instance_id)
+            if payload.file_path:
+                raise HTTPException(status_code=422, detail="RUNTIME_INSTANCE_UNAVAILABLE")
+            admission = getattr(require_service(), "admission_gate", None)
+            if admission is not None and not admission.accepts_new_runs:
+                raise HTTPException(status_code=503, detail="RUNTIME_SHUTTING_DOWN")
     except BaseException:
         supervisor.release_slot(reserved_slot)
         raise
@@ -3137,10 +3181,22 @@ async def v1_chat_endpoint(payload: V1ChatRequest, request: Request):
                 session_id=payload.session_id,
                 input=query,
                 run_id=run_id,
+                runtime_instance_id=payload.runtime_instance_id,
+                timeout_seconds=payload.timeout_seconds if payload.runtime_instance_id is not None else None,
             ),
             retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
             memory_access_context=_memory_access(request, payload.agent_id, getattr(payload, "session_id", None)),
+            require_new_run=payload.runtime_instance_id is None,
         )
+        # 两条路径的首个事件都在持久接纳后产生，且已写入 Client Feed。
+        try:
+            await anext(stream)
+        except AgentApplicationError as exc:
+            status = 409 if exc.error_code == "RUN_ALREADY_ACCEPTED" else 422
+            raise HTTPException(status_code=status, detail=exc.error_code) from None
+        except ChatRuntimeTransportError as exc:
+            status = 409 if exc.error_code == "RUN_ALREADY_ACCEPTED" else 503
+            raise HTTPException(status_code=status, detail=exc.error_code) from None
         supervisor.spawn(run_id, stream, reserved_slot=reserved_slot)
     except BaseException:
         supervisor.release_slot(reserved_slot)
@@ -3195,7 +3251,7 @@ async def v1_run_events_endpoint(
                     for event in events:
                         yield f"id: {event.cursor}\nevent: {event.event_type}\ndata: {client_event_data(event)}\n\n"
                         cursor = event.cursor
-                        if event.event_type in {"run.completed", "run.failed", "run.cancelled"}:
+                        if event.event_type in {"run.completed", "run.failed", "run.cancelled", "run.observation_lost"}:
                             return
                     continue
                 await asyncio.sleep(CLIENT_FEED_POLL_INTERVAL_SECONDS)
@@ -3208,9 +3264,20 @@ async def v1_run_events_endpoint(
     )
 
 
+@v1_router.get("/runs/{run_id}/result")
+async def v1_external_run_result_endpoint(
+    run_id: Annotated[str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)], request: Request,
+):
+    await _authorize_run(request, run_id, AuthorizationAction.READ)
+    result = await require_agent_application_service().read_external_result(run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="RUNTIME_RESULT_NOT_FOUND")
+    return result
+
+
 @app.post("/api/runtime/execute")
 async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Request):
-    """同步执行一条严格校验的 Coordinated Runtime 请求。"""
+    """同步执行一条严格校验的应用 Runtime 请求。"""
 
     service = require_agent_application_service()
     runtime_service = require_service()
@@ -3230,6 +3297,8 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Requ
     await _bind_new_run_and_conversation(
         request, run_id=payload.run_id, agent_id=payload.agent_id, session_id=payload.session_id
     )
+    if payload.runtime_instance_id is not None:
+        await _authorize_opencode_instance(request, payload.run_id, payload.runtime_instance_id)
 
     try:
         result = await service.execute(
@@ -3239,6 +3308,7 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Requ
                 input=payload.query,
                 run_id=payload.run_id,
                 timeout_seconds=payload.timeout_seconds,
+                runtime_instance_id=payload.runtime_instance_id,
             ),
             retrieval_cache_authz_domain=request.state.principal.authz_domain_id,
             memory_access_context=_memory_access(request, payload.agent_id, getattr(payload, "session_id", None)),
@@ -3246,7 +3316,14 @@ async def runtime_execute_endpoint(payload: RuntimeExecuteRequest, request: Requ
     except ChatRuntimeTransportError as exc:
         raise HTTPException(status_code=503, detail=exc.error_code) from None
     except AgentApplicationError as exc:
-        status_code = 409 if exc.error_code.endswith("VERSION_MISMATCH") else 422
+        if exc.error_code == "RUN_ALREADY_ACCEPTED":
+            status_code = 409
+        elif exc.error_code in {"OPENCODE_AUTH_FAILED", "OPENCODE_CONNECTION_FAILED"}:
+            status_code = 503
+        elif exc.error_code.startswith("OPENCODE_"):
+            status_code = 502
+        else:
+            status_code = 409 if exc.error_code.endswith("VERSION_MISMATCH") else 422
         raise HTTPException(status_code=status_code, detail=exc.error_code) from None
     except asyncio.CancelledError:
         raise
@@ -3296,7 +3373,7 @@ def _encoded_response_content(response: BaseModel) -> tuple[dict[str, object], i
 
 @app.post("/api/runtime/evaluation-execute/v2")
 async def runtime_evaluation_execute_v2_endpoint(
-    payload: RuntimeExecuteRequest, request: Request
+    payload: _NativeRuntimeExecuteRequest, request: Request
 ):
     """返回 v2 RAG 与独立 delivered final answer evaluation evidence。"""
     service = require_agent_application_service()
@@ -3832,6 +3909,10 @@ async def cancel_run_endpoint(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="invalid run_id") from exc
     await _authorize_run(request, run_id, AuthorizationAction.CANCEL)
+    external_runs = getattr(app.state, "external_runs", None)
+    external_run = await external_runs.get(run_id) if external_runs is not None else None
+    if external_run is not None and external_run.terminal_status is not None:
+        return {"status": "already_completed", "run_id": run_id}
     service = require_service()
     control = _require_runtime_services().durable_run_control
     await control.request_cancel(run_id, CancellationReason.REQUEST_CANCELLED.value)
@@ -3840,6 +3921,10 @@ async def cancel_run_endpoint(
     local_result = _run_registry_for(service).cancel(
         run_id, CancellationReason.REQUEST_CANCELLED
     )
+    if external_run is not None:
+        if local_result is None:
+            await require_agent_application_service().cancel_detached_external(run_id)
+        return {"status": "cancellation_requested" if local_result is not False else "already_cancelled", "run_id": run_id}
     return {
         "status": "cancelled" if local_result is not False else "already_cancelled",
         "run_id": run_id,

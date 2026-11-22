@@ -10,6 +10,22 @@
 共享其解析路径。普通 execute/stream 通过 Run 级 Runtime Adapter 执行。生产
 lifespan 注入 NativeRuntimeAdapter，由其调用同一个 ChatService 并投影原生事件和结果。
 业务 Schema 校验留在应用服务，原生 Scope 继续持有执行、取消及持久终态。
+
+`/api/runtime/execute` 和后台 `/api/v1/chat` 为 `core_router` 提供 OpenCode CLI 实例选择。
+HTTP 入口先检查 Run `PROCESS` 权限，再用认证后的租户和用户 ID 匹配该实例的白名单。
+应用服务复用输入校验和结果投影，`lifespan()` 为每个实例装配并关闭
+独立的 HTTP 客户端，CLI 由实例部署方运行。Adapter 给每次执行创建独立 Session，
+在后台执行时并发订阅 Legacy `/event`，核对 Session、父消息、助手消息与文本 Part。
+应用服务将通过校验的输出和固定进度写入同一个 Client Feed。上游 SSE 结束后仍由同步
+Prompt 响应或按关联查询的完整助手消息确认终态。HTTP 同步响应公开无正文的状态投影。
+
+`external_runtime_runs` 保存外部 Run 归属、实例目标摘要、Session/Message 引用、观察状态和确认的终态。
+External Run 接纳与 Native lease claim 共用 Run 级事务锁。Client Feed 的终态与外部确认状态同事务提交。
+`/api/v1/chat` 的两条执行路径均在持久接纳后返回事件地址。Native v1 仅接纳尚未取得执行资格的 Run ID，保留派发前的取消意图。
+现有取消路由记录持久意图并唤醒 `RunRegistry`，已派发的执行由 Adapter 调用原实例的 Session abort，
+仅按关联中止消息确认终态。结果未知时，后台 Feed 发布 `run.observation_lost`，结果查询在原实例恢复后可重新确认。
+重启后 `GET /api/v1/runs/{run_id}/result` 经 Run READ 授权按持久身份重读，可用的最终正文经过业务输出校验。
+
 startup 汇集 builtin、BusinessTool、MCP registrations 与可信
 permission seeds，编译单一 AgentRegistry 后 freeze ToolRegistry。
 `actual_allowed_tools` 同时约束 Governance、Discovery 和 toolset identity；MCP policy

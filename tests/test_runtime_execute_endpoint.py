@@ -4,6 +4,7 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -11,7 +12,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 import server
-from core.auth import Principal
+from core.auth import AuthError, AuthorizationAction, Principal
 from core.chat_service import ChatService
 from core.agent_platform.application import AgentApplicationService
 from core.agent_platform.registry import AgentRegistrationBundle, compile_agent_catalog
@@ -252,6 +253,28 @@ def test_valid_request_accepts_all_required_fields():
     )
     assert request.run_id == run_id
     assert request.timeout_seconds == 30.0
+
+
+@pytest.mark.asyncio
+async def test_external_instance_requires_run_authorization_before_execution(monkeypatch):
+    execute = AsyncMock()
+    monkeypatch.setattr(server, "require_agent_application_service", lambda: SimpleNamespace(execute=execute))
+    monkeypatch.setattr(server, "require_service", lambda: SimpleNamespace(admission_gate=None))
+    authorize = AsyncMock(side_effect=AuthError("AUTHORIZATION_FORBIDDEN", 403))
+    monkeypatch.setattr(server, "_authorize_run", authorize)
+    request = _test_request()
+    payload = _payload().model_copy(update={"runtime_instance_id": "local"})
+
+    with pytest.raises(AuthError) as exc:
+        await server.runtime_execute_endpoint(payload, request)
+    assert exc.value.status_code == 403
+    authorize.assert_awaited_once_with(request, payload.run_id, AuthorizationAction.PROCESS)
+    execute.assert_not_awaited()
+
+    with pytest.raises(ValidationError):
+        server.RuntimeExecuteRequest.model_validate(dict(payload.model_dump(), base_url="http://localhost"))
+    with pytest.raises(ValidationError):
+        server._NativeRuntimeExecuteRequest.model_validate(payload.model_dump())
 
 
 @pytest.mark.parametrize("missing", ["run_id", "timeout_seconds"])

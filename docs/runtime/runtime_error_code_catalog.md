@@ -1,5 +1,23 @@
 # Runtime Error Code Catalog
 
+## OpenCode 执行
+
+| 安全错误码 | HTTP | 触发条件 |
+| --- | --- | --- |
+| `RUNTIME_INSTANCE_UNAVAILABLE` | 422 | 实例未登记或 Agent 入口无此实例选择能力。 |
+| `AUTHORIZATION_FORBIDDEN` | 403 | 通过 Run 授权的调用者未获所选实例的使用权。 |
+| `RUN_ALREADY_ACCEPTED` | 409 | v1 或外部同步入口的新执行使用了已被 Native、OpenCode 或后台任务占用的 Run ID。 |
+| `RUNTIME_RESULT_NOT_FOUND` | 404 | 已获 Run READ 权限但该 Run 没有外部执行映射。 |
+| `OPENCODE_AUTH_FAILED` | 503 | CLI Server 拒绝 HTTP 认证。 |
+| `OPENCODE_CONNECTION_FAILED` | 503 | 无法连接实例，或 Session 创建阶段发生传输错误。 |
+| `OPENCODE_SESSION_CREATE_FAILED` | 502 | 实例未返回可确认的 Session 和已批准目录。 |
+| `OPENCODE_SESSION_NOT_FOUND` | 502 | 提交 Prompt 时目标 Session 不存在。 |
+| `OPENCODE_PROMPT_REJECTED` | 502 | 实例通过 HTTP 明确拒绝 Prompt。 |
+| `OPENCODE_TASK_FAILED` | 200，状态 `FAILED` | 已完成且身份匹配的助手消息包含明确错误或异常结束原因。 |
+| `OPENCODE_RESULT_UNKNOWN` | 同步 502，后台或重读为安全错误码 | 暂时无法确认外部最终状态或读取确认过的结果。后台用 `run.observation_lost` 结束本次订阅。 |
+| `DEADLINE_EXCEEDED` | 200，状态 `FAILED` | 跑到截止时间且确认 Prompt 尚未派发，或匹配的助手消息已中止。 |
+| `RUN_CANCELLED` | 200，状态 `CANCELLED` | 在取消意图下确认 Prompt 尚未派发，或匹配的助手消息已中止。 |
+
 ## Stage 3 WP3 Security Codes
 
 | Code | Domain | Phase | Owner | Trigger | Retry | Side effect | User/log projection | Operator action | Evidence | Tests |

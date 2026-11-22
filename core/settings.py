@@ -11,6 +11,7 @@
 
 import importlib.metadata
 import ipaddress
+import json
 import math
 import ntpath
 import os
@@ -19,7 +20,7 @@ import tomllib
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit
 
 
@@ -94,6 +95,107 @@ class SettingsValidationError(ValueError):
         super().__init__(
             f"{safe_error_code}: field={field} reason={reason_code}"
         )
+
+
+@dataclass(frozen=True)
+class OpenCodeInstanceSettings:
+    instance_id: str
+    deployment: str
+    base_url: str
+    workspace: str
+    password: str = field(repr=False)
+    username: str = "opencode"
+    provider_id: str | None = None
+    model_id: str | None = None
+    agent: str | None = None
+    allowed_principals: frozenset[tuple[str, uuid.UUID]] = field(default_factory=frozenset, repr=False)
+
+
+def _env_opencode_instances() -> tuple[OpenCodeInstanceSettings, ...]:
+    name = "LOCAL_AGENT_OPENCODE_INSTANCES"
+    raw = os.getenv(name)
+    if raw is None:
+        return ()
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        raise SettingsValidationError(SETTINGS_PARSE_ERROR, name, "INVALID_JSON") from None
+    if not isinstance(entries, list):
+        raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "EXPECTED_LIST")
+
+    required = {"instance_id", "deployment", "base_url", "workspace", "password_env"}
+    optional = {"username", "provider_id", "model_id", "agent", "allowed_principals"}
+    instances = {}
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or not required <= entry.keys() <= required | optional
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for key, value in entry.items() if key != "allowed_principals"
+            )
+        ):
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_INSTANCE")
+        instance_id = entry["instance_id"]
+        deployment = entry["deployment"]
+        if not ENVIRONMENT_ID_PATTERN.fullmatch(instance_id) or instance_id in instances:
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_OR_DUPLICATE_INSTANCE_ID")
+        if deployment not in {"LOCAL", "MANAGED"}:
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_DEPLOYMENT")
+
+        base_url = entry["base_url"]
+        try:
+            url = urlsplit(base_url)
+            port = url.port
+            loopback = url.hostname in {"127.0.0.1", "::1"}
+        except ValueError:
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_ENDPOINT") from None
+        if (
+            not url.hostname or port == 0 or url.username is not None
+            or url.path not in {"", "/"} or "?" in base_url or "#" in base_url
+            or any(character.isspace() or character == "\\" for character in base_url)
+            or url.scheme not in {"http", "https"}
+            or (deployment == "LOCAL" and not loopback)
+            or (url.scheme == "http" and not loopback)
+        ):
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_ENDPOINT")
+
+        workspace = entry["workspace"]
+        if "\x00" in workspace or not (
+            PureWindowsPath(workspace).is_absolute() or PurePosixPath(workspace).is_absolute()
+        ):
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_WORKSPACE")
+        if ("provider_id" in entry) != ("model_id" in entry):
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INCOMPLETE_MODEL")
+        password_env = entry["password_env"]
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", password_env):
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_PASSWORD_REFERENCE")
+        password = os.getenv(password_env, "")
+        username = entry.get("username", "opencode")
+        if not password.strip() or ":" in username:
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_HTTP_CREDENTIALS")
+        grants = entry.get("allowed_principals", [])
+        allowed_principals: set[tuple[str, uuid.UUID]] = set()
+        try:
+            if not isinstance(grants, list):
+                raise ValueError
+            for grant in grants:
+                if (
+                    not isinstance(grant, dict)
+                    or grant.keys() != {"tenant_id", "user_id"}
+                    or any(not isinstance(value, str) or not value.strip() for value in grant.values())
+                ):
+                    raise ValueError
+                allowed_principals.add((grant["tenant_id"], uuid.UUID(grant["user_id"])))
+        except ValueError:
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_ALLOWED_PRINCIPALS") from None
+        instances[instance_id] = OpenCodeInstanceSettings(
+            instance_id=instance_id, deployment=deployment, base_url=base_url, workspace=workspace,
+            password=password, username=username, provider_id=entry.get("provider_id"),
+            model_id=entry.get("model_id"), agent=entry.get("agent"),
+            allowed_principals=frozenset(allowed_principals),
+        )
+    return tuple(instances.values())
 
 
 class EnvironmentProfile(str, Enum):
@@ -810,6 +912,7 @@ class Settings:
     recovery_max_backoff_seconds: int = 60
     recovery_shutdown_grace_seconds: float = 5.0
     reconciliation_max_concurrency: int = 4
+    opencode_instances: tuple[OpenCodeInstanceSettings, ...] = ()
 
     @classmethod
     def load(cls) -> "Settings":
@@ -1573,4 +1676,5 @@ class Settings:
             reconciliation_max_concurrency=_env_strict_int(
                 "LOCAL_AGENT_RECONCILIATION_MAX_CONCURRENCY", 4, minimum=1, maximum=100
             ),
+            opencode_instances=_env_opencode_instances(),
         )

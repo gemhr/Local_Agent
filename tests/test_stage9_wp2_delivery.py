@@ -24,6 +24,7 @@ from core.runtime.events import (
     ErrorPayload,
     OutputDeltaPayload,
     RunCompletedPayload,
+    RunStartedPayload,
     RuntimeEvent,
     RuntimeEventType,
     ToolApprovalRequestedPayload,
@@ -424,8 +425,8 @@ async def test_v1_subscription_disconnect_does_not_cancel_supervised_producer(
     await feed.append_event(
         _event(
             1,
-            RuntimeEventType.OUTPUT_DELTA,
-            OutputDeltaPayload("ready"),
+            RuntimeEventType.RUN_STARTED,
+            RunStartedPayload(status="running"),
             run_id=run_id,
         )
     )
@@ -440,6 +441,7 @@ async def test_v1_subscription_disconnect_does_not_cancel_supervised_producer(
             async def events():
                 producer_started.set()
                 try:
+                    yield _event(1, RuntimeEventType.RUN_STARTED, RunStartedPayload(status="running"), run_id=run_id)
                     await producer_release.wait()
                     yield _event(
                         2,

@@ -741,6 +741,7 @@ class CoordinatedRuntimeFactory:
         adaptive_stop_enabled: bool | None = None,
         adaptive_route: dict | None = None,
         memory_access_context: MemoryAccessContext | None = None,
+        require_new_run: bool = False,
     ) -> CoordinatedRunScope:
         """默认 Coordinated 入口：始终经过动态 PlanResolver。"""
         return await self._create_run_scope(
@@ -767,6 +768,7 @@ class CoordinatedRuntimeFactory:
             adaptive_stop_enabled=adaptive_stop_enabled,
             adaptive_route=adaptive_route,
             memory_access_context=memory_access_context,
+            require_new_run=require_new_run,
         )
 
     async def create_static_run_scope(
@@ -1033,6 +1035,7 @@ class CoordinatedRuntimeFactory:
         adaptive_stop_enabled: bool | None = None,
         adaptive_route: dict | None = None,
         memory_access_context: MemoryAccessContext | None = None,
+        require_new_run: bool = False,
     ) -> CoordinatedRunScope:
         """Create one identity set and clean up any partially built transport."""
         if self._services.lifecycle_state is not RuntimeLifecycleState.READY:
@@ -1145,10 +1148,6 @@ class CoordinatedRuntimeFactory:
                     resolved_retrieval_profile_id=definition.retrieval_profile_id or "NONE",
                     resolved_memory_profile_id=definition.memory_profile_id or "NONE",
                 )
-                client_event_feed = getattr(self._services, "client_event_feed", None)
-                register_delivery = getattr(client_event_feed, "register_structured_output", None)
-                if definition.output_schema is not None and callable(register_delivery):
-                    register_delivery(run_context.run_id, definition.output_schema)
             durable_control = self._services.durable_run_control
             run_context.execution_policy = selected_policy
             run_context.adaptive_route = adaptive_route
@@ -1159,9 +1158,15 @@ class CoordinatedRuntimeFactory:
             durable_lease = existing_lease or await durable_control.claim(
                 run_context.run_id,
                 self._services.run_control_owner_id,
+                **({"require_new_run": True} if require_new_run else {}),
             )
             if existing_lease is not None and getattr(existing_lease, "run_id", run_context.run_id) != run_context.run_id:
                 raise ValueError("durable lease run_id mismatch")
+            if existing_context is None and definition.output_schema is not None:
+                client_event_feed = getattr(self._services, "client_event_feed", None)
+                register_delivery = getattr(client_event_feed, "register_structured_output", None)
+                if callable(register_delivery):
+                    register_delivery(run_context.run_id, definition.output_schema)
             run_context.attach_ownership_validator(
                 lambda: durable_control.assert_current(durable_lease)
             )

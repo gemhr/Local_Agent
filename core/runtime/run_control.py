@@ -10,7 +10,7 @@ from sqlalchemy import func, or_, select, text, update
 
 from core.persistence.database import Database
 from core.persistence.errors import PersistenceError
-from core.persistence.models import RunControlCommandRow, RunControlRow
+from core.persistence.models import ExternalRunRow, RunControlCommandRow, RunControlRow
 from core.persistence.repositories import runtime as runtime_repository
 from core.runtime.events import RuntimeEvent
 
@@ -55,12 +55,15 @@ class DurableRunControlService:
         self.database = database
         self.lease_seconds = lease_seconds
 
-    async def claim(self, run_id: str, owner_id: str) -> RunLease:
+    async def claim(self, run_id: str, owner_id: str, *, require_new_run: bool = False) -> RunLease:
+        """新接纳允许取消预写的零 fence 记录，已占用的 Run 只允许续租或恢复。"""
         self._validate_identity(run_id, "run_id")
         self._validate_identity(owner_id, "owner_id")
         try:
             async with self.database.transaction() as session:
                 await runtime_repository.lock_run_scope(session, run_id)
+                if await session.get(ExternalRunRow, run_id) is not None:
+                    raise RunControlConflict("Run 已关联外部 Runtime，不能 claim")
                 row = (await session.execute(
                     select(RunControlRow).where(RunControlRow.run_id == run_id).with_for_update()
                 )).scalar_one_or_none()
@@ -76,6 +79,8 @@ class DurableRunControlService:
                     await session.refresh(row)
                 elif row.state == "CLOSED":
                     raise RunControlConflict("Run 已关闭，不能 claim")
+                elif require_new_run and row.fencing_token != 0:
+                    raise RunControlConflict("Run 已接纳，不能再次接纳")
                 elif row.owner_id == owner_id and row.lease_until is not None:
                     renewed = await self._renew_locked(session, row, owner_id, int(row.fencing_token))
                     if renewed is not None:

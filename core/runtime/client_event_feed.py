@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from collections.abc import Mapping
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from core.persistence.database import Database
@@ -242,6 +242,14 @@ class PostgresClientEventFeed:
 
     def projection_committed(self, event: RuntimeEvent) -> None:
         _projection_committed(self, event)
+
+    async def append_external_in_transaction(self, session, run_id: str, event_type: str, payload: dict) -> None:
+        """写入调用方已校验的事件。调用方持有该 Run 的事务锁。"""
+        last_cursor = await session.scalar(
+            select(func.max(ClientDeliveryEventRow.cursor)).where(ClientDeliveryEventRow.run_id == run_id)
+        )
+        projected = ClientDeliveryEvent(run_id, (last_cursor or 0) + 1, event_type, payload, datetime.now(UTC))
+        await self._append_projected_in_transaction(session, projected)
 
     async def _append_projected_in_transaction(self, session, projected) -> None:
         result = await session.execute(
