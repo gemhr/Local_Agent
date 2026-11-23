@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import func
 
 from core.persistence.models import ExternalRunRow, RunControlRow, RuntimeRunExecutionRow
-from core.persistence.repositories.runtime import lock_run_scope
+from core.persistence.repositories.runtime import lock_run_scope, workflow_claim_allowed
 
 if TYPE_CHECKING:
     from core.agent_platform.runtime_adapter import ExecutionResult, RuntimeRequest
@@ -28,12 +28,19 @@ class ExternalRunRepository:
         async with self._database.session() as session:
             return await session.get(ExternalRunRow, run_id)
 
-    async def claim(self, request: RuntimeRequest, result: ExecutionResult, target_digest: str) -> str | None:
+    async def claim(
+        self, request: RuntimeRequest, result: ExecutionResult, target_digest: str, *,
+        workflow_target_digest: str | None = None,
+    ) -> str | None:
         access = request.memory_access_context
         if access is None:
             raise ValueError("External Run requires a trusted owner context")
         async with self._database.transaction() as session:
             await lock_run_scope(session, result.run_id)
+            if not await workflow_claim_allowed(
+                session, result.run_id, "OPENCODE", request, runtime_target_digest=workflow_target_digest,
+            ):
+                raise ExternalRunConflict(result.run_id)
             control = await session.get(RunControlRow, result.run_id)
             if (
                 (control is not None and (control.fencing_token > 0 or control.state == "CLOSED"))

@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from sqlalchemy import func, or_, select, text, update
 
 from core.persistence.database import Database
 from core.persistence.errors import PersistenceError
-from core.persistence.models import ExternalRunRow, RunControlCommandRow, RunControlRow
+from core.persistence.models import DurableToolInvocationRow, ExternalRunRow, RunControlCommandRow, RunControlRow
 from core.persistence.repositories import runtime as runtime_repository
 from core.runtime.events import RuntimeEvent
+
+if TYPE_CHECKING:
+    from core.agent_platform.runtime_adapter import RuntimeRequest
+    from core.runtime.tool_idempotency import DurableToolInvocation
 
 
 class RunControlError(Exception):
@@ -55,7 +60,11 @@ class DurableRunControlService:
         self.database = database
         self.lease_seconds = lease_seconds
 
-    async def claim(self, run_id: str, owner_id: str, *, require_new_run: bool = False) -> RunLease:
+    async def claim(
+        self, run_id: str, owner_id: str, *, require_new_run: bool = False,
+        workflow_request: RuntimeRequest | None = None, recovering: bool = False,
+        tool_recovery: DurableToolInvocation | DurableToolInvocationRow | None = None,
+    ) -> RunLease:
         """新接纳允许取消预写的零 fence 记录，已占用的 Run 只允许续租或恢复。"""
         self._validate_identity(run_id, "run_id")
         self._validate_identity(owner_id, "owner_id")
@@ -67,6 +76,21 @@ class DurableRunControlService:
                 row = (await session.execute(
                     select(RunControlRow).where(RunControlRow.run_id == run_id).with_for_update()
                 )).scalar_one_or_none()
+                admitted = row is not None and row.fencing_token > 0
+                if tool_recovery is not None:
+                    if not admitted:
+                        raise RunControlConflict("Tool 恢复需要已接纳的 Native Run")
+                    invocation = await session.get(DurableToolInvocationRow, tool_recovery.invocation_id)
+                    if (invocation is None or invocation.run_id != run_id or tool_recovery.run_id != run_id
+                            or invocation.step_id != tool_recovery.step_id or invocation.tool_name != tool_recovery.tool_name
+                            or not 0 < invocation.fencing_token <= row.fencing_token
+                            or invocation.state not in {"STARTED", "UNKNOWN"}):
+                        raise RunControlConflict("Tool 恢复与持久 invocation 不一致")
+                if not await runtime_repository.workflow_claim_allowed(
+                    session, run_id, "NATIVE", workflow_request,
+                    recovering=admitted and (recovering or tool_recovery is not None),
+                ):
+                    raise RunControlConflict("Run 已预留给 Workflow")
                 if row is None:
                     row = RunControlRow(run_id=run_id, owner_id=owner_id, fencing_token=1)
                     session.add(row)
@@ -79,7 +103,7 @@ class DurableRunControlService:
                     await session.refresh(row)
                 elif row.state == "CLOSED":
                     raise RunControlConflict("Run 已关闭，不能 claim")
-                elif require_new_run and row.fencing_token != 0:
+                elif (require_new_run or workflow_request is not None) and admitted:
                     raise RunControlConflict("Run 已接纳，不能再次接纳")
                 elif row.owner_id == owner_id and row.lease_until is not None:
                     renewed = await self._renew_locked(session, row, owner_id, int(row.fencing_token))
@@ -145,28 +169,33 @@ class DurableRunControlService:
         self._validate_identity(command_id, "command_id")
         async with self.database.transaction() as session:
             await runtime_repository.lock_run_scope(session, run_id)
-            control = (await session.execute(select(RunControlRow).where(RunControlRow.run_id == run_id).with_for_update())).scalar_one_or_none()
-            if control is None:
-                control = RunControlRow(run_id=run_id)
-                session.add(control)
-                await session.flush()
-            elif control.state == "CLOSED":
-                raise RunControlConflict("Run 已关闭，不能请求 CANCEL")
-            existing = (await session.execute(select(RunControlCommandRow).where(RunControlCommandRow.run_id == run_id))).scalar_one_or_none()
-            if existing is not None:
-                if existing.reason != reason:
-                    raise RunControlConflict("重复 CANCEL 的 payload 与既有 intent 冲突")
-                return CancelIntent(run_id, existing.command_id, existing.reason, existing.created_at)
-            command = RunControlCommandRow(command_id=command_id, run_id=run_id, command_type="CANCEL", reason=reason)
-            session.add(command)
-            control.cancel_command_id = command_id
-            control.cancel_reason = reason
-            control.cancel_requested_at = func.now()
-            control.version += 1
-            control.updated_at = func.now()
+            return await self.request_cancel_locked(session, run_id, reason, command_id=command_id)
+
+    @staticmethod
+    async def request_cancel_locked(session, run_id: str, reason: str, *, command_id: str | None = None) -> CancelIntent:
+        """与调用方业务变更原子提交，调用方必须持有 Run 锁。"""
+        control = await session.get(RunControlRow, run_id, with_for_update=True)
+        if control is None:
+            control = RunControlRow(run_id=run_id)
+            session.add(control)
             await session.flush()
-            await session.refresh(command)
-            return CancelIntent(run_id, command.command_id, command.reason, command.created_at)
+        elif control.state == "CLOSED":
+            raise RunControlConflict("Run 已关闭，不能请求 CANCEL")
+        existing = await session.scalar(select(RunControlCommandRow).where(RunControlCommandRow.run_id == run_id))
+        if existing is not None:
+            if existing.reason != reason:
+                raise RunControlConflict("重复 CANCEL 的 payload 与既有 intent 冲突")
+            return CancelIntent(run_id, existing.command_id, existing.reason, existing.created_at)
+        command = RunControlCommandRow(command_id=command_id or uuid4().hex, run_id=run_id, command_type="CANCEL", reason=reason)
+        session.add(command)
+        control.cancel_command_id = command.command_id
+        control.cancel_reason = reason
+        control.cancel_requested_at = func.now()
+        control.version += 1
+        control.updated_at = func.now()
+        await session.flush()
+        await session.refresh(command)
+        return CancelIntent(run_id, command.command_id, command.reason, command.created_at)
 
     async def cancel_intent(self, run_id: str) -> CancelIntent | None:
         async with self.database.session() as session:

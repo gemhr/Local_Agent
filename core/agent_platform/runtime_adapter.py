@@ -33,6 +33,7 @@ class RuntimeRequest:
     memory_access_context: MemoryAccessContext | None = None
     runtime_instance_id: str | None = None
     require_new_run: bool = False
+    workflow_dispatch_token: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +103,7 @@ class NativeRuntimeAdapter:
             "workflow_version": request.workflow_version,
             "retrieval_cache_authz_domain": request.retrieval_cache_authz_domain,
             "memory_access_context": request.memory_access_context,
+            **({"workflow_dispatch_token": request.workflow_dispatch_token} if request.workflow_dispatch_token else {}),
         }
 
     async def execute(self, request: RuntimeRequest) -> ExecutionResult:
@@ -124,6 +126,7 @@ class NativeRuntimeAdapter:
             kwargs["adaptive_route"] = adaptive_route
         output, result = await self._chat_service.run_coordinated_agent(
             request.agent_id, request.input, **kwargs,
+            **({"require_new_run": True} if request.require_new_run else {}),
         )
         return self.project_result(result, output)
 

@@ -742,6 +742,7 @@ class CoordinatedRuntimeFactory:
         adaptive_route: dict | None = None,
         memory_access_context: MemoryAccessContext | None = None,
         require_new_run: bool = False,
+        workflow_dispatch_token: str | None = None,
     ) -> CoordinatedRunScope:
         """默认 Coordinated 入口：始终经过动态 PlanResolver。"""
         return await self._create_run_scope(
@@ -769,6 +770,7 @@ class CoordinatedRuntimeFactory:
             adaptive_route=adaptive_route,
             memory_access_context=memory_access_context,
             require_new_run=require_new_run,
+            workflow_dispatch_token=workflow_dispatch_token,
         )
 
     async def create_static_run_scope(
@@ -1036,6 +1038,7 @@ class CoordinatedRuntimeFactory:
         adaptive_route: dict | None = None,
         memory_access_context: MemoryAccessContext | None = None,
         require_new_run: bool = False,
+        workflow_dispatch_token: str | None = None,
     ) -> CoordinatedRunScope:
         """Create one identity set and clean up any partially built transport."""
         if self._services.lifecycle_state is not RuntimeLifecycleState.READY:
@@ -1155,10 +1158,19 @@ class CoordinatedRuntimeFactory:
             run_context.loop_policy = loop_policy
             run_context.loop_correlation = ((rehydrated_root.resume_input.get("agent_loop") or {}).get("correlation", {})
                 if rehydrated_root is not None else loop_correlation or {})
+            claim_options = {"require_new_run": True} if require_new_run else {}
+            if workflow_dispatch_token is not None:
+                from core.agent_platform.runtime_adapter import RuntimeRequest
+
+                claim_options["workflow_request"] = RuntimeRequest(
+                    agent_id=run_context.data.entry_agent_id, input=query, agent_version=definition.agent_version,
+                    run_id=run_context.run_id, session_id=run_context.session_id,
+                    memory_access_context=memory_access_context, workflow_dispatch_token=workflow_dispatch_token,
+                )
             durable_lease = existing_lease or await durable_control.claim(
                 run_context.run_id,
                 self._services.run_control_owner_id,
-                **({"require_new_run": True} if require_new_run else {}),
+                **claim_options,
             )
             if existing_lease is not None and getattr(existing_lease, "run_id", run_context.run_id) != run_context.run_id:
                 raise ValueError("durable lease run_id mismatch")

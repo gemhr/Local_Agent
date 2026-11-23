@@ -26,6 +26,16 @@ External Run 接纳与 Native lease claim 共用 Run 级事务锁。Client Feed 
 仅按关联中止消息确认终态。结果未知时，后台 Feed 发布 `run.observation_lost`，结果查询在原实例恢复后可重新确认。
 重启后 `GET /api/v1/runs/{run_id}/result` 经 Run READ 授权按持久身份重读，可用的最终正文经过业务输出校验。
 
+### 跨 Runtime 串行 Workflow
+
+受信注册可声明 `SERIAL` 模式，固定两个有序步骤、Agent 版本、实例和输入。Native 委派继续使用 `DELEGATION`。串行定义当前执行 OpenCode → Native，要求审批或额外结果校验的步骤会拒绝执行。Workflow 首次创建时写入版本摘要，摘要包括固定输入和外部运行配置。同版本摘要漂移会拒绝新建，已有运行续跑时会暂停。
+
+认证 HUMAN 使用 `POST /api/v1/workflows/{workflow_id}/runs` 创建运行。请求体需要 UUID `request_id`，可提供 `expected_workflow_version`。同一租户、原发起人的重复请求返回已有运行，复用请求 ID 切换 Workflow 或版本返回冲突。同租户 owner / ADMIN 可用 `GET /api/v1/workflow-runs/{workflow_run_id}` 查询状态、步骤和子 Run ID，并向同路径下的 `/cancel` 提交取消。`/resume` 只接受原发起人重新认证后的请求。状态查询读取原 Run 的持久观察记录，结果正文沿原 Runtime 来源读取。
+
+`WorkflowService` 在创建后台任务前获取共享 Run 容量。槽位不足时，未启动的 Workflow 保持持久 `PENDING`，原发起人可显式续跑。`WorkflowRepository` 在一个事务内写入步骤预留、子 Run 与会话归属。首次接纳在原 Run 锁下核对内部派发凭证及实际 Agent、版本、输入摘要、实例配置和发起人会话。重领未接纳的预留会替换凭证并复用原 Run ID。取消按 Workflow 行、子 Run 锁的顺序提交取消意图，已接纳时同时写入原 Run 的持久控制路径。已有 OpenCode 会话只按原绑定核查，`ACTIVE` 或 `UNKNOWN` 不重发 Prompt。Native 恢复仍由 `RecoveryCoordinator` 负责。工具对账和人工收口使用已接纳 Native Run 的原 fence 和 invocation 绑定。
+
+Workflow 只有取得可信 Runtime 终态和可用结果引用才会推进。Native 使用关闭的 durable RunControl、对应的 Journal 终态和 Client Feed，OpenCode 使用原持久绑定的终态和助手消息身份。不确定结果可进入 `PAUSED`，已发起取消却缺少终态证据时保留 `CANCELLING`。应用关闭时等待 Workflow 任务退出后再释放 Runtime 资源，重启后需原发起人显式续跑才能派发新步骤。
+
 startup 汇集 builtin、BusinessTool、MCP registrations 与可信
 permission seeds，编译单一 AgentRegistry 后 freeze ToolRegistry。
 `actual_allowed_tools` 同时约束 Governance、Discovery 和 toolset identity；MCP policy

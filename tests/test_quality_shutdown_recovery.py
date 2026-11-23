@@ -46,6 +46,8 @@ async def test_lifespan_shutdown_fences_recovery_and_quality_receipt(clean_datab
     lifetime = server.lifespan(app)
     await lifetime.__aenter__()
     services = app.state.runtime_services
+    workflow = app.state.workflow_service
+    assert workflow._admitting()
     recovery = app.state.recovery_coordinator
     repository = recovery.repository
     control = recovery.run_control
@@ -56,8 +58,8 @@ async def test_lifespan_shutdown_fences_recovery_and_quality_receipt(clean_datab
     claimed, executed, reconciled = [], [], []
     async def candidates(**kwargs):
         return ids[:2]
-    async def claim(run_id, owner):
-        result = await original_claim(run_id, owner)
+    async def claim(run_id, owner, **kwargs):
+        result = await original_claim(run_id, owner, **kwargs)
         claimed.append(run_id)
         claim_returned.set()
         await release_claim.wait()
@@ -85,6 +87,7 @@ async def test_lifespan_shutdown_fences_recovery_and_quality_receipt(clean_datab
     async def stop():
         assert services.lifecycle_state.value == "SHUTTING_DOWN"
         assert services.admission_gate.state.value == "DRAINING"
+        assert workflow._closed
         assert recovery.stopping
         cleaning.set()
         await finish_cleanup.wait()
@@ -146,6 +149,7 @@ async def test_lifespan_shutdown_fences_recovery_and_quality_receipt(clean_datab
         assert await session.scalar(select(func.count()).select_from(RuntimeAgentEvaluationReceiptRow)) == 0
     finish_cleanup.set()
     await asyncio.wait_for(closing, 15)
+    assert app.state.workflow_service is None
     report = await app.state.runtime_shutdown_coordinator.shutdown()
     assert report.orchestration_completed
     assert services.admission_gate.state.value == "CLOSED"

@@ -57,6 +57,13 @@ class OpenCodeRuntimeAdapter:
             "workspace": instance.workspace,
             "deployment": instance.deployment,
         })
+        self.workflow_target_digest = canonical_payload_digest({
+            "target": self.target_digest,
+            "agent": instance.agent,
+            "provider": instance.provider_id,
+            "model": instance.model_id,
+            "use_instance_tool_permissions": instance.use_instance_tool_permissions,
+        })
         self._client = httpx.AsyncClient(
             base_url=instance.base_url,
             auth=httpx.BasicAuth(instance.username, instance.password),
@@ -66,6 +73,11 @@ class OpenCodeRuntimeAdapter:
             trust_env=False,
             transport=transport,
         )
+
+    def require_workflow_access(self, principal) -> None:
+        from core.auth import require_opencode_instance_access
+
+        require_opencode_instance_access(principal, self._instance)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -410,7 +422,10 @@ class OpenCodeRuntimeAdapter:
         source = CancellationSource()
         deadline = asyncio.get_running_loop().time() + (request.timeout_seconds or 120)
         try:
-            cancel_reason = await self._runs.claim(request, identity, self.target_digest)
+            cancel_reason = await self._runs.claim(
+                request, identity, self.target_digest,
+                **({"workflow_target_digest": self.workflow_target_digest} if request.workflow_dispatch_token else {}),
+            )
         except ExternalRunConflict:
             raise RuntimeAdapterError("RUN_ALREADY_ACCEPTED", "Run ID 已被执行占用") from None
         if cancel_reason is not None:

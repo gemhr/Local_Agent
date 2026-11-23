@@ -154,8 +154,8 @@ def compile_agent_catalog(
             raise AgentRegistrationCompileError("当前未支持 Agent memory profile binding")
         if definition.execution_binding.kind == "workflow":
             workflow = workflows.get(definition.execution_binding.reference or "")
-            if workflow is None:
-                raise AgentRegistrationCompileError("Agent 引用了未知 Workflow")
+            if workflow is None or workflow.execution_mode != "DELEGATION":
+                raise AgentRegistrationCompileError("Agent 引用了未知或不可用于委派的 Workflow")
             for task in workflow.tasks:
                 if task.agent_id not in known_agent_ids:
                     raise AgentRegistrationCompileError("Workflow 引用了未知 Agent")
@@ -255,6 +255,20 @@ def compile_agent_catalog(
         registry = AgentRegistry(compiled)
     except AgentRegistryError as exc:
         raise AgentRegistrationCompileError(exc.safe_message) from None
+    for workflow in workflows.values():
+        if workflow.execution_mode != "SERIAL":
+            continue
+        for task in workflow.tasks:
+            try:
+                entry = registry.require_entry(task.agent_id)
+            except AgentRegistryError:
+                raise AgentRegistrationCompileError("串行 Workflow 引用了不可用的 Agent 入口") from None
+            definition = entry.definition
+            if (definition.agent_version != task.agent_version
+                    or task.input_type not in definition.accepted_input_types
+                    or not task.capabilities.issubset(definition.capabilities)
+                    or (task.runtime_kind == "OPENCODE" and task.agent_id != "core_router")):
+                raise AgentRegistrationCompileError("串行 Workflow Agent 与注册约束不匹配")
     return CompiledAgentCatalog(
         agent_registry=registry,
         tool_grants=MappingProxyType(grants),

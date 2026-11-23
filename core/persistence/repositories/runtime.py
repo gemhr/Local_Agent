@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +22,13 @@ from core.persistence.models import (
     EventConsumptionCheckpointRow,
     RuntimeEventJournalRow,
     RuntimeSnapshotRow,
+    WorkflowRunRow,
+    WorkflowStepRunRow,
 )
+from core.runtime.execution_aggregate import canonical_payload_digest
+
+if TYPE_CHECKING:
+    from core.agent_platform.runtime_adapter import RuntimeRequest
 
 __all__ = [
     "delete_journal_rows_for_run",
@@ -60,6 +67,38 @@ async def lock_run_scope(session: AsyncSession, run_id: str) -> None:
     """
     await session.execute(
         select(func.pg_advisory_xact_lock(func.hashtextextended(run_id, 0)))
+    )
+
+
+async def workflow_claim_allowed(
+    session: AsyncSession, run_id: str, runtime_kind: str, request: RuntimeRequest | None, *,
+    runtime_target_digest: str | None = None, recovering: bool = False,
+) -> bool:
+    """在调用方持有的 Run 锁下核对实际执行请求与持久预留。"""
+    step = await session.scalar(select(WorkflowStepRunRow).where(WorkflowStepRunRow.platform_run_id == run_id))
+    if step is None:
+        return request is None or request.workflow_dispatch_token is None
+    if step.runtime_kind != runtime_kind or step.status != "RESERVED":
+        return False
+    if recovering:
+        return True
+    if (request is None or request.workflow_dispatch_token is None
+            or request.workflow_dispatch_token != step.dispatch_token):
+        return False
+    access = request.memory_access_context
+    run = await session.get(WorkflowRunRow, step.workflow_run_id)
+    return (
+        request.run_id == run_id
+        and request.agent_id == step.agent_id
+        and request.agent_version == step.agent_version
+        and canonical_payload_digest(request.input) == step.input_digest
+        and request.runtime_instance_id == step.runtime_instance_id
+        and runtime_target_digest == step.runtime_target_digest
+        and (runtime_kind != "OPENCODE" or runtime_target_digest is not None)
+        and access is not None and access.principal_kind == "HUMAN"
+        and access.tenant_id == run.tenant_id and access.user_id == str(run.owner_user_id)
+        and access.agent_id == request.agent_id
+        and access.session_id == request.session_id == f"{run.workflow_run_id}:{step.step_id}"
     )
 
 

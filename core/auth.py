@@ -171,11 +171,52 @@ def require_owned(principal: Principal, owner_id: str | uuid.UUID | None) -> Non
         raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
 
 
+def require_opencode_instance_access(principal: Principal, instance) -> None:
+    if (principal.tenant_id, principal.user_id) not in instance.allowed_principals:
+        raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+
+
 class ObjectAuthorizationService:
     """对象级授权唯一 Owner；不拥有任何 Runtime 或业务状态。"""
 
     def __init__(self, database: Any) -> None:
         self.database = database
+
+    async def require_current_human(self, principal: Principal) -> None:
+        """进程内任务使用同一受信身份，并重新检查等待期间可能变化的授权。"""
+        if (not isinstance(principal, Principal) or principal.principal_kind != "HUMAN"
+                or (principal.expires_at <= datetime.now(UTC)) or not principal.tenant_id):
+            raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+        async with self.database.session() as session:
+            user = await session.get(UserRow, principal.user_id)
+            if (user is None or user.subject != principal.subject or user.disabled_at is not None
+                    or user.tenant_id != principal.tenant_id or user.principal_kind != "HUMAN"):
+                raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+            roles = await session.scalars(select(RoleRow.code).join(
+                UserRoleRow, UserRoleRow.role_id == RoleRow.id,
+            ).where(UserRoleRow.user_id == principal.user_id))
+            if not principal.roles or not principal.roles.issubset(roles.all()):
+                raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+
+    @classmethod
+    async def bind_new_in_transaction(cls, session, principal: Principal, object_type: str, object_id: str) -> None:
+        """由业务记录的调用方事务原子提交归属。"""
+        tenant_id = cls._require_tenant(principal)
+        row = await session.get(ObjectOwnershipRow, {"object_type": object_type, "object_id": object_id})
+        if row is None:
+            session.add(ObjectOwnershipRow(
+                object_type=object_type, object_id=object_id,
+                owner_user_id=principal.user_id, tenant_id=tenant_id,
+            ))
+            await session.flush()
+        else:
+            cls._require_binding_owner(principal, row)
+
+    @staticmethod
+    def _require_binding_owner(principal: Principal, row: ObjectOwnershipRow) -> None:
+        is_admin = principal.principal_kind == "HUMAN" and "ADMIN" in principal.roles
+        if row.tenant_id != principal.tenant_id or (not is_admin and str(row.owner_user_id) != str(principal.user_id)):
+            raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
 
     @staticmethod
     def _require_tenant(principal: Principal) -> str:
@@ -242,41 +283,21 @@ class ObjectAuthorizationService:
     async def _require_existing_binding(
         self, principal: Principal, object_type: str, object_id: str
     ) -> None:
-        tenant_id = self._require_tenant(principal)
+        self._require_tenant(principal)
         async with self.database.session() as session:
             row = await session.get(
                 ObjectOwnershipRow,
                 {"object_type": object_type, "object_id": object_id},
             )
-        if row is None or row.tenant_id != tenant_id:
+        if row is None:
             raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
-        is_admin = principal.principal_kind == "HUMAN" and "ADMIN" in principal.roles
-        if not is_admin and str(row.owner_user_id) != str(principal.user_id):
-            raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
+        self._require_binding_owner(principal, row)
 
     async def bind_new(self, principal: Principal, object_type: str, object_id: str) -> None:
         """创建时由认证身份绑定；冲突对象只能被原 owner 复用。"""
-        tenant_id = self._require_tenant(principal)
         try:
             async with self.database.transaction() as session:
-                row = await session.get(
-                    ObjectOwnershipRow, {"object_type": object_type, "object_id": object_id}
-                )
-                if row is None:
-                    session.add(ObjectOwnershipRow(
-                        object_type=object_type, object_id=object_id,
-                        owner_user_id=principal.user_id, tenant_id=tenant_id,
-                    ))
-                    await session.flush()
-                    return
-                if row.tenant_id != tenant_id:
-                    raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
-                is_admin = (
-                    principal.principal_kind == "HUMAN"
-                    and "ADMIN" in principal.roles
-                )
-                if not is_admin and str(row.owner_user_id) != str(principal.user_id):
-                    raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
+                await self.bind_new_in_transaction(session, principal, object_type, object_id)
         except PersistenceError as exc:
             if exc.error_code is not DatabaseErrorCode.DATABASE_INTEGRITY_VIOLATION:
                 raise

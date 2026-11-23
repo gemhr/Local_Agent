@@ -190,7 +190,8 @@ Production 安全不变量（SERVER role）：backend 为 remote/hybrid 时 endp
 - `use_instance_tool_permissions` 是可选 JSON 布尔值，默认为 `false`，此时 AgentCore 禁用该实例的 Prompt 工具。设为 `true` 时，工具可用性及访问范围由 OpenCode 实例的 `permission` 配置决定。部署方应先配置默认拒绝和明确的工具、路径白名单，再授权调用者。Workspace 只指定执行目录，文件访问仍受 OpenCode 权限配置和进程权限约束。
 - 已认证、具有 Run `PROCESS` 权限且在实例白名单中的调用者，可在 `POST /api/runtime/execute` 或 `POST /api/v1/chat` 为 `core_router` 指定 `runtime_instance_id`。省略实例 ID 使用 Native。后台入口的外部执行支持可选 `timeout_seconds`，省略时为 120 秒。超时在已派发时触发原 Session 的 abort。无法确认中止时，观察状态为 `UNKNOWN`。
 - 持久身份绑定包含实例 ID、部署类型、Origin 和 Workspace 的摘要。需要改变目标时应登记新的实例 ID，已有 Run 的结果查询仅访问与其绑定匹配的配置。HTTP 服务访问密码可独立轮换。
-- 升级现有 PostgreSQL 数据库时，先运行 `uv run --no-sync python -m alembic upgrade head` 安装 `0045_external_runtime_runs`。
+- 升级现有 PostgreSQL 数据库时，先运行 `uv run --no-sync python -m alembic upgrade head`。`0045_external_runtime_runs` 增加外部执行持久化，`0046_workflow_execution` 增加 Workflow 版本和运行记录，`0047_workflow_target_binding` 固定外部子 Run 的执行配置摘要。
+- 内置固定两步定义 `runtime_handoff` 绑定实例 `workflow-opencode`。使用现有 `LOCAL_AGENT_OPENCODE_INSTANCES` 注册该 ID 并授权发起人后方可创建运行。Workflow 版本摘要会固定实例目标、CLI Agent、模型和工具权限模式。
 
 ## Role Boundary
 

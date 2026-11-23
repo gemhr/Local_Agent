@@ -125,6 +125,8 @@ class ChatService:
         workflow_id: str | None = None,
         workflow_version: str | None = None,
         adaptive_route: dict | None = None,
+        require_new_run: bool = False,
+        workflow_dispatch_token: str | None = None,
     ) -> tuple[str | None, RunCoordinatorResult]:
         """通过 RunCoordinator 执行一条真实的非流式单 Agent 路径。
 
@@ -146,6 +148,8 @@ class ChatService:
             workflow_id=workflow_id,
             workflow_version=workflow_version,
             **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
+            **({"require_new_run": True} if require_new_run else {}),
+            **({"workflow_dispatch_token": workflow_dispatch_token} if workflow_dispatch_token else {}),
             _result_out=results,
         ):
             events.append(event)
@@ -249,6 +253,7 @@ class ChatService:
         workflow_version: str | None = None,
         adaptive_route: dict | None = None,
         require_new_run: bool = False,
+        workflow_dispatch_token: str | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """以 Producer Task + 单 Consumer Channel 暴露真实 Coordinated 事件流。"""
         if self._coordinated_runtime_factory is None:
@@ -273,6 +278,7 @@ class ChatService:
             workflow_id=workflow_id,
             workflow_version=workflow_version,
             require_new_run=require_new_run,
+            **({"workflow_dispatch_token": workflow_dispatch_token} if workflow_dispatch_token else {}),
             **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
         )
         try:
@@ -307,12 +313,16 @@ class ChatService:
         loop_correlation=None,
         adaptive_stop_enabled=None,
         require_new_run: bool = False,
+        workflow_dispatch_token: str | None = None,
     ):
         factory = self._coordinated_runtime_factory
         if factory is None:
             raise ChatRuntimeTransportError(
                 "RUNTIME_CONFIGURATION_ERROR"
             ) from None
+        if (workflow_dispatch_token is not None and retrieval_cache_authz_domain is not None
+                and (memory_access_context is None or retrieval_cache_authz_domain != memory_access_context.user_id)):
+            raise ChatRuntimeTransportError("RUN_ALREADY_ACCEPTED")
         try:
             scope = await factory.create_run_scope(
                 agent_id,
@@ -332,6 +342,7 @@ class ChatService:
                 workflow_id=workflow_id,
                 workflow_version=workflow_version,
                 **({"require_new_run": True} if require_new_run else {}),
+                **({"workflow_dispatch_token": workflow_dispatch_token} if workflow_dispatch_token else {}),
                 **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
                 **({"execution_policy": execution_policy, "loop_policy": loop_policy, "loop_correlation": loop_correlation, "adaptive_stop_enabled": adaptive_stop_enabled}
                    if execution_policy is not None else {}),
@@ -377,6 +388,7 @@ class ChatService:
         workflow_version: str | None = None,
         adaptive_route: dict | None = None,
         require_new_run: bool = False,
+        workflow_dispatch_token: str | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         """Run the sole production coordinated event path through the factory.
 
@@ -400,6 +412,7 @@ class ChatService:
             workflow_id=workflow_id,
             workflow_version=workflow_version,
             require_new_run=require_new_run,
+            **({"workflow_dispatch_token": workflow_dispatch_token} if workflow_dispatch_token else {}),
             **({"adaptive_route": adaptive_route} if adaptive_route is not None else {}),
         )
         consumer = self._consume_scope_events(

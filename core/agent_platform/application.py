@@ -126,6 +126,21 @@ class AgentApplicationService:
             raise AgentApplicationError("RUNTIME_INSTANCE_UNAVAILABLE", "Runtime 实例未启用或不可用于此 Agent")
         return adapter
 
+    def validate_workflow_step(self, request: ExecutionRequest, principal) -> str | None:
+        """复用业务输入、Agent 版本和实例限制，返回外部派发配置的摘要。"""
+        self._resolve_request(request)
+        self._select_runtime(request)
+        if request.runtime_instance_id is not None:
+            return self.require_workflow_instance_access(request.runtime_instance_id, principal)
+        return None
+
+    def require_workflow_instance_access(self, instance_id: str, principal) -> str:
+        adapter = self._runtime_instances.get(instance_id)
+        if adapter is None:
+            raise AgentApplicationError("RUNTIME_INSTANCE_UNAVAILABLE", "Runtime 实例未启用")
+        adapter.require_workflow_access(principal)
+        return adapter.workflow_target_digest
+
     def _resolve_request(self, request: ExecutionRequest):
         if not isinstance(request, ExecutionRequest):
             raise TypeError("request 必须是 ExecutionRequest")
@@ -287,6 +302,8 @@ class AgentApplicationService:
         retrieval_cache_authz_domain: str | None = None,
         memory_access_context: MemoryAccessContext | None = None,
         adaptive_route: dict | None = None,
+        require_new_run: bool = False,
+        workflow_dispatch_token: str | None = None,
     ) -> ExecutionResult:
         registration, definition, workflow_id, workflow_version, effective_input = self._resolve_request(request)
         adapter = self._select_runtime(request)
@@ -296,6 +313,8 @@ class AgentApplicationService:
             run_id=request.run_id, session_id=request.session_id, timeout_seconds=request.timeout_seconds,
             retrieval_cache_authz_domain=retrieval_cache_authz_domain, memory_access_context=memory_access_context,
             runtime_instance_id=request.runtime_instance_id,
+            require_new_run=require_new_run,
+            workflow_dispatch_token=workflow_dispatch_token,
         )
         single_call = definition.business_options.get("stage13_single_call") is True
         if request.runtime_instance_id is not None:
@@ -326,7 +345,7 @@ class AgentApplicationService:
             result = await adapter.execute(runtime_request)
         return self._validate_output(self._apply_registration(result, registration), definition)
 
-    async def read_external_result(self, run_id: str) -> dict | None:
+    async def read_external_result(self, run_id: str, *, mark_unknown: bool = True) -> dict | None:
         """按已授权 Run 的绑定重读正文，必要时收敛未知状态。"""
         if self._external_runs is None:
             return None
@@ -357,7 +376,7 @@ class AgentApplicationService:
                     ):
                         output = result.output
             except (LookupError, RuntimeAdapterError):
-                if row.terminal_status is None:
+                if row.terminal_status is None and mark_unknown:
                     await self._external_runs.observe_unknown(run_id)
                     row = await self._external_runs.get(run_id)
                 read_error = "OPENCODE_RESULT_UNKNOWN"

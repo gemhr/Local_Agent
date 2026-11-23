@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 _SAFE_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _SAFE_AGENT_ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,63}$")
+_SAFE_INSTANCE_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 
 
 def _freeze_json(value: Any, *, path: str = "value") -> Any:
@@ -182,6 +183,11 @@ class WorkflowTask:
     instruction: str
     input_type: str = "text"
     capabilities: frozenset[str] = frozenset()
+    agent_version: str | None = None
+    runtime_kind: str | None = None
+    runtime_instance_id: str | None = None
+    requires_result_validation: bool = False
+    requires_approval: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (("task_id", self.task_id), ("agent_id", self.agent_id), ("input_type", self.input_type)):
@@ -192,6 +198,18 @@ class WorkflowTask:
             raise ValueError("instruction 不能为空")
         if not isinstance(self.capabilities, frozenset) or any(_SAFE_ID.fullmatch(item) is None for item in self.capabilities):
             raise ValueError("capabilities 必须是安全标识集合")
+        if self.agent_version is not None and (
+            not isinstance(self.agent_version, str) or not _SAFE_VERSION.fullmatch(self.agent_version)
+        ):
+            raise ValueError("agent_version 必须是安全版本")
+        if self.runtime_kind not in (None, "OPENCODE", "NATIVE"):
+            raise ValueError("runtime_kind 无效")
+        if self.runtime_instance_id is not None and (
+            not isinstance(self.runtime_instance_id, str) or not _SAFE_INSTANCE_ID.fullmatch(self.runtime_instance_id)
+        ):
+            raise ValueError("runtime_instance_id 必须是安全标识")
+        if type(self.requires_result_validation) is not bool or type(self.requires_approval) is not bool:
+            raise TypeError("步骤准出约束必须是 bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +218,7 @@ class WorkflowDefinition:
     workflow_version: str
     tasks: tuple[WorkflowTask, ...] = ()
     synthesis_required: bool = False
+    execution_mode: str = "DELEGATION"
 
     def __post_init__(self) -> None:
         for name in ("workflow_id", "workflow_version"):
@@ -213,6 +232,22 @@ class WorkflowDefinition:
             raise TypeError("synthesis_required 必须是 bool")
         if len({task.task_id for task in self.tasks}) != len(self.tasks):
             raise ValueError("Workflow task_id 不允许重复")
+        if self.execution_mode == "SERIAL":
+            if self.synthesis_required or len(self.tasks) != 2:
+                raise ValueError("串行 Workflow 必须有两个步骤")
+            if tuple(task.runtime_kind for task in self.tasks) != ("OPENCODE", "NATIVE"):
+                raise ValueError("串行 Workflow 当前仅支持 OpenCode → Native")
+            for task in self.tasks:
+                if task.agent_version is None or task.input_type != "text":
+                    raise ValueError("串行 Workflow 必须固定 Agent 版本和文本输入")
+                if (task.runtime_instance_id is not None) != (task.runtime_kind == "OPENCODE"):
+                    raise ValueError("串行 Workflow 实例绑定与 Runtime 类型不匹配")
+            return
+        if self.execution_mode != "DELEGATION" or any(
+            task.runtime_kind is not None or task.runtime_instance_id is not None or task.agent_version is not None
+            or task.requires_result_validation or task.requires_approval for task in self.tasks
+        ):
+            raise ValueError("Native 委派定义不得声明串行执行配置")
         if len(self.tasks) > 1 and not self.synthesis_required:
             raise ValueError("多个 delegated tasks 必须声明 synthesis_required")
         if len(self.tasks) == 1 and not self.synthesis_required:

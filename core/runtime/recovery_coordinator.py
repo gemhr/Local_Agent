@@ -86,7 +86,7 @@ class RecoveryCoordinator:
             if self.stopping:
                 break
             try:
-                lease = await self.run_control.claim(run_id, self.instance_id)
+                lease = await self.run_control.claim(run_id, self.instance_id, recovering=True)
             except RunControlConflict:
                 # Claim races are expected and are not recovery failures.
                 continue

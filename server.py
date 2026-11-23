@@ -34,6 +34,7 @@ from core.auth import (
     AuthService,
     AuthorizationAction,
     AuthorizationService,
+    require_opencode_instance_access,
     require_role,
     require_scope,
     EVALUATION_EXECUTE_SCOPE,
@@ -215,6 +216,8 @@ from core.agent_platform.registry import compile_agent_catalog
 from core.agent_platform.registrations import BUSINESS_REGISTRATION_BUNDLE
 from core.agent_platform.opencode_runtime_adapter import OpenCodeRuntimeAdapter
 from core.agent_platform.runtime_adapter import NativeRuntimeAdapter
+from core.agent_platform.workflow import WorkflowError, WorkflowService
+from core.persistence.repositories.workflows import WorkflowRepository
 from core.runtime.agent_evalops_trace_exporter import AgentEvalOpsTraceExporter
 from core.runtime.trace_export_dispatcher import TraceExportDispatcher
 from core.settings import (
@@ -330,6 +333,16 @@ class RunExecutionSupervisor:
                 "observe_run_admission_wait",
                 time.perf_counter() - started,
             )
+        return True
+
+    async def try_acquire_slot(self) -> bool | None:
+        """预留共享槽位。返回 None 表示饱和，False 表示容量限制未启用。"""
+        if self._slots is None:
+            return False
+        if self._slots.locked():
+            return None
+        # 同一事件循环中，未锁定的 Semaphore.acquire 立即完成，并尊重已有等待者。
+        await self._slots.acquire()
         return True
 
     def release_slot(self, reserved: bool) -> None:
@@ -1582,7 +1595,9 @@ async def lifespan(app: FastAPI):
 
     async def reconcile_tool_candidate(candidate):
         """生产对账 lane：claim Run 后仅调用 adapter 的只读 provider lookup。"""
-        lease = await durable_run_control.claim(candidate.run_id, app.state.application_metadata.instance_id)
+        lease = await durable_run_control.claim(
+            candidate.run_id, app.state.application_metadata.instance_id, tool_recovery=candidate,
+        )
         if recovery_coordinator.stopping:
             await durable_run_control.release(lease)
             return None
@@ -1686,6 +1701,13 @@ async def lifespan(app: FastAPI):
         max_active_runs=settings.max_active_runs,
         metrics=observability_service,
     )
+    workflow_service = None
+    if not app.state.ci_evaluation_only:
+        workflow_service = WorkflowService(
+            WorkflowRepository(persistence_database), compiled_agent_catalog.workflows, agent_application_service,
+            app.state.authorization_service, app.state.run_execution_supervisor, run_registry, runtime_services.admission_gate,
+        )
+    app.state.workflow_service = workflow_service
     app.state.client_event_feed = runtime_services.client_event_feed
     from core.agent_platform.ci_diagnosis import CIInvestigationService
     from core.incidents.baseband_quality import load_configuration as load_baseband_quality
@@ -1735,6 +1757,8 @@ async def lifespan(app: FastAPI):
         runtime_services.admission_gate.close_admission()
         recovery_coordinator.request_stop()
         app.state.runtime_lifecycle_state = RuntimeLifecycleState.SHUTTING_DOWN
+        if workflow_service is not None:
+            await workflow_service.close()
         if stage13_delivery_client is not None:
             await stage13_delivery_client.aclose()
             app.state.stage13_delivery_service = None
@@ -1770,6 +1794,7 @@ async def lifespan(app: FastAPI):
             )
         app.state.chat_service = None
         app.state.agent_application_service = None
+        app.state.workflow_service = None
         app.state.agent_registry = None
         app.state.agent_catalog = None
         app.state.stage8_mission_service = None
@@ -2246,6 +2271,11 @@ def _api_error(request: Request, code: str, status_code: int) -> JSONResponse:
 
 @app.exception_handler(AuthError)
 async def auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
+    return _api_error(request, exc.code, exc.status_code)
+
+
+@app.exception_handler(WorkflowError)
+async def workflow_error_handler(request: Request, exc: WorkflowError) -> JSONResponse:
     return _api_error(request, exc.code, exc.status_code)
 
 
@@ -2924,9 +2954,7 @@ async def _authorize_opencode_instance(request: Request, run_id: str, instance_i
     instance = next((item for item in settings.opencode_instances if item.instance_id == instance_id), None)
     if instance is None:
         raise HTTPException(status_code=422, detail="RUNTIME_INSTANCE_UNAVAILABLE")
-    principal = request.state.principal
-    if (principal.tenant_id, principal.user_id) not in instance.allowed_principals:
-        raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+    require_opencode_instance_access(request.state.principal, instance)
 
 
 def _run_registry_for(service) -> object:
@@ -3946,6 +3974,45 @@ async def v1_principal_endpoint(request: Request):
     }
 
 
+class WorkflowCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: uuid.UUID
+    expected_workflow_version: Annotated[StrictStr, Field(min_length=1, max_length=64)] | None = None
+
+
+def _workflow_service(request: Request) -> WorkflowService:
+    service = getattr(request.app.state, "workflow_service", None)
+    if service is None:
+        raise WorkflowError("RUNTIME_NOT_READY", 503)
+    return service
+
+
+@v1_router.post("/workflows/{workflow_id}/runs", status_code=202)
+async def create_workflow_run(workflow_id: Annotated[str, Path(max_length=64)], payload: WorkflowCreateRequest, request: Request):
+    try:
+        return await _workflow_service(request).create(
+            request.state.principal, workflow_id, payload.request_id, payload.expected_workflow_version,
+        )
+    except AgentApplicationError as exc:
+        raise WorkflowError(exc.error_code, 422) from None
+
+
+@v1_router.get("/workflow-runs/{workflow_run_id}")
+async def get_workflow_run(workflow_run_id: uuid.UUID, request: Request):
+    return await _workflow_service(request).get(request.state.principal, str(workflow_run_id))
+
+
+@v1_router.post("/workflow-runs/{workflow_run_id}/resume", status_code=202)
+async def resume_workflow_run(workflow_run_id: uuid.UUID, request: Request):
+    return await _workflow_service(request).resume(request.state.principal, str(workflow_run_id))
+
+
+@v1_router.post("/workflow-runs/{workflow_run_id}/cancel", status_code=202)
+async def cancel_workflow_run(workflow_run_id: uuid.UUID, request: Request):
+    return await _workflow_service(request).cancel(request.state.principal, str(workflow_run_id))
+
+
 app.include_router(v1_router)
 
 
@@ -4082,7 +4149,7 @@ async def _handle_manual_tool_resolution(
 
     owner_id = f"{runtime_services.run_control_owner_id}:manual"
     try:
-        lease = await runtime_services.durable_run_control.claim(run_id, owner_id)
+        lease = await runtime_services.durable_run_control.claim(run_id, owner_id, tool_recovery=record)
         audit = ManualResolutionAudit(
             actor_id=str(principal.user_id),
             tenant_id=principal.tenant_id,

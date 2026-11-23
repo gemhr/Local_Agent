@@ -251,7 +251,7 @@ class ObjectOwnershipRow(PersistenceBase):
 
     __table_args__ = (
         CheckConstraint(
-            "object_type IN ('RUN', 'CONVERSATION', 'MISSION', 'REVIEW', 'TEST_PLAN', 'ARTIFACT', 'GENERATED_CASE_ARTIFACT', 'EXTERNAL_EXECUTION_JOB', 'APPROVAL', 'TICKET_CONTINUATION', 'EVALUATION_JOB')",
+            "object_type IN ('RUN', 'CONVERSATION', 'MISSION', 'REVIEW', 'TEST_PLAN', 'ARTIFACT', 'GENERATED_CASE_ARTIFACT', 'EXTERNAL_EXECUTION_JOB', 'APPROVAL', 'TICKET_CONTINUATION', 'EVALUATION_JOB', 'WORKFLOW_RUN')",
             name="ck_object_ownership_type",
         ),
         ForeignKeyConstraint(
@@ -582,6 +582,66 @@ class ToolResolutionSnapshotRow(PersistenceBase):
             "snapshot_schema_version > 0",
             name="ck_tool_resolution_snapshot_schema_version",
         ),
+    )
+
+
+class WorkflowVersionRow(PersistenceBase):
+    """已使用的 Workflow 版本及其执行语义摘要。"""
+
+    __tablename__ = "workflow_versions"
+    workflow_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    workflow_version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    definition_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class WorkflowRunRow(PersistenceBase):
+    __tablename__ = "workflow_runs"
+    workflow_run_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    workflow_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    definition_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_user_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    current_step: Mapped[int] = mapped_column(Integer, nullable=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        ForeignKeyConstraint(("workflow_id", "workflow_version"), ("workflow_versions.workflow_id", "workflow_versions.workflow_version")),
+        UniqueConstraint("tenant_id", "owner_user_id", "request_id", name="uq_workflow_runs_request"),
+        CheckConstraint("status IN ('PENDING', 'RUNNING', 'PAUSED', 'CANCELLING', 'SUCCEEDED', 'FAILED', 'CANCELLED')", name="ck_workflow_runs_status"),
+        CheckConstraint("current_step BETWEEN 0 AND 1", name="ck_workflow_runs_current_step"),
+    )
+
+
+class WorkflowStepRunRow(PersistenceBase):
+    __tablename__ = "workflow_step_runs"
+    workflow_run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.workflow_run_id", ondelete="CASCADE"), primary_key=True)
+    step_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    attempt: Mapped[int] = mapped_column(Integer, primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    platform_run_id: Mapped[str | None] = mapped_column(String(255))
+    agent_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    runtime_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    runtime_instance_id: Mapped[str | None] = mapped_column(String(64))
+    runtime_target_digest: Mapped[str | None] = mapped_column(String(64))
+    input_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    dispatch_token: Mapped[str | None] = mapped_column(String(36))
+    runtime_status: Mapped[str | None] = mapped_column(String(16))
+    result_ref: Mapped[dict | None] = mapped_column(JSONB)
+    reason: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (
+        UniqueConstraint("workflow_run_id", "position", name="uq_workflow_step_runs_position"),
+        UniqueConstraint("platform_run_id", name="uq_workflow_step_runs_platform_run"),
+        CheckConstraint("attempt = 1 AND position BETWEEN 0 AND 1", name="ck_workflow_step_runs_position"),
+        CheckConstraint("status IN ('PENDING', 'RESERVED', 'SUCCEEDED', 'FAILED', 'CANCELLED')", name="ck_workflow_step_runs_status"),
     )
 
 
@@ -1657,6 +1717,9 @@ CANONICAL_TABLES = (
     "runtime_event_journal",
     "client_delivery_events",
     "external_runtime_runs",
+    "workflow_step_runs",
+    "workflow_runs",
+    "workflow_versions",
     "tool_resolution_snapshots",
     "runtime_run_control_commands",
     "runtime_run_control",

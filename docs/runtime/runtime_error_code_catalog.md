@@ -18,6 +18,19 @@
 | `DEADLINE_EXCEEDED` | 200，状态 `FAILED` | 跑到截止时间且确认 Prompt 尚未派发，或匹配的助手消息已中止。 |
 | `RUN_CANCELLED` | 200，状态 `CANCELLED` | 在取消意图下确认 Prompt 尚未派发，或匹配的助手消息已中止。 |
 
+## 串行 Workflow
+
+| 安全错误码 | HTTP 或持久状态 | 触发条件 |
+| --- | --- | --- |
+| `WORKFLOW_DEFINITION_UNAVAILABLE` | 404 / `PAUSED` | 静态定义缺失或非串行。 |
+| `WORKFLOW_VERSION_MISMATCH` / `WORKFLOW_DEFINITION_DRIFT` | 409 / `PAUSED` | 当前注册版本或语义摘要与请求或持久记录不一致。 |
+| `WORKFLOW_REQUEST_CONFLICT` | 409 | 发起者将已使用的 `request_id` 绑定到其他 Workflow 或版本。 |
+| `WORKFLOW_STEP_CONSTRAINT_UNSUPPORTED` | 422 / `PAUSED` | 已声明需额外结果校验或审批。 |
+| `WORKFLOW_RUN_ID_CONFLICT` | `PAUSED` | 新生成的 Run ID 已有归属或运行记录。 |
+| `WORKFLOW_RUNTIME_BINDING_MISMATCH` | `PAUSED` | 外部 Run 的实例、Agent 或发起人会话与预留步骤不符。 |
+| `WORKFLOW_RUN_<观察状态>` | `PAUSED` | 原 Run 仍待接纳或缺少确定终态，且没有更具体的 Runtime 错误码。 |
+| `NATIVE_TERMINAL_UNVERIFIED` / `WORKFLOW_RESULT_UNAVAILABLE` | `PAUSED` | Native 关闭记录缺少对应 Journal 终态，或成功步骤缺少可用结果引用。 |
+
 ## Stage 3 WP3 Security Codes
 
 | Code | Domain | Phase | Owner | Trigger | Retry | Side effect | User/log projection | Operator action | Evidence | Tests |

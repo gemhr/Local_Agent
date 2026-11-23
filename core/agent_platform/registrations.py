@@ -1,7 +1,7 @@
 """应用启动时提交的完整业务注册清单。"""
 
 from core.agent_platform.registry import AgentRegistrationBundle
-from core.agent_platform.contracts import AgentRegistration
+from core.agent_platform.contracts import AgentRegistration, WorkflowDefinition, WorkflowTask
 from core.agent_platform.ci_diagnosis import definition
 from core.agent_platform.baseband_investigator import definition as baseband_definition
 from core.ci_simulation.baseband import AGENT_ID as BASEBAND_AGENT
@@ -16,7 +16,14 @@ from core.feature_impact.tools import TOOL_NAMES as FEATURE_TOOLS, AGENT_ID as F
 # 中声明；内置 Agent 仍由平台 seed 提供。
 BUSINESS_REGISTRATION_BUNDLE = AgentRegistrationBundle(
     registrations=(AgentRegistration(definition()), AgentRegistration(baseband_definition()), AgentRegistration(feature_definition()), AgentRegistration(status_definition())),
-    workflows=(),
+    workflows=(WorkflowDefinition(
+        "runtime_handoff", "1", execution_mode="SERIAL", tasks=(
+            WorkflowTask("external", "core_router", "请仅回复 OpenCode 检查完成。",
+                         agent_version="builtin-1", runtime_kind="OPENCODE", runtime_instance_id="workflow-opencode"),
+            WorkflowTask("native", "core_router", "请仅回复 Native 检查完成。",
+                         agent_version="builtin-1", runtime_kind="NATIVE"),
+        ),
+    ),),
     tools=(),
     model_profile_ids=frozenset({"default"}),
     retrieval_profile_ids=frozenset(),

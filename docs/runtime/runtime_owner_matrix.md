@@ -60,6 +60,7 @@ test-only AST Gate 只是全production Python surface的owner/sink oracle，不�
 |---|---|---|---|---|---|---|
 | runtime selection | `server.py::lifespan()` 装配 NativeRuntimeAdapter 和可信 OpenCode 实例，HTTP 入口检查实例权限 | AgentApplicationService, ChatService | lifespan 装配一次 | 服务端实例配置、CoordinatedRuntimeFactory | APPLICATION_SCOPE | Runtime failure handler、Model router、HTTP retry |
 | external run identity / terminal | ExternalRunRepository，依据 OpenCode 关联结果 | AgentApplicationService、Run 结果查询、Client Feed | 受 Run 事务锁保护的接纳与终态写入 | `external_runtime_runs` | RUN_SCOPE | Native Journal、Plan、Snapshot、Model Attempt |
+| serial workflow / child run reservation | WorkflowService / WorkflowRepository | Workflow API；Native、OpenCode 接纳读取预留 | Workflow 行锁后取得子 Run 事务锁；子 Run 终态由原 Runtime 确认 | `workflow_versions`、`workflow_runs`、`workflow_step_runs` 与对象归属 | APPLICATION_SCOPE | Native RecoveryCoordinator、OpenCode Session/Prompt、Runtime Budget |
 | run identity | RunIdentifiers / RunContext | State、Event、Trace、Registry、Journal | `create_run_context()` | Event/Journal/Snapshot 中的安全 identity | RUN_SCOPE | Report、Fault controller、Adapter |
 | trace identity | RunIdentifiers / RunContext | Emitter、Span recorder、Journal | `create_run_context()` | Event/Journal/Snapshot | RUN_SCOPE | Model/Tool adapter、Report |
 | run state | AgentState | Coordinator、Scheduler、Snapshot、observer | AgentStateMachine，经 Parent Runtime 调用 | AgentState schema / RunSnapshot 投影 | RUN_SCOPE | Plan、Report、RecoveryValidator |
