@@ -193,6 +193,7 @@ Production 安全不变量（SERVER role）：backend 为 remote/hybrid 时 endp
 - 升级现有 PostgreSQL 数据库时，先运行 `uv run --no-sync python -m alembic upgrade head`。`0045_external_runtime_runs` 增加外部执行持久化，`0046_workflow_execution` 增加 Workflow 版本和运行记录，`0047_workflow_target_binding` 固定外部子 Run 的执行配置摘要，`0048_workflow_artifact_handoff` 增加产物引用与实际下游输入。
 - 内置固定两步定义 `runtime_handoff` 绑定实例 `workflow-opencode`。使用现有 `LOCAL_AGENT_OPENCODE_INSTANCES` 注册该 ID 并授权发起人后方可创建运行。Workflow 版本摘要会固定实例目标、CLI Agent、模型和工具权限模式。
 - `ci_artifact_handoff` 复用受信的 `workflow-opencode` 实例，要求 `deployment=LOCAL`、`use_instance_tool_permissions=true` 和服务进程可读写的本机合成 Workspace。OpenCode 侧只授予任务所需的文件权限。Workflow 进程负责创建每次执行的专属子目录并验证其中的固定文件，CLI 与本机操作系统权限共同约束 Workspace 的写入者。该定义的产物文件上限为 16 KiB。
+- `ci_artifact_review@1` 复用上述实例和本机 Workspace，并在步骤后等待人工决定。升级到 Alembic `0049_workflow_approval` 后使用现有 HUMAN 鉴权和 Workflow API，无额外服务或后台 Worker。
 
 ## Role Boundary
 

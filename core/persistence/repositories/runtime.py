@@ -25,6 +25,7 @@ from core.persistence.models import (
     WorkflowRunRow,
     WorkflowStepRunRow,
 )
+from core.persistence.repositories.workflow_approvals import consume_approval, require_dispatch_approval
 from core.runtime.execution_aggregate import canonical_payload_digest
 
 if TYPE_CHECKING:
@@ -103,12 +104,18 @@ async def workflow_claim_allowed(
     )
     if not matches:
         return False
-    if runtime_kind == "NATIVE" and not already_admitted and (run.handoff_input is not None or step.bound_input is not None):
+    if runtime_kind == "NATIVE" and not already_admitted and (
+        run.handoff_input is not None or step.bound_input is not None or run.approval_phase is not None
+    ):
         # 只读 Workflow 状态，避免逆序获取已由 prepare/cancel 持有的 Workflow 行锁。
         if (run.handoff_input is None or run.cancel_requested or run.status != "RUNNING" or run.current_step != step.position
                 or step.position != 1 or step.bound_input != request.input or workflow_artifact_check is None):
             return False
+        approval = await require_dispatch_approval(session, run, step) if run.approval_phase is not None else None
         await workflow_artifact_check(session, run, step, request.input)
+        if approval is not None:
+            # 与首次 fence 同事务提交。产物复核失败或接纳回滚时不消费批准。
+            consume_approval(approval)
     return True
 
 

@@ -604,6 +604,7 @@ class WorkflowRunRow(PersistenceBase):
     owner_user_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), nullable=False)
     request_id: Mapped[str] = mapped_column(String(36), nullable=False)
     handoff_input: Mapped[dict | None] = mapped_column(JSONB)
+    approval_phase: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     current_step: Mapped[int] = mapped_column(Integer, nullable=False)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -614,7 +615,8 @@ class WorkflowRunRow(PersistenceBase):
     __table_args__ = (
         ForeignKeyConstraint(("workflow_id", "workflow_version"), ("workflow_versions.workflow_id", "workflow_versions.workflow_version")),
         UniqueConstraint("tenant_id", "owner_user_id", "request_id", name="uq_workflow_runs_request"),
-        CheckConstraint("status IN ('PENDING', 'RUNNING', 'PAUSED', 'CANCELLING', 'SUCCEEDED', 'FAILED', 'CANCELLED')", name="ck_workflow_runs_status"),
+        CheckConstraint("status IN ('PENDING', 'RUNNING', 'PAUSED', 'CANCELLING', 'SUCCEEDED', 'FAILED', 'CANCELLED', "
+                        "'WAITING_APPROVAL', 'REJECTED')", name="ck_workflow_runs_status"),
         CheckConstraint("current_step BETWEEN 0 AND 1", name="ck_workflow_runs_current_step"),
     )
 
@@ -646,6 +648,35 @@ class WorkflowStepRunRow(PersistenceBase):
         UniqueConstraint("platform_run_id", name="uq_workflow_step_runs_platform_run"),
         CheckConstraint("attempt = 1 AND position BETWEEN 0 AND 1", name="ck_workflow_step_runs_position"),
         CheckConstraint("status IN ('PENDING', 'RESERVED', 'SUCCEEDED', 'FAILED', 'CANCELLED')", name="ck_workflow_step_runs_status"),
+    )
+
+
+class WorkflowApprovalRow(PersistenceBase):
+    __tablename__ = "workflow_approvals"
+    approval_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    step_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    approval_phase: Mapped[str] = mapped_column(String(32), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_user_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    binding_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    decided_by: Mapped[object | None] = mapped_column(Uuid(as_uuid=True))
+    decided_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("workflow_run_id", "step_id", "attempt"),
+            ("workflow_step_runs.workflow_run_id", "workflow_step_runs.step_id", "workflow_step_runs.attempt"),
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("workflow_run_id", name="uq_workflow_approvals_run"),
+        CheckConstraint("approval_phase = 'AFTER_STEP_OUTPUT'", name="ck_workflow_approvals_phase"),
+        CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED', 'INVALIDATED')", name="ck_workflow_approvals_status"),
+        CheckConstraint("consumed_at IS NULL OR status = 'APPROVED'", name="ck_workflow_approvals_consumed"),
     )
 
 
@@ -1722,6 +1753,7 @@ CANONICAL_TABLES = (
     "client_delivery_events",
     "external_runtime_runs",
     "workflow_step_runs",
+    "workflow_approvals",
     "workflow_runs",
     "workflow_versions",
     "tool_resolution_snapshots",

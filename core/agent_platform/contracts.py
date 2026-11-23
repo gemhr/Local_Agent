@@ -212,6 +212,10 @@ class WorkflowTask:
             raise TypeError("步骤准出约束必须是 bool")
 
 
+AFTER_STEP_OUTPUT = "AFTER_STEP_OUTPUT"
+BEFORE_STEP_DISPATCH = "BEFORE_STEP_DISPATCH"
+
+
 @dataclass(frozen=True, slots=True)
 class WorkflowDefinition:
     workflow_id: str
@@ -220,6 +224,7 @@ class WorkflowDefinition:
     synthesis_required: bool = False
     execution_mode: str = "DELEGATION"
     result_binding: str | None = None
+    approval_phase: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("workflow_id", "workflow_version"):
@@ -236,6 +241,10 @@ class WorkflowDefinition:
             or not _SAFE_ID.fullmatch(self.result_binding)
         ):
             raise ValueError("result_binding 必须是串行 Workflow 的受信标识")
+        if self.approval_phase is not None and (
+            self.execution_mode != "SERIAL" or self.approval_phase not in (AFTER_STEP_OUTPUT, BEFORE_STEP_DISPATCH)
+        ):
+            raise ValueError("approval_phase 无效")
         if len({task.task_id for task in self.tasks}) != len(self.tasks):
             raise ValueError("Workflow task_id 不允许重复")
         if self.execution_mode == "SERIAL":

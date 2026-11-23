@@ -10,6 +10,7 @@ from typing import Any, Optional
 from core.runtime.memory_scope import MemoryAccessContext
 from core.runtime.memory_scope import MemoryContextError
 from core.runtime.run_control import RunControlConflict, WorkflowArtifactAdmissionRejected
+from core.persistence.repositories.workflow_approvals import WorkflowApprovalError
 from core.agent_router import AgentRouter
 from core.runtime.metrics import ApplicationRuntimeGaugeProvider
 from core.runtime.observability_dispatcher import RuntimeObservabilityDispatcher
@@ -361,6 +362,8 @@ class ChatService:
             ) from None
         except WorkflowArtifactAdmissionRejected as exc:
             raise ChatRuntimeTransportError(exc.error_code) from None
+        except WorkflowApprovalError as exc:
+            raise ChatRuntimeTransportError(exc.code) from None
         except RunControlConflict:
             code = "RUN_ALREADY_ACCEPTED" if require_new_run else "RUNTIME_SCOPE_CREATION_FAILED"
             raise ChatRuntimeTransportError(code) from None

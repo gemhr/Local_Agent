@@ -12,9 +12,12 @@ from sqlalchemy.dialects.postgresql import insert
 from core.auth import ObjectAuthorizationService
 from core.persistence.models import (
     ClientDeliveryEventRow, ExternalRunRow, ObjectOwnershipRow, RunControlRow,
-    RuntimeEventJournalRow, WorkflowRunRow, WorkflowStepRunRow, WorkflowVersionRow,
+    RuntimeEventJournalRow, WorkflowApprovalRow, WorkflowRunRow, WorkflowStepRunRow, WorkflowVersionRow,
 )
 from core.persistence.repositories.runtime import lock_run_scope
+from core.persistence.repositories.workflow_approvals import (
+    WorkflowApprovalError, approval_binding_digest, require_dispatch_approval, verify_approval_binding, workflow_approval,
+)
 from core.runtime.cancellation import CancellationReason
 from core.runtime.event_journal_store import journal_record_from_row
 from core.runtime.events import RuntimeEventType
@@ -22,7 +25,7 @@ from core.runtime.execution_aggregate import canonical_payload_digest
 from core.runtime.run_control import DurableRunControlService
 
 
-TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
+TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CANCELLED", "REJECTED"})
 
 
 @dataclass(frozen=True)
@@ -85,7 +88,8 @@ class WorkflowRepository:
             run = WorkflowRunRow(
                 workflow_run_id=str(uuid4()), workflow_id=key[0], workflow_version=key[1],
                 definition_digest=digest, tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
-                request_id=request_id, handoff_input=handoff_input, status="PENDING", current_step=0, cancel_requested=False,
+                request_id=request_id, handoff_input=handoff_input, approval_phase=definition.approval_phase,
+                status="PENDING", current_step=0, cancel_requested=False,
             )
             await ObjectAuthorizationService.bind_new_in_transaction(session, principal, "WORKFLOW_RUN", run.workflow_run_id)
             session.add(run)
@@ -101,12 +105,46 @@ class WorkflowRepository:
             return run, True
 
     async def read(self, run_id):
+        run, steps, _ = await self.snapshot(run_id)
+        return run, steps
+
+    async def snapshot(self, run_id):
         async with self.database.transaction() as session:
             run = await self._lock_workflow(session, run_id)
             steps = tuple(await session.scalars(select(WorkflowStepRunRow).where(
                 WorkflowStepRunRow.workflow_run_id == run_id,
             ).order_by(WorkflowStepRunRow.position)))
-            return run, steps
+            approval = await workflow_approval(session, run_id) if run.approval_phase is not None else None
+            return run, steps, approval
+
+    async def decide_approval(self, run_id, approval_id, actor, decision, binding_digest):
+        decisions = {"APPROVE": "APPROVED", "REJECT": "REJECTED"}
+        if decision not in decisions:
+            raise WorkflowApprovalError("WORKFLOW_APPROVAL_DECISION_INVALID", 422)
+        async with self.database.transaction() as session:
+            run = await self._lock_workflow(session, run_id)
+            await ObjectAuthorizationService.require_current_human_in_session(session, actor)
+            approval = await workflow_approval(session, run_id)
+            if approval is None or approval.approval_id != approval_id:
+                raise WorkflowApprovalError("WORKFLOW_APPROVAL_NOT_FOUND", 404)
+            if run.cancel_requested or approval.status == "INVALIDATED":
+                raise WorkflowApprovalError("WORKFLOW_APPROVAL_INVALIDATED")
+            if binding_digest is not None and approval.binding_digest != binding_digest:
+                raise WorkflowApprovalError("WORKFLOW_APPROVAL_BINDING_MISMATCH")
+            native = await self._step(session, run_id, 1)
+            await verify_approval_binding(session, run, native, approval)
+            new_status = decisions[decision]
+            if approval.status != "PENDING":
+                if approval.status == new_status and approval.decided_by == actor.user_id:
+                    return approval
+                raise WorkflowApprovalError("WORKFLOW_APPROVAL_DECISION_CONFLICT")
+            if run.status != "WAITING_APPROVAL" or native.platform_run_id is not None:
+                raise WorkflowApprovalError("WORKFLOW_APPROVAL_DECISION_CONFLICT")
+            approval.status = new_status
+            approval.decided_by = actor.user_id
+            approval.decided_at = datetime.now(UTC)
+            _set_status(run, "REJECTED" if new_status == "REJECTED" else "WAITING_APPROVAL")
+            return approval
 
     async def prepare(self, run_id, position, principal, conversation_id, *, definition_digest=None,
                       runtime_target_digest=None, effective_input=None, prepare_artifact=None):
@@ -122,6 +160,8 @@ class WorkflowRepository:
             external = await session.get(ExternalRunRow, platform_run_id)
             if external is not None or (control is not None and (control.fencing_token > 0 or control.state == "CLOSED")):
                 return None
+            if run.approval_phase is not None and step.position == 1:
+                await require_dispatch_approval(session, run, step)
             if step.runtime_kind == "OPENCODE":
                 if (definition_digest != run.definition_digest or runtime_target_digest is None
                         or step.runtime_target_digest not in (None, runtime_target_digest)):
@@ -248,8 +288,8 @@ class WorkflowRepository:
                     current.status = "FAILED"
                     _set_status(run, "FAILED", current.reason)
             elif evidence.result_ref is None or (
-                run.handoff_input is not None and current.position == 0
-                and (evidence.artifact_ref is None or evidence.next_input is None)
+                current.position == 0 and (run.handoff_input is not None or run.approval_phase is not None)
+                and (run.handoff_input is None or evidence.artifact_ref is None or evidence.next_input is None)
             ):
                 current.reason = "WORKFLOW_RESULT_UNAVAILABLE" if evidence.result_ref is None else "WORKFLOW_VALIDATION_REQUIRED"
                 _set_status(run, "PAUSED", current.reason)
@@ -264,6 +304,15 @@ class WorkflowRepository:
                         successor.bound_input = evidence.next_input
                         successor.input_digest = canonical_payload_digest(evidence.next_input)
                     run.current_step = 1
+                    if run.approval_phase is not None:
+                        session.add(WorkflowApprovalRow(
+                            approval_id=str(uuid4()), workflow_run_id=run_id, step_id=current.step_id,
+                            attempt=current.attempt, approval_phase=run.approval_phase,
+                            tenant_id=run.tenant_id, owner_user_id=run.owner_user_id, status="PENDING",
+                            binding_digest=approval_binding_digest(run, current, successor),
+                        ))
+                        _set_status(run, "WAITING_APPROVAL")
+                        return False
                     _set_status(run, "PENDING")
                     return True
             return False
@@ -286,6 +335,10 @@ class WorkflowRepository:
             if run.status in TERMINAL:
                 return None
             run.cancel_requested = True
+            if run.approval_phase is not None:
+                approval = await workflow_approval(session, run_id)
+                if approval is not None and approval.status == "PENDING":
+                    approval.status = "INVALIDATED"
             step = await self._step(session, run_id, run.current_step)
             if step.platform_run_id is not None:
                 await lock_run_scope(session, step.platform_run_id)

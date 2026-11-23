@@ -184,19 +184,23 @@ class ObjectAuthorizationService:
 
     async def require_current_human(self, principal: Principal) -> None:
         """进程内任务使用同一受信身份，并重新检查等待期间可能变化的授权。"""
+        async with self.database.session() as session:
+            await self.require_current_human_in_session(session, principal)
+
+    @staticmethod
+    async def require_current_human_in_session(session, principal: Principal) -> None:
         if (not isinstance(principal, Principal) or principal.principal_kind != "HUMAN"
                 or (principal.expires_at <= datetime.now(UTC)) or not principal.tenant_id):
             raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
-        async with self.database.session() as session:
-            user = await session.get(UserRow, principal.user_id)
-            if (user is None or user.subject != principal.subject or user.disabled_at is not None
-                    or user.tenant_id != principal.tenant_id or user.principal_kind != "HUMAN"):
-                raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
-            roles = await session.scalars(select(RoleRow.code).join(
-                UserRoleRow, UserRoleRow.role_id == RoleRow.id,
-            ).where(UserRoleRow.user_id == principal.user_id))
-            if not principal.roles or not principal.roles.issubset(roles.all()):
-                raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+        user = await session.get(UserRow, principal.user_id)
+        if (user is None or user.subject != principal.subject or user.disabled_at is not None
+                or user.tenant_id != principal.tenant_id or user.principal_kind != "HUMAN"):
+            raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+        roles = await session.scalars(select(RoleRow.code).join(
+            UserRoleRow, UserRoleRow.role_id == RoleRow.id,
+        ).where(UserRoleRow.user_id == principal.user_id))
+        if not principal.roles or not principal.roles.issubset(roles.all()):
+            raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
 
     @classmethod
     async def bind_new_in_transaction(cls, session, principal: Principal, object_type: str, object_id: str) -> None:

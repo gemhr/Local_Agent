@@ -11,10 +11,12 @@ from uuid import UUID
 from core.agent_platform.application import AgentApplicationError, ExecutionRequest
 from core.agent_platform import workflow_artifacts as artifacts
 from core.agent_platform.ci_status import AGENT_ID as CI_STATUS_AGENT
+from core.agent_platform.contracts import AFTER_STEP_OUTPUT
 from core.auth import AuthorizationAction, AuthError, require_owned
 from core.chat_service import ChatRuntimeTransportError
 from core.incidents.contracts import CIError
 from core.persistence.repositories.workflows import TERMINAL
+from core.persistence.repositories.workflow_approvals import WorkflowApprovalError
 from core.runtime.cancellation import CancellationReason
 from core.runtime.execution_aggregate import canonical_payload_digest
 from core.runtime.memory_scope import MemoryAccessContext
@@ -59,9 +61,13 @@ class WorkflowService:
             raise WorkflowError("WORKFLOW_DEFINITION_UNAVAILABLE", 404)
         if expected_version is not None and definition.workflow_version != expected_version:
             raise WorkflowError("WORKFLOW_VERSION_MISMATCH")
-        if any(task.requires_approval for task in definition.tasks):
-            raise WorkflowError("WORKFLOW_STEP_CONSTRAINT_UNSUPPORTED", 422)
         ci_binding = definition.result_binding == artifacts.CI_ARTIFACT_BINDING
+        approval_steps = tuple(task.requires_approval for task in definition.tasks)
+        if definition.approval_phase is None:
+            if any(approval_steps):
+                raise WorkflowError("WORKFLOW_STEP_CONSTRAINT_UNSUPPORTED", 422)
+        elif not (ci_binding and definition.approval_phase == AFTER_STEP_OUTPUT and approval_steps == (True, False)):
+            raise WorkflowError("WORKFLOW_STEP_CONSTRAINT_UNSUPPORTED", 422)
         if ci_binding:
             producer, consumer = definition.tasks
             if (self._ci_status is None or not producer.requires_result_validation or consumer.requires_result_validation
@@ -78,6 +84,7 @@ class WorkflowService:
             "workflow_id": workflow_id, "workflow_version": definition.workflow_version,
             "execution_mode": definition.execution_mode, "tasks": tasks,
             **({"result_binding": artifacts.CI_ARTIFACT_CONTRACT} if ci_binding else {}),
+            **({"approval_phase": definition.approval_phase} if definition.approval_phase is not None else {}),
         })
         return definition, digest, tuple(task["runtime_target"] for task in tasks)
 
@@ -115,10 +122,20 @@ class WorkflowService:
         await self._authorize(principal, run_id, AuthorizationAction.READ)
         return await self._view(run_id)
 
+    async def decide_approval(self, principal, run_id, approval_id, decision, *, binding_digest=None):
+        await self._authorize(principal, run_id, AuthorizationAction.APPROVE)
+        try:
+            approval = await self._repository.decide_approval(run_id, approval_id, principal, decision, binding_digest)
+        except WorkflowApprovalError as exc:
+            raise WorkflowError(exc.code, exc.status_code) from None
+        return self._approval_view(approval)
+
     async def resume(self, principal, run_id):
         await self._authorize(principal, run_id, AuthorizationAction.READ)
-        run, _ = await self._repository.read(run_id)
+        run, _, approval = await self._repository.snapshot(run_id)
         require_owned(principal, run.owner_user_id)
+        if run.status == "WAITING_APPROVAL" and (approval is None or approval.status != "APPROVED"):
+            return await self._view(run_id)
         if run.status not in TERMINAL and not run.cancel_requested:
             if not self._admitting():
                 raise WorkflowError("RUNTIME_SHUTTING_DOWN", 503)
@@ -146,12 +163,15 @@ class WorkflowService:
         await self._authz.authorize(principal, "WORKFLOW_RUN", run_id, action)
 
     async def _view(self, run_id):
-        run, steps = await self._repository.read(run_id)
+        run, steps, approval = await self._repository.snapshot(run_id)
         current = steps[run.current_step]
         evidence = await self._repository.evidence(current)
         if run.status == "CANCELLING" and evidence.runtime_status in TERMINAL:
             await self._repository.record(run_id, current, evidence)
-            run, steps = await self._repository.read(run_id)
+            run, steps, approval = await self._repository.snapshot(run_id)
+        frozen_ci_input = None
+        if approval is not None and steps[1].bound_input == artifacts.freeze_native_input(run.handoff_input):
+            frozen_ci_input = run.handoff_input
         return {
             "workflow_run_id": run.workflow_run_id,
             "workflow_id": run.workflow_id,
@@ -161,6 +181,12 @@ class WorkflowService:
             "cancel_requested": run.cancel_requested,
             "reason": run.reason,
             "result_available": run.status == "SUCCEEDED" and steps[-1].result_ref is not None,
+            **({
+                "approval": self._approval_view(approval),
+                "frozen_ci_input": frozen_ci_input,
+                "requires_owner_resume": run.status in {"WAITING_APPROVAL", "PAUSED"}
+                and approval.status == "APPROVED" and approval.consumed_at is None,
+            } if approval is not None else {}),
             "steps": [{
                 "step_id": step.step_id,
                 "attempt": step.attempt,
@@ -175,6 +201,21 @@ class WorkflowService:
                 **({"artifact_ref": {key: value for key, value in step.artifact_ref.items() if key != "file_identity"}}
                    if step.artifact_ref is not None else {}),
             } for step in steps],
+        }
+
+    @staticmethod
+    def _approval_view(approval):
+        return {
+            "approval_id": approval.approval_id,
+            "step_id": approval.step_id,
+            "attempt": approval.attempt,
+            "approval_phase": approval.approval_phase,
+            "status": approval.status,
+            "binding_digest": approval.binding_digest,
+            "decided_by": str(approval.decided_by) if approval.decided_by is not None else None,
+            "decided_at": approval.decided_at,
+            "created_at": approval.created_at,
+            "consumed_at": approval.consumed_at,
         }
 
     async def _start(self, run_id, principal):
@@ -218,7 +259,7 @@ class WorkflowService:
                 await self._authz.require_current_human(principal)
                 require_owned(principal, run.owner_user_id)
                 definition, digest, runtime_targets = self._resolve(principal, run.workflow_id, run.workflow_version)
-                if digest != run.definition_digest:
+                if digest != run.definition_digest or definition.approval_phase != run.approval_phase:
                     raise WorkflowError("WORKFLOW_DEFINITION_DRIFT")
                 request = self._request(definition.tasks[step.position], session_id=f"{run_id}:{step.step_id}")
                 if definition.result_binding is not None:
@@ -252,7 +293,7 @@ class WorkflowService:
                     definition_digest=digest, runtime_target_digest=runtime_targets[step.position],
                     effective_input=request.input, prepare_artifact=prepare_artifact,
                 )
-            except artifacts.WorkflowArtifactError as exc:
+            except (artifacts.WorkflowArtifactError, WorkflowApprovalError) as exc:
                 await self._repository.pause(run_id, step.position, exc.code)
                 return
             error = None

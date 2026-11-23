@@ -14,6 +14,7 @@ from core.persistence.database import Database
 from core.persistence.errors import PersistenceError
 from core.persistence.models import DurableToolInvocationRow, ExternalRunRow, RunControlCommandRow, RunControlRow
 from core.persistence.repositories import runtime as runtime_repository
+from core.persistence.repositories.workflow_approvals import WorkflowApprovalError
 from core.runtime.events import RuntimeEvent
 
 if TYPE_CHECKING:
@@ -134,7 +135,7 @@ class DurableRunControlService:
                         raise RunControlConflict("Run 当前仍由其他 executor 持有")
                     return takeover
                 return self._lease(row)
-        except (RunControlError, PersistenceError):
+        except (RunControlError, PersistenceError, WorkflowApprovalError):
             raise
         except Exception as exc:
             raise RunControlError("Run control claim 失败") from exc

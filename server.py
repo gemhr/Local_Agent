@@ -3989,6 +3989,13 @@ class WorkflowCreateRequest(BaseModel):
     execution_id: uuid.UUID | None = None
 
 
+class WorkflowApprovalDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["APPROVE", "REJECT"]
+    binding_digest: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
+
+
 def _workflow_service(request: Request) -> WorkflowService:
     service = getattr(request.app.state, "workflow_service", None)
     if service is None:
@@ -4016,6 +4023,15 @@ async def get_workflow_run(workflow_run_id: uuid.UUID, request: Request):
 @v1_router.post("/workflow-runs/{workflow_run_id}/resume", status_code=202)
 async def resume_workflow_run(workflow_run_id: uuid.UUID, request: Request):
     return await _workflow_service(request).resume(request.state.principal, str(workflow_run_id))
+
+
+@v1_router.post("/workflow-runs/{workflow_run_id}/approvals/{approval_id}/decision")
+async def decide_workflow_approval(
+    workflow_run_id: uuid.UUID, approval_id: uuid.UUID, payload: WorkflowApprovalDecisionRequest, request: Request,
+):
+    return await _workflow_service(request).decide_approval(
+        request.state.principal, str(workflow_run_id), str(approval_id), payload.decision, binding_digest=payload.binding_digest,
+    )
 
 
 @v1_router.post("/workflow-runs/{workflow_run_id}/cancel", status_code=202)

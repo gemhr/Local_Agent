@@ -28,7 +28,7 @@ External Run 接纳与 Native lease claim 共用 Run 级事务锁。Client Feed 
 
 ### 跨 Runtime 串行 Workflow
 
-受信注册可声明 `SERIAL` 模式，固定两个有序步骤、Agent 版本、实例以及输入或结果绑定规则。Native 委派继续使用 `DELEGATION`。串行定义当前执行 OpenCode → Native，受信结果绑定按已实现的规则准出。要求审批或声明了未知准出规则的定义会拒绝执行。Workflow 首次创建时写入版本摘要，摘要包括固定输入、结果绑定合同和外部运行配置。同版本摘要漂移会拒绝新建，已有运行续跑时会暂停。
+受信注册可声明 `SERIAL` 模式，固定两个有序步骤、Agent 版本、实例以及输入或结果绑定规则。Native 委派继续使用 `DELEGATION`。串行定义当前执行 OpenCode → Native，受信结果绑定按已实现的规则准出。`AFTER_STEP_OUTPUT` 当前用于 CI Artifact 交接，`BEFORE_STEP_DISPATCH` 及未知准出规则会拒绝执行。Workflow 首次创建时写入版本摘要，覆盖固定输入、结果绑定合同、外部运行配置及已配置的审批阶段。同版本摘要漂移会拒绝新建，已有运行续跑时会暂停。
 
 认证 HUMAN 使用 `POST /api/v1/workflows/{workflow_id}/runs` 创建运行。请求体需要 UUID `request_id`，可提供 `expected_workflow_version`。同一租户、原发起人的重复请求返回已有运行，复用请求 ID 切换 Workflow 或版本返回冲突。同租户 owner / ADMIN 可用 `GET /api/v1/workflow-runs/{workflow_run_id}` 查询状态、步骤和子 Run ID，并向同路径下的 `/cancel` 提交取消。`/resume` 只接受原发起人重新认证后的请求。状态查询读取原 Run 的持久观察记录，结果正文沿原 Runtime 来源读取。
 
@@ -39,6 +39,10 @@ Workflow 只有取得可信 Runtime 终态和可用结果引用才会推进。Na
 `ci_artifact_handoff@1` 创建时另需 `incident_id`、`execution_id`，用当前发起人核对合成 CI 关联。第一步在受信本地 Workspace 中创建 `workflow-runs/<workflow_run_id>`，OpenCode 使用专属目录下固定的 `ci-execution.json`。Workflow 按原 Run 的实例、Session、父消息与最终助手消息重读完整 `ci-handoff.v1`，校验严格 JSON、UUID、固定产物路径及 `ci-execution-ref.v1` 文件。产物校验记录相对路径、大小、SHA-256、来源 Run 和步骤身份。
 
 第一步准出事务同步持久化产物引用与后续 Native 实际输入及摘要。Native 输入的 `incident_id` 来自已验证的 OpenCode 正文，`execution_id` 来自同一份实际读取并散列的文件字节，`task_type` 固定为 `CI_EXECUTION_STATUS`。派发前重查原发起人的 CI 授权。Native 在原 Run advisory lock 内核对持久 producer、受信 Workspace 与实际文件，复核通过后才写首次 fence。产物失效时 Workflow 暂停并保留原预留 ID。已接纳 Run 按原恢复合同处理。CIStatus FAST_PATH 沿用原受治理 Tool，`ci-status.v1` 必须来自已校验的终态 Feed，两个业务 ID 必须对应冻结输入。
+
+`ci_artifact_review@1` 采用相同 CI 输入和产物合同。首步业务准出时同事务写入冻结产物和 Native 输入，创建单个 `PENDING` 审批并进入 `WAITING_APPROVAL`。此时首步 Runtime 仍为 `SUCCEEDED`，下游无预留，后台任务退出并释放共享槽位。Workflow GET 显示审批状态、绑定摘要、上游步骤和冻结 CI 输入。
+
+原发起人或同租户 HUMAN ADMIN 可通过 `POST /api/v1/workflow-runs/{workflow_run_id}/approvals/{approval_id}/decision` 提交一次 `APPROVE` 或 `REJECT`，可附 `binding_digest` 断言。批准只记录决定，等待原发起人重新认证并显式调用 `/resume`。拒绝将 Workflow 置为 `REJECTED`，保留真实上游结果。等待中取消会使待审项失效，已经批准的决定保留审计并随 Workflow 停止推进。Native 首次接纳在原 Run 锁内核对批准绑定及实际文件，批准消费与首次 fence 同事务提交。
 
 startup 汇集 builtin、BusinessTool、MCP registrations 与可信
 permission seeds，编译单一 AgentRegistry 后 freeze ToolRegistry。

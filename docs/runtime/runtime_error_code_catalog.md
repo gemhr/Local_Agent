@@ -25,7 +25,7 @@
 | `WORKFLOW_DEFINITION_UNAVAILABLE` | 404 / `PAUSED` | 静态定义缺失或非串行。 |
 | `WORKFLOW_VERSION_MISMATCH` / `WORKFLOW_DEFINITION_DRIFT` | 409 / `PAUSED` | 当前注册版本或语义摘要与请求或持久记录不一致。 |
 | `WORKFLOW_REQUEST_CONFLICT` | 409 | 发起者将已使用的 `request_id` 绑定到其他 Workflow 或版本。 |
-| `WORKFLOW_STEP_CONSTRAINT_UNSUPPORTED` | 422 / `PAUSED` | 已声明未知的结果校验规则或尚未实现的审批。 |
+| `WORKFLOW_STEP_CONSTRAINT_UNSUPPORTED` | 422 / `PAUSED` | 已声明未知的结果校验规则或不支持的审批配置。 |
 | `WORKFLOW_RUN_ID_CONFLICT` | `PAUSED` | 新生成的 Run ID 已有归属或运行记录。 |
 | `WORKFLOW_RUNTIME_BINDING_MISMATCH` | `PAUSED` | 外部 Run 的实例、Agent 或发起人会话与预留步骤不符。 |
 | `WORKFLOW_RUN_<观察状态>` | `PAUSED` | 原 Run 仍待接纳或缺少确定终态，且没有更具体的 Runtime 错误码。 |
@@ -37,6 +37,10 @@
 | `WORKFLOW_ARTIFACT_PREEXISTS` / `WORKFLOW_ARTIFACT_UNAVAILABLE` | `PAUSED` | 专属目录或目标文件在首发前已存在，或运行时缺少文件读取证据。 |
 | `WORKFLOW_ARTIFACT_CHANGED` / `WORKFLOW_ARTIFACT_BINDING_INVALID` / `WORKFLOW_BOUND_INPUT_INVALID` | `PAUSED` | 派发前复核无法证明原文件、产物引用或冻结输入一致。首次收件发现产物变化时步骤失败。 |
 | `WORKFLOW_VALIDATION_REQUIRED` / `WORKFLOW_NATIVE_OUTPUT_INVALID` | `PAUSED` / `FAILED` | 第一步缺少持久准出证据，或 Native 交付结构或业务标识与冻结输入不一致。 |
+| `WORKFLOW_APPROVAL_NOT_FOUND` | 404 | 审批 ID 不属于指定 Workflow。 |
+| `WORKFLOW_APPROVAL_BINDING_MISMATCH` | 409 / `PAUSED` | 审批摘要断言与原决定不符，或原绑定与持久步骤内容不一致。 |
+| `WORKFLOW_APPROVAL_DECISION_CONFLICT` / `WORKFLOW_APPROVAL_INVALIDATED` | 409 | 反向决定、不同审批人试图重复决定，或 Workflow 已取消。 |
+| `WORKFLOW_APPROVAL_REQUIRED` | `PAUSED` | 下游实际派发缺少有效、未消费的批准。正常等待审批时保持 `WAITING_APPROVAL`。 |
 
 ## Stage 3 WP3 Security Codes
 

@@ -34,7 +34,7 @@ from tests.test_workflow_execution import _when
 DEFINITION = next(item for item in BUSINESS_REGISTRATION_BUNDLE.workflows if item.workflow_id == "ci_artifact_handoff")
 
 
-async def _setup(database, tmp_path, *, mode="valid"):
+async def _setup(database, tmp_path, *, mode="valid", definition=DEFINITION):
     from server import RunExecutionSupervisor
 
     runtime_instances = {}
@@ -106,7 +106,7 @@ async def _setup(database, tmp_path, *, mode="valid"):
     supervisor = RunExecutionSupervisor(max_active_runs=2)
 
     def build():
-        return WorkflowService(WorkflowRepository(database), {DEFINITION.workflow_id: DEFINITION}, app,
+        return WorkflowService(WorkflowRepository(database), {definition.workflow_id: definition}, app,
                                q.authorization, supervisor, services.run_registry, services.admission_gate, ci_status=status)
 
     return q, workspace, calls, adapter, build
