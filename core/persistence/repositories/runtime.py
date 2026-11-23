@@ -22,10 +22,13 @@ from core.persistence.models import (
     EventConsumptionCheckpointRow,
     RuntimeEventJournalRow,
     RuntimeSnapshotRow,
+    SpaceRow,
+    UserRow,
     WorkflowRunRow,
     WorkflowStepRunRow,
 )
 from core.persistence.repositories.workflow_approvals import consume_approval, require_dispatch_approval
+from core.persistence.repositories.spaces import SpaceRepository
 from core.runtime.execution_aggregate import canonical_payload_digest
 
 if TYPE_CHECKING:
@@ -104,6 +107,15 @@ async def workflow_claim_allowed(
     )
     if not matches:
         return False
+    if run.space_id is not None and not already_admitted:
+        user = await session.get(UserRow, run.owner_user_id)
+        if user is None or user.disabled_at is not None or user.principal_kind != "HUMAN" or user.tenant_id != run.tenant_id:
+            return False
+        current = await session.execute(
+            SpaceRepository.visible_to(run.tenant_id, run.owner_user_id).where(SpaceRow.id == run.space_id)
+        )
+        if current.one_or_none() is None:
+            return False
     if runtime_kind == "NATIVE" and not already_admitted and (
         run.handoff_input is not None or step.bound_input is not None or run.approval_phase is not None
     ):

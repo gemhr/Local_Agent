@@ -11,7 +11,7 @@ from uuid import UUID
 from core.agent_platform.application import AgentApplicationError, ExecutionRequest
 from core.agent_platform import workflow_artifacts as artifacts
 from core.agent_platform.ci_status import AGENT_ID as CI_STATUS_AGENT
-from core.agent_platform.contracts import AFTER_STEP_OUTPUT
+from core.agent_platform.contracts import AFTER_STEP_OUTPUT, WorkflowDefinition, WorkflowTask
 from core.auth import AuthorizationAction, AuthError, require_owned
 from core.chat_service import ChatRuntimeTransportError
 from core.incidents.contracts import CIError
@@ -20,6 +20,7 @@ from core.persistence.repositories.workflow_approvals import WorkflowApprovalErr
 from core.runtime.cancellation import CancellationReason
 from core.runtime.execution_aggregate import canonical_payload_digest
 from core.runtime.memory_scope import MemoryAccessContext
+from core.workspace.service import WorkspaceService
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,9 @@ class WorkflowService:
             raise WorkflowError("WORKFLOW_DEFINITION_UNAVAILABLE", 404)
         if expected_version is not None and definition.workflow_version != expected_version:
             raise WorkflowError("WORKFLOW_VERSION_MISMATCH")
+        return self._resolve_definition(principal, definition)
+
+    def _resolve_definition(self, principal, definition, *, published=False):
         ci_binding = definition.result_binding == artifacts.CI_ARTIFACT_BINDING
         approval_steps = tuple(task.requires_approval for task in definition.tasks)
         if definition.approval_phase is None:
@@ -79,17 +83,53 @@ class WorkflowService:
         for task in definition.tasks:
             # Native 的 JSON 由已验证的上游输入填充，静态文本只是定义的一部分。
             pin = None if ci_binding and task.runtime_kind == "NATIVE" else self._application.validate_workflow_step(self._request(task), principal)
+            if published and task.runtime_kind == "OPENCODE":
+                purpose = "WORKFLOW_CI_ARTIFACT" if ci_binding else "WORKFLOW_TEXT"
+                self._application.require_workspace_instance(task.runtime_instance_id, principal, purpose)
+            if published and ci_binding and task.runtime_kind == "NATIVE":
+                self._application.validate_agent_version(task.agent_id, task.agent_version)
             tasks.append({**asdict(task), "capabilities": sorted(task.capabilities), "runtime_target": pin})
         digest = canonical_payload_digest({
-            "workflow_id": workflow_id, "workflow_version": definition.workflow_version,
+            "workflow_id": definition.workflow_id, "workflow_version": definition.workflow_version,
             "execution_mode": definition.execution_mode, "tasks": tasks,
             **({"result_binding": artifacts.CI_ARTIFACT_CONTRACT} if ci_binding else {}),
             **({"approval_phase": definition.approval_phase} if definition.approval_phase is not None else {}),
         })
         return definition, digest, tuple(task["runtime_target"] for task in tasks)
 
-    async def create(self, principal, workflow_id, request_id: UUID, expected_version=None, *, incident_id=None, execution_id=None):
+    def publication(self, principal, definition):
+        _, digest, targets = self._resolve_definition(principal, definition, published=True)
+        if definition.result_binding is not None:
+            self._application.workflow_artifact_workspace(definition.tasks[0].runtime_instance_id, principal, targets[0])
+        snapshot = asdict(definition)
+        snapshot["tasks"] = [{**asdict(task), "capabilities": sorted(task.capabilities)} for task in definition.tasks]
+        return digest, {"definition": snapshot, "runtime_targets": list(targets)}
+
+    async def _resolve_published(self, principal, space_id, workflow_id, version):
+        row = await self._repository.published_version(principal, space_id, workflow_id, version)
+        if row is None:
+            raise WorkflowError("WORKFLOW_PUBLISHED_VERSION_UNAVAILABLE", 404)
+        saved = row.definition_snapshot
+        try:
+            snapshot = saved["definition"]
+            tasks = tuple(WorkflowTask(**{**item, "capabilities": frozenset(item["capabilities"])}) for item in snapshot["tasks"])
+            definition = WorkflowDefinition(**{**snapshot, "tasks": tasks})
+        except (KeyError, TypeError, ValueError):
+            raise WorkflowError("WORKFLOW_DEFINITION_DRIFT") from None
+        if (definition.workflow_id, definition.workflow_version) != (workflow_id, version):
+            raise WorkflowError("WORKFLOW_DEFINITION_DRIFT")
+        if definition.execution_mode != "SERIAL":
+            raise WorkflowError("WORKFLOW_DEFINITION_DRIFT")
+        exact, digest, targets = self._resolve_definition(principal, definition, published=True)
+        if digest != row.definition_digest or list(targets) != saved.get("runtime_targets"):
+            raise WorkflowError("WORKFLOW_DEFINITION_DRIFT")
+        return exact, digest, targets
+
+    async def create(self, principal, workflow_id, request_id: UUID, expected_version=None, *, incident_id=None, execution_id=None, space_id=None):
         await self._authz.require_current_human(principal)
+        if space_id is not None:
+            async with self._repository.database.session() as session:
+                await WorkspaceService.require_access_in_session(session, principal, space_id)
         request_id = str(request_id)
         try:
             handoff_input = artifacts.initial_query(incident_id, execution_id) if incident_id is not None or execution_id is not None else None
@@ -99,7 +139,10 @@ class WorkflowService:
         if run is None:
             if not self._admitting():
                 raise WorkflowError("RUNTIME_SHUTTING_DOWN", 503)
-            definition, digest, targets = self._resolve(principal, workflow_id, expected_version)
+            if space_id is None:
+                definition, digest, targets = self._resolve(principal, workflow_id, expected_version)
+            else:
+                definition, digest, targets = await self._resolve_published(principal, space_id, workflow_id, expected_version)
             if (definition.result_binding is not None) != (handoff_input is not None):
                 raise WorkflowError("WORKFLOW_CI_INPUT_INVALID", 422)
             if handoff_input is not None:
@@ -108,18 +151,20 @@ class WorkflowService:
                     await self._ci_status.workflow_route(principal, handoff_input)
                 except CIError as exc:
                     raise WorkflowError(exc.code, exc.status) from None
-            run, created = await self._repository.create(principal, request_id, definition, digest, handoff_input=handoff_input)
+            run, created = await self._repository.create(
+                principal, request_id, definition, digest, handoff_input=handoff_input, space_id=space_id,
+            )
             if run is None:
                 raise WorkflowError("WORKFLOW_DEFINITION_DRIFT")
             if created:
                 await self._start(run.workflow_run_id, principal)
-        if (run.workflow_id != workflow_id or run.handoff_input != handoff_input
+        if (run.workflow_id != workflow_id or run.space_id != space_id or run.handoff_input != handoff_input
                 or (expected_version is not None and run.workflow_version != expected_version)):
             raise WorkflowError("WORKFLOW_REQUEST_CONFLICT")
         return await self._view(run.workflow_run_id)
 
     async def get(self, principal, run_id):
-        await self._authorize(principal, run_id, AuthorizationAction.READ)
+        await self._authorize(principal, run_id, AuthorizationAction.READ, share_workspace_read=True)
         return await self._view(run_id)
 
     async def decide_approval(self, principal, run_id, approval_id, decision, *, binding_digest=None):
@@ -144,7 +189,7 @@ class WorkflowService:
 
     async def cancel(self, principal, run_id):
         await self._authorize(principal, run_id, AuthorizationAction.CANCEL)
-        step = await self._repository.cancel(run_id)
+        step = await self._repository.cancel(run_id, principal)
         if step is not None:
             evidence = await self._repository.evidence(step)
             if evidence.runtime_status is None and evidence.observation != "UNVERIFIED":
@@ -158,9 +203,9 @@ class WorkflowService:
                         await self._application.cancel_detached_external(step.platform_run_id)
         return await self._view(run_id)
 
-    async def _authorize(self, principal, run_id, action):
+    async def _authorize(self, principal, run_id, action, *, share_workspace_read=False):
         await self._authz.require_current_human(principal)
-        await self._authz.authorize(principal, "WORKFLOW_RUN", run_id, action)
+        await self._authz.authorize(principal, "WORKFLOW_RUN", run_id, action, share_workspace_read=share_workspace_read)
 
     async def _view(self, run_id):
         run, steps, approval = await self._repository.snapshot(run_id)
@@ -190,6 +235,9 @@ class WorkflowService:
             "steps": [{
                 "step_id": step.step_id,
                 "attempt": step.attempt,
+                "position": step.position,
+                "agent_id": step.agent_id,
+                "agent_version": step.agent_version,
                 "status": step.status,
                 "platform_run_id": step.platform_run_id,
                 "runtime_kind": step.runtime_kind,
@@ -198,7 +246,10 @@ class WorkflowService:
                 "runtime_observation": evidence.observation if step.position == current.position and step.platform_run_id else None,
                 "reason": step.reason or (evidence.reason if step.position == current.position else None),
                 "result_available": step.result_ref is not None,
-                **({"artifact_ref": {key: value for key, value in step.artifact_ref.items() if key != "file_identity"}}
+                **({"artifact_ref": {key: step.artifact_ref[key] for key in (
+                    "workflow_run_id", "step_id", "attempt", "producer_run_id", "runtime_instance_id",
+                    "relative_path", "size", "sha256",
+                ) if key in step.artifact_ref}}
                    if step.artifact_ref is not None else {}),
             } for step in steps],
         }
@@ -258,7 +309,12 @@ class WorkflowService:
             try:
                 await self._authz.require_current_human(principal)
                 require_owned(principal, run.owner_user_id)
-                definition, digest, runtime_targets = self._resolve(principal, run.workflow_id, run.workflow_version)
+                if run.space_id is None:
+                    definition, digest, runtime_targets = self._resolve(principal, run.workflow_id, run.workflow_version)
+                else:
+                    definition, digest, runtime_targets = await self._resolve_published(
+                        principal, run.space_id, run.workflow_id, run.workflow_version,
+                    )
                 if digest != run.definition_digest or definition.approval_phase != run.approval_phase:
                     raise WorkflowError("WORKFLOW_DEFINITION_DRIFT")
                 request = self._request(definition.tasks[step.position], session_id=f"{run_id}:{step.step_id}")
@@ -293,7 +349,7 @@ class WorkflowService:
                     definition_digest=digest, runtime_target_digest=runtime_targets[step.position],
                     effective_input=request.input, prepare_artifact=prepare_artifact,
                 )
-            except (artifacts.WorkflowArtifactError, WorkflowApprovalError) as exc:
+            except (artifacts.WorkflowArtifactError, WorkflowApprovalError, AuthError) as exc:
                 await self._repository.pause(run_id, step.position, exc.code)
                 return
             error = None

@@ -28,6 +28,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
 from core.agent_router import AgentRouter
+from core.workspace.http import router as workspace_router
+from core.workspace.configuration import WorkspaceConfiguration
+from core.workspace.execution_http import router as workspace_execution_router
+from core.workspace.observation_http import router as workspace_observation_router
+from core.workspace.service import WorkspaceError, WorkspaceService
+from core.workspace.tasks import WorkspaceTasks
 from core.auth import (
     AUTH_INVALID_TOKEN,
     AUTHORIZATION_FORBIDDEN,
@@ -35,7 +41,7 @@ from core.auth import (
     AuthService,
     AuthorizationAction,
     AuthorizationService,
-    require_opencode_instance_access,
+    Principal,
     require_role,
     require_scope,
     EVALUATION_EXECUTE_SCOPE,
@@ -748,6 +754,7 @@ async def lifespan(app: FastAPI):
     app.state.durable_run_control = durable_run_control
     app.state.auth_service = AuthService(persistence_database, settings)
     app.state.authorization_service = AuthorizationService(persistence_database)
+    app.state.workspace_service = WorkspaceService(persistence_database)
     app.state.evaluation_job_service = EvaluationJobService(
         persistence_database, observability=observability_service
     )
@@ -1716,6 +1723,13 @@ async def lifespan(app: FastAPI):
             ci_status=app.state.ci_status_service,
         )
     app.state.workflow_service = workflow_service
+    app.state.workspace_configuration = WorkspaceConfiguration(
+        persistence_database, agent_application_service, workflow_service, compiled_agent_catalog.workflows,
+    )
+    app.state.workspace_tasks = WorkspaceTasks(
+        persistence_database, agent_application_service, workflow_service, app.state.authorization_service,
+        app.state.run_execution_supervisor, runtime_services.admission_gate,
+    )
     app.state.client_event_feed = runtime_services.client_event_feed
     from core.agent_platform.ci_diagnosis import CIInvestigationService
     from core.incidents.baseband_quality import load_configuration as load_baseband_quality
@@ -1801,6 +1815,8 @@ async def lifespan(app: FastAPI):
         app.state.chat_service = None
         app.state.agent_application_service = None
         app.state.workflow_service = None
+        app.state.workspace_configuration = None
+        app.state.workspace_tasks = None
         app.state.agent_registry = None
         app.state.agent_catalog = None
         app.state.stage8_mission_service = None
@@ -2261,13 +2277,15 @@ _ADMIN_ONLY_API_PATHS = frozenset({
 })
 
 
-def _api_error(request: Request, code: str, status_code: int) -> JSONResponse:
+def _api_error(
+    request: Request, code: str, status_code: int, *, message: str | None = None,
+) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={
             "error": {
                 "code": code,
-                "message": "Authentication failed." if status_code == 401 else "Forbidden.",
+                "message": message or ("Authentication failed." if status_code == 401 else "Forbidden."),
                 "request_id": getattr(request.state, "request_id", ""),
             }
         },
@@ -2283,6 +2301,16 @@ async def auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
 @app.exception_handler(WorkflowError)
 async def workflow_error_handler(request: Request, exc: WorkflowError) -> JSONResponse:
     return _api_error(request, exc.code, exc.status_code)
+
+
+@app.exception_handler(WorkspaceError)
+async def workspace_error_handler(request: Request, exc: WorkspaceError) -> JSONResponse:
+    return _api_error(request, exc.code, exc.status_code, message=exc.message)
+
+
+@app.exception_handler(AgentApplicationError)
+async def agent_application_error_handler(request: Request, exc: AgentApplicationError) -> JSONResponse:
+    return _api_error(request, exc.error_code, 422, message=exc.safe_message)
 
 
 _JOB_HTTP_STATUS = {
@@ -2945,22 +2973,24 @@ async def _bind_new_run_and_conversation(
 
 async def _authorize_run(
     request: Request, run_id: str, action: AuthorizationAction,
-    *, required_scope: str | None = None,
+    *, required_scope: str | None = None, share_workspace_read: bool = False,
+    principal: Principal | None = None,
 ) -> None:
-    principal = request.state.principal
+    if principal is None:
+        principal = request.state.principal
     if required_scope is None and principal.principal_kind == "SERVICE" and action is AuthorizationAction.CANCEL:
         required_scope = RUNTIME_CANCEL_SCOPE
     await _authorization_service(request).authorize(
-        principal, "RUN", run_id, action, required_scope=required_scope
+        principal, "RUN", run_id, action, required_scope=required_scope, share_workspace_read=share_workspace_read,
     )
 
 
 async def _authorize_opencode_instance(request: Request, run_id: str, instance_id: str) -> None:
     await _authorize_run(request, run_id, AuthorizationAction.PROCESS)
-    instance = next((item for item in settings.opencode_instances if item.instance_id == instance_id), None)
-    if instance is None:
-        raise HTTPException(status_code=422, detail="RUNTIME_INSTANCE_UNAVAILABLE")
-    require_opencode_instance_access(request.state.principal, instance)
+    try:
+        require_agent_application_service().require_workspace_instance(instance_id, request.state.principal, "AGENT_TEXT")
+    except AgentApplicationError as exc:
+        raise HTTPException(status_code=422, detail=exc.error_code) from None
 
 
 def _run_registry_for(service) -> object:
@@ -3261,7 +3291,7 @@ async def v1_run_events_endpoint(
     request: Request,
     after_cursor: Annotated[int | None, Query(ge=0, le=MAX_RESUME_CURSOR)] = None,
 ):
-    await _authorize_run(request, run_id, AuthorizationAction.SUBSCRIBE)
+    await _authorize_run(request, run_id, AuthorizationAction.SUBSCRIBE, share_workspace_read=True)
     feed = getattr(request.app.state, "client_event_feed", None)
     if feed is None:
         raise HTTPException(status_code=503, detail="CLIENT_EVENT_FEED_UNAVAILABLE")
@@ -3271,8 +3301,24 @@ async def v1_run_events_endpoint(
         nonlocal cursor
         service = getattr(request.app.state, "observability_service", None)
         _observe_only(service, "observe_sse_open")
+        recheck_at = time.monotonic() + 2
         try:
             while True:
+                if time.monotonic() >= recheck_at:
+                    try:
+                        auth = getattr(request.app.state, "auth_service", None)
+                        if not isinstance(auth, AuthService):
+                            raise AuthError(AUTH_INVALID_TOKEN)
+                        principal = await auth.authenticate(request.headers.get("Authorization"))
+                        await _authorize_run(
+                            request, run_id, AuthorizationAction.SUBSCRIBE,
+                            share_workspace_read=True, principal=principal,
+                        )
+                    except (AuthError, PersistenceError):
+                        yield 'event: access.revoked\ndata: {}\n\n'
+                        return
+                    recheck_at = time.monotonic() + 2
+                    yield ": heartbeat\n\n"
                 poll_started = time.perf_counter()
                 events = await feed.read_after(run_id, cursor)
                 _observe_only(
@@ -3302,7 +3348,7 @@ async def v1_run_events_endpoint(
 async def v1_external_run_result_endpoint(
     run_id: Annotated[str, Path(max_length=REQUEST_PAYLOAD_POLICY.RUN_ID_MAX_CHARS)], request: Request,
 ):
-    await _authorize_run(request, run_id, AuthorizationAction.READ)
+    await _authorize_run(request, run_id, AuthorizationAction.READ, share_workspace_read=True)
     result = await require_agent_application_service().read_external_result(run_id)
     if result is None:
         raise HTTPException(status_code=404, detail="RUNTIME_RESULT_NOT_FOUND")
@@ -4039,6 +4085,9 @@ async def cancel_workflow_run(workflow_run_id: uuid.UUID, request: Request):
     return await _workflow_service(request).cancel(request.state.principal, str(workflow_run_id))
 
 
+v1_router.include_router(workspace_router)
+v1_router.include_router(workspace_execution_router)
+v1_router.include_router(workspace_observation_router)
 app.include_router(v1_router)
 
 

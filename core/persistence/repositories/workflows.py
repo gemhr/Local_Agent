@@ -13,6 +13,7 @@ from core.auth import ObjectAuthorizationService
 from core.persistence.models import (
     ClientDeliveryEventRow, ExternalRunRow, ObjectOwnershipRow, RunControlRow,
     RuntimeEventJournalRow, WorkflowApprovalRow, WorkflowRunRow, WorkflowStepRunRow, WorkflowVersionRow,
+    WorkspaceWorkflowRow,
 )
 from core.persistence.repositories.runtime import lock_run_scope
 from core.persistence.repositories.workflow_approvals import (
@@ -23,6 +24,7 @@ from core.runtime.event_journal_store import journal_record_from_row
 from core.runtime.events import RuntimeEventType
 from core.runtime.execution_aggregate import canonical_payload_digest
 from core.runtime.run_control import DurableRunControlService
+from core.workspace.service import WorkspaceService
 
 
 TERMINAL = frozenset({"SUCCEEDED", "FAILED", "CANCELLED", "REJECTED"})
@@ -72,26 +74,33 @@ class WorkflowRepository:
             WorkflowRunRow.request_id == request_id,
         ))
 
-    async def create(self, principal, request_id, definition, digest, *, handoff_input=None):
+    async def create(self, principal, request_id, definition, digest, *, handoff_input=None, space_id=None):
         async with self.database.transaction() as session:
             await lock_run_scope(session, f"workflow-request:{principal.tenant_id}:{principal.user_id}:{request_id}")
+            if space_id is not None:
+                await WorkspaceService.require_write_access_in_session(session, principal, space_id)
             prior = await self._find_request(session, principal, request_id)
             if prior is not None:
                 return prior, False
             key = (definition.workflow_id, definition.workflow_version)
-            await session.execute(insert(WorkflowVersionRow).values(
-                workflow_id=key[0], workflow_version=key[1], definition_digest=digest,
-            ).on_conflict_do_nothing())
+            if space_id is None:
+                await session.execute(insert(WorkflowVersionRow).values(
+                    workflow_id=key[0], workflow_version=key[1], definition_digest=digest,
+                ).on_conflict_do_nothing())
             version = await session.get(WorkflowVersionRow, key)
-            if version.definition_digest != digest:
+            if (version is None or version.definition_digest != digest
+                    or (version.definition_snapshot is not None) != (space_id is not None)):
                 return None, False
             run = WorkflowRunRow(
                 workflow_run_id=str(uuid4()), workflow_id=key[0], workflow_version=key[1],
                 definition_digest=digest, tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
+                space_id=space_id,
                 request_id=request_id, handoff_input=handoff_input, approval_phase=definition.approval_phase,
                 status="PENDING", current_step=0, cancel_requested=False,
             )
-            await ObjectAuthorizationService.bind_new_in_transaction(session, principal, "WORKFLOW_RUN", run.workflow_run_id)
+            await ObjectAuthorizationService.bind_new_in_transaction(
+                session, principal, "WORKFLOW_RUN", run.workflow_run_id, space_id=space_id,
+            )
             session.add(run)
             await session.flush()
             session.add_all([
@@ -103,6 +112,17 @@ class WorkflowRepository:
                 ) for position, task in enumerate(definition.tasks)
             ])
             return run, True
+
+    async def published_version(self, principal, space_id, workflow_id, version):
+        async with self.database.session() as session:
+            await WorkspaceService.require_access_in_session(session, principal, space_id)
+            return await session.scalar(select(WorkflowVersionRow).join(
+                WorkspaceWorkflowRow, WorkspaceWorkflowRow.id == WorkflowVersionRow.workflow_id,
+            ).where(
+                WorkspaceWorkflowRow.space_id == space_id, WorkspaceWorkflowRow.tenant_id == principal.tenant_id,
+                WorkflowVersionRow.workflow_id == workflow_id, WorkflowVersionRow.workflow_version == version,
+                WorkflowVersionRow.definition_snapshot.is_not(None),
+            ))
 
     async def read(self, run_id):
         run, steps, _ = await self.snapshot(run_id)
@@ -124,6 +144,8 @@ class WorkflowRepository:
         async with self.database.transaction() as session:
             run = await self._lock_workflow(session, run_id)
             await ObjectAuthorizationService.require_current_human_in_session(session, actor)
+            if run.space_id is not None:
+                await WorkspaceService.require_write_access_in_session(session, actor, run.space_id, manage=True)
             approval = await workflow_approval(session, run_id)
             if approval is None or approval.approval_id != approval_id:
                 raise WorkflowApprovalError("WORKFLOW_APPROVAL_NOT_FOUND", 404)
@@ -153,6 +175,8 @@ class WorkflowRepository:
             run = await self._lock_workflow(session, run_id)
             if run.status in TERMINAL or run.cancel_requested or run.current_step != position:
                 return None
+            if run.space_id is not None:
+                await WorkspaceService.require_write_access_in_session(session, principal, run.space_id)
             step = await self._step(session, run_id, position)
             platform_run_id = step.platform_run_id or str(uuid4())
             await lock_run_scope(session, platform_run_id)
@@ -183,8 +207,12 @@ class WorkflowRepository:
                 elif step.bound_input is None or step.bound_input != effective_input:
                     return None
             if step.platform_run_id is None:
-                await ObjectAuthorizationService.bind_new_in_transaction(session, principal, "RUN", platform_run_id)
-                await ObjectAuthorizationService.bind_new_in_transaction(session, principal, "CONVERSATION", conversation_id)
+                await ObjectAuthorizationService.bind_new_in_transaction(
+                    session, principal, "RUN", platform_run_id, space_id=run.space_id,
+                )
+                await ObjectAuthorizationService.bind_new_in_transaction(
+                    session, principal, "CONVERSATION", conversation_id, space_id=run.space_id,
+                )
                 step.platform_run_id = platform_run_id
             step.status = "RESERVED"
             step.dispatch_token = str(uuid4())
@@ -328,10 +356,12 @@ class WorkflowRepository:
             step.reason = reason
             _set_status(run, "PAUSED", reason)
 
-    async def cancel(self, run_id):
+    async def cancel(self, run_id, actor=None):
         """取消与子 Run 接纳竞争在同一 Run 锁下决出。"""
         async with self.database.transaction() as session:
             run = await self._lock_workflow(session, run_id)
+            if run.space_id is not None:
+                await WorkspaceService.require_write_access_in_session(session, actor, run.space_id)
             if run.status in TERMINAL:
                 return None
             run.cancel_requested = True

@@ -203,21 +203,29 @@ class ObjectAuthorizationService:
             raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
 
     @classmethod
-    async def bind_new_in_transaction(cls, session, principal: Principal, object_type: str, object_id: str) -> None:
+    async def bind_new_in_transaction(cls, session, principal: Principal, object_type: str, object_id: str, *, space_id=None) -> None:
         """由业务记录的调用方事务原子提交归属。"""
         tenant_id = cls._require_tenant(principal)
         row = await session.get(ObjectOwnershipRow, {"object_type": object_type, "object_id": object_id})
         if row is None:
             session.add(ObjectOwnershipRow(
                 object_type=object_type, object_id=object_id,
-                owner_user_id=principal.user_id, tenant_id=tenant_id,
+                owner_user_id=principal.user_id, tenant_id=tenant_id, space_id=space_id,
             ))
             await session.flush()
         else:
-            cls._require_binding_owner(principal, row)
+            if space_id is not None:
+                if row.space_id != space_id or row.tenant_id != tenant_id:
+                    raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
+                require_owned(principal, row.owner_user_id)
+            else:
+                cls._require_binding_owner(principal, row)
 
     @staticmethod
     def _require_binding_owner(principal: Principal, row: ObjectOwnershipRow) -> None:
+        # 通用创建入口不可重新绑定 Workspace 的执行身份或会话。
+        if row.space_id is not None:
+            raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
         is_admin = principal.principal_kind == "HUMAN" and "ADMIN" in principal.roles
         if row.tenant_id != principal.tenant_id or (not is_admin and str(row.owner_user_id) != str(principal.user_id)):
             raise AuthError(AUTHORIZATION_OBJECT_NOT_OWNED, 404)
@@ -322,6 +330,7 @@ class ObjectAuthorizationService:
     async def authorize(
         self, principal: Principal, object_type: str, object_id: str,
         action: AuthorizationAction | str, *, required_scope: str | None = None,
+        share_workspace_read: bool = False,
     ) -> None:
         """按 Tenant → owner/role → scope → action policy 顺序授权。
 
@@ -333,6 +342,20 @@ class ObjectAuthorizationService:
             raise AuthError(AUTHORIZATION_FORBIDDEN, 403) from exc
         async with self.database.session() as session:
             row = await self._resolve_ownership(session, object_type, object_id)
+            if row is not None and row.space_id is not None:
+                from core.workspace.service import WorkspaceService
+                access = await WorkspaceService.require_access_in_session(
+                    session, principal, row.space_id, resource_tenant_id=row.tenant_id,
+                )
+                if required_scope is not None:
+                    raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+                if action is AuthorizationAction.APPROVE and object_type == "WORKFLOW_RUN":
+                    if access.role not in {"OWNER", "ADMIN"}:
+                        raise AuthError(AUTHORIZATION_FORBIDDEN, 403)
+                elif not (share_workspace_read and object_type in {"RUN", "WORKFLOW_RUN"}
+                          and action in {AuthorizationAction.READ, AuthorizationAction.SUBSCRIBE}):
+                    require_owned(principal, row.owner_user_id)
+                return
         self._apply_policy(principal, row, action, required_scope)
 
     async def authorize_external_execution(

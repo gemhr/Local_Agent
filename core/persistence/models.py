@@ -20,6 +20,9 @@ Alembic revision 产生（见 ``alembic/versions/``）；运行时代码**不**�
 
 from __future__ import annotations
 
+from datetime import datetime
+from uuid import UUID
+
 from sqlalchemy import (
     Boolean,
     BigInteger,
@@ -213,6 +216,53 @@ class UserRow(PersistenceBase):
     )
 
 
+class SpaceRow(PersistenceBase):
+    __tablename__ = "spaces"
+    __table_args__ = (
+        UniqueConstraint("id", "tenant_id", name="uq_spaces_id_tenant"),
+        ForeignKeyConstraint(
+            ("owner_user_id", "tenant_id"), ("users.id", "users.tenant_id"),
+            name="fk_spaces_owner_tenant", ondelete="RESTRICT",
+        ),
+        CheckConstraint("kind IN ('PERSONAL', 'TEAM')", name="ck_spaces_kind"),
+        Index(
+            "uq_spaces_personal_owner", "tenant_id", "owner_user_id", unique=True,
+            postgresql_where=text("kind = 'PERSONAL'"),
+        ),
+        Index("ix_spaces_tenant_owner", "tenant_id", "owner_user_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(120))
+    owner_user_id: Mapped[UUID] = mapped_column(Uuid)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
+class SpaceMemberRow(PersistenceBase):
+    __tablename__ = "space_members"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("space_id", "tenant_id"), ("spaces.id", "spaces.tenant_id"),
+            name="fk_space_members_space_tenant", ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ("user_id", "tenant_id"), ("users.id", "users.tenant_id"),
+            name="fk_space_members_user_tenant", ondelete="CASCADE",
+        ),
+        CheckConstraint("role IN ('ADMIN', 'MEMBER')", name="ck_space_members_role"),
+        Index("ix_space_members_tenant_user", "tenant_id", "user_id"),
+    )
+
+    space_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64))
+    role: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+
 class RoleRow(PersistenceBase):
     __tablename__ = "roles"
     id: Mapped[object] = mapped_column(Uuid(as_uuid=True), primary_key=True)
@@ -238,6 +288,7 @@ class ObjectOwnershipRow(PersistenceBase):
     __tablename__ = "object_ownership"
     object_type: Mapped[str] = mapped_column(String(32), primary_key=True)
     object_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    space_id: Mapped[UUID | None] = mapped_column(Uuid)
     owner_user_id: Mapped[object] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
@@ -250,6 +301,8 @@ class ObjectOwnershipRow(PersistenceBase):
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(("space_id", "tenant_id"), ("spaces.id", "spaces.tenant_id"),
+                             name="fk_object_ownership_space_tenant"),
         CheckConstraint(
             "object_type IN ('RUN', 'CONVERSATION', 'MISSION', 'REVIEW', 'TEST_PLAN', 'ARTIFACT', 'GENERATED_CASE_ARTIFACT', 'EXTERNAL_EXECUTION_JOB', 'APPROVAL', 'TICKET_CONTINUATION', 'EVALUATION_JOB', 'WORKFLOW_RUN')",
             name="ck_object_ownership_type",
@@ -592,6 +645,7 @@ class WorkflowVersionRow(PersistenceBase):
     workflow_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     workflow_version: Mapped[str] = mapped_column(String(64), primary_key=True)
     definition_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    definition_snapshot: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
 
 
 class WorkflowRunRow(PersistenceBase):
@@ -602,6 +656,7 @@ class WorkflowRunRow(PersistenceBase):
     definition_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
     owner_user_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    space_id: Mapped[UUID | None] = mapped_column(Uuid)
     request_id: Mapped[str] = mapped_column(String(36), nullable=False)
     handoff_input: Mapped[dict | None] = mapped_column(JSONB)
     approval_phase: Mapped[str | None] = mapped_column(String(32))
@@ -613,12 +668,73 @@ class WorkflowRunRow(PersistenceBase):
     updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
     __table_args__ = (
+        ForeignKeyConstraint(("space_id", "tenant_id"), ("spaces.id", "spaces.tenant_id"),
+                             name="fk_workflow_runs_space_tenant"),
         ForeignKeyConstraint(("workflow_id", "workflow_version"), ("workflow_versions.workflow_id", "workflow_versions.workflow_version")),
         UniqueConstraint("tenant_id", "owner_user_id", "request_id", name="uq_workflow_runs_request"),
         CheckConstraint("status IN ('PENDING', 'RUNNING', 'PAUSED', 'CANCELLING', 'SUCCEEDED', 'FAILED', 'CANCELLED', "
                         "'WAITING_APPROVAL', 'REJECTED')", name="ck_workflow_runs_status"),
         CheckConstraint("current_step BETWEEN 0 AND 1", name="ck_workflow_runs_current_step"),
     )
+
+
+class WorkspaceAgentRow(PersistenceBase):
+    __tablename__ = "workspace_agents"
+    __table_args__ = (
+        ForeignKeyConstraint(("space_id", "tenant_id"), ("spaces.id", "spaces.tenant_id")),
+        ForeignKeyConstraint(("owner_user_id", "tenant_id"), ("users.id", "users.tenant_id")),
+        Index("ix_workspace_agents_space", "space_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    space_id: Mapped[UUID] = mapped_column(Uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64))
+    owner_user_id: Mapped[UUID] = mapped_column(Uuid)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text)
+    base_agent_id: Mapped[str] = mapped_column(String(64))
+    base_agent_version: Mapped[str] = mapped_column(String(64))
+    instructions: Mapped[str] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer)
+
+
+class WorkspaceWorkflowRow(PersistenceBase):
+    __tablename__ = "workspace_workflows"
+    __table_args__ = (
+        ForeignKeyConstraint(("space_id", "tenant_id"), ("spaces.id", "spaces.tenant_id")),
+        ForeignKeyConstraint(("owner_user_id", "tenant_id"), ("users.id", "users.tenant_id")),
+        Index("ix_workspace_workflows_space", "space_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    space_id: Mapped[UUID] = mapped_column(Uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64))
+    owner_user_id: Mapped[UUID] = mapped_column(Uuid)
+    template_id: Mapped[str] = mapped_column(String(64))
+    template_version: Mapped[str] = mapped_column(String(64))
+    draft: Mapped[dict] = mapped_column(JSONB)
+    revision: Mapped[int] = mapped_column(Integer)
+    published_revision: Mapped[int | None] = mapped_column(Integer)
+    latest_version: Mapped[int] = mapped_column(Integer)
+
+
+class WorkspaceAgentSubmissionRow(PersistenceBase):
+    """客户端请求身份和提交快照。实际接纳状态由 Runtime 原记录判定。"""
+
+    __tablename__ = "workspace_agent_submissions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "owner_user_id", "request_id", name="uq_workspace_agent_request"),
+        ForeignKeyConstraint(("space_id", "tenant_id"), ("spaces.id", "spaces.tenant_id")),
+        ForeignKeyConstraint(("owner_user_id", "tenant_id"), ("users.id", "users.tenant_id")),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(Uuid)
+    space_id: Mapped[UUID] = mapped_column(Uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64))
+    owner_user_id: Mapped[UUID] = mapped_column(Uuid)
+    request_digest: Mapped[str] = mapped_column(String(64))
+    configuration: Mapped[dict] = mapped_column(JSONB)
 
 
 class WorkflowStepRunRow(PersistenceBase):
@@ -1746,6 +1862,11 @@ CANONICAL_TABLES = (
     "roles",
     "user_roles",
     "object_ownership",
+    "space_members",
+    "spaces",
+    "workspace_agents",
+    "workspace_workflows",
+    "workspace_agent_submissions",
     "evaluation_jobs",
     "evaluation_results",
     "outbox_events",

@@ -20,6 +20,7 @@ from core.agent_platform.runtime_adapter import (
     RuntimeRequest,
 )
 from core.runtime.business_output_schema import schema_matches as _schema_matches
+from core.auth import AuthError
 
 if TYPE_CHECKING:
     from core.agent_platform.opencode_runtime_adapter import OpenCodeRuntimeAdapter
@@ -134,6 +135,39 @@ class AgentApplicationService:
             return self.require_workflow_instance_access(request.runtime_instance_id, principal)
         return None
 
+    def workspace_text_agent(self, agent_id: str = "core_router", version: str | None = None):
+        if agent_id != "core_router":
+            raise AgentApplicationError("WORKSPACE_AGENT_UNAVAILABLE", "Agent 未获准用于工作台文本任务")
+        _, definition, _, _, _ = self._resolve_request(ExecutionRequest(agent_id, "", expected_agent_version=version))
+        if definition.input_schema is not None or definition.output_schema is not None:
+            raise AgentApplicationError("WORKSPACE_AGENT_UNAVAILABLE", "Agent 不再提供受信文本入口")
+        return definition
+
+    def require_workspace_instance(self, instance_id: str, principal, purpose: str) -> str:
+        target = self.require_workflow_instance_access(instance_id, principal)
+        if purpose not in self._runtime_instances[instance_id].workspace_purposes():
+            raise AgentApplicationError("RUNTIME_INSTANCE_PURPOSE_DENIED", "实例未获准用于此任务用途")
+        return target
+
+    def workspace_runtime_instances(self, principal) -> list[dict]:
+        instances = [{
+            "id": "native", "name": "Native", "kind": "NATIVE", "deployment": None,
+            "purposes": ["AGENT_TEXT"], "agent_ids": ["core_router"], "status": "CONFIGURED",
+        }]
+        for instance_id, adapter in sorted(self._runtime_instances.items()):
+            try:
+                adapter.require_workflow_access(principal)
+            except AuthError:
+                continue
+            purposes = adapter.workspace_purposes()
+            if purposes:
+                instances.append({
+                    "id": instance_id, "name": instance_id, "kind": "OPENCODE",
+                    "deployment": adapter.deployment, "purposes": purposes,
+                    "agent_ids": ["core_router"], "status": "CONFIGURED",
+                })
+        return instances
+
     def require_workflow_instance_access(self, instance_id: str, principal) -> str:
         adapter = self._runtime_instances.get(instance_id)
         if adapter is None:
@@ -149,18 +183,25 @@ class AgentApplicationService:
         except RuntimeAdapterError as exc:
             raise AgentApplicationError(exc.error_code, exc.safe_message) from None
 
-    def _resolve_request(self, request: ExecutionRequest):
-        if not isinstance(request, ExecutionRequest):
-            raise TypeError("request 必须是 ExecutionRequest")
+    def _registered_agent(self, agent_id: str, expected_version: str | None):
         try:
-            registration = self._registry.require_entry(request.agent_id)
-        except Exception as exc:
+            registration = self._registry.require_entry(agent_id)
+        except Exception:
             raise AgentApplicationError("UNKNOWN_AGENT", "Agent 未注册或不可作为入口") from None
         definition = getattr(registration, "definition", None)
         if definition is None:
             raise AgentApplicationError("AGENT_DEFINITION_UNAVAILABLE", "Agent 业务定义不可用")
-        if request.expected_agent_version is not None and request.expected_agent_version != definition.agent_version:
+        if expected_version is not None and expected_version != definition.agent_version:
             raise AgentApplicationError("AGENT_VERSION_MISMATCH", "Agent 版本与请求断言不一致")
+        return registration, definition
+
+    def validate_agent_version(self, agent_id: str, expected_version: str) -> None:
+        self._registered_agent(agent_id, expected_version)
+
+    def _resolve_request(self, request: ExecutionRequest):
+        if not isinstance(request, ExecutionRequest):
+            raise TypeError("request 必须是 ExecutionRequest")
+        registration, definition = self._registered_agent(request.agent_id, request.expected_agent_version)
         workflow = getattr(registration, "workflow", None)
         workflow_id = workflow.workflow_id if workflow is not None else None
         workflow_version = workflow.workflow_version if workflow is not None else None

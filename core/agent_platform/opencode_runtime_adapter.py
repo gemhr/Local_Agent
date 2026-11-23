@@ -79,6 +79,17 @@ class OpenCodeRuntimeAdapter:
 
         require_opencode_instance_access(principal, self._instance)
 
+    def workspace_purposes(self) -> tuple[str, ...]:
+        if not self._instance.use_instance_tool_permissions:
+            return ("AGENT_TEXT", "WORKFLOW_TEXT")
+        if self._instance.deployment == "LOCAL":
+            return ("WORKFLOW_CI_ARTIFACT",)
+        return ()
+
+    @property
+    def deployment(self) -> str:
+        return self._instance.deployment
+
     def workflow_artifact_workspace(self) -> str:
         if self._instance.deployment != "LOCAL" or not self._instance.use_instance_tool_permissions:
             raise RuntimeAdapterError("WORKFLOW_ARTIFACT_WORKSPACE_UNAVAILABLE", "实例未启用本地文件交接")

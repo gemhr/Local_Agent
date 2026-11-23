@@ -282,6 +282,26 @@ EdDSA JWT 验证。Principal 由服务端 JWT claims 与 PostgreSQL `users`/`use
 带 fixture/replay 或私有 Memory 治理控制的 `evaluation-execute/v3`、`v4` 仅允许 ADMIN，
 其请求体中的 `agent_id` / `requester_agent_id` 只是业务控制字段，不构成 HTTP Principal。
 
+### Workspace 空间授权
+
+`/api/v1/spaces` 复用相同的 Bearer 中间件，只接受数据库中仍有效的 HUMAN。服务端使用 Principal
+的 tenant 和用户 ID 创建空间。个人空间仅所有者可读。团队空间只对所有者和已加入的有效成员开放，
+其 OWNER、ADMIN 可管理成员，MEMBER 可查看成员。租户 ADMIN 同样需要有效的空间角色。
+对象不存在、跨租户、同租户非成员均返回 404。已加入的 MEMBER 尝试写成员时返回 403。
+
+团队成员写入在同一 PostgreSQL 事务内锁定团队，随后读取当前授权。被撤权后的后续请求按最新成员结果处理。
+`WorkspaceService.require_access_in_session()` 为以后有 Space 绑定的业务对象提供复用入口。
+调用方从持久化对象解析 `space_id` 和 `resource_tenant_id`，在业务事务中校验。
+现有无 Space 绑定的 Runtime 对象继续应用既有对象归属规则。
+
+Space Owner/ADMIN 管理共享定义和发布。有效成员可读取 Agent 配置、已发布的 Workflow，并以自己的身份提交。
+版本发布冻结任务指令与 Runtime 目标，后续执行按持久化精确版本复核。Workspace 生成的 Run、WorkflowRun 和会话均有 Space
+归属。任务详情、Workflow 详情、Run 的结果及事件入口显式允许当前团队成员共享读取。其它用途继续使用原发起人或
+对应作用域规则，避免共享读扩大到会话、记忆和受限证据入口。取消与继续要求原发起人，Workflow 审批验证 Space
+Owner/ADMIN。事件流约每两秒重验授权，撤权时关闭连接。产物投影仅返回绑定标识、相对路径、大小和文件摘要。
+通用创建入口禁止复用已绑定 Workspace 的 Run 或会话 ID。Workflow 首次子 Run 接纳再次核对成员资格，
+已接纳执行的原 Runtime 恢复机制保持自己的职责。
+
 ## Tool Governance Security（WP2-B）
 
 `ToolGovernanceService` / `ToolPolicyCatalog` 只处理 Agent ID、canonical Tool name、固定枚举/code、risk classification 与内部 run/step scope。
