@@ -12,6 +12,7 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path as FilePath
 from typing import Annotated, Literal, Optional
 
@@ -217,6 +218,7 @@ from core.agent_platform.registrations import BUSINESS_REGISTRATION_BUNDLE
 from core.agent_platform.opencode_runtime_adapter import OpenCodeRuntimeAdapter
 from core.agent_platform.runtime_adapter import NativeRuntimeAdapter
 from core.agent_platform.workflow import WorkflowError, WorkflowService
+from core.agent_platform.workflow_artifacts import verify_native_admission
 from core.persistence.repositories.workflows import WorkflowRepository
 from core.runtime.agent_evalops_trace_exporter import AgentEvalOpsTraceExporter
 from core.runtime.trace_export_dispatcher import TraceExportDispatcher
@@ -735,7 +737,11 @@ async def lifespan(app: FastAPI):
             RuntimeInitializationError("database_readiness")
         )
     app.state.db_schema_revision = schema_readiness.alembic_revision
-    durable_run_control = DurableRunControlService(persistence_database)
+    opencode_adapters = {}
+    durable_run_control = DurableRunControlService(
+        persistence_database,
+        workflow_artifact_check=partial(verify_native_admission, runtime_instances=opencode_adapters),
+    )
     durable_approval = DurableApprovalService(persistence_database)
     durable_tool_invocation = DurableToolInvocationService(persistence_database)
     tool_snapshot_store = PostgresToolResolutionSnapshotStore(persistence_database)
@@ -1453,7 +1459,6 @@ async def lifespan(app: FastAPI):
     )
     client_event_feed = PostgresClientEventFeed(persistence_database, runtime_metrics)
     external_runs = ExternalRunRepository(persistence_database, client_event_feed)
-    opencode_adapters = {}
     for index, instance in enumerate(settings.opencode_instances):
         opencode_adapters[instance.instance_id] = await initialization_stack.create(
             f"opencode_adapter_{index}",
@@ -1701,19 +1706,20 @@ async def lifespan(app: FastAPI):
         max_active_runs=settings.max_active_runs,
         metrics=observability_service,
     )
+    from core.agent_platform.ci_status import CIStatusService
+    app.state.ci_status_service = CIStatusService(incident_service, agent_application_service, app.state.authorization_service)
     workflow_service = None
     if not app.state.ci_evaluation_only:
         workflow_service = WorkflowService(
             WorkflowRepository(persistence_database), compiled_agent_catalog.workflows, agent_application_service,
             app.state.authorization_service, app.state.run_execution_supervisor, run_registry, runtime_services.admission_gate,
+            ci_status=app.state.ci_status_service,
         )
     app.state.workflow_service = workflow_service
     app.state.client_event_feed = runtime_services.client_event_feed
     from core.agent_platform.ci_diagnosis import CIInvestigationService
     from core.incidents.baseband_quality import load_configuration as load_baseband_quality
     app.state.baseband_quality_configuration = load_baseband_quality(settings.baseband_quality_configuration_path)
-    from core.agent_platform.ci_status import CIStatusService
-    app.state.ci_status_service = CIStatusService(incident_service, agent_application_service, app.state.authorization_service)
     app.state.ci_investigation_service = CIInvestigationService(
         incident_service, agent_application_service, execution_repository,
         app.state.run_execution_supervisor, app.state.authorization_service,
@@ -3979,6 +3985,8 @@ class WorkflowCreateRequest(BaseModel):
 
     request_id: uuid.UUID
     expected_workflow_version: Annotated[StrictStr, Field(min_length=1, max_length=64)] | None = None
+    incident_id: uuid.UUID | None = None
+    execution_id: uuid.UUID | None = None
 
 
 def _workflow_service(request: Request) -> WorkflowService:
@@ -3993,6 +4001,8 @@ async def create_workflow_run(workflow_id: Annotated[str, Path(max_length=64)], 
     try:
         return await _workflow_service(request).create(
             request.state.principal, workflow_id, payload.request_id, payload.expected_workflow_version,
+            incident_id=str(payload.incident_id) if payload.incident_id else None,
+            execution_id=str(payload.execution_id) if payload.execution_id else None,
         )
     except AgentApplicationError as exc:
         raise WorkflowError(exc.error_code, 422) from None

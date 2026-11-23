@@ -73,6 +73,7 @@ async def lock_run_scope(session: AsyncSession, run_id: str) -> None:
 async def workflow_claim_allowed(
     session: AsyncSession, run_id: str, runtime_kind: str, request: RuntimeRequest | None, *,
     runtime_target_digest: str | None = None, recovering: bool = False,
+    already_admitted: bool = False, workflow_artifact_check=None,
 ) -> bool:
     """在调用方持有的 Run 锁下核对实际执行请求与持久预留。"""
     step = await session.scalar(select(WorkflowStepRunRow).where(WorkflowStepRunRow.platform_run_id == run_id))
@@ -87,7 +88,7 @@ async def workflow_claim_allowed(
         return False
     access = request.memory_access_context
     run = await session.get(WorkflowRunRow, step.workflow_run_id)
-    return (
+    matches = (
         request.run_id == run_id
         and request.agent_id == step.agent_id
         and request.agent_version == step.agent_version
@@ -100,6 +101,15 @@ async def workflow_claim_allowed(
         and access.agent_id == request.agent_id
         and access.session_id == request.session_id == f"{run.workflow_run_id}:{step.step_id}"
     )
+    if not matches:
+        return False
+    if runtime_kind == "NATIVE" and not already_admitted and (run.handoff_input is not None or step.bound_input is not None):
+        # 只读 Workflow 状态，避免逆序获取已由 prepare/cancel 持有的 Workflow 行锁。
+        if (run.handoff_input is None or run.cancel_requested or run.status != "RUNNING" or run.current_step != step.position
+                or step.position != 1 or step.bound_input != request.input or workflow_artifact_check is None):
+            return False
+        await workflow_artifact_check(session, run, step, request.input)
+    return True
 
 
 async def select_journal_by_event_id(

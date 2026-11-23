@@ -26,7 +26,7 @@ from tests.test_runtime_adapter import _native_application
 from tests.test_stage6_wp2_ownership import _create_user, _disabled_rate_limiter, _principal, _token
 
 
-DEFINITION, = BUSINESS_REGISTRATION_BUNDLE.workflows
+DEFINITION = next(item for item in BUSINESS_REGISTRATION_BUNDLE.workflows if item.workflow_id == "runtime_handoff")
 
 
 async def _setup(database, tmp_path, upstream, *, capacity=2):

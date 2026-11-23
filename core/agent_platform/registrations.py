@@ -8,6 +8,7 @@ from core.ci_simulation.baseband import AGENT_ID as BASEBAND_AGENT
 from core.agent_platform.ci_diagnosis_tools import TOOL_NAMES
 from core.incidents.service import AGENT_ID
 from core.agent_platform.ci_status import definition as status_definition, AGENT_ID as STATUS_AGENT, TOOL_NAME as STATUS_TOOL
+from core.agent_platform.workflow_artifacts import CI_ARTIFACT_BINDING
 from core.feature_impact.agent import definition as feature_definition
 from core.feature_impact.tools import TOOL_NAMES as FEATURE_TOOLS, AGENT_ID as FEATURE_AGENT
 
@@ -23,7 +24,15 @@ BUSINESS_REGISTRATION_BUNDLE = AgentRegistrationBundle(
             WorkflowTask("native", "core_router", "请仅回复 Native 检查完成。",
                          agent_version="builtin-1", runtime_kind="NATIVE"),
         ),
-    ),),
+    ), WorkflowDefinition(
+        "ci_artifact_handoff", "1", execution_mode="SERIAL", result_binding=CI_ARTIFACT_BINDING, tasks=(
+            WorkflowTask("external", "core_router", "在指定路径写入 CI 执行引用文件，再回复约定的 JSON 对象。",
+                         agent_version="builtin-1", runtime_kind="OPENCODE", runtime_instance_id="workflow-opencode",
+                         requires_result_validation=True),
+            WorkflowTask("native", STATUS_AGENT, "查询由交接结果绑定的 CI 执行状态。",
+                         agent_version=status_definition().agent_version, runtime_kind="NATIVE"),
+        ),
+    )),
     tools=(),
     model_profile_ids=frozenset({"default"}),
     retrieval_profile_ids=frozenset(),

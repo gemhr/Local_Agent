@@ -141,6 +141,14 @@ class AgentApplicationService:
         adapter.require_workflow_access(principal)
         return adapter.workflow_target_digest
 
+    def workflow_artifact_workspace(self, instance_id: str, principal, expected_target: str) -> str:
+        if self.require_workflow_instance_access(instance_id, principal) != expected_target:
+            raise AgentApplicationError("WORKFLOW_DEFINITION_DRIFT", "实例执行配置与冻结内容不一致")
+        try:
+            return self._runtime_instances[instance_id].workflow_artifact_workspace()
+        except RuntimeAdapterError as exc:
+            raise AgentApplicationError(exc.error_code, exc.safe_message) from None
+
     def _resolve_request(self, request: ExecutionRequest):
         if not isinstance(request, ExecutionRequest):
             raise TypeError("request 必须是 ExecutionRequest")

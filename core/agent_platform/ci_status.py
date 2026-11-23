@@ -173,6 +173,10 @@ class CIStatusService:
             raise ValueError("CI_STATUS_MODE_INVALID")
         self.incidents, self.application, self.authorization, self.mode = incidents, application, authorization, mode
 
+    async def workflow_route(self, principal, query):
+        """Workflow 接入固定 FAST_PATH，使用原查询权限和 scope。"""
+        return await freeze_route(self.incidents, principal, query, "FAST_PATH")
+
     async def execute(self, principal, incident_id, execution_id):
         from core.agent_platform.application import ExecutionRequest
         query = dict(task_type="CI_EXECUTION_STATUS", incident_id=incident_id, execution_id=execution_id)

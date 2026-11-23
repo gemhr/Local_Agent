@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from core.runtime.memory_scope import MemoryAccessContext
 from core.runtime.memory_scope import MemoryContextError
-from core.runtime.run_control import RunControlConflict
+from core.runtime.run_control import RunControlConflict, WorkflowArtifactAdmissionRejected
 from core.agent_router import AgentRouter
 from core.runtime.metrics import ApplicationRuntimeGaugeProvider
 from core.runtime.observability_dispatcher import RuntimeObservabilityDispatcher
@@ -359,6 +359,8 @@ class ChatService:
             raise ChatRuntimeTransportError(
                 "RUNTIME_SHUTTING_DOWN"
             ) from None
+        except WorkflowArtifactAdmissionRejected as exc:
+            raise ChatRuntimeTransportError(exc.error_code) from None
         except RunControlConflict:
             code = "RUN_ALREADY_ACCEPTED" if require_new_run else "RUNTIME_SCOPE_CREATION_FAILED"
             raise ChatRuntimeTransportError(code) from None

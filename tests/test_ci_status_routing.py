@@ -32,12 +32,12 @@ class QueryProvider(DecisionProvider):
         return self.invoke(messages, max_tokens=max_tokens)
 
 
-async def setup_query(database, tmp_path, responses=()):
+async def setup_query(database, tmp_path, responses=(), *, control=None):
     incidents, principal, instance, execution, incident = await setup_incident(database)
     tool = status.CIStatusTool(incidents, SyncPersistenceBridge(asyncio.get_running_loop()))
     bundle = AgentRegistrationBundle(registrations=(AgentRegistration(status.definition()),),
         tool_grants={status.TOOL_NAME: frozenset({status.AGENT_ID})})
-    factory, repo, model, _ = await assembly(database, tmp_path, responses, business_bundle=bundle, context_policy={},
+    factory, repo, model, _ = await assembly(database, tmp_path, responses, business_bundle=bundle, context_policy={}, control=control,
         context_model=QueryProvider(responses),
         tool_registrations=[ToolRegistration(ToolDescriptor(name=status.TOOL_NAME, description="CI 状态"), tool)])
     from core.runtime.tool_snapshot_store import PostgresToolResolutionSnapshotStore

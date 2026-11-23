@@ -25,11 +25,18 @@
 | `WORKFLOW_DEFINITION_UNAVAILABLE` | 404 / `PAUSED` | 静态定义缺失或非串行。 |
 | `WORKFLOW_VERSION_MISMATCH` / `WORKFLOW_DEFINITION_DRIFT` | 409 / `PAUSED` | 当前注册版本或语义摘要与请求或持久记录不一致。 |
 | `WORKFLOW_REQUEST_CONFLICT` | 409 | 发起者将已使用的 `request_id` 绑定到其他 Workflow 或版本。 |
-| `WORKFLOW_STEP_CONSTRAINT_UNSUPPORTED` | 422 / `PAUSED` | 已声明需额外结果校验或审批。 |
+| `WORKFLOW_STEP_CONSTRAINT_UNSUPPORTED` | 422 / `PAUSED` | 已声明未知的结果校验规则或尚未实现的审批。 |
 | `WORKFLOW_RUN_ID_CONFLICT` | `PAUSED` | 新生成的 Run ID 已有归属或运行记录。 |
 | `WORKFLOW_RUNTIME_BINDING_MISMATCH` | `PAUSED` | 外部 Run 的实例、Agent 或发起人会话与预留步骤不符。 |
 | `WORKFLOW_RUN_<观察状态>` | `PAUSED` | 原 Run 仍待接纳或缺少确定终态，且没有更具体的 Runtime 错误码。 |
 | `NATIVE_TERMINAL_UNVERIFIED` / `WORKFLOW_RESULT_UNAVAILABLE` | `PAUSED` | Native 关闭记录缺少对应 Journal 终态，或成功步骤缺少可用结果引用。 |
+| `WORKFLOW_CI_INPUT_INVALID` | 422 | CI 交接创建缺少有效 UUID，或其他定义收到 CI 专用字段。 |
+| `WORKFLOW_ARTIFACT_WORKSPACE_UNAVAILABLE` | 422 / `PAUSED` | 实例未启用本地文件交接。 |
+| `WORKFLOW_OUTPUT_INVALID` / `WORKFLOW_ARTIFACT_JSON_INVALID` / `WORKFLOW_CI_BINDING_MISMATCH` | `FAILED` | 正文或文件未通过严格 JSON / Schema 校验，或业务标识不匹配。 |
+| `WORKFLOW_ARTIFACT_PATH_INVALID` / `WORKFLOW_ARTIFACT_FILE_INVALID` | `FAILED` / `PAUSED` | 产物路径、文件类型、大小或本机目录边界不合法。 |
+| `WORKFLOW_ARTIFACT_PREEXISTS` / `WORKFLOW_ARTIFACT_UNAVAILABLE` | `PAUSED` | 专属目录或目标文件在首发前已存在，或运行时缺少文件读取证据。 |
+| `WORKFLOW_ARTIFACT_CHANGED` / `WORKFLOW_ARTIFACT_BINDING_INVALID` / `WORKFLOW_BOUND_INPUT_INVALID` | `PAUSED` | 派发前复核无法证明原文件、产物引用或冻结输入一致。首次收件发现产物变化时步骤失败。 |
+| `WORKFLOW_VALIDATION_REQUIRED` / `WORKFLOW_NATIVE_OUTPUT_INVALID` | `PAUSED` / `FAILED` | 第一步缺少持久准出证据，或 Native 交付结构或业务标识与冻结输入不一致。 |
 
 ## Stage 3 WP3 Security Codes
 

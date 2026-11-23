@@ -28,13 +28,17 @@ External Run 接纳与 Native lease claim 共用 Run 级事务锁。Client Feed 
 
 ### 跨 Runtime 串行 Workflow
 
-受信注册可声明 `SERIAL` 模式，固定两个有序步骤、Agent 版本、实例和输入。Native 委派继续使用 `DELEGATION`。串行定义当前执行 OpenCode → Native，要求审批或额外结果校验的步骤会拒绝执行。Workflow 首次创建时写入版本摘要，摘要包括固定输入和外部运行配置。同版本摘要漂移会拒绝新建，已有运行续跑时会暂停。
+受信注册可声明 `SERIAL` 模式，固定两个有序步骤、Agent 版本、实例以及输入或结果绑定规则。Native 委派继续使用 `DELEGATION`。串行定义当前执行 OpenCode → Native，受信结果绑定按已实现的规则准出。要求审批或声明了未知准出规则的定义会拒绝执行。Workflow 首次创建时写入版本摘要，摘要包括固定输入、结果绑定合同和外部运行配置。同版本摘要漂移会拒绝新建，已有运行续跑时会暂停。
 
 认证 HUMAN 使用 `POST /api/v1/workflows/{workflow_id}/runs` 创建运行。请求体需要 UUID `request_id`，可提供 `expected_workflow_version`。同一租户、原发起人的重复请求返回已有运行，复用请求 ID 切换 Workflow 或版本返回冲突。同租户 owner / ADMIN 可用 `GET /api/v1/workflow-runs/{workflow_run_id}` 查询状态、步骤和子 Run ID，并向同路径下的 `/cancel` 提交取消。`/resume` 只接受原发起人重新认证后的请求。状态查询读取原 Run 的持久观察记录，结果正文沿原 Runtime 来源读取。
 
 `WorkflowService` 在创建后台任务前获取共享 Run 容量。槽位不足时，未启动的 Workflow 保持持久 `PENDING`，原发起人可显式续跑。`WorkflowRepository` 在一个事务内写入步骤预留、子 Run 与会话归属。首次接纳在原 Run 锁下核对内部派发凭证及实际 Agent、版本、输入摘要、实例配置和发起人会话。重领未接纳的预留会替换凭证并复用原 Run ID。取消按 Workflow 行、子 Run 锁的顺序提交取消意图，已接纳时同时写入原 Run 的持久控制路径。已有 OpenCode 会话只按原绑定核查，`ACTIVE` 或 `UNKNOWN` 不重发 Prompt。Native 恢复仍由 `RecoveryCoordinator` 负责。工具对账和人工收口使用已接纳 Native Run 的原 fence 和 invocation 绑定。
 
 Workflow 只有取得可信 Runtime 终态和可用结果引用才会推进。Native 使用关闭的 durable RunControl、对应的 Journal 终态和 Client Feed，OpenCode 使用原持久绑定的终态和助手消息身份。不确定结果可进入 `PAUSED`，已发起取消却缺少终态证据时保留 `CANCELLING`。应用关闭时等待 Workflow 任务退出后再释放 Runtime 资源，重启后需原发起人显式续跑才能派发新步骤。
+
+`ci_artifact_handoff@1` 创建时另需 `incident_id`、`execution_id`，用当前发起人核对合成 CI 关联。第一步在受信本地 Workspace 中创建 `workflow-runs/<workflow_run_id>`，OpenCode 使用专属目录下固定的 `ci-execution.json`。Workflow 按原 Run 的实例、Session、父消息与最终助手消息重读完整 `ci-handoff.v1`，校验严格 JSON、UUID、固定产物路径及 `ci-execution-ref.v1` 文件。产物校验记录相对路径、大小、SHA-256、来源 Run 和步骤身份。
+
+第一步准出事务同步持久化产物引用与后续 Native 实际输入及摘要。Native 输入的 `incident_id` 来自已验证的 OpenCode 正文，`execution_id` 来自同一份实际读取并散列的文件字节，`task_type` 固定为 `CI_EXECUTION_STATUS`。派发前重查原发起人的 CI 授权。Native 在原 Run advisory lock 内核对持久 producer、受信 Workspace 与实际文件，复核通过后才写首次 fence。产物失效时 Workflow 暂停并保留原预留 ID。已接纳 Run 按原恢复合同处理。CIStatus FAST_PATH 沿用原受治理 Tool，`ci-status.v1` 必须来自已校验的终态 Feed，两个业务 ID 必须对应冻结输入。
 
 startup 汇集 builtin、BusinessTool、MCP registrations 与可信
 permission seeds，编译单一 AgentRegistry 后 freeze ToolRegistry。

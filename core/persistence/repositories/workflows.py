@@ -31,6 +31,11 @@ class StepEvidence:
     runtime_status: str | None = None
     result_ref: dict | None = None
     reason: str | None = None
+    artifact_ref: dict | None = None
+    next_input: str | None = None
+    validation_error: str | None = None
+    validation_retryable: bool = False
+    native_output: str | None = None
 
 
 def _set_status(run, status, reason=None):
@@ -64,7 +69,7 @@ class WorkflowRepository:
             WorkflowRunRow.request_id == request_id,
         ))
 
-    async def create(self, principal, request_id, definition, digest):
+    async def create(self, principal, request_id, definition, digest, *, handoff_input=None):
         async with self.database.transaction() as session:
             await lock_run_scope(session, f"workflow-request:{principal.tenant_id}:{principal.user_id}:{request_id}")
             prior = await self._find_request(session, principal, request_id)
@@ -80,7 +85,7 @@ class WorkflowRepository:
             run = WorkflowRunRow(
                 workflow_run_id=str(uuid4()), workflow_id=key[0], workflow_version=key[1],
                 definition_digest=digest, tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
-                request_id=request_id, status="PENDING", current_step=0, cancel_requested=False,
+                request_id=request_id, handoff_input=handoff_input, status="PENDING", current_step=0, cancel_requested=False,
             )
             await ObjectAuthorizationService.bind_new_in_transaction(session, principal, "WORKFLOW_RUN", run.workflow_run_id)
             session.add(run)
@@ -103,7 +108,8 @@ class WorkflowRepository:
             ).order_by(WorkflowStepRunRow.position)))
             return run, steps
 
-    async def prepare(self, run_id, position, principal, conversation_id, *, definition_digest=None, runtime_target_digest=None):
+    async def prepare(self, run_id, position, principal, conversation_id, *, definition_digest=None,
+                      runtime_target_digest=None, effective_input=None, prepare_artifact=None):
         """锁序为 Workflow 行 → 子 Run 锁。旧凭证在同一个 Run 锁下失效。"""
         async with self.database.transaction() as session:
             run = await self._lock_workflow(session, run_id)
@@ -125,6 +131,18 @@ class WorkflowRepository:
                 if control is not None or await session.get(ObjectOwnershipRow, ("RUN", platform_run_id)) is not None:
                     _set_status(run, "PAUSED", "WORKFLOW_RUN_ID_CONFLICT")
                     return None
+            if run.handoff_input is not None:
+                if step.position == 0:
+                    if effective_input is None or prepare_artifact is None:
+                        return None
+                    if step.platform_run_id is None:
+                        step.input_digest = canonical_payload_digest(effective_input)
+                    elif canonical_payload_digest(effective_input) != step.input_digest:
+                        return None
+                    step.artifact_directory = prepare_artifact(step.platform_run_id is None, step.artifact_directory)
+                elif step.bound_input is None or step.bound_input != effective_input:
+                    return None
+            if step.platform_run_id is None:
                 await ObjectAuthorizationService.bind_new_in_transaction(session, principal, "RUN", platform_run_id)
                 await ObjectAuthorizationService.bind_new_in_transaction(session, principal, "CONVERSATION", conversation_id)
                 step.platform_run_id = platform_run_id
@@ -153,7 +171,8 @@ class WorkflowRepository:
                 if (row.terminal_status == "SUCCEEDED" and not row.error_code
                         and row.external_session_id and row.user_message_id and row.assistant_message_id):
                     ref = {"kind": "OPENCODE_MESSAGE", "instance_id": row.instance_id,
-                           "session_id": row.external_session_id, "message_id": row.assistant_message_id}
+                           "session_id": row.external_session_id, "user_message_id": row.user_message_id,
+                           "message_id": row.assistant_message_id}
                 return StepEvidence(row.observation_state, row.terminal_status, ref, row.error_code)
 
             control = await session.get(RunControlRow, run_id)
@@ -168,14 +187,21 @@ class WorkflowRepository:
             status = terminal.safe_payload.get("status")
             reason = terminal.safe_payload.get("safe_error_code")
             ref = None
+            native_output = None
             if status == "SUCCEEDED":
                 delivery = await session.get(ClientDeliveryEventRow, (run_id, terminal.sequence))
                 if delivery is not None and delivery.event_id == terminal.event_id:
                     if delivery.payload.get("business_output_valid") is False:
                         reason = "BUSINESS_OUTPUT_INVALID"
+                    elif step.bound_input is not None:
+                        if (delivery.payload.get("business_output_valid") is True
+                                and delivery.payload.get("output_disposition") == "ACCEPTED"
+                                and isinstance(delivery.payload.get("output"), str)):
+                            native_output = delivery.payload["output"]
+                            ref = {"kind": "NATIVE_FEED", "terminal_sequence": terminal.sequence}
                     elif delivery.payload.get("output") or await self._native_text_available(session, run_id, terminal.sequence):
                         ref = {"kind": "NATIVE_FEED", "terminal_sequence": terminal.sequence}
-            return StepEvidence("TERMINAL", status, ref, reason)
+            return StepEvidence("TERMINAL", status, ref, reason, native_output=native_output)
 
     @staticmethod
     async def _native_text_available(session, run_id, terminal_sequence):
@@ -214,14 +240,29 @@ class WorkflowRepository:
             elif evidence.runtime_status != "SUCCEEDED" or evidence.reason == "BUSINESS_OUTPUT_INVALID":
                 current.status = "FAILED" if evidence.runtime_status == "SUCCEEDED" else evidence.runtime_status
                 _set_status(run, current.status, evidence.reason)
-            elif evidence.result_ref is None:
-                current.reason = "WORKFLOW_RESULT_UNAVAILABLE"
+            elif evidence.validation_error:
+                current.reason = evidence.validation_error
+                if evidence.validation_retryable:
+                    _set_status(run, "PAUSED", current.reason)
+                else:
+                    current.status = "FAILED"
+                    _set_status(run, "FAILED", current.reason)
+            elif evidence.result_ref is None or (
+                run.handoff_input is not None and current.position == 0
+                and (evidence.artifact_ref is None or evidence.next_input is None)
+            ):
+                current.reason = "WORKFLOW_RESULT_UNAVAILABLE" if evidence.result_ref is None else "WORKFLOW_VALIDATION_REQUIRED"
                 _set_status(run, "PAUSED", current.reason)
             else:
                 current.status = "SUCCEEDED"
                 if step.position == 1:
                     _set_status(run, "SUCCEEDED")
                 else:
+                    if run.handoff_input is not None:
+                        current.artifact_ref = evidence.artifact_ref
+                        successor = await self._step(session, run_id, 1)
+                        successor.bound_input = evidence.next_input
+                        successor.input_digest = canonical_payload_digest(evidence.next_input)
                     run.current_step = 1
                     _set_status(run, "PENDING")
                     return True

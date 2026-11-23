@@ -603,6 +603,7 @@ class WorkflowRunRow(PersistenceBase):
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
     owner_user_id: Mapped[object] = mapped_column(Uuid(as_uuid=True), nullable=False)
     request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    handoff_input: Mapped[dict | None] = mapped_column(JSONB)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     current_step: Mapped[int] = mapped_column(Integer, nullable=False)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -635,6 +636,9 @@ class WorkflowStepRunRow(PersistenceBase):
     dispatch_token: Mapped[str | None] = mapped_column(String(36))
     runtime_status: Mapped[str | None] = mapped_column(String(16))
     result_ref: Mapped[dict | None] = mapped_column(JSONB)
+    artifact_ref: Mapped[dict | None] = mapped_column(JSONB)
+    artifact_directory: Mapped[list | None] = mapped_column(JSONB)
+    bound_input: Mapped[str | None] = mapped_column(Text)
     reason: Mapped[str | None] = mapped_column(String(64))
 
     __table_args__ = (

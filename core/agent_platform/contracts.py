@@ -219,6 +219,7 @@ class WorkflowDefinition:
     tasks: tuple[WorkflowTask, ...] = ()
     synthesis_required: bool = False
     execution_mode: str = "DELEGATION"
+    result_binding: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("workflow_id", "workflow_version"):
@@ -230,6 +231,11 @@ class WorkflowDefinition:
             raise TypeError("tasks 必须是 WorkflowTask tuple")
         if type(self.synthesis_required) is not bool:
             raise TypeError("synthesis_required 必须是 bool")
+        if self.result_binding is not None and (
+            self.execution_mode != "SERIAL" or not isinstance(self.result_binding, str)
+            or not _SAFE_ID.fullmatch(self.result_binding)
+        ):
+            raise ValueError("result_binding 必须是串行 Workflow 的受信标识")
         if len({task.task_id for task in self.tasks}) != len(self.tasks):
             raise ValueError("Workflow task_id 不允许重复")
         if self.execution_mode == "SERIAL":

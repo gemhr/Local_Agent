@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -16,7 +17,10 @@ from core.persistence.repositories import runtime as runtime_repository
 from core.runtime.events import RuntimeEvent
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from core.agent_platform.runtime_adapter import RuntimeRequest
+    from core.persistence.models import WorkflowRunRow, WorkflowStepRunRow
     from core.runtime.tool_idempotency import DurableToolInvocation
 
 
@@ -30,6 +34,12 @@ class OwnershipLost(RunControlError):
 
 class RunControlConflict(RunControlError):
     """The requested control mutation conflicts with durable state."""
+
+
+class WorkflowArtifactAdmissionRejected(RunControlConflict):
+    def __init__(self, error_code: str) -> None:
+        self.error_code = error_code
+        super().__init__(error_code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,13 +62,17 @@ class CancelIntent:
 class DurableRunControlService:
     """唯一负责 durable Run lease/fence/command 状态转换的 Service。"""
 
-    def __init__(self, database: Database, *, lease_seconds: int = 30) -> None:
+    def __init__(
+        self, database: Database, *, lease_seconds: int = 30,
+        workflow_artifact_check: Callable[[AsyncSession, WorkflowRunRow, WorkflowStepRunRow, str], Awaitable[None]] | None = None,
+    ) -> None:
         if not isinstance(database, Database):
             raise TypeError("database 必须是 Database")
         if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) or lease_seconds <= 0:
             raise ValueError("lease_seconds 必须是正整数")
         self.database = database
         self.lease_seconds = lease_seconds
+        self._workflow_artifact_check = workflow_artifact_check
 
     async def claim(
         self, run_id: str, owner_id: str, *, require_new_run: bool = False,
@@ -89,6 +103,7 @@ class DurableRunControlService:
                 if not await runtime_repository.workflow_claim_allowed(
                     session, run_id, "NATIVE", workflow_request,
                     recovering=admitted and (recovering or tool_recovery is not None),
+                    already_admitted=admitted, workflow_artifact_check=self._workflow_artifact_check,
                 ):
                     raise RunControlConflict("Run 已预留给 Workflow")
                 if row is None:
