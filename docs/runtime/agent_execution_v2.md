@@ -34,7 +34,7 @@ Child FINAL 只提交最多16KiB正文的内部 ChildResult，信任为 AGENT_DE
 
 仅 `ci_incident_investigator` 根 Frame 可冻结 `adaptive_stop=ci-investigation-stop.v1`。`CIInvestigationService` 使用的 canonical Definition 对新 Run 启用该可选策略；其他 Agent、查询 Fast Path 和没有该冻结配置的旧 Run 不启用。策略和 `coverage_rule=ci-observed-minimum.v1`、`reserve_seconds=15`、canonical SHA-256 digest 进入原 pinned_config/config_digest；旧 Run 恢复不从当前 Definition 补开新策略。
 
-只在上一批已 OBSERVED、NEED_DECISION、下一轮尚未 OPEN，且无未决 Tool/HITL/Child 时判断。`ci_evidence.py` 与最终 `validate_report` 共用已读来源提取：COMMITTED Tool 正文、Action projection/source/result digest、同 Frame OBSERVED、同 incident/execution、AVAILABLE 原 manifest 必须相符。必要覆盖为 PARSER_LOG、ENVIRONMENT_RECORD、CASE_REQUIREMENTS，环境能力字段非空。覆盖不是根因正确性或质量 verdict，不替代原报告 Validator/后续 GT 评测。
+只在上一批已 OBSERVED、NEED_DECISION、下一轮尚未 OPEN，且无未决 Tool/HITL/Child 时判断。`ci_evidence.py` 与最终 `validate_report` 核对同一 incident/execution 的 AVAILABLE 原 manifest、COMMITTED Tool 正文、Action 投影与摘要，以及同一 Frame 的 OBSERVED 记录。既有场景必须覆盖 PARSER_LOG、ENVIRONMENT_RECORD、CASE_REQUIREMENTS。文件驱动合成场景 `stale_case_input_file` 必须覆盖 PARSER_LOG、ENVIRONMENT_RECORD、TLV_INTERFACE_DEFINITION 和 SCRIPT_BASELINE。两种场景的环境能力字段均须非空。根因和修复资格由后续业务校验确定。
 
 Alembic `0042_loop_adaptive_decision` 为原 RuntimeLoopFrameRow 增加可空 JSONB `adaptive_decision`；原 LoopFrame DTO 同步支持。记录 version、policy_digest、observation_cursor、evidence_digest、effective_iteration、allowed_actions=FINAL_ONLY、reason、insufficient、decision_id。reason 为 COVERAGE_SUFFICIENT 或 BUDGET_RESERVE，decision_id 由其余字段的 canonical digest 派生。原 Repository 的锁、lease/fencing、resume_generation、row_version 先提交限制，再创建 Snapshot；重复提交读取原决定。数据库触发器禁止修改或清除非空决定，迁移不允许通过 downgrade 丢弃历史限制。
 
@@ -45,6 +45,14 @@ Alembic `0042_loop_adaptive_decision` 为原 RuntimeLoopFrameRow 增加可空 JS
 Driver 在 prepare_batch/prepare_handoff 前拒绝 TOOL_BATCH/HANDOFF；原 accept_batch 在模型响应与 Snapshot 绑定检查后再次拒绝，不能创建 Action/Child/Tool。非法输出沿 LOOP_DECISION_INVALID 停止，不循环重问。最多一个新的逻辑终结轮，Provider fallback/recovery attempt 仍使用原有限预算。insufficient=true 时 FINAL 必须明确 INSUFFICIENT_EVIDENCE 且 uncertainties 非空；REFUSAL 沿原拒绝分支，不伪造完整诊断成功。
 
 恢复校验决定/策略摘要、原 observation/source 及已冻结限制快照，继续使用原决定和绝对 Deadline。COMMITTED 结果不重读，STARTED/UNKNOWN 仍交原对账流程；到期优先失败。RESULT_READY 仍走原 StepCompletion/OutputGate，CI 业务报告在原投影流程校验。Runtime SUCCEEDED 不等于业务完整诊断成功，INSUFFICIENT_EVIDENCE 必须单独识别。
+
+### 文件驱动合成修复输入
+
+`ci_incident_investigator@1.0.0` 使用既有基础指令和注册报告 Schema。`ci_get_execution_context` 在匹配 `stale_case_input_file@1` 的已绑定执行后返回四项必读目录及 `diagnosis_requirements`，由 `SCRIPT_BASELINE` 提供该场景的用例输入要求。Runtime FINAL 校验与报告封存均按受信执行范围接受此场景的 `failure_mechanism` 扩展。旧场景使用原字段集合和原证据目录。
+
+`CIInvestigationService.repair_input()` 供受信服务读取已封存的 Native 调查。调用前由 `project_if_terminal()` 验证和封存报告。准入要求原 owner 的 OPEN Incident、匹配的场景、用例及执行来源、`SUPPORTED` 诊断和 `failure_mechanism=TLV_INPUT_REVISION_STALE`。服务端从原执行快照确认用例要求和 PRECHECK 因果，复算证据摘要及接口和脚本文件 SHA-256。通过时返回 `repair-input.v1`，授权范围仅 `cases/tlv-report.json` 的 `request_tlv_hex`。拒绝时返回业务错误码。
+
+`RepairInput.canonical_bytes()` 使用排序键、紧凑分隔符、Unicode 原文的 UTF-8 JSON；`digest()` 对该正文计算 SHA-256。`diagnosis_report_digest` 对封存报告的规范 JSON 计算，`native_result_digest` 对 Runtime 交付的原始报告文本计算。`execution_evidence_digest` 对按 Evidence ID 排序的完整 manifest 计算。接口和脚本摘要覆盖原始文件字节。供下游持久化的输入和摘要应一起绑定至消费步骤。现有六证据 CI 质量导出针对新场景返回 `CI_QUALITY_SOURCE_UNAVAILABLE`。
 
 ## Context / Evidence / 兼容
 

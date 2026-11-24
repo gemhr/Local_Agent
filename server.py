@@ -1714,13 +1714,19 @@ async def lifespan(app: FastAPI):
         metrics=observability_service,
     )
     from core.agent_platform.ci_status import CIStatusService
+    from core.agent_platform.ci_diagnosis import CIInvestigationService
     app.state.ci_status_service = CIStatusService(incident_service, agent_application_service, app.state.authorization_service)
+    app.state.ci_investigation_service = CIInvestigationService(
+        incident_service, agent_application_service, execution_repository,
+        app.state.run_execution_supervisor, app.state.authorization_service,
+        real_model=settings.llm_backend in {"remote", "hybrid", "local"},
+    )
     workflow_service = None
     if not app.state.ci_evaluation_only:
         workflow_service = WorkflowService(
             WorkflowRepository(persistence_database), compiled_agent_catalog.workflows, agent_application_service,
             app.state.authorization_service, app.state.run_execution_supervisor, run_registry, runtime_services.admission_gate,
-            ci_status=app.state.ci_status_service,
+            ci_status=app.state.ci_status_service, ci_investigation=app.state.ci_investigation_service,
         )
     app.state.workflow_service = workflow_service
     app.state.workspace_configuration = WorkspaceConfiguration(
@@ -1731,14 +1737,10 @@ async def lifespan(app: FastAPI):
         app.state.run_execution_supervisor, runtime_services.admission_gate,
     )
     app.state.client_event_feed = runtime_services.client_event_feed
-    from core.agent_platform.ci_diagnosis import CIInvestigationService
     from core.incidents.baseband_quality import load_configuration as load_baseband_quality
     app.state.baseband_quality_configuration = load_baseband_quality(settings.baseband_quality_configuration_path)
-    app.state.ci_investigation_service = CIInvestigationService(
-        incident_service, agent_application_service, execution_repository,
-        app.state.run_execution_supervisor, app.state.authorization_service,
-        real_model=settings.llm_backend in {"remote", "hybrid", "local"},
-    )
+    from core.incidents import repair_quality
+    app.state.repair_quality_configuration = repair_quality.load_configuration(settings.repair_quality_configuration_path)
     from core.agent_platform.adaptive_evaluation import Configuration, AdaptiveEvaluationService
     app.state.adaptive_evaluation_service = None
     if settings.adaptive_evaluation_configuration_path:
@@ -2390,6 +2392,8 @@ async def request_id_and_auth_middleware(request: Request, call_next):
                 require_scope(request.state.principal, "localagent:ci-business:evaluate")
             elif request.url.path in {"/api/ci/quality/baseband/evaluate", "/api/ci/quality/coverage-execution/evaluate"} and request.method == "POST":
                 require_scope(request.state.principal, "localagent:baseband:evaluate")
+            elif request.url.path.startswith("/api/ci/quality/repair-evidence/") and request.method == "GET":
+                require_scope(request.state.principal, "localagent:ci-repair:evidence")
             elif request.url.path in {"/api/feature-impact/quality/evaluate", "/api/feature-impact/quality/evaluate-v2"} and request.method == "POST":
                 require_scope(request.state.principal, "localagent:feature-impact:evaluate")
             elif _is_stage8_result_callback_path(request.url.path):
@@ -4040,6 +4044,7 @@ class WorkflowApprovalDecisionRequest(BaseModel):
 
     decision: Literal["APPROVE", "REJECT"]
     binding_digest: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
+    diff_digest: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
 
 
 def _workflow_service(request: Request) -> WorkflowService:
@@ -4065,6 +4070,19 @@ async def create_workflow_run(workflow_id: Annotated[str, Path(max_length=64)], 
 async def get_workflow_run(workflow_run_id: uuid.UUID, request: Request):
     return await _workflow_service(request).get(request.state.principal, str(workflow_run_id))
 
+@v1_router.get("/workflow-runs/{workflow_run_id}/repair-artifact")
+async def get_workflow_repair_artifact(workflow_run_id: uuid.UUID, request: Request):
+    return await _workflow_service(request).repair_artifact(request.state.principal, str(workflow_run_id))
+
+
+@v1_router.get("/workflow-runs/{workflow_run_id}/repair-gate/{gate_id}")
+async def get_workflow_repair_gate(workflow_run_id: uuid.UUID, gate_id: uuid.UUID, request: Request):
+    from core.incidents import repair_quality
+    from core.incidents.http import call
+
+    return await call(repair_quality.read_gate(_workflow_service(request), request.app.state.repair_quality_configuration,
+        request.state.principal, str(workflow_run_id), str(gate_id)))
+
 
 @v1_router.post("/workflow-runs/{workflow_run_id}/resume", status_code=202)
 async def resume_workflow_run(workflow_run_id: uuid.UUID, request: Request):
@@ -4076,7 +4094,8 @@ async def decide_workflow_approval(
     workflow_run_id: uuid.UUID, approval_id: uuid.UUID, payload: WorkflowApprovalDecisionRequest, request: Request,
 ):
     return await _workflow_service(request).decide_approval(
-        request.state.principal, str(workflow_run_id), str(approval_id), payload.decision, binding_digest=payload.binding_digest,
+        request.state.principal, str(workflow_run_id), str(approval_id), payload.decision,
+        binding_digest=payload.binding_digest, diff_digest=payload.diff_digest,
     )
 
 

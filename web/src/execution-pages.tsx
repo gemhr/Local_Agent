@@ -217,13 +217,15 @@ function WorkflowForm(props: PageProps & {
       </select>
       {choices.length === 0 && <p className="muted">当前身份没有符合此模板用途的 OpenCode 实例，草稿仍可保存。</p>}</div>
       {template.steps.map((step, index) => {
-        const field = index === 0 ? 'external_instruction' : 'native_instruction'
+        const field = step.runtime_kind === 'OPENCODE' ? 'external_instruction' : 'native_instruction'
         return <section className="workflow-step" key={step.id}>
           <h3>{index + 1} · {step.runtime_kind}</h3>
           <p className="muted">{step.agent_id} @{step.agent_version} · {step.result_contract}{step.requires_approval && ' · 产物验证后审批'}</p>
-          <label htmlFor={field}>{step.runtime_kind} 任务指令</label>
-          <textarea id={field} required rows={4} maxLength={4000} readOnly={!template.instructions_editable}
-            value={draft[field]} onChange={event => update(field, event.target.value)} />
+          {template.instructions_editable ? <>
+            <label htmlFor={field}>{step.runtime_kind} 任务指令</label>
+            <textarea id={field} required rows={4} maxLength={4000}
+              value={draft[field]} onChange={event => update(field, event.target.value)} />
+          </> : <p>{step.instruction}</p>}
         </section>
       })}
       {template.requires_ci_input && <p className="muted">任务输入为 incident_id 和 execution_id。产物路径、结构化输出及下游校验由模板固定。</p>}
@@ -267,7 +269,7 @@ export function WorkflowsPage(props: PageProps) {
   }
 
   return <>
-    <Heading title="Workflow" detail="复制两步串行模板，编辑草稿并发布可执行版本。" />
+    <Heading title="Workflow" detail="复制受信串行模板，编辑草稿并发布可执行版本。" />
     {notice && <Banner tone="notice">{notice}</Banner>}
     {catalog.data && runtimes.data && workflows.data ? <>
       <section className="panel catalog-panel">

@@ -1,14 +1,16 @@
 """状态驱动的模拟执行；场景只选择初态，不直接决定结果。"""
 from copy import deepcopy
 from datetime import datetime, timezone
+import json
 from uuid import NAMESPACE_URL, uuid5
 from core.runtime.snapshot_serialization import sha256_digest
-from core.ci_simulation import baseband, oracle_chain
+from core.ci_simulation import baseband, oracle_chain, tlv_input
 
 SCENARIOS = baseband.TEMPLATES + oracle_chain.TEMPLATES + [
     dict(scenario_key="report_pipeline_failure", title="上报链路失败", description="调查工具兼容与执行证据", template_version="2"),
     dict(scenario_key="environment_configuration_failure", title="环境配置冲突", description="检查共享环境开关", template_version="2"),
     dict(scenario_key="stale_case_input", title="TLV 输入落后", description="检查用例输入与软件要求", template_version="2"),
+    dict(scenario_key=tlv_input.SCENARIO_KEY, title="合成脚本 TLV 版本不匹配", description="根据文件与接口定义检查 TLV 输入", template_version=tlv_input.TEMPLATE_VERSION),
     dict(scenario_key="buffer_behavior_change", title="产品 Buffer 回归", description="模拟研发交付与关联 Feature 回归", template_version="2"),
     dict(scenario_key="limited_diagnostics", title="诊断记录不完整", description="保留实际证据缺口", template_version="2"),
 ]
@@ -20,6 +22,10 @@ PRODUCT_RELEASES = {
 
 
 def initial_state(key):
+    if key == tlv_input.SCENARIO_KEY:
+        state = initial_state("stale_case_input")
+        state["synthetic_tlv_baselines"] = tlv_input.load_baselines()
+        return state
     if key in {s["scenario_key"] for s in oracle_chain.TEMPLATES}:
         return oracle_chain.initial_state(key)
     if key in {s["scenario_key"] for s in baseband.TEMPLATES}:
@@ -70,6 +76,10 @@ def case_catalog(state):
     return [primary, related]
 
 
+def evidence_id_for(execution_id, kind):
+    return str(uuid5(NAMESPACE_URL, execution_id + ":" + kind))
+
+
 def execute(state, execution_id, case_id=None):
     if state.get("schema_version") == oracle_chain.SCHEMA:
         return oracle_chain.execute(state, execution_id, case_id)
@@ -86,6 +96,17 @@ def execute(state, execution_id, case_id=None):
             payload_matches_golden=selected["payload_matches_golden"])
     env, case, artifact = snapshot["environment"], snapshot["test_case"], snapshot["report"]
     release = PRODUCT_RELEASES[env["software_version"]]
+    baselines = snapshot.pop("synthetic_tlv_baselines", None)
+    if baselines is not None:
+        snapshot["synthetic_tlv_version"] = tlv_input.TEMPLATE_VERSION
+        interface = json.loads(baselines[tlv_input.INTERFACE_PATH])
+        script = baselines[tlv_input.SCRIPT_PATHS[case["case_id"]]]
+        if (env["software_version"], release["required_tlv_revision"]) != (
+                interface["software_version"], interface["required_revision"]):
+            raise ValueError("CI_SYNTHETIC_TLV_INTERFACE_MISMATCH")
+        revision, value = tlv_input.decode_request(interface, script, case["case_id"])
+        case.update(input_contract="tlv", input_revision=revision, required_field_revision=interface["required_revision"])
+        artifact.update(field_revision=revision, payload_matches_golden=value == tlv_input.EXPECTED_VALUES[case["case_id"]])
     now = datetime.now(timezone.utc)
     captured = now.isoformat()
     artifact["report_artifact_id"] = execution_id + ":report"
@@ -94,7 +115,7 @@ def execute(state, execution_id, case_id=None):
         env.get("feature_flags", {}).get("compressed_transport", True) != case["compressed_transport"])
     input_error = case.get("input_contract") == "tlv" and (
         case["input_revision"] < release["required_tlv_revision"] or revision != case["input_revision"])
-    pre_error = "FEATURE_FLAG_CONFLICT" if flag_error else "TLV_INPUT_REVISION_STALE" if input_error else None
+    pre_error = "FEATURE_FLAG_CONFLICT" if flag_error else tlv_input.STALE_ERROR if input_error else None
     buffer = env.get("buffer_behavior", release["buffer_behavior"])
     allowed = {"compact": {"modern"}, "legacy": {"legacy"}, "compatible": {"legacy", "modern"}}[buffer]
     product_error = "BUFFER_CONTRACT_MISMATCH" if case.get("buffer_requirement") and case["buffer_requirement"] not in allowed else None
@@ -130,7 +151,9 @@ def execute(state, execution_id, case_id=None):
             container_type="simulated-compressed-report", product_release=release),
         COMPARISON_LOG=comparison, PARSER_LOG=parser if complete else None,
         ENVIRONMENT_RECORD=dict(**common, **visible_env), CASE_REQUIREMENTS=dict(**common, **case))
-    evidence = [dict(evidence_id=str(uuid5(NAMESPACE_URL, execution_id + ":" + kind)), execution_id=execution_id,
+    if baselines is not None:
+        contents.update(tlv_input.evidence_contents(baselines, case["case_id"], execution_id, pre_error))
+    evidence = [dict(evidence_id=evidence_id_for(execution_id, kind), execution_id=execution_id,
         kind=kind, captured_at=captured, availability="AVAILABLE" if content is not None else "MISSING",
         media_type="application/json", digest=sha256_digest(content) if content is not None else None,
         content=content, missing_reason=None if content is not None else "解析日志未采集") for kind, content in contents.items()]

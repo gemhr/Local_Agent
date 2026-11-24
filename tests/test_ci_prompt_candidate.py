@@ -1,5 +1,8 @@
 """候选工件与离线构造检查；不表示实际 Runtime/Provider 已执行。"""
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+import json
+from pathlib import Path
 import pytest
 
 from core.agent_platform.ci_diagnosis import definition
@@ -49,7 +52,6 @@ def test_request_construction_checker_does_not_claim_send():
 
 
 def test_startup_bundle_is_pinned_and_does_not_mutate_default(tmp_path):
-    import json
     from core.agent_platform.registrations import BUSINESS_REGISTRATION_BUNDLE
     from core.agent_platform.ci_prompt_candidate import configured_bundle
     from core.runtime.agent_loop.quality_capture import capture_ci_prompt_request
@@ -71,6 +73,49 @@ def test_startup_bundle_is_pinned_and_does_not_mutate_default(tmp_path):
     path.write_text(json.dumps(config), encoding='utf-8')
     with pytest.raises(ValueError):
         configured_bundle(BUSINESS_REGISTRATION_BUNDLE, path)
+
+
+@pytest.mark.parametrize("mode", ["BASELINE", "CANDIDATE"])
+def test_startup_loads_pre_wp2_approved_prompt(tmp_path, mode):
+    from core.agent_platform.ci_prompt_candidate import configured_bundle
+    from core.agent_platform.quality_configuration import check_agent
+    from core.agent_platform.registrations import BUSINESS_REGISTRATION_BUNDLE
+
+    # 工件与 Definition 摘要来自 8e25f0e，测试运行时不重建旧批准。
+    frozen = json.loads(Path(__file__).with_name("fixtures").joinpath("ci_prompt_pre_wp2_approval.json").read_bytes())
+    asset = frozen["asset"]
+    approval = frozen["approved_manifest_digest"]
+    path = tmp_path / "quality.json"
+
+    def load(candidate_asset, approved_digest):
+        config = {"ci_prompt": dict(asset=candidate_asset, approved_manifest_digest=approved_digest, mode=mode)}
+        path.write_text(json.dumps(config), encoding="utf-8")
+        return configured_bundle(BUSINESS_REGISTRATION_BUNDLE, path)
+
+    bundle = load(asset, approval)
+    selected = next(r.definition for r in bundle.registrations if r.definition.agent_id == "ci_incident_investigator")
+    pin = selected.business_options["ci_prompt_selection"]
+    expected = frozen["selections"][mode]
+    assert pin["prompt_digest"] == expected["prompt_digest"]
+    assert pin["manifest_digest"] == approval and pin["candidate_id"] == asset["manifest"]["candidate_id"]
+    assert selected.agent_version == "1.0.0"
+    check_agent({"agents": {selected.agent_id: dict(agent_version="1.0.0", execution_policy="durable-agent-loop.v2",
+        definition_digest=expected["definition_digest"])}}, selected)
+
+    with pytest.raises(ValueError, match="CI_PROMPT_NOT_APPROVED"):
+        load(asset, "0" * 64)
+    tampered = deepcopy(asset)
+    tampered["manifest"]["base_asset_digest"] = "0" * 64
+    with pytest.raises(ValueError, match="CI_PROMPT_ASSET_PIN_INVALID"):
+        load(tampered, approval)
+    manifest = asset["manifest"]
+    unapproved = prepare(asset["instructions"] + "\n增加一项未审批的检查。",
+        feedback_refs=manifest["source_feedback_refs"], review_refs=manifest["source_review_refs"],
+        change_reason=manifest["change_reason"], created_at=manifest["created_at"])
+    with pytest.raises(ValueError, match="CI_PROMPT_NOT_APPROVED"):
+        load(unapproved, approval)
+    with pytest.raises(ValueError, match="CI_PROMPT_ASSET_PIN_INVALID"):
+        load({**asset, "instructions": unapproved["instructions"]}, approval)
 
 
 @pytest.mark.asyncio

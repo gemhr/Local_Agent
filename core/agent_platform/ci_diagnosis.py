@@ -5,9 +5,10 @@ from pydantic import ValidationError
 from core.agent_platform.application import ExecutionRequest
 from core.agent_platform.contracts import AgentDefinition
 from core.agent_platform.ci_diagnosis_tools import TOOL_NAMES, strict_object
-from core.incidents.service import AGENT_ID, AGENT_VERSION
+from core.incidents.service import AGENT_ID, AGENT_VERSION, require_human
 from core.incidents.models import InvestigationRow, IncidentRow
-from core.incidents.contracts import CIError, DiagnosisReport
+from core.incidents.contracts import CIError, DiagnosisReport, TLVDiagnosisReport
+from core.ci_simulation import tlv_input
 from core.ci_simulation.models import CIExecutionRow
 from core.persistence.models import RuntimeLoopActionRow, ObjectOwnershipRow
 from core.runtime.memory_scope import MemoryAccessContext
@@ -47,6 +48,22 @@ FINAL_REPORT_SCHEMA = {
 }
 
 
+async def file_report_schema(database, run_id, baseline_schema, *, session_id):
+    """只有受信执行绑定可以启用文件场景的报告扩展。"""
+    async with database.session() as session:
+        snapshot = await session.scalar(select(CIExecutionRow.execution_snapshot)
+            .join(IncidentRow, IncidentRow.execution_id == CIExecutionRow.execution_id)
+            .join(InvestigationRow, InvestigationRow.incident_id == IncidentRow.incident_id)
+            .where(InvestigationRow.run_id == run_id, InvestigationRow.session_id == session_id,
+                InvestigationRow.agent_id == AGENT_ID, InvestigationRow.agent_version == AGENT_VERSION))
+    if snapshot is None or not tlv_input.is_file_execution(snapshot):
+        return baseline_schema
+    return {**baseline_schema, "properties": {
+        **baseline_schema["properties"],
+        "failure_mechanism": {"type": "string", "enum": [tlv_input.STALE_ERROR]},
+    }}
+
+
 def definition():
     return AgentDefinition(agent_id=AGENT_ID, agent_version=AGENT_VERSION, display_name="CI 故障调查助手",
         role="CI 执行证据调查", instructions=INSTRUCTIONS, allowed_tools=frozenset((*TOOL_NAMES, "load_skill", "read_skill_resource")),
@@ -76,7 +93,7 @@ def validate_report(raw, row, incident, execution, image, actions):
             or sha256_digest(step.typed_result_payload) != step.result_digest
             or step.typed_result_payload.get("producer_agent_id") != row.agent_id):
         raise CIError("CI_REPORT_RESULT_INVALID")
-    from core.agent_platform.ci_evidence import observed_sources, minimum_coverage
+    from core.agent_platform.ci_evidence import observed_sources, canonical_sources, minimum_coverage
     seen = observed_sources(image, actions, frame, incident.incident_id, execution.execution_id,
         before_iteration=final.iteration_no)
     value = strict_object(raw)
@@ -92,19 +109,19 @@ def validate_report(raw, row, incident, execution, image, actions):
         return validate_sources(value, row, incident, execution, seen)
     if isinstance(value, dict) and value.get("kind") == "REFUSAL":
         raise CIError("CI_REPORT_REFUSED")
-    report = DiagnosisReport.model_validate(value)
+    report_type = TLVDiagnosisReport if tlv_input.is_file_execution(execution.execution_snapshot) else DiagnosisReport
+    report = report_type.model_validate(value)
     if report.incident_id != row.incident_id or not seen:
         raise CIError("CI_REPORT_SOURCE_INVALID")
-    originals = {e["evidence_id"]: e for e in execution.evidence_manifest}
+    originals = canonical_sources(seen, incident.incident_id, execution)
     for ref in report.supporting_evidence:
-        original, read = originals.get(ref.evidence_id), seen.get(ref.evidence_id)
-        if (original is None or read is None or original["availability"] != "AVAILABLE"
-                or original["digest"] != ref.digest or read != dict(incident_id=incident.incident_id, **original)):
+        original = originals.get(ref.evidence_id)
+        if original is None or original["digest"] != ref.digest:
             raise CIError("CI_REPORT_SOURCE_INVALID")
     if report.diagnosis_status == "SUPPORTED" and not minimum_coverage(
-            {ref.evidence_id: seen[ref.evidence_id] for ref in report.supporting_evidence}):
+            {ref.evidence_id: originals[ref.evidence_id] for ref in report.supporting_evidence}, execution):
         raise CIError("CI_REPORT_UNSUPPORTED")
-    return report.model_dump()
+    return report.model_dump(exclude_none=True)
 
 
 class CIInvestigationService:
@@ -180,3 +197,14 @@ class CIInvestigationService:
         return dict(investigation_id=row.investigation_id, run_id=row.run_id, report_version=row.report_version,
             investigation_status=status, runtime_status=runtime, diagnosis_status=(row.report_payload or {}).get("diagnosis_status", (row.report_payload or {}).get("decidability", "FAILED" if row.projection_status == "FAILED" else None)),
             report=row.report_payload, safe_error_code="CI_RUN_START_UNCONFIRMED" if status == "UNCONFIRMED" else row.safe_error_code)
+
+    async def repair_input(self, principal, incident_id, investigation_id):
+        """读取已封存的 Native 调查并核验修复资格，本入口无需启动或推进 Run。"""
+        from core.incidents.repair_input import admit_repair
+
+        require_human(principal)
+        row = await self.incidents.investigation(principal, incident_id, investigation_id)
+        async with self.incidents.database.session() as session:
+            incident, execution, instance = await self.incidents.resolution_scope(session, principal, incident_id)
+            owner = await session.get(ObjectOwnershipRow, ("RUN", row.run_id))
+        return admit_repair(row, incident, execution, instance, owner)

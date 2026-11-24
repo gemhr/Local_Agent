@@ -302,6 +302,12 @@ Owner/ADMIN。事件流约每两秒重验授权，撤权时关闭连接。产物
 通用创建入口禁止复用已绑定 Workspace 的 Run 或会话 ID。Workflow 首次子 Run 接纳再次核对成员资格，
 已接纳执行的原 Runtime 恢复机制保持自己的职责。
 
+`ci_repair_review@1` 使用同一 Workspace、Workflow 和 Runtime 接纳。原发起人的 Incident、Execution、Native Run 与 Session 在运行前绑定，已封存报告的修复输入按规范正文和摘要由后续步骤读取。专用 OpenCode 实例只接受具有当前修复步骤派发凭证的请求。部署者负责把 CLI 的固定目录映射到已冻结的合成仓库根，并以操作系统权限限制到唯一可写文件。
+
+已授权 Workspace 成员可以读取该任务冻结的合成 Patch、前后正文及摘要。合成脚本使用 UTF-8/LF。Artifact 准出与复核时，Git 在独立临时目录将 Patch 应用到原始脚本字节，要求唯一变更路径、应用结果及 SHA-256 与冻结候选一致。批准同时核对展示的 Diff 摘要、持久审批绑定和当前候选文件。原 owner 恢复时重新核对，漂移使批准失效。
+
+REPLAY 使用冻结的脚本字节计算合成 TLV 主案和正常对照。现有 Workflow 行锁保护一次批准消费，批准消费与 Receipt、Step 终态和 Workflow 终态同事务写入。CI 原 Execution 与 Incident 继续保留原始状态和人工关闭机制。封存证据 GET 需要项目、Space、owner、租户和专用 SERVICE 同时匹配，只读取已完成收据并导出固定字段。Native 导出只包含结构化诊断字段和同 Run 证据引用，模型自由文本、宿主路径及凭据不进入证据正文。
+
 ## Tool Governance Security（WP2-B）
 
 `ToolGovernanceService` / `ToolPolicyCatalog` 只处理 Agent ID、canonical Tool name、固定枚举/code、risk classification 与内部 run/step scope。

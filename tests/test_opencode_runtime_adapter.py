@@ -238,7 +238,7 @@ async def test_unconfirmed_or_failed_prompt_never_returns_output_or_retries(fail
         await adapter.close()
 
 
-def test_settings_resolve_instance_secret_and_fail_closed(monkeypatch):
+def test_settings_resolve_instance_secret_and_fail_closed(monkeypatch, tmp_path):
     monkeypatch.delenv("LOCAL_AGENT_OPENCODE_INSTANCES", raising=False)
     assert Settings.load().opencode_instances == ()
     instance = _instance()
@@ -260,12 +260,18 @@ def test_settings_resolve_instance_secret_and_fail_closed(monkeypatch):
     for grants, expected in (([], frozenset()), ([grant], frozenset({("tenant-a", user_id)}))):
         monkeypatch.setenv("LOCAL_AGENT_OPENCODE_INSTANCES", json.dumps([dict(entry, allowed_principals=grants)]))
         assert Settings.load().opencode_instances[0].allowed_principals == expected
+    repair = dict(entry, instance_id="ci-repair", workspace="/workspace", repair_repository=str(tmp_path),
+        use_instance_tool_permissions=True, allowed_principals=[grant])
+    monkeypatch.setenv("LOCAL_AGENT_OPENCODE_INSTANCES", json.dumps([repair]))
+    assert Settings.load().opencode_instances[0].repair_repository == str(tmp_path)
     for invalid, reason in (
         ([entry, entry], "INVALID_OR_DUPLICATE_INSTANCE_ID"),
         ([dict(entry, base_url="http://untrusted.invalid")], "INVALID_ENDPOINT"),
         ([dict(entry, allowed_principals={})], "INVALID_ALLOWED_PRINCIPALS"),
         ([dict(entry, allowed_principals=[dict(grant, user_id="bad-uuid")])], "INVALID_ALLOWED_PRINCIPALS"),
         ([dict(entry, use_instance_tool_permissions="true")], "INVALID_TOOL_PERMISSIONS_MODE"),
+        ([dict(repair, allowed_principals=[])], "INVALID_REPAIR_REPOSITORY"),
+        ([dict(repair, repair_repository="relative-repository")], "INVALID_REPAIR_REPOSITORY"),
     ):
         monkeypatch.setenv("LOCAL_AGENT_OPENCODE_INSTANCES", json.dumps(invalid))
         with pytest.raises(SettingsValidationError, match=reason):

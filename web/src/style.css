@@ -253,3 +253,4 @@ input::placeholder { color: #65758a; }
   .hero-link { margin-left: 0; }
   .facts > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }
+.repair-diff { max-height: 28rem; overflow: auto; padding: 0.75rem; background: var(--surface-muted, #eff3f5); white-space: pre; }

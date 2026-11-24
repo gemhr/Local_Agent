@@ -183,6 +183,11 @@ class AgentApplicationService:
         except RuntimeAdapterError as exc:
             raise AgentApplicationError(exc.error_code, exc.safe_message) from None
 
+    def workflow_repair_repository(self, instance_id: str, principal, expected_target: str) -> str:
+        if self.require_workspace_instance(instance_id, principal, "WORKFLOW_CI_REPAIR") != expected_target:
+            raise AgentApplicationError("WORKFLOW_DEFINITION_DRIFT", "修复仓库与冻结实例不一致")
+        return self._runtime_instances[instance_id].workflow_repair_repository()
+
     def _registered_agent(self, agent_id: str, expected_version: str | None):
         try:
             registration = self._registry.require_entry(agent_id)

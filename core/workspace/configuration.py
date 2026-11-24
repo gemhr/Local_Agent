@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
+from core.agent_platform.contracts import CI_REPAIR_BINDING
 from core.auth import AUTHORIZATION_OBJECT_NOT_OWNED, AuthError
 from core.persistence.models import WorkspaceAgentRow, WorkspaceWorkflowRow, WorkflowVersionRow
 from core.workspace.service import WorkspaceError, WorkspaceService
@@ -21,7 +22,7 @@ class WorkspaceConfiguration:
         self.application = application
         self.workflow = workflow
         self.templates = {key: item for key, item in templates.items() if key in {
-            "runtime_handoff", "ci_artifact_handoff", "ci_artifact_review",
+            "runtime_handoff", "ci_artifact_handoff", "ci_artifact_review", "ci_repair_review",
         }}
 
     async def get_catalog(self, principal, space_id):
@@ -40,26 +41,28 @@ class WorkspaceConfiguration:
     async def get_runtimes(self, principal, space_id):
         async with self.database.session() as session:
             await WorkspaceService.require_access_in_session(session, principal, space_id)
-        approved_artifact_instances = {
-            item.tasks[0].runtime_instance_id for item in self.templates.values() if item.result_binding is not None
-        }
+        approved_artifact_instances = {self._template_view(item)["fixed_runtime_instance_id"] for item in self.templates.values()}
         return [
             item for item in self.application.workspace_runtime_instances(principal)
-            if "WORKFLOW_CI_ARTIFACT" not in item["purposes"] or item["id"] in approved_artifact_instances
+            if not {"WORKFLOW_CI_ARTIFACT", "WORKFLOW_CI_REPAIR"}.intersection(item["purposes"])
+            or item["id"] in approved_artifact_instances
         ]
 
     @staticmethod
     def _template_view(template):
         ci = template.result_binding is not None
+        repair = template.result_binding == CI_REPAIR_BINDING
+        external = next(task for task in template.tasks if task.runtime_kind == "OPENCODE")
         return {
             "id": template.workflow_id, "version": template.workflow_version,
             "instructions_editable": not ci, "requires_ci_input": ci, "approval_phase": template.approval_phase,
-            "runtime_purpose": "WORKFLOW_CI_ARTIFACT" if ci else "WORKFLOW_TEXT",
-            "fixed_runtime_instance_id": template.tasks[0].runtime_instance_id if ci else None,
+            "runtime_purpose": "WORKFLOW_CI_REPAIR" if repair else "WORKFLOW_CI_ARTIFACT" if ci else "WORKFLOW_TEXT",
+            "fixed_runtime_instance_id": external.runtime_instance_id if ci else None,
             "steps": [{
                 "id": task.task_id, "agent_id": task.agent_id, "agent_version": task.agent_version,
                 "runtime_kind": task.runtime_kind, "instruction": task.instruction,
-                "result_contract": ("CI_ARTIFACT" if position == 0 else "CI_STATUS") if ci else "TEXT",
+                "result_contract": ("REPAIR_INPUT", "REPAIR_DIFF", "REPLAY")[position] if repair
+                    else ("CI_ARTIFACT" if position == 0 else "CI_STATUS") if ci else "TEXT",
                 "requires_approval": task.requires_approval,
             } for position, task in enumerate(template.tasks)],
         }
@@ -72,7 +75,7 @@ class WorkspaceConfiguration:
 
     @staticmethod
     def _require_template_instance(template, instance_id):
-        if template.result_binding is not None and instance_id != template.tasks[0].runtime_instance_id:
+        if template.result_binding is not None and instance_id != WorkspaceConfiguration._template_view(template)["fixed_runtime_instance_id"]:
             raise WorkspaceError("RUNTIME_INSTANCE_PURPOSE_DENIED", 422, "The CI template does not allow this instance.")
 
     @staticmethod
@@ -138,7 +141,7 @@ class WorkspaceConfiguration:
             releases.append({
                 "version": version.workflow_version, "name": snapshot["name"], "description": snapshot["description"],
                 "definition_digest": version.definition_digest, "requires_ci_input": definition["result_binding"] is not None,
-                "runtime_instance_id": definition["tasks"][0]["runtime_instance_id"],
+                "runtime_instance_id": next(task["runtime_instance_id"] for task in definition["tasks"] if task["runtime_kind"] == "OPENCODE"),
                 "approval_phase": definition["approval_phase"],
                 "steps": definition["tasks"],
             })
@@ -169,8 +172,10 @@ class WorkspaceConfiguration:
         async with self.database.transaction() as session:
             await WorkspaceService.require_write_access_in_session(session, principal, space_id, manage=True)
             template = self._template(payload.template_id, payload.template_version)
+            external = next(task for task in template.tasks if task.runtime_kind == "OPENCODE")
+            native = next(task for task in template.tasks if task.runtime_kind == "NATIVE")
             draft = {"name": payload.name, "description": "", "runtime_instance_id": None,
-                     "external_instruction": template.tasks[0].instruction, "native_instruction": template.tasks[1].instruction}
+                     "external_instruction": external.instruction, "native_instruction": native.instruction}
             row = WorkspaceWorkflowRow(
                 id=f"ws_{uuid4().hex}", space_id=space_id, tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
                 template_id=template.workflow_id, template_version=template.workflow_version, draft=draft,
@@ -186,7 +191,7 @@ class WorkspaceConfiguration:
             _check_revision(row.revision, payload.expected_revision)
             template = self._template(row.template_id, row.template_version)
             purpose = self._template_view(template)["runtime_purpose"]
-            if purpose == "WORKFLOW_CI_ARTIFACT" and (
+            if template.result_binding is not None and (
                 payload.external_instruction is not None or payload.native_instruction is not None
             ):
                 raise WorkspaceError("WORKSPACE_WORKFLOW_INSTRUCTIONS_FIXED", 422, "This template has fixed instructions.")
@@ -213,12 +218,15 @@ class WorkspaceConfiguration:
             if not draft["runtime_instance_id"]:
                 raise WorkspaceError("WORKSPACE_WORKFLOW_RUNTIME_REQUIRED", 422, "Select an eligible OpenCode instance.")
             self._require_template_instance(template, draft["runtime_instance_id"])
-            external, native = template.tasks
             next_version = row.latest_version + 1
-            definition = replace(template, workflow_id=workflow_id, workflow_version=str(next_version), tasks=(
-                replace(external, instruction=draft["external_instruction"], runtime_instance_id=draft["runtime_instance_id"]),
-                replace(native, instruction=draft["native_instruction"]),
-            ))
+            tasks = template.tasks
+            if template.result_binding != CI_REPAIR_BINDING:
+                external, native = tasks
+                tasks = (
+                    replace(external, instruction=draft["external_instruction"], runtime_instance_id=draft["runtime_instance_id"]),
+                    replace(native, instruction=draft["native_instruction"]),
+                )
+            definition = replace(template, workflow_id=workflow_id, workflow_version=str(next_version), tasks=tasks)
             digest, snapshot = self.workflow.publication(principal, definition)
             snapshot.update(name=draft["name"], description=draft["description"])
             session.add(WorkflowVersionRow(

@@ -74,7 +74,13 @@ class AgentLoopDriverV2:
                     output_schema = definition.business_options.get("final_report_schema", output_schema)
                 if decision.kind in {"FINAL", "REFUSAL"} and output_schema is not None:
                     try:
-                        if not schema_matches(output_schema, json.loads(decision.content)):
+                        value = json.loads(decision.content)
+                        if (decision.kind == "FINAL" and definition.agent_id == CI_DIAGNOSIS_AGENT_ID
+                                and isinstance(value, dict) and "failure_mechanism" in value):
+                            from core.agent_platform.ci_diagnosis import file_report_schema
+                            output_schema = submit(file_report_schema(
+                                repo.database, frame.run_id, output_schema, session_id=context.session_id))
+                        if not schema_matches(output_schema, value):
                             raise ValueError("schema")
                     except (TypeError, ValueError):
                         raise LoopStopped("LOOP_DECISION_INVALID") from None

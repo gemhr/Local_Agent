@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from asyncio import to_thread
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -9,7 +10,11 @@ from uuid import uuid4
 from sqlalchemy import and_, func, select
 from sqlalchemy.dialects.postgresql import insert
 
-from core.auth import ObjectAuthorizationService
+from core.agent_platform import ci_repair_artifacts as repair
+from core.agent_platform import ci_repair_replay as replay_service
+from core.agent_platform.workflow_artifacts import WorkflowArtifactError
+from core.auth import ObjectAuthorizationService, require_owned
+from core.incidents.contracts import CIError
 from core.persistence.models import (
     ClientDeliveryEventRow, ExternalRunRow, ObjectOwnershipRow, RunControlRow,
     RuntimeEventJournalRow, WorkflowApprovalRow, WorkflowRunRow, WorkflowStepRunRow, WorkflowVersionRow,
@@ -17,7 +22,8 @@ from core.persistence.models import (
 )
 from core.persistence.repositories.runtime import lock_run_scope
 from core.persistence.repositories.workflow_approvals import (
-    WorkflowApprovalError, approval_binding_digest, require_dispatch_approval, verify_approval_binding, workflow_approval,
+    WorkflowApprovalError, approval_binding_digest, approval_binding_payload, consume_approval, require_dispatch_approval,
+    verify_approval_binding, workflow_approval,
 )
 from core.runtime.cancellation import CancellationReason
 from core.runtime.event_journal_store import journal_record_from_row
@@ -74,7 +80,7 @@ class WorkflowRepository:
             WorkflowRunRow.request_id == request_id,
         ))
 
-    async def create(self, principal, request_id, definition, digest, *, handoff_input=None, space_id=None):
+    async def create(self, principal, request_id, definition, digest, *, handoff_input=None, space_id=None, repair_baseline=None):
         async with self.database.transaction() as session:
             await lock_run_scope(session, f"workflow-request:{principal.tenant_id}:{principal.user_id}:{request_id}")
             if space_id is not None:
@@ -82,6 +88,15 @@ class WorkflowRepository:
             prior = await self._find_request(session, principal, request_id)
             if prior is not None:
                 return prior, False
+            if repair_baseline is not None:
+                root_key = canonical_payload_digest(repair_baseline["root_id"])
+                await lock_run_scope(session, "ci-repair-root:" + root_key)
+                taken = await session.scalar(select(WorkflowRunRow.workflow_run_id).where(
+                    WorkflowRunRow.repair_baseline["root_id"] == repair_baseline["root_id"],
+                ).limit(1))
+                if taken is not None:
+                    raise WorkflowArtifactError("CI_REPAIR_REPOSITORY_RESERVED")
+                await to_thread(repair.require_pristine, repair_baseline)
             key = (definition.workflow_id, definition.workflow_version)
             if space_id is None:
                 await session.execute(insert(WorkflowVersionRow).values(
@@ -96,6 +111,7 @@ class WorkflowRepository:
                 definition_digest=digest, tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
                 space_id=space_id,
                 request_id=request_id, handoff_input=handoff_input, approval_phase=definition.approval_phase,
+                repair_baseline=repair_baseline,
                 status="PENDING", current_step=0, cancel_requested=False,
             )
             await ObjectAuthorizationService.bind_new_in_transaction(
@@ -128,16 +144,18 @@ class WorkflowRepository:
         run, steps, _ = await self.snapshot(run_id)
         return run, steps
 
-    async def snapshot(self, run_id):
+    async def snapshot(self, run_id, *, lock=True):
         async with self.database.transaction() as session:
-            run = await self._lock_workflow(session, run_id)
+            run = await session.get(WorkflowRunRow, run_id, with_for_update=lock)
+            if run is None:
+                return None, (), None
             steps = tuple(await session.scalars(select(WorkflowStepRunRow).where(
                 WorkflowStepRunRow.workflow_run_id == run_id,
             ).order_by(WorkflowStepRunRow.position)))
             approval = await workflow_approval(session, run_id) if run.approval_phase is not None else None
             return run, steps, approval
 
-    async def decide_approval(self, run_id, approval_id, actor, decision, binding_digest):
+    async def decide_approval(self, run_id, approval_id, actor, decision, binding_digest, diff_digest=None):
         decisions = {"APPROVE": "APPROVED", "REJECT": "REJECTED"}
         if decision not in decisions:
             raise WorkflowApprovalError("WORKFLOW_APPROVAL_DECISION_INVALID", 422)
@@ -151,17 +169,26 @@ class WorkflowRepository:
                 raise WorkflowApprovalError("WORKFLOW_APPROVAL_NOT_FOUND", 404)
             if run.cancel_requested or approval.status == "INVALIDATED":
                 raise WorkflowApprovalError("WORKFLOW_APPROVAL_INVALIDATED")
-            if binding_digest is not None and approval.binding_digest != binding_digest:
+            if (binding_digest is not None or run.repair_baseline is not None) and approval.binding_digest != binding_digest:
                 raise WorkflowApprovalError("WORKFLOW_APPROVAL_BINDING_MISMATCH")
-            native = await self._step(session, run_id, 1)
-            await verify_approval_binding(session, run, native, approval)
+            consumer = await self._step(session, run_id, 2 if run.repair_baseline is not None else 1)
+            producer = await verify_approval_binding(session, run, consumer, approval)
+            if run.repair_baseline is not None and producer.artifact_ref["diff_digest"] != diff_digest:
+                raise WorkflowApprovalError("CI_REPAIR_DIFF_MISMATCH")
             new_status = decisions[decision]
             if approval.status != "PENDING":
                 if approval.status == new_status and approval.decided_by == actor.user_id:
                     return approval
                 raise WorkflowApprovalError("WORKFLOW_APPROVAL_DECISION_CONFLICT")
-            if run.status != "WAITING_APPROVAL" or native.platform_run_id is not None:
+            if run.status != "WAITING_APPROVAL" or consumer.platform_run_id is not None:
                 raise WorkflowApprovalError("WORKFLOW_APPROVAL_DECISION_CONFLICT")
+            if run.repair_baseline is not None and decision == "APPROVE":
+                try:
+                    await to_thread(repair.verify_current, run, producer)
+                except WorkflowArtifactError as exc:
+                    approval.status = "INVALIDATED"
+                    _set_status(run, "PAUSED", exc.code)
+                    return approval
             approval.status = new_status
             approval.decided_by = actor.user_id
             approval.decided_at = datetime.now(UTC)
@@ -169,7 +196,7 @@ class WorkflowRepository:
             return approval
 
     async def prepare(self, run_id, position, principal, conversation_id, *, definition_digest=None,
-                      runtime_target_digest=None, effective_input=None, prepare_artifact=None):
+                      runtime_target_digest=None, effective_input=None, prepare_artifact=None, bind_investigation=None):
         """锁序为 Workflow 行 → 子 Run 锁。旧凭证在同一个 Run 锁下失效。"""
         async with self.database.transaction() as session:
             run = await self._lock_workflow(session, run_id)
@@ -178,13 +205,15 @@ class WorkflowRepository:
             if run.space_id is not None:
                 await WorkspaceService.require_write_access_in_session(session, principal, run.space_id)
             step = await self._step(session, run_id, position)
+            if step.runtime_kind == "REPLAY":
+                return None
             platform_run_id = step.platform_run_id or str(uuid4())
             await lock_run_scope(session, platform_run_id)
             control = await session.get(RunControlRow, platform_run_id)
             external = await session.get(ExternalRunRow, platform_run_id)
             if external is not None or (control is not None and (control.fencing_token > 0 or control.state == "CLOSED")):
                 return None
-            if run.approval_phase is not None and step.position == 1:
+            if run.repair_baseline is None and run.approval_phase is not None and step.position == 1:
                 await require_dispatch_approval(session, run, step)
             if step.runtime_kind == "OPENCODE":
                 if (definition_digest != run.definition_digest or runtime_target_digest is None
@@ -195,7 +224,19 @@ class WorkflowRepository:
                 if control is not None or await session.get(ObjectOwnershipRow, ("RUN", platform_run_id)) is not None:
                     _set_status(run, "PAUSED", "WORKFLOW_RUN_ID_CONFLICT")
                     return None
-            if run.handoff_input is not None:
+            if run.repair_baseline is not None:
+                if step.position == 0:
+                    if effective_input is None or bind_investigation is None:
+                        return None
+                    if step.platform_run_id is not None and step.input_digest != canonical_payload_digest(effective_input):
+                        return None
+                    step.input_digest = canonical_payload_digest(effective_input)
+                    await bind_investigation(session, platform_run_id)
+                elif step.bound_input is None or step.bound_input != effective_input:
+                    return None
+                else:
+                    await to_thread(repair.require_pristine, run.repair_baseline)
+            elif run.handoff_input is not None:
                 if step.position == 0:
                     if effective_input is None or prepare_artifact is None:
                         return None
@@ -261,7 +302,7 @@ class WorkflowRepository:
                 if delivery is not None and delivery.event_id == terminal.event_id:
                     if delivery.payload.get("business_output_valid") is False:
                         reason = "BUSINESS_OUTPUT_INVALID"
-                    elif step.bound_input is not None:
+                    elif step.bound_input is not None and step.runtime_kind == "NATIVE":
                         if (delivery.payload.get("business_output_valid") is True
                                 and delivery.payload.get("output_disposition") == "ACCEPTED"
                                 and isinstance(delivery.payload.get("output"), str)):
@@ -316,6 +357,10 @@ class WorkflowRepository:
                     current.status = "FAILED"
                     _set_status(run, "FAILED", current.reason)
             elif evidence.result_ref is None or (
+                run.repair_baseline is not None and (evidence.next_input is None or
+                    (current.position == 1 and evidence.artifact_ref is None))
+            ) or (
+                run.repair_baseline is None and
                 current.position == 0 and (run.handoff_input is not None or run.approval_phase is not None)
                 and (run.handoff_input is None or evidence.artifact_ref is None or evidence.next_input is None)
             ):
@@ -323,6 +368,23 @@ class WorkflowRepository:
                 _set_status(run, "PAUSED", current.reason)
             else:
                 current.status = "SUCCEEDED"
+                if run.repair_baseline is not None:
+                    successor = await self._step(session, run_id, current.position + 1)
+                    successor.bound_input = evidence.next_input
+                    successor.input_digest = canonical_payload_digest(evidence.next_input)
+                    run.current_step = successor.position
+                    if current.position == 0:
+                        _set_status(run, "PENDING")
+                        return True
+                    current.artifact_ref = evidence.artifact_ref
+                    session.add(WorkflowApprovalRow(
+                        approval_id=str(uuid4()), workflow_run_id=run_id, step_id=current.step_id,
+                        attempt=current.attempt, approval_phase=run.approval_phase,
+                        tenant_id=run.tenant_id, owner_user_id=run.owner_user_id, status="PENDING",
+                        binding_digest=approval_binding_digest(run, current, successor),
+                    ))
+                    _set_status(run, "WAITING_APPROVAL")
+                    return False
                 if step.position == 1:
                     _set_status(run, "SUCCEEDED")
                 else:
@@ -344,6 +406,36 @@ class WorkflowRepository:
                     _set_status(run, "PENDING")
                     return True
             return False
+
+    async def complete_replay(self, run_id, principal):
+        """同一事务封存回放事实、消费批准并完成 Workflow。"""
+        async with self.database.transaction() as session:
+            run = await self._lock_workflow(session, run_id)
+            if run.status in TERMINAL or run.cancel_requested or run.repair_baseline is None or run.current_step != 2:
+                return
+            await ObjectAuthorizationService.require_current_human_in_session(session, principal)
+            require_owned(principal, run.owner_user_id)
+            await WorkspaceService.require_write_access_in_session(session, principal, run.space_id)
+            approval = await workflow_approval(session, run_id)
+            if (approval is None or approval.status != "APPROVED" or approval.consumed_at is not None
+                    or approval.decided_by is None or approval.decided_at is None):
+                return
+            consumer = await self._step(session, run_id, 2)
+            try:
+                producer = await verify_approval_binding(session, run, consumer, approval)
+                await to_thread(repair.verify_current, run, producer)
+                native = await self._step(session, run_id, 0)
+                consume_approval(approval)
+                consumer.result_ref = await replay_service.seal(
+                    session, run, native, producer, consumer, approval, approval_binding_payload(run, producer, consumer),
+                )
+            except (CIError, WorkflowArtifactError, WorkflowApprovalError) as exc:
+                approval.consumed_at = None
+                approval.status = "INVALIDATED"
+                _set_status(run, "PAUSED", exc.code)
+                return
+            consumer.status = "SUCCEEDED"
+            _set_status(run, "SUCCEEDED")
 
     async def pause(self, run_id, position, reason, *, token=None):
         async with self.database.transaction() as session:

@@ -195,6 +195,9 @@ Production 安全不变量（SERVER role）：backend 为 remote/hybrid 时 endp
 - 内置固定两步定义 `runtime_handoff` 绑定实例 `workflow-opencode`。使用现有 `LOCAL_AGENT_OPENCODE_INSTANCES` 注册该 ID 并授权发起人后方可创建运行。Workflow 版本摘要会固定实例目标、CLI Agent、模型和工具权限模式。
 - `ci_artifact_handoff` 复用受信的 `workflow-opencode` 实例，要求 `deployment=LOCAL`、`use_instance_tool_permissions=true` 和服务进程可读写的本机合成 Workspace。OpenCode 侧只授予任务所需的文件权限。Workflow 进程负责创建每次执行的专属子目录并验证其中的固定文件，CLI 与本机操作系统权限共同约束 Workspace 的写入者。该定义的产物文件上限为 16 KiB。
 - `ci_artifact_review@1` 复用上述实例和本机 Workspace，并在步骤后等待人工决定。升级到 Alembic `0049_workflow_approval` 后使用现有 HUMAN 鉴权和 Workflow API，无额外服务或后台 Worker。
+- `ci_repair_review@1` 绑定专用实例 `ci-repair`，需先升级到 `0052_ci_repair_workflow`。该 LOCAL 实例需要显式 `allowed_principals`、`use_instance_tool_permissions=true` 及 `repair_repository`。后者是 AgentCore 可读的独立本地 Git 仓库绝对路径，`workspace` 是 OpenCode 端与它对应的固定目录。容器部署可将同一仓库挂载到远端固定路径，例如 `/workspace`。两个路径都参与实例目标固定。
+- 修复仓库应使用 `core/ci_simulation/fixtures/tlv_input/` 下的三份原始 JSON 文件初始化，按原字节提交单个初始 Git 版本，禁用换行转换，保持索引干净、无远端。每个仓库根仅接纳一个修复任务。部署时将根目录和 `.git` 设为只读，单独授予 `cases/tlv-report.json` 的写权限，OpenCode 权限只允许读取接口与目标脚本及编辑目标脚本。运行时目录和持久产物在服务端独立复核。
+- 运行 OpenCode 的环境须安装 Git。适配器在修复 Prompt 派发前向 OpenCode 核对 `/path` 的 `directory` 和 `worktree`，两者均应匹配冻结的 `workspace`。部署时默认拒绝工具，在所选 Agent 的权限中仅放行上述文件。可读写权限以该 Agent 的有效规则及操作系统权限为准。
 
 ## Role Boundary
 
@@ -516,6 +519,10 @@ source_manifest 中 skill_loads 投影仅含 name/sha256/first，不存正文，
 ## 基带输入调查与只读评价
 
 `LOCAL_AGENT_BASEBAND_QUALITY_CONFIGURATION_PATH` 默认为空，未配置时不授予任何基带评价来源。非空值指向 UTF-8 JSON：`{"grants":[{"project_id":"...","service_user_id":"...","tenant_id":"...","owner_user_id":"...","incident_ids":["..."]}]}`。配置由部署者管理，启动时冻结；更改后重启。文件只含身份授权，不保存 token、GT 或模型报告。
+
+`LOCAL_AGENT_REPAIR_QUALITY_CONFIGURATION_PATH` 默认为空。配置文件使用 UTF-8 JSON，`grants` 每项明确列出 `project_id`、`service_user_id`、`tenant_id`、`space_id`、`owner_user_id`。证据读取凭据需为同租户的 `SERVICE`，并具有 `localagent:ci-repair:evidence`。只读入口 `GET /api/ci/quality/repair-evidence/{workflow_run_id}/{evidence_digest}?project_id={project_id}` 返回固定 `ci-repair-evidence.v1` 正文与 `X-Content-SHA256`。`evidence_digest` 计算实际 UTF-8 响应字节，和内部 Receipt、Artifact、Diff 摘要有各自用途。
+
+Workspace 的可选 `gate_sources` 每项填入 `project_id`、`api_origin`、`web_origin` 和 `token_env`。Origin 由部署者固定，要求 HTTPS 或环回 HTTP。`token_env` 指向只具备已配置 Project `Read` 的 AgentEvalOps API Key。Workspace 校验两侧 Run 的角色与证据定位后展示 Go 持久 Gate；无法从 Go 确认时显示未确认。
 
 `POST /api/ci/quality/baseband/evaluate` 要求 SERVICE 和 `localagent:baseband:evaluate`，同时匹配配置中的 service、tenant、owner、project 和确切 incident。请求的 selector 仅选择已封存调查；不能授权新来源。输入使用 `baseband-input.v1`，请求摘要为排序、紧凑 UTF-8 canonical JSON 的 SHA-256。RULE 明示规则来源；AGENT 必须重验 SUCCEEDED Run、Session、DELIVERED FINAL、封存摘要和实际 COMMITTED/OBSERVED 引用。入口不启动模型、不修改执行，不接收 GT 或报告正文。
 

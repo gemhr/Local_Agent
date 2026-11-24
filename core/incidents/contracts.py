@@ -4,6 +4,7 @@ from datetime import date, datetime
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from core.ci_simulation.service import CIError
+from core.ci_simulation.tlv_input import SCENARIO_KEY
 
 
 class StrictDTO(BaseModel):
@@ -227,7 +228,7 @@ class GroupDecision(Intent):
 
 
 class CreateScenario(Intent):
-    scenario_key: Literal["report_pipeline_failure", "limited_diagnostics", "environment_configuration_failure", "stale_case_input", "buffer_behavior_change", "baseband_input_mismatch", "baseband_compatible", "baseband_missing_receipt", "oracle_reference_scope", "oracle_application_delay", "oracle_output_divergence", "oracle_partial_capture"]
+    scenario_key: Literal["report_pipeline_failure", "limited_diagnostics", "environment_configuration_failure", "stale_case_input", SCENARIO_KEY, "buffer_behavior_change", "baseband_input_mismatch", "baseband_compatible", "baseband_missing_receipt", "oracle_reference_scope", "oracle_application_delay", "oracle_output_divergence", "oracle_partial_capture"]
 
 
 class ExecutionIntent(Intent):
@@ -328,6 +329,10 @@ class DiagnosisReport(StrictDTO):
         return self
 
 
+class TLVDiagnosisReport(DiagnosisReport):
+    failure_mechanism: Literal["TLV_INPUT_REVISION_STALE"] | None = None
+
+
 class EvidenceEntry(StrictDTO):
     evidence_id: str
     kind: str
@@ -352,3 +357,4 @@ class ExecutionContext(StrictDTO):
     outcome: Literal["PASS", "FAIL"]
     completed_at: str
     evidence: list[EvidenceEntry]
+    diagnosis_requirements: str | None = None

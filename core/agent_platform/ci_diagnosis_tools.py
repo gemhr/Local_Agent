@@ -1,7 +1,7 @@
 """两个具有真实 Run 上下文的只读工具。"""
 import json
 from core.runtime.tool_adapters import ToolAdapter, ToolAdapterInvocationError, ToolAdapterResponse
-from core.runtime.tool_contract import ToolExecutionSpec, ToolSideEffectKind, ToolErrorCategory, ToolInvocation
+from core.runtime.tool_contract import ToolExecutionSpec, ToolExecutionStatus, ToolSideEffectKind, ToolErrorCategory, ToolInvocation
 from core.runtime.retry import OperationIdempotency
 from core.runtime.tool_registry import ToolDescriptor, ToolRegistration
 from core.runtime.tool_governance import ToolPolicy
@@ -48,14 +48,26 @@ class CIDiagnosisTool(ToolAdapter):
 
     def invoke_once(self, invocation, context):
         context.raise_if_cancelled()
-        try:
-            result = self.bridge.run(lambda: self.service.bound_execution(context.run_context, invocation.arguments.get("evidence_id")),
-                operation=self.spec.tool_name, timeout_seconds=min(10, context.remaining_seconds()))
-        except CIError:
-            raise ToolAdapterInvocationError(category=ToolErrorCategory.PERMISSION_DENIED,
-                safe_error_code="CI_EVIDENCE_SCOPE_DENIED", safe_message="取证范围不允许") from None
+
+        async def read_bound_execution():
+            try:
+                return await self.service.bound_execution(context.run_context, invocation.arguments.get("evidence_id"))
+            except CIError as exc:
+                if exc.code != "CI_EVIDENCE_SCOPE_DENIED":
+                    raise
+                # 已确认的授权拒绝在桥内完成，避免跨桥异常被归类为未知结果。
+                return None
+
+        result = self.bridge.run(read_bound_execution, operation=self.spec.tool_name,
+            timeout_seconds=min(10, context.remaining_seconds()))
         context.raise_if_cancelled()
-        result = (EvidencePayload if self.spec.tool_name == TOOL_NAMES[1] else ExecutionContext).model_validate(result).model_dump()
+        if result is None:
+            return ToolAdapterResponse(content='{"error":"CI_EVIDENCE_SCOPE_DENIED"}', content_type="application/json",
+                safe_summary="取证范围不允许", status=ToolExecutionStatus.FAILED)
+        if self.spec.tool_name == TOOL_NAMES[1]:
+            result = EvidencePayload.model_validate(result).model_dump()
+        else:
+            result = ExecutionContext.model_validate(result).model_dump(exclude_unset=True)
         return ToolAdapterResponse(content=json.dumps(result, ensure_ascii=False, allow_nan=False),
             content_type="application/json", safe_summary="已读取授权执行证据")
 

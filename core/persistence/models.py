@@ -659,6 +659,7 @@ class WorkflowRunRow(PersistenceBase):
     space_id: Mapped[UUID | None] = mapped_column(Uuid)
     request_id: Mapped[str] = mapped_column(String(36), nullable=False)
     handoff_input: Mapped[dict | None] = mapped_column(JSONB)
+    repair_baseline: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
     approval_phase: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     current_step: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -674,7 +675,8 @@ class WorkflowRunRow(PersistenceBase):
         UniqueConstraint("tenant_id", "owner_user_id", "request_id", name="uq_workflow_runs_request"),
         CheckConstraint("status IN ('PENDING', 'RUNNING', 'PAUSED', 'CANCELLING', 'SUCCEEDED', 'FAILED', 'CANCELLED', "
                         "'WAITING_APPROVAL', 'REJECTED')", name="ck_workflow_runs_status"),
-        CheckConstraint("current_step BETWEEN 0 AND 1", name="ck_workflow_runs_current_step"),
+        CheckConstraint("current_step BETWEEN 0 AND CASE WHEN repair_baseline IS NULL THEN 1 ELSE 2 END",
+                        name="ck_workflow_runs_current_step"),
     )
 
 
@@ -762,7 +764,8 @@ class WorkflowStepRunRow(PersistenceBase):
     __table_args__ = (
         UniqueConstraint("workflow_run_id", "position", name="uq_workflow_step_runs_position"),
         UniqueConstraint("platform_run_id", name="uq_workflow_step_runs_platform_run"),
-        CheckConstraint("attempt = 1 AND position BETWEEN 0 AND 1", name="ck_workflow_step_runs_position"),
+        CheckConstraint("attempt = 1 AND (position BETWEEN 0 AND 1 OR (position = 2 AND runtime_kind = 'REPLAY')) "
+                        "AND (runtime_kind <> 'REPLAY' OR position = 2)", name="ck_workflow_step_runs_position"),
         CheckConstraint("status IN ('PENDING', 'RESERVED', 'SUCCEEDED', 'FAILED', 'CANCELLED')", name="ck_workflow_step_runs_status"),
     )
 

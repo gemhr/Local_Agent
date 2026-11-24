@@ -1,0 +1,11 @@
+{
+  "definition_version": "tlv-interface.v1",
+  "software_version": "product-2.0",
+  "required_revision": 2,
+  "header": ["type_u8", "length_u8"],
+  "value_encoding": "unsigned_big_endian",
+  "revisions": {
+    "1": {"type": 16, "value_length_bytes": 1},
+    "2": {"type": 17, "value_length_bytes": 2}
+  }
+}

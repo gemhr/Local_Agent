@@ -99,6 +99,8 @@ async def export_facts(service, principal, body):
             instance = await session.get(ScenarioInstanceRow, execution.instance_id) if execution else None
             if instance is None or instance.tenant_id != principal.tenant_id or instance.owner_user_id != principal.user_id:
                 raise CIError("CI_NOT_FOUND", 404)
+            if "synthetic_tlv_version" in execution.execution_snapshot:
+                raise CIError("CI_QUALITY_SOURCE_UNAVAILABLE", 422)
             version = await session.get(NightlyVersionExecutionRow, execution.nightly_version_execution_id) if execution.nightly_version_execution_id else None
             if body.batch_id is not None and (version is None or version.batch_id != body.batch_id):
                 raise CIError("CI_NOT_FOUND", 404)

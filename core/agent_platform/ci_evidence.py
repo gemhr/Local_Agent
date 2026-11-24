@@ -3,6 +3,7 @@ from sqlalchemy import select
 
 from core.agent_platform.ci_diagnosis_tools import TOOL_NAMES, strict_object
 from core.ci_simulation.models import CIExecutionRow
+from core.ci_simulation import tlv_input
 from core.incidents.models import InvestigationRow, IncidentRow
 from core.incidents.service import AGENT_ID
 from core.runtime.snapshot_serialization import sha256_digest
@@ -47,10 +48,13 @@ def canonical_sources(seen, incident_id, execution):
         and originals[key]["availability"] == "AVAILABLE" and value == dict(incident_id=incident_id, **originals[key])}
 
 
-def minimum_coverage(seen):
+def minimum_coverage(seen, execution=None):
     kinds = {e["kind"] for e in seen.values()}
+    required = REQUIRED_KINDS
+    if execution is not None and tlv_input.is_file_execution(execution.execution_snapshot):
+        required = tlv_input.REQUIRED_EVIDENCE_KINDS
     environment = next((e["content"] for e in seen.values() if e["kind"] == "ENVIRONMENT_RECORD"), None)
-    return REQUIRED_KINDS <= kinds and isinstance(environment, dict) and all(
+    return required <= kinds and isinstance(environment, dict) and all(
         environment.get(k) is not None for k in ("parser_supported_field_revision", "decoder_supported_field_revision"))
 
 
@@ -65,5 +69,4 @@ async def investigation_evidence(session, root, frame, image, actions):
     incident = await session.get(IncidentRow, row.incident_id)
     execution = await session.get(CIExecutionRow, incident.execution_id)
     seen = canonical_sources(observed_sources(image, actions, frame, incident.incident_id, execution.execution_id), incident.incident_id, execution)
-    # 当前唯一覆盖规则是上述三类及环境能力；没有通用自然语言反证推断。
-    return seen, minimum_coverage(seen)
+    return seen, minimum_coverage(seen, execution)

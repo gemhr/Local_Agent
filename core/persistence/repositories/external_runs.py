@@ -30,7 +30,7 @@ class ExternalRunRepository:
 
     async def claim(
         self, request: RuntimeRequest, result: ExecutionResult, target_digest: str, *,
-        workflow_target_digest: str | None = None,
+        workflow_target_digest: str | None = None, repair_only: bool = False,
     ) -> str | None:
         access = request.memory_access_context
         if access is None:
@@ -39,6 +39,7 @@ class ExternalRunRepository:
             await lock_run_scope(session, result.run_id)
             if not await workflow_claim_allowed(
                 session, result.run_id, "OPENCODE", request, runtime_target_digest=workflow_target_digest,
+                repair_only=repair_only,
             ):
                 raise ExternalRunConflict(result.run_id)
             control = await session.get(RunControlRow, result.run_id)

@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from sqlalchemy import select, func
 from core.ci_simulation import service as simulation
+from core.ci_simulation import tlv_input
 from core.ci_simulation.models import CIExecutionRow, ScenarioInstanceRow
 from core.incidents.models import IncidentRow, InvestigationRow, IncidentActionRow, IncidentVerificationRow
 from core.incidents.contracts import CIError
@@ -141,21 +142,28 @@ class IncidentService:
 
     async def admit(self, principal, incident_id, request_id, *, run_id=None, session_id=None):
         async with self.database.transaction() as session:
-            incident = await self.owned_incident(session, principal, incident_id, lock=True)
-            old = (await session.execute(select(InvestigationRow).where(InvestigationRow.incident_id == incident_id,
-                InvestigationRow.request_id == request_id))).scalar_one_or_none()
-            if old:
-                return old, False
-            version = (await session.execute(select(func.max(InvestigationRow.report_version)).where(InvestigationRow.incident_id == incident_id))).scalar() or 0
-            execution = await session.get(CIExecutionRow, incident.execution_id)
-            from core.ci_simulation.baseband import AGENT_ID as BASEBAND_AGENT, SCHEMA
-            agent_id = BASEBAND_AGENT if execution.execution_snapshot.get("schema_version") in {SCHEMA, "baseband-input.v2"} else AGENT_ID
-            row = InvestigationRow(investigation_id=str(uuid4()), incident_id=incident_id, request_id=request_id,
-                report_version=version + 1, run_id=run_id or str(uuid4()), session_id=session_id or incident.session_id, agent_id=agent_id,
-                agent_version="1.1.0" if agent_id == BASEBAND_AGENT else AGENT_VERSION, created_at=datetime.now(timezone.utc), projection_status="PENDING")
-            session.add(row)
-            await session.flush()
-            return row, True
+            return await self.admit_in_transaction(session, principal, incident_id, request_id,
+                run_id=run_id, session_id=session_id)
+
+    async def admit_in_transaction(self, session, principal, incident_id, request_id, *, run_id=None, session_id=None):
+        incident = await self.owned_incident(session, principal, incident_id, lock=True)
+        old = (await session.execute(select(InvestigationRow).where(InvestigationRow.incident_id == incident_id,
+            InvestigationRow.request_id == request_id))).scalar_one_or_none()
+        if old:
+            if ((run_id is not None and old.run_id != run_id)
+                    or (session_id is not None and old.session_id != session_id)):
+                raise CIError("CI_REQUEST_CONFLICT", 409)
+            return old, False
+        version = (await session.execute(select(func.max(InvestigationRow.report_version)).where(InvestigationRow.incident_id == incident_id))).scalar() or 0
+        execution = await session.get(CIExecutionRow, incident.execution_id)
+        from core.ci_simulation.baseband import AGENT_ID as BASEBAND_AGENT, SCHEMA
+        agent_id = BASEBAND_AGENT if execution.execution_snapshot.get("schema_version") in {SCHEMA, "baseband-input.v2"} else AGENT_ID
+        row = InvestigationRow(investigation_id=str(uuid4()), incident_id=incident_id, request_id=request_id,
+            report_version=version + 1, run_id=run_id or str(uuid4()), session_id=session_id or incident.session_id, agent_id=agent_id,
+            agent_version="1.1.0" if agent_id == BASEBAND_AGENT else AGENT_VERSION, created_at=datetime.now(timezone.utc), projection_status="PENDING")
+        session.add(row)
+        await session.flush()
+        return row, True
 
     async def investigation(self, principal, incident_id, investigation_id):
         async with self.database.session() as session:
@@ -181,9 +189,18 @@ class IncidentService:
             execution = await session.get(CIExecutionRow, incident.execution_id)
             if evidence_id is not None:
                 return self.evidence(execution, incident.incident_id, evidence_id)
-            return dict(incident_id=incident.incident_id, execution_id=execution.execution_id,
+            result = dict(incident_id=incident.incident_id, execution_id=execution.execution_id,
                 environment_id=execution.environment_id, case_id=execution.case_id, outcome=execution.outcome,
                 completed_at=execution.completed_at.isoformat(), evidence=evidence_catalog(execution))
+            if tlv_input.is_file_execution(execution.execution_snapshot):
+                result["evidence"] = [e for e in result["evidence"] if e["kind"] in tlv_input.REQUIRED_EVIDENCE_KINDS]
+                result["diagnosis_requirements"] = (
+                    "stale_case_input_file@1：直接读取并引用目录四项，无需另查技能资源。"
+                    "工具参数 evidence_id 必须逐字复制目录中的 UUID，勿填 digest 或文件路径。SCRIPT_BASELINE 提供用例要求。"
+                    "若证据支持脚本版本落后导致预检失败，报告使用 AUTOMATION、TEST_OWNER 和 "
+                    'failure_mechanism="TLV_INPUT_REVISION_STALE"。'
+                )
+            return result
 
     async def seal(self, investigation_id, report, result_digest, error=None):
         async with self.database.transaction() as session:

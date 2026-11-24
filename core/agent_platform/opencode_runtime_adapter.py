@@ -56,6 +56,7 @@ class OpenCodeRuntimeAdapter:
             "origin": str(httpx.URL(instance.base_url)),
             "workspace": instance.workspace,
             "deployment": instance.deployment,
+            **({"repair_repository": instance.repair_repository} if instance.repair_repository is not None else {}),
         })
         self.workflow_target_digest = canonical_payload_digest({
             "target": self.target_digest,
@@ -80,6 +81,10 @@ class OpenCodeRuntimeAdapter:
         require_opencode_instance_access(principal, self._instance)
 
     def workspace_purposes(self) -> tuple[str, ...]:
+        if self._instance.repair_repository is not None:
+            if self._instance.deployment == "LOCAL" and self._instance.use_instance_tool_permissions:
+                return ("WORKFLOW_CI_REPAIR",)
+            return ()
         if not self._instance.use_instance_tool_permissions:
             return ("AGENT_TEXT", "WORKFLOW_TEXT")
         if self._instance.deployment == "LOCAL":
@@ -94,6 +99,11 @@ class OpenCodeRuntimeAdapter:
         if self._instance.deployment != "LOCAL" or not self._instance.use_instance_tool_permissions:
             raise RuntimeAdapterError("WORKFLOW_ARTIFACT_WORKSPACE_UNAVAILABLE", "实例未启用本地文件交接")
         return self._instance.workspace
+
+    def workflow_repair_repository(self) -> str:
+        if "WORKFLOW_CI_REPAIR" not in self.workspace_purposes():
+            raise RuntimeAdapterError("WORKFLOW_REPAIR_REPOSITORY_UNAVAILABLE", "实例未绑定本地合成修复仓库")
+        return self._instance.repair_repository
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -145,6 +155,20 @@ class OpenCodeRuntimeAdapter:
         ):
             raise RuntimeAdapterError("OPENCODE_SESSION_CREATE_FAILED", "无法创建或确认 OpenCode 会话")
         return session_id
+
+    async def _require_repair_worktree(self) -> None:
+        workspace = self._instance.workspace
+        path_type = PureWindowsPath if PureWindowsPath(workspace).is_absolute() else PurePosixPath
+        try:
+            response = await self._client.get("/path")
+            response.raise_for_status()
+            body = response.json()
+            matches = isinstance(body, dict) and all(isinstance(body.get(key), str)
+                and path_type(body[key]) == path_type(workspace) for key in ("directory", "worktree"))
+        except (httpx.HTTPError, ValueError):
+            matches = False
+        if not matches:
+            raise RuntimeAdapterError("OPENCODE_REPAIR_WORKTREE_MISMATCH", "无法确认专用实例的 Git 工作树")
 
     async def _prompt(self, request: RuntimeRequest, session_id: str, user_message_id: str, timeout: float) -> dict:
         prompt = {
@@ -353,6 +377,8 @@ class OpenCodeRuntimeAdapter:
                 return self._cancelled(result, source.token.reason)
             try:
                 async with asyncio.timeout_at(deadline):
+                    if self._instance.repair_repository is not None:
+                        await self._require_repair_worktree()
                     session_id = await self._create_session()
                     user_message_id = _user_message_id()
                     await self._runs.bind_session(result.run_id, session_id, user_message_id)
@@ -414,6 +440,8 @@ class OpenCodeRuntimeAdapter:
     def _result_identity(self, request: RuntimeRequest) -> ExecutionResult:
         if request.runtime_instance_id != self._instance.instance_id:
             raise RuntimeAdapterError("RUNTIME_INSTANCE_UNAVAILABLE", "Runtime 实例未启用或不可用于此 Agent")
+        if self._instance.repair_repository is not None and request.workflow_dispatch_token is None:
+            raise RuntimeAdapterError("RUNTIME_INSTANCE_PURPOSE_DENIED", "修复实例仅供已接纳的 CI Workflow 步骤使用")
         return ExecutionResult(
             run_id=request.run_id or str(uuid4()),
             trace_id=str(uuid4()),
@@ -441,6 +469,7 @@ class OpenCodeRuntimeAdapter:
             cancel_reason = await self._runs.claim(
                 request, identity, self.target_digest,
                 **({"workflow_target_digest": self.workflow_target_digest} if request.workflow_dispatch_token else {}),
+                **({"repair_only": True} if self._instance.repair_repository is not None else {}),
             )
         except ExternalRunConflict:
             raise RuntimeAdapterError("RUN_ALREADY_ACCEPTED", "Run ID 已被执行占用") from None

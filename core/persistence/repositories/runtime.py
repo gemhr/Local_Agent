@@ -77,12 +77,12 @@ async def lock_run_scope(session: AsyncSession, run_id: str) -> None:
 async def workflow_claim_allowed(
     session: AsyncSession, run_id: str, runtime_kind: str, request: RuntimeRequest | None, *,
     runtime_target_digest: str | None = None, recovering: bool = False,
-    already_admitted: bool = False, workflow_artifact_check=None,
+    already_admitted: bool = False, workflow_artifact_check=None, repair_only: bool = False,
 ) -> bool:
     """在调用方持有的 Run 锁下核对实际执行请求与持久预留。"""
     step = await session.scalar(select(WorkflowStepRunRow).where(WorkflowStepRunRow.platform_run_id == run_id))
     if step is None:
-        return request is None or request.workflow_dispatch_token is None
+        return not repair_only and (request is None or request.workflow_dispatch_token is None)
     if step.runtime_kind != runtime_kind or step.status != "RESERVED":
         return False
     if recovering:
@@ -92,6 +92,8 @@ async def workflow_claim_allowed(
         return False
     access = request.memory_access_context
     run = await session.get(WorkflowRunRow, step.workflow_run_id)
+    if runtime_kind == "OPENCODE" and repair_only != (run.repair_baseline is not None):
+        return False
     matches = (
         request.run_id == run_id
         and request.agent_id == step.agent_id
@@ -116,6 +118,19 @@ async def workflow_claim_allowed(
         )
         if current.one_or_none() is None:
             return False
+    if run.repair_baseline is not None and not already_admitted:
+        if run.cancel_requested or run.status != "RUNNING" or run.current_step != step.position:
+            return False
+        if runtime_kind == "OPENCODE":
+            return step.position == 1 and step.bound_input == request.input
+        from core.incidents.models import InvestigationRow
+
+        investigation = await session.scalar(select(InvestigationRow).where(
+            InvestigationRow.run_id == run_id, InvestigationRow.incident_id == run.handoff_input["incident_id"],
+            InvestigationRow.session_id == request.session_id, InvestigationRow.agent_id == request.agent_id,
+            InvestigationRow.agent_version == request.agent_version,
+        ))
+        return step.position == 0 and investigation is not None
     if runtime_kind == "NATIVE" and not already_admitted and (
         run.handoff_input is not None or step.bound_input is not None or run.approval_phase is not None
     ):

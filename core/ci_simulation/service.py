@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
-from core.ci_simulation.execution import execute, initial_state, case_catalog
+from core.ci_simulation.execution import SCENARIOS, execute, initial_state, case_catalog
 from core.ci_simulation.models import ScenarioInstanceRow, CIExecutionRow
 
 
@@ -14,9 +14,10 @@ class CIError(ValueError):
 
 
 async def create_instance(session, principal, key, request_id):
+    state = initial_state(key)
     values = dict(instance_id=str(uuid4()), tenant_id=principal.tenant_id, owner_user_id=principal.user_id,
-        request_id=request_id, scenario_key=key, template_version="1" if key.startswith("baseband_") else "2", state_revision=1,
-        current_state=initial_state(key), created_at=datetime.now(timezone.utc))
+        request_id=request_id, scenario_key=key, template_version=next(s["template_version"] for s in SCENARIOS if s["scenario_key"] == key), state_revision=1,
+        current_state=state, created_at=datetime.now(timezone.utc))
     inserted = (await session.execute(insert(ScenarioInstanceRow).values(**values).on_conflict_do_nothing().returning(ScenarioInstanceRow.instance_id))).scalar_one_or_none()
     row = (await session.execute(select(ScenarioInstanceRow).where(ScenarioInstanceRow.tenant_id == principal.tenant_id,
         ScenarioInstanceRow.owner_user_id == principal.user_id, ScenarioInstanceRow.request_id == request_id))).scalar_one()

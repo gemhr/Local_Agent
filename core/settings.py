@@ -110,6 +110,7 @@ class OpenCodeInstanceSettings:
     agent: str | None = None
     allowed_principals: frozenset[tuple[str, uuid.UUID]] = field(default_factory=frozenset, repr=False)
     use_instance_tool_permissions: bool = False
+    repair_repository: str | None = None
 
 
 def _env_opencode_instances() -> tuple[OpenCodeInstanceSettings, ...]:
@@ -125,7 +126,7 @@ def _env_opencode_instances() -> tuple[OpenCodeInstanceSettings, ...]:
         raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "EXPECTED_LIST")
 
     required = {"instance_id", "deployment", "base_url", "workspace", "password_env"}
-    structured = {"allowed_principals", "use_instance_tool_permissions"}
+    structured = {"allowed_principals", "use_instance_tool_permissions", "repair_repository"}
     optional = {"username", "provider_id", "model_id", "agent"} | structured
     instances = {}
     for entry in entries:
@@ -194,12 +195,19 @@ def _env_opencode_instances() -> tuple[OpenCodeInstanceSettings, ...]:
         use_instance_tool_permissions = entry.get("use_instance_tool_permissions", False)
         if not isinstance(use_instance_tool_permissions, bool):
             raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_TOOL_PERMISSIONS_MODE")
+        repair_repository = entry.get("repair_repository")
+        if repair_repository is not None and (
+            deployment != "LOCAL" or not use_instance_tool_permissions or not allowed_principals
+            or not isinstance(repair_repository, str) or not Path(repair_repository).is_absolute()
+        ):
+            raise SettingsValidationError(SETTINGS_VALIDATION_ERROR, name, "INVALID_REPAIR_REPOSITORY")
         instances[instance_id] = OpenCodeInstanceSettings(
             instance_id=instance_id, deployment=deployment, base_url=base_url, workspace=workspace,
             password=password, username=username, provider_id=entry.get("provider_id"),
             model_id=entry.get("model_id"), agent=entry.get("agent"),
             allowed_principals=frozenset(allowed_principals),
             use_instance_tool_permissions=use_instance_tool_permissions,
+            repair_repository=repair_repository,
         )
     return tuple(instances.values())
 
@@ -855,6 +863,7 @@ class Settings:
     quality_evaluation_configuration_path: str = ""
     adaptive_evaluation_configuration_path: str = ""
     baseband_quality_configuration_path: str = ""
+    repair_quality_configuration_path: str = ""
     agentevalops_connect_timeout_seconds: float = 0.5
     agentevalops_total_deadline_seconds: float = 3.0
     evaluation_mode: bool = False
@@ -1601,6 +1610,7 @@ class Settings:
             quality_evaluation_configuration_path=quality_values[2],
             adaptive_evaluation_configuration_path=os.getenv("LOCAL_AGENT_ADAPTIVE_EVALUATION_CONFIGURATION_PATH", "").strip(),
             baseband_quality_configuration_path=os.getenv("LOCAL_AGENT_BASEBAND_QUALITY_CONFIGURATION_PATH", "").strip(),
+            repair_quality_configuration_path=os.getenv("LOCAL_AGENT_REPAIR_QUALITY_CONFIGURATION_PATH", "").strip(),
             agentevalops_connect_timeout_seconds=agentevalops_connect_timeout_seconds,
             agentevalops_total_deadline_seconds=agentevalops_total_deadline_seconds,
             evaluation_mode=evaluation_mode,

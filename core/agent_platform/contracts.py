@@ -202,7 +202,7 @@ class WorkflowTask:
             not isinstance(self.agent_version, str) or not _SAFE_VERSION.fullmatch(self.agent_version)
         ):
             raise ValueError("agent_version 必须是安全版本")
-        if self.runtime_kind not in (None, "OPENCODE", "NATIVE"):
+        if self.runtime_kind not in (None, "OPENCODE", "NATIVE", "REPLAY"):
             raise ValueError("runtime_kind 无效")
         if self.runtime_instance_id is not None and (
             not isinstance(self.runtime_instance_id, str) or not _SAFE_INSTANCE_ID.fullmatch(self.runtime_instance_id)
@@ -214,6 +214,8 @@ class WorkflowTask:
 
 AFTER_STEP_OUTPUT = "AFTER_STEP_OUTPUT"
 BEFORE_STEP_DISPATCH = "BEFORE_STEP_DISPATCH"
+CI_REPAIR_BINDING = "ci-repair.v1"
+CI_REPAIR_INSTANCE = "ci-repair"
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,10 +250,21 @@ class WorkflowDefinition:
         if len({task.task_id for task in self.tasks}) != len(self.tasks):
             raise ValueError("Workflow task_id 不允许重复")
         if self.execution_mode == "SERIAL":
-            if self.synthesis_required or len(self.tasks) != 2:
-                raise ValueError("串行 Workflow 必须有两个步骤")
-            if tuple(task.runtime_kind for task in self.tasks) != ("OPENCODE", "NATIVE"):
-                raise ValueError("串行 Workflow 当前仅支持 OpenCode → Native")
+            if self.result_binding == CI_REPAIR_BINDING:
+                expected = (
+                    ("diagnose", "NATIVE", "ci_incident_investigator", "1.0.0", None, True, False),
+                    ("repair", "OPENCODE", "core_router", "builtin-1", CI_REPAIR_INSTANCE, True, True),
+                    ("replay", "REPLAY", "ci_replay", "1", None, False, False),
+                )
+                shape = tuple((t.task_id, t.runtime_kind, t.agent_id, t.agent_version, t.runtime_instance_id,
+                    t.requires_result_validation, t.requires_approval) for t in self.tasks)
+                if shape != expected or self.approval_phase != AFTER_STEP_OUTPUT or self.synthesis_required:
+                    raise ValueError("CI 修复 Workflow 的诊断、修复及回放步骤必须固定")
+            else:
+                if self.synthesis_required or len(self.tasks) != 2:
+                    raise ValueError("串行 Workflow 必须有两个步骤")
+                if tuple(task.runtime_kind for task in self.tasks) != ("OPENCODE", "NATIVE"):
+                    raise ValueError("串行 Workflow 当前仅支持 OpenCode → Native")
             for task in self.tasks:
                 if task.agent_version is None or task.input_type != "text":
                     raise ValueError("串行 Workflow 必须固定 Agent 版本和文本输入")

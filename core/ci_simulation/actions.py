@@ -53,7 +53,8 @@ def preview(state, action_kind, target_case_id, parameters):
     elif action_kind == "SET_FEATURE_FLAG":
         change(["environment", "feature_flags", "compressed_transport"], False)
     elif action_kind == "REFRESH_CASE_INPUT":
-        if primary.get("input_contract") != "tlv" or PRODUCT_RELEASES[state["environment"]["software_version"]]["required_tlv_revision"] != parameters["target_revision"]:
+        if ("synthetic_tlv_baselines" in state or primary.get("input_contract") != "tlv"
+                or PRODUCT_RELEASES[state["environment"]["software_version"]]["required_tlv_revision"] != parameters["target_revision"]):
             raise CIError("CI_ACTION_TARGET_INVALID", 422)
         change(["test_case", "input_revision"], parameters["target_revision"])
         change(["report", "field_revision"], parameters["target_revision"])

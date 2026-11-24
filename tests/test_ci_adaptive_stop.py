@@ -80,12 +80,13 @@ class InvestigationProvider:
         return ModelAdapterResponse(json.dumps(self.report()), finish_reason="stop", tool_call_count=0)
 
 
-async def build(database, tmp_path, *, adaptive=True, limited=False, illegal=None, handoff=False, loop_limits=None, reuse=None):
+async def build(database, tmp_path, *, adaptive=True, limited=False, illegal=None, handoff=False, loop_limits=None, reuse=None,
+                run_id=None, session_id=None):
     if reuse is None:
         incidents, principal, instance, execution, incident = await setup_incident(database, "limited_diagnostics" if limited else "report_pipeline_failure")
     else:
         incidents, principal, instance, execution, incident = reuse.incidents, reuse.principal, reuse.instance, reuse.execution, reuse.incident
-    row, _ = await incidents.admit(principal, incident.incident_id, str(uuid4()))
+    row, _ = await incidents.admit(principal, incident.incident_id, str(uuid4()), run_id=run_id, session_id=session_id)
     bridge = SyncPersistenceBridge(asyncio.get_running_loop())
     registry = ToolRegistry()
     register_tools(registry, incidents, bridge)

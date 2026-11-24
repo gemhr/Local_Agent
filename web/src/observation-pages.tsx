@@ -21,15 +21,29 @@ type Artifact = {
   workflow_run_id: string; step_id: string; attempt: number; producer_run_id: string
   runtime_instance_id: string; relative_path: string; size: number; sha256: string
 }
+type RepairArtifact = {
+  schema_version: string; workflow_run_id: string; changed_paths: string[]; explanation: string
+  baseline_revision: string; before: string; after: string; diff: string
+  before_sha256: string; after_sha256: string; artifact_digest: string; diff_digest: string
+}
 type Step = {
   step_id: string; attempt: number; position: number; status: string; platform_run_id: string | null
   agent_id: string; agent_version: string; runtime_kind: string; runtime_instance_id: string | null
   runtime_status: string | null; runtime_observation: string | null; result_available: boolean
   reason: string | null; artifact_ref?: Artifact
 }
+type OracleResult = { case_id: string; expected_value: number; actual_value: number | null; oracle_status: string; reason: string | null }
+type Replay = { replay_id: string; technical_status: string; receipt_digest: string; results: Record<'baseline' | 'candidate', OracleResult[]> }
+type RepairGate = { decision: 'PASS' | 'FAIL' | 'BLOCKED'; url: string; baseline_run_id: string; candidate_run_id: string }
 type Detail = Task & {
   result?: Result; configuration_revision?: number; runtime_instance_id?: string; input_digest?: string
-  workflow?: { approval?: Approval; steps: Step[]; status: string; current_step: string }
+  workflow?: {
+    approval?: Approval; steps: Step[]; status: string; current_step: string; reason?: string
+    repair_artifact_available?: boolean
+    repair_context?: { incident_id: string; execution_id: string }
+    repair_diagnosis?: { diagnosis_status: string; root_cause_hypothesis: string; failure_mechanism: string }
+    repair_replay?: Replay | null; repair_evidence_digest?: string | null
+  }
 }
 type ApprovalItem = Approval & {
   workflow_run_id: string; title: string; workflow_version: string; workflow_status: string
@@ -54,21 +68,23 @@ function Status({ value }: { value: string }) {
   return <span className={`task-status status-${value.toLowerCase()}`}>{labels[value] ?? value}</span>
 }
 
-function useObservation<T>(api: WorkspaceApi, path: string, pollMs = 0) {
+function useObservation<T>(api: WorkspaceApi, path: string | null, pollMs = 0) {
   const [snapshot, setSnapshot] = useState<{ path: string; data: T }>()
   const [failure, setFailure] = useState<{ path: string; text: string }>()
   const [revision, setRevision] = useState(0)
   useEffect(() => {
+    if (path === null) return
+    const target = path
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
     async function read() {
       try {
-        const data = await api.observation<T>(path, controller.signal)
-        if (!controller.signal.aborted) { setSnapshot({ path, data }); setFailure(undefined) }
+        const data = await api.observation<T>(target, controller.signal)
+        if (!controller.signal.aborted) { setSnapshot({ path: target, data }); setFailure(undefined) }
       } catch (error) {
         if (controller.signal.aborted) return
         if (isRevocation(error)) setSnapshot(undefined)
-        setFailure({ path, text: errorText(error) })
+        setFailure({ path: target, text: errorText(error) })
         if (isRevocation(error)) return
       }
       if (pollMs && !controller.signal.aborted) timer = setTimeout(() => void read(), pollMs)
@@ -219,10 +235,28 @@ function TaskDetail({ api, kind, id }: { api: WorkspaceApi; kind: Kind; id: stri
   const [message, setMessage] = useState<{ tone: 'notice' | 'error'; text: string }>()
   const [confirmCancel, setConfirmCancel] = useState(false)
   const [selectedRun, setSelectedRun] = useState<string>()
+  const [gateInput, setGateInput] = useState('')
+  const [gateID, setGateID] = useState('')
   const task = query.data
   const wf = task?.workflow
   const approval = wf?.approval
   const actionPath = kind === 'WORKFLOW' ? `/workflow-runs/${id}` : `/runs/${id}`
+  const patchQuery = useObservation<RepairArtifact>(api, wf?.repair_artifact_available ? `${actionPath}/repair-artifact` : null)
+  const patch = patchQuery.data
+  const gate = useObservation<RepairGate>(api, wf?.repair_replay && gateID ? `${actionPath}/repair-gate/${encodeURIComponent(gateID)}` : null)
+  const [verifiedPatch, setVerifiedPatch] = useState<RepairArtifact>()
+  useEffect(() => {
+    if (!patch || patch.schema_version !== 'ci-repair-artifact.v1' || patch.workflow_run_id !== id
+      || typeof patch.diff !== 'string' || !patch.diff || !globalThis.crypto?.subtle) return
+    let active = true
+    void crypto.subtle.digest('SHA-256', new TextEncoder().encode(patch.diff)).then(buffer => {
+      const digest = Array.from(new Uint8Array(buffer), n => n.toString(16).padStart(2, '0')).join('')
+      if (active && digest === patch.diff_digest) setVerifiedPatch(patch)
+    }).catch(() => { if (active) setVerifiedPatch(undefined) })
+    return () => { active = false }
+  }, [patch, id])
+  const canDecide = !wf?.repair_context || (!!patch && patch === verifiedPatch)
+  const diffBinding = wf?.repair_context && patch === verifiedPatch && patch ? { diff_digest: patch.diff_digest } : {}
 
   async function perform(action: string, body?: object) {
     if (pending) return
@@ -257,6 +291,49 @@ function TaskDetail({ api, kind, id }: { api: WorkspaceApi; kind: Kind; id: stri
     {message && <Banner tone={message.tone}>{message.text}</Banner>}
     <div className="observation-layout">
       <div className="space-detail">
+        {wf?.repair_context && <section className="panel">
+          <header className="panel-heading"><h2>CI 修复证据</h2></header>
+          <dl className="facts">
+            <div><dt>Incident</dt><dd className="identifier">{wf.repair_context.incident_id}</dd></div>
+            <div><dt>Execution</dt><dd className="identifier">{wf.repair_context.execution_id}</dd></div>
+            {wf.repair_diagnosis && <div><dt>Native 诊断</dt><dd>{wf.repair_diagnosis.root_cause_hypothesis} · {wf.repair_diagnosis.failure_mechanism}</dd></div>}
+          </dl>
+          {patchQuery.error && <Banner tone="error">{patchQuery.error}</Banner>}
+          {patch && patch === verifiedPatch && <>
+            <p>{patch.changed_paths.join('，')} · {patch.explanation}</p>
+            <dl className="facts">
+              <div><dt>基线</dt><dd className="identifier">{patch.baseline_revision}</dd></div>
+              <div><dt>修改前 SHA-256</dt><dd className="identifier">{patch.before_sha256}</dd></div>
+              <div><dt>修改后 SHA-256</dt><dd className="identifier">{patch.after_sha256}</dd></div>
+              <div><dt>产物 SHA-256</dt><dd className="identifier">{patch.artifact_digest}</dd></div>
+              <div><dt>Diff SHA-256</dt><dd className="identifier">{patch.diff_digest}</dd></div>
+            </dl>
+            <details><summary>修改前后内容</summary><pre className="repair-diff">{patch.before}</pre><pre className="repair-diff">{patch.after}</pre></details>
+            <h3>冻结 Git Diff</h3><pre className="repair-diff">{patch.diff}</pre>
+          </>}
+        </section>}
+        {wf?.repair_replay && <section className="panel">
+          <header className="panel-heading"><h2>确定性回放</h2><strong>{wf.repair_replay.technical_status}</strong></header>
+          <dl className="facts">
+            <div><dt>Replay Receipt</dt><dd className="identifier">{wf.repair_replay.replay_id}</dd></div>
+            <div><dt>收据 SHA-256</dt><dd className="identifier">{wf.repair_replay.receipt_digest}</dd></div>
+            <div><dt>独立评测证据 SHA-256</dt><dd className="identifier">{wf.repair_evidence_digest}</dd></div>
+          </dl>
+          <table><thead><tr><th>版本</th><th>用例</th><th>预期</th><th>解码值</th><th>Oracle</th></tr></thead>
+            <tbody>{(['baseline', 'candidate'] as const).flatMap(role => wf.repair_replay!.results[role].map(result =>
+              <tr key={`${role}:${result.case_id}`}><td>{role}</td><td>{result.case_id}</td><td>{result.expected_value}</td>
+                <td>{result.actual_value ?? '—'}</td><td>{result.oracle_status}{result.reason && ` · ${result.reason}`}</td></tr>))}</tbody>
+          </table>
+          <h3>AgentEvalOps Release Gate</h3>
+          <form className="form-actions" onSubmit={event => {
+            event.preventDefault(); setGateID(gateInput.trim()); gate.clear()
+          }}>
+            <label>Gate ID <input value={gateInput} onChange={event => setGateInput(event.target.value)} required /></label>
+            <button className="button secondary" type="submit">核对门禁</button>
+          </form>
+          {gate.error ? <p>门禁未确认。</p> : gate.data ? <p>{gate.data.decision} · <a href={gate.data.url} target="_blank" rel="noreferrer">查看评测详情</a></p>
+            : <p>{gateID ? '正在核对门禁…' : '等待独立评测'}</p>}
+        </section>}
         {approval && <section className="panel approval-panel">
           <header className="panel-heading"><ClipboardCheck size={20} /><h2>人工审批</h2><Status value={approval.status} /></header>
           {task.status === 'AWAITING_OWNER' && <p>已批准，等待原任务发起人继续执行。</p>}
@@ -264,13 +341,16 @@ function TaskDetail({ api, kind, id }: { api: WorkspaceApi; kind: Kind; id: stri
             <div><dt>步骤</dt><dd>{approval.step_id} · v{task.version}</dd></div>
             <div><dt>决定人</dt><dd className="identifier">{approval.decided_by ?? '待决定'}</dd></div>
             <div><dt>决定时间</dt><dd>{stamp(approval.decided_at)}</dd></div>
+            <div><dt>消费时间</dt><dd>{stamp(approval.consumed_at)}</dd></div>
             <div><dt>绑定摘要</dt><dd className="identifier">{approval.binding_digest}</dd></div>
           </dl>
           {task.can_approve && approval.status === 'PENDING' && <div className="form-actions">
-            <button className="button primary" disabled={pending} onClick={() => void perform(`approvals/${approval.approval_id}/decision`,
-              { decision: 'APPROVE', binding_digest: approval.binding_digest })}>批准</button>
-            <button className="button secondary" disabled={pending} onClick={() => void perform(`approvals/${approval.approval_id}/decision`,
-              { decision: 'REJECT', binding_digest: approval.binding_digest })}>拒绝</button>
+            {wf?.repair_context && <p className="muted">批准绑定当前 Diff。候选文件变化会使批准失效。</p>}
+            {!canDecide && <p className="muted">完整 Diff 通过摘要核对后可以审批。</p>}
+            <button className="button primary" disabled={pending || !canDecide} onClick={() => void perform(`approvals/${approval.approval_id}/decision`,
+              { decision: 'APPROVE', binding_digest: approval.binding_digest, ...diffBinding })}>批准</button>
+            <button className="button secondary" disabled={pending || !canDecide} onClick={() => void perform(`approvals/${approval.approval_id}/decision`,
+              { decision: 'REJECT', binding_digest: approval.binding_digest, ...diffBinding })}>拒绝</button>
           </div>}
           {approval.status === 'PENDING' && !task.can_approve && <p className="muted">等待有审批权限的成员处理。</p>}
         </section>}

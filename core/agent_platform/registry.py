@@ -259,6 +259,8 @@ def compile_agent_catalog(
         if workflow.execution_mode != "SERIAL":
             continue
         for task in workflow.tasks:
+            if task.runtime_kind == "REPLAY":
+                continue  # 固定 CI 模板的业务步骤由 Workflow 服务推进。
             try:
                 entry = registry.require_entry(task.agent_id)
             except AgentRegistryError:
